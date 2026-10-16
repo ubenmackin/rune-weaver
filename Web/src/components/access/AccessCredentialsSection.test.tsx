@@ -1,19 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the access credentials policy section.
-//
-// Purpose: Pins the structured credentials editor of the declarative policy
-// surface that owns policy.toml alongside the network editors: the searchable
-// credentials list, the add/edit modal with its Test-committed probe preview,
-// delete confirmation, and the per-row Keychain secrets entry (Set, Update,
-// guarded Delete) with its prefix-tolerant keys.
-// Scope: The bindings list with its search plus attention filter, the binding
-// modal, the Keychain store and guarded delete flows, and the unlinked-secret
-// reconciliation. Cases render the policy surface because the credentials
-// section mounts inside it behind its sub-tab, exactly as the original suite
-// drove it. Engine invariant math and TOML serialization stay with their owner
-// suites.
-// Architectural role: Guards the credentials half of the single dashboard
-// surface whose writes steer the mandatory egress choke-point, so a binding
-// edit cannot persist unvalidated text or claim a write that never landed.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -75,13 +60,8 @@ describe("AccessCredentialsSection", () => {
     clearAuthToken();
   });
 
-  // Routes the pane fetch plus the Keychain presence probe so each case
-  // overrides only the response it exercises.
-  // Secrets side of the stub: store and delete answer the bodyless 204 from
-  // the engine contract while status answers only the existence map. Status
-  // accepts a fixed map or a probe function so store and delete flows can
-  // flip presence mid-test; posted bodies and deleted keys ride out through
-  // callbacks instead of globals.
+  // Routes the pane fetch plus the Keychain presence probe so each case overrides only the response
+  // it exercises.
   interface PaneSecretsStub {
     secretStatus?: Record<string, boolean> | ((keys: string[]) => Record<string, boolean>);
     onSecretPosted?: (body: Record<string, unknown>) => void;

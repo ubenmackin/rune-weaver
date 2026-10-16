@@ -79,10 +79,6 @@ public enum VisionGate: Sendable {
     }
 
     /// Removes inline image payloads from one text turn.
-    /// Matches contiguous base64 plus newline-wrapped chunks (long lines only)
-    /// with missing `=` padding and base64url spellings tolerated, so
-    /// text-only models never receive leaked pixels through a strict match.
-    /// Also strips JSON image payload fields (`imageDataBase64`, `screenshotDataURL`).
     private static func isBase64Char(_ char: Character) -> Bool {
         char.isLetter || char.isNumber || char == "+" || char == "/" || char == "-" || char == "_" || char == "="
     }
@@ -252,9 +248,6 @@ public enum VisionGate: Sendable {
     }
 
     /// Removes inline image payloads from one text turn.
-    /// Matches contiguous base64 plus newline-wrapped chunks with missing `=` padding and base64url spellings tolerated,
-    /// so text-only models never receive leaked pixels through a strict match.
-    /// Also strips JSON image payload fields (`imageDataBase64`, `screenshotDataURL`).
     public static func strippedContent(_ content: String) -> String {
         var result = content
         if result.contains("imageDataBase64") || result.contains("screenshotDataURL") {
@@ -331,9 +324,6 @@ public enum BrowserScreenshotPolicy: Sendable {
     public static let captureViewportHeight = 800
 
     /// Scales dimensions to fit within the longest-edge cap.
-    /// Shared contract mirrored by the Playwright helper's PIL downscale:
-    /// captures are resized so the longest edge is `maxDimension` before
-    /// JPEG re-encoding, keeping payloads near the persistence budget.
     public static func scaledDimensions(width: Int, height: Int) -> (width: Int, height: Int) {
         guard width > 0, height > 0 else { return (width, height) }
         let longest = max(width, height)
@@ -345,10 +335,7 @@ public enum BrowserScreenshotPolicy: Sendable {
     }
 
     /// Target capture size for a source viewport, applying the longest-edge cap.
-    /// - Parameters:
-    ///   - width: Source viewport width in pixels.
-    ///   - height: Source viewport height in pixels.
-    /// - Returns: Downscaled dimensions honoring `maxDimension`.
+    /// width: Source viewport width in pixels.
     public static func targetCaptureSize(width: Int, height: Int) -> (width: Int, height: Int) {
         scaledDimensions(width: width, height: height)
     }
@@ -397,19 +384,12 @@ public struct BrowserRedirectStep: Sendable, Codable, Equatable {
     }
 }
 
-/// Single-source wire helpers for the `browser.navigate` document shared by
-/// tool output (`BrowserNavigateEnvelope` in RuneWeaverTools) and display and
-/// audit (`BrowserNavigateResult` here). Both decoders accept the same
-/// `finalUrl`/`finalURL`/`final_url`, redirect-chain, `authRequired`,
-/// text-snapshot, and screenshot aliases so the shape cannot drift; the tool
-/// envelope reuses `BrowserNavigateResult` for those fields and keeps only its
-/// envelope-only keys (title, refs, truncated, downloads, note) locally.
+/// Single-source wire helpers for the `browser.navigate` document shared by tool output
+/// (`BrowserNavigateEnvelope` in RuneWeaverTools) and display and audit (`BrowserNavigateResult`
+/// here).
 public enum BrowserNavigateWire: Sendable {
-    /// Returns the first present value across alias keys.
-    /// Single-sources alias-tolerant decoding for tool output, display, and
-    /// audit so the three shapes cannot drift. Type mismatches are logged
-    /// instead of silently skipped so corruption between tool output and
-    /// display surfaces in diagnostics while alternative shapes still render.
+    /// Returns the first present value across alias keys. Single-sources alias-tolerant decoding
+    /// for tool output, display, and audit so the three shapes cannot drift.
     public static func decodeFirst<T: Decodable, K: CodingKey>(
         _ container: KeyedDecodingContainer<K>,
         keys: [K]
@@ -430,13 +410,6 @@ public enum BrowserNavigateWire: Sendable {
     }
 
     /// Normalizes raw helper screenshot text to a data URL.
-    /// Strict shared contract mirrored by the dashboard thumbnail gate:
-    /// only `data:image/jpeg|png|webp|gif;base64` mounts, plus raw helper
-    /// bytes starting with `/9j/` or `iVBOR`. Any other string (including
-    /// bare base64 of any length) stays nil so engine and dashboard agree
-    /// on what counts as an image.
-    /// - Parameter raw: Helper `screenshot`/`thumbnail` field, if any.
-    /// - Returns: Data URL, or nil when absent.
     public static func normalizedDataURL(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -523,9 +496,6 @@ public struct BrowserNavigateResult: Sendable, Codable, Equatable {
     }
 
     /// Decodes tolerantly across plugin shape variations.
-    /// Shared wire fields decode single-sourced through `BrowserNavigateWire`
-    /// so tool output, display, and audit share one alias table; mismatched
-    /// types are logged by the shared helper instead of silently skipped.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let finalRaw: String? = BrowserNavigateWire.decodeFirst(container, keys: [.finalUrl, .finalURL, .finalUrlSnake])
@@ -708,9 +678,6 @@ public protocol LLMProvider: Sendable {
     func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse>
 
     /// Streams a chat completion for one chat session.
-    /// Lets backends with sticky prefix state keep the turn on the same slot
-    /// so cached prefixes survive across turns; backends without sticky state
-    /// fall back to the session-agnostic path.
     func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse>
 
     /// Streams a chat completion for callers holding the chat identifier directly.

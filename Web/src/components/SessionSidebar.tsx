@@ -1,16 +1,4 @@
 // Rune Weaver Dashboard — Collapsible session history sidebar for Chat.
-// Lists past sessions, supports instant switching, inline renaming, and session deletion.
-// Fan-out workers nest under the session that spawned them behind a collapsed
-// disclosure with an agent count, so a swarm stays one row until inspected;
-// the viewed session's entire ancestor chain force-opens transitively, with a
-// cycle guard so malformed parent links cannot spin expansion, and workers
-// whose parent is gone fall back to top-level rows rather than vanishing.
-// Renders as a static inline column on desktop and as a dismissible fixed drawer
-// with a dim backdrop on handheld widths, closing on backdrop, Escape, or
-// session select with focus returned to the History trigger.
-// The shell keeps its chat surface mounted behind `display: none`, so the
-// sidebar also revalidates history on each Chat-tab activation edge instead of
-// relying on a mount that a tab switch never performs.
 
 import {
   Fragment,
@@ -73,22 +61,14 @@ interface SessionSidebarProps {
   isOpen: boolean;
   onToggleOpen: () => void;
   refreshTrigger?: number;
-  // Shell activation flag for the Chat tab. The shell keeps this sidebar's
-  // parent mounted behind `display: none`, so returning to Chat is a state
-  // transition rather than a remount; the view watches the false→true edge to
-  // revalidate history that may have changed while another tab was showing.
-  // Optional, and absent means active, so standalone renders (and tests)
-  // behave exactly as they did before the flag existed.
+  // Shell activation flag for the Chat tab.
   isActive?: boolean;
   pendingApprovals?: PermissionRequest[];
   // Live interactive turns parked in the chat view while the user browses
   // other sessions. The sidebar merges these with polled run rows so a
   // background turn stays badged even before its run record persists.
   runningSessionIDs?: Set<string> | string[] | null;
-  // Live handheld flag from the owner. When omitted the sidebar reads the
-  // shared breakpoint hook directly so standalone renders still adapt; the
-  // explicit prop exists so the chat view can pass its own live value and
-  // tests can pin a breakpoint without mocking matchMedia internals.
+  // Live handheld flag from the owner.
   isMobile?: boolean;
   // Close-only dismissal for the mobile drawer. Falls back to the toggle
   // when omitted so existing callers keep working; unlike the toggle it can
@@ -187,10 +167,7 @@ function isGoalSession(session: SessionSummary | null | undefined): boolean {
   return isGoalSource || hasGoalId;
 }
 
-// Resolved props for the presentational view. The handheld flag and the
-// activation flag are both required here because the wrapper below resolves
-// each from exactly one source: either the explicit owner prop or its default,
-// never both at once.
+// Resolved props for the presentational view.
 type SessionSidebarViewProps = Omit<
   SessionSidebarProps,
   "isMobile" | "isActive"
@@ -248,11 +225,7 @@ function SessionSidebarView({
     null,
   );
 
-  // Returns focus to the History trigger after a mobile dismissal. The lookup
-  // stays inside the timeout because the trigger only mounts once the drawer
-  // closes; reading the ref while the drawer is still open would see no
-  // mounted trigger and skip the focus entirely, stranding keyboard users on
-  // the document body.
+  // Returns focus to the History trigger after a mobile dismissal.
   const returnFocusToTrigger = useCallback(() => {
     if (focusTimeoutRef.current !== null) {
       window.clearTimeout(focusTimeoutRef.current);
@@ -272,10 +245,7 @@ function SessionSidebarView({
     };
   }, []);
 
-  // Close-only dismissal shared by every mobile exit path. Prefers the
-  // explicit onClose so backdrop and Escape can never reopen the drawer by
-  // reusing the toggle; the toggle remains as the fallback for callers that
-  // never provided onClose.
+  // Close-only dismissal shared by every mobile exit path.
   const requestDrawerClose = useCallback(() => {
     if (onClose) {
       onClose();
@@ -312,12 +282,9 @@ function SessionSidebarView({
     return () => window.removeEventListener("keydown", handleEscape);
   }, [isOpen, isMobile, handleEscape]);
 
-  // Modal drawer contract for the handheld drawer: trap Tab inside the drawer
-  // while it is open so keyboard focus cannot reach the dimmed background
-  // behind the backdrop, and lock background scroll until dismissal. Desktop
-  // stays an inline column with no trap or lock. The trap wraps first-to-last
-  // so Shift+Tab on the first control lands on the last and Tab on the last
-  // lands on the first; an empty drawer consumes Tab rather than leaking it.
+  // Modal drawer contract for the handheld drawer: trap Tab inside the drawer while it is open so
+  // keyboard focus cannot reach the dimmed background behind the backdrop, and lock background
+  // scroll until dismissal.
   useEffect(() => {
     if (!isOpen || !isMobile) return;
     const container = sidebarRef.current;
@@ -364,20 +331,16 @@ function SessionSidebarView({
     };
   }, [isOpen, isMobile]);
 
-  // Moves focus into the drawer when it opens on mobile so keyboard and
-  // screen-reader users land inside the history list; desktop keeps its
-  // existing focus because the sidebar is always inline there. Guarded to the
-  // open transition so an already-open desktop sidebar never steals focus on
-  // mount or unrelated renders.
+  // Moves focus into the drawer when it opens on mobile so keyboard and screen-reader users land
+  // inside the history list; desktop keeps its existing focus because the sidebar is always inline
+  // there.
   useEffect(() => {
     if (!isOpen || !isMobile) return;
     sidebarRef.current?.focus();
   }, [isOpen, isMobile]);
 
-  // Session select that also dismisses the mobile drawer. Desktop keeps the
-  // inline sidebar open across switches; mobile closes it and returns focus
-  // to the History trigger. Fail-closed on empty identifiers: an invalid id
-  // never reaches the owner callback.
+  // Session select that also dismisses the mobile drawer. Desktop keeps the inline sidebar open
+  // across switches; mobile closes it and returns focus to the History trigger.
   const handleSelectAndMaybeClose = useCallback(
     (id: unknown) => {
       if (typeof id !== "string" || id.trim().length === 0) return;
@@ -390,14 +353,7 @@ function SessionSidebarView({
     [onSelectSession, isMobile, requestDrawerClose, returnFocusToTrigger],
   );
 
-  // Sessions with a turn still running on the engine while the user browses
-  // elsewhere. Live broadcasts mark the start immediately while the shared
-  // run-log poller covers reloads and missed sockets, so the badge never
-  // depends on one transport alone. Entries are normalized lowercase for
-  // comparison since the engine formats UUIDs uppercase and the dashboard
-  // mints lowercase. Polling lives single-source in `useRunningRuns` alongside
-  // the chat view so two mounted views share one interval instead of doubling
-  // QPS; this view keeps only the live set plus the shared polled set.
+  // Sessions with a turn still running on the engine while the user browses elsewhere.
   const [liveRunningIDs, setLiveRunningIDs] = useState<Set<string>>(
     () => new Set<string>(),
   );
@@ -472,10 +428,8 @@ function SessionSidebarView({
       );
       const normalized = normalizeSessionID(owner);
       if (!normalized) return;
-      // Single active contract with the polled run log: only a live running
-      // status keeps the badge lit. A parked awaiting_approval turn arrives as
-      // completed and surfaces through the approvals icon instead, so live and
-      // polled views agree after reload without double-badging.
+      // Single active contract with the polled run log: only a live running status keeps the badge
+      // lit.
       const nestedStatus =
         typeof (nested as Record<string, unknown>).status === "string"
           ? ((nested as Record<string, unknown>).status as string)
@@ -508,10 +462,9 @@ function SessionSidebarView({
 
   useSharedWebSocket(handleRunBroadcast, undefined, handleSocketOpen);
 
-  // Browsers throttle or suspend hidden tabs, and a backgrounded dashboard may
-  // miss both frames and socket events, so returning to the foreground
-  // revalidates the list; the shared coalescer folds a near-simultaneous
-  // reconnect into the same refetch.
+  // Browsers throttle or suspend hidden tabs, and a backgrounded dashboard may miss both frames and
+  // socket events, so returning to the foreground revalidates the list; the shared coalescer folds a
+  // near-simultaneous reconnect into the same refetch.
   useEffect(() => {
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
@@ -524,10 +477,8 @@ function SessionSidebarView({
     };
   }, [scheduleSessionsRefresh]);
 
-  // Revalidate the shared poller when the viewed session changes so a switch
-  // badges without waiting for the next tick; the interval itself stays owned
-  // by the shared hook. Terminal eviction needs no local timer because the
-  // shared tick plus live `run_completed` broadcasts clear both sets.
+  // Revalidate the shared poller when the viewed session changes so a switch badges without waiting
+  // for the next tick; the interval itself stays owned by the shared hook.
   useEffect(() => {
     refreshSharedRuns();
   }, [refreshSharedRuns, currentSessionID, refreshTrigger]);
@@ -548,13 +499,9 @@ function SessionSidebarView({
     void refreshSessions();
   }, [refreshSessions, currentSessionID, refreshTrigger]);
 
-  // The shell keeps ChatView mounted behind `display: none`, so a tab return
-  // never remounts this sidebar: without an edge-triggered refetch, sessions
-  // created while another tab was showing would stay invisible until the next
-  // socket frame or socket reopen. The ref captures the previous value so
-  // exactly the false→true activation transition refetches, while the initial
-  // mount and repeated active renders stay silent (a mount merely seeds the
-  // list, and every other refresh path keeps its own trigger).
+  // The shell keeps ChatView mounted behind `display: none`, so a tab return never remounts this
+  // sidebar: without an edge-triggered refetch, sessions created while another tab was showing would
+  // stay invisible until the next socket frame or socket reopen.
   const wasActiveRef = useRef(active);
 
   useEffect(() => {
@@ -641,13 +588,7 @@ function SessionSidebarView({
     return [draft, ...sessions];
   }, [sessions, currentSessionID, hasCurrentSession, draftStamp]);
 
-  // Fan-out tree derivation over the filtered candidates. A row nests only when
-  // its parent is itself a candidate, so a worker whose parent was deleted (or
-  // hidden by the active filter) stays top-level instead of disappearing.
-  // Children are removed from the date grouping so each swarm renders exactly
-  // once — indented under its parent — regardless of the worker's own update
-  // time. All keys normalize because the engine spells UUIDs uppercase while
-  // the dashboard mints lowercase.
+  // Fan-out tree derivation over the filtered candidates.
   const {
     candidateSessions,
     childrenByParent,
@@ -698,12 +639,9 @@ function SessionSidebarView({
     };
   }, [activeSessions, filter]);
 
-  // The active session's entire ancestor chain stays open while its descendant
-  // is being viewed, so switching to a worker (or reloading on one) never
-  // hides the row the owner is reading, however deep the swarm nests. The walk
-  // follows the child→parent map transitively and stops at the first repeated
-  // key, so malformed or cyclic parent links terminate instead of looping. The
-  // union is additive: the explicit set is only widened.
+  // The active session's entire ancestor chain stays open while its descendant is being viewed, so
+  // switching to a worker (or reloading on one) never hides the row the owner is reading, however
+  // deep the swarm nests.
   const activeAncestorKeys = useMemo(() => {
     const ancestors = new Set<string>();
     const visited = new Set<string>();
@@ -727,10 +665,9 @@ function SessionSidebarView({
     return effective;
   }, [expandedParentKeys, activeAncestorKeys]);
 
-  // Union of every running signal so one missed transport never hides a
-  // background turn: live broadcasts for immediacy, polled runs for reloads,
-  // and the chat view's parked flights for turns whose run row has not
-  // persisted yet. All entries stay normalized for case-insensitive matches.
+  // Union of every running signal so one missed transport never hides a background turn: live
+  // broadcasts for immediacy, polled runs for reloads, and the chat view's parked flights for turns
+  // whose run row has not persisted yet.
   const backgroundRunning = useMemo(() => {
     const merged = new Set<string>();
     for (const id of liveRunningIDs) merged.add(id);
@@ -751,12 +688,7 @@ function SessionSidebarView({
 
   const grouped = groupSessionsByDate(topLevelSessions);
 
-  // One row renderer shared by both tree levels. Children differ only by
-  // indentation and the worker glyph; rename, delete, running badge, and
-  // selection reuse the same handlers, and deleting a child never touches its
-  // parent because parentage is origin metadata, not ownership. The explicit
-  // return type is required because the renderer nests its own children
-  // recursively, which inference alone cannot resolve.
+  // One row renderer shared by both tree levels.
   const renderSessionRow = (
     session: SessionSummary,
     { isChild }: { isChild: boolean },
@@ -768,10 +700,8 @@ function SessionSidebarView({
     const childSessions = childrenByParent.get(sessionKey) ?? [];
     const hasChildren = childSessions.length > 0;
     const isExpanded = hasChildren && expandedParentSet.has(sessionKey);
-    // Background turns keep their badge even while viewed elsewhere so
-    // the user can spot a still-running session without opening Runs.
-    // The active session keeps its typing indicator in chat; the row
-    // badge stays as the cross-session signal.
+    // Background turns keep their badge even while viewed elsewhere so the user can spot a
+    // still-running session without opening Runs.
     const isBackgroundRunning = backgroundRunning.has(sessionKey);
 
     return (
@@ -1113,10 +1043,7 @@ function SessionSidebarView({
   );
 }
 
-// Hook-backed entry for standalone renders without an owner flag. Owns the
-// single MediaQueryList subscription for those renders only; the public
-// wrapper has already defaulted the activation flag, so no shell state is
-// needed here.
+// Hook-backed entry for standalone renders without an owner flag.
 function SessionSidebarHooked(
   props: Omit<SessionSidebarProps, "isMobile" | "isActive"> & {
     isMobile?: undefined;
@@ -1132,14 +1059,8 @@ export default function SessionSidebar({
   isActive: isActiveProp,
   ...rest
 }: SessionSidebarProps) {
-  // Single-owner handheld truth: ChatView always passes its live `isMobile`
-  // flag, so render directly with no second subscription here. Only
-  // standalone renders without a prop mount the shared hook, keeping exactly
-  // one MediaQueryList listener per mounted sidebar.
-  //
-  // Activation resolves in the same wrapper role: absent means active, so a
-  // caller with no shell tab state (a standalone render or a test) has no
-  // inactive phase to transition from and behaves exactly as before.
+  // Single-owner handheld truth: ChatView always passes its live `isMobile` flag, so render
+  // directly with no second subscription here.
   const active = isActiveProp ?? true;
   if (isMobileProp !== undefined) {
     return <SessionSidebarView {...rest} isMobile={isMobileProp} isActive={active} />;

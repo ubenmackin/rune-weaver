@@ -1,21 +1,4 @@
 // Rune Weaver App Tests — Permissions onboarding completion through AppModel.
-//
-// Pins the first-run window contract through the menu model seam without
-// touching real TCC state or the owner's defaults: a fresh isolated suite
-// reads incomplete, marking completion flips the published flag and persists,
-// and a second model over the same suite stays complete so the next launch
-// does not auto-open. The auto-open gate is exercised through the model's
-// flags so token posture plus completion together decide the launch.
-//
-// Scope: AppModel construction with an injected store, mark-completed
-// persistence, cross-instance durability, and the shouldAutoOpen verdicts
-// derived from model state. No window presentation, no live probes, no snapshot
-// assertions.
-// Shared Contract:
-// - A fresh store reads incomplete; markCompleted persists across stores.
-// - shouldAutoOpen is true only when no token is needed and onboarding is incomplete.
-// Owner: Sources/RuneWeaverApp/AppModel.swift onboarding seam plus
-// Sources/RuneWeaverApp/PermissionsOnboardingStore.swift persistence.
 
 import EventKit
 import Foundation
@@ -112,11 +95,6 @@ struct PermissionsOnboardingTests {
 }
 
 /// Probe stub isolating the Calendars plus Reminders rows from real TCC.
-///
-/// Seeded statuses answer `status(_:)` reads while `requestResults` answer
-/// `request(_:)` prompts, so the suite proves silent reads never take the
-/// prompting path. A distinct name avoids colliding with the view-model stub
-/// in the same test target.
 @MainActor
 final class CalendarsRemindersProbeStub: PermissionProbing {
     var seededStatuses: [PermissionKind: PermissionStatus]

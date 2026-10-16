@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Recipient classification, normalization, and handle identity.
-//
-// Pins the shared shape rules every recipient surface depends on: email and
-// phone classification with canonical handle output, near-miss fallbacks to
-// normalized names, diacritic and whitespace folding, the query-length bound,
-// the handle key used for dedupe and history matching, and Codable round-trips
-// of the shared candidate and resolution value types. Classification is pure,
-// so the suite needs no store, Contacts, or Messages fixtures.
 
 import Foundation
 @testable import RuneWeaverCore

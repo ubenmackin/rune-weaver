@@ -1,20 +1,10 @@
 // Rune Weaver Core — Durable model for proactive Wayfinder idea suggestions.
-//
-// Defines the value types behind the "what next?" suggestions the ideas engine
-// proposes from goals, patterns, and memory: the suggestion families it may
-// emit, the lifecycle states that carry a suggestion from proposal to a
-// decision, and the Codable snapshot the store round-trips. These are
-// storage-agnostic value objects so the engine, tools, and future surfaces can
-// assemble an idea before SQLite persistence exists; `IdeasStore` owns the
-// table beside the existing episode, session, goal, and run-log rows.
 
 import Foundation
 
-/// Category of one proactive idea.
-///
-/// Raw values are the stable wire, SQLite, and model-facing strings, so
-/// renaming a case never silently rewrites persisted rows or a prompt that
-/// asked the model for that spelling.
+/// Category of one proactive idea. Raw values are the stable wire, SQLite, and model-facing
+/// strings, so renaming a case never silently rewrites persisted rows or a prompt that asked the
+/// model for that spelling.
 public enum IdeaKind: String, Sendable, Codable, CaseIterable, Equatable {
     /// A suggested change to an existing goal's plan or cadence.
     case planAdjustment = "plan_adjustment"
@@ -24,12 +14,8 @@ public enum IdeaKind: String, Sendable, Codable, CaseIterable, Equatable {
     case tip
 }
 
-/// Lifecycle state of one proactive idea.
-///
-/// `proposed` is the resting state for a freshly generated suggestion;
-/// `accepted` and `dismissed` are terminal owner decisions. Only a
-/// non-dismissed idea blocks a duplicate title, so a dismissed suggestion may
-/// resurface if the owner later asks for it again.
+/// Lifecycle state of one proactive idea. Only a non-dismissed idea blocks a duplicate title, so a
+/// dismissed suggestion may resurface if the owner later asks for it again.
 public enum IdeaStatus: String, Sendable, Codable, CaseIterable, Equatable {
     /// Generated and awaiting an owner decision.
     case proposed

@@ -1,11 +1,5 @@
 // Rune Weaver Dashboard — Interactive chat interface with session history sidebar,
 // animated typing indicator, distinct tool activity display, and attached status bar.
-// This view is also the single writer of the persona avatar's liveness signals: it
-// sees every turn terminal, every run frame, and every REST completion, so the
-// activity clock and working flag published here combine with the greeting
-// cluster's REST snapshot to resolve its avatar state, with no extra transport.
-// Text identity only here: the header keeps the muted name span and never
-// renders the Wisp image, which lives exactly once in the greeting cluster.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -149,10 +143,8 @@ interface MessageItem {
   // reloads and older engines, which render no chip and no placeholder.
   recallDiagnostics?: RecallDiagnostics | null;
   toolActions?: ToolAction[];
-  // Chronological timeline for this turn: text and tool batches alternate in the
-  // order the engine produced them so multi-round turns never collapse into one
-  // lumped bucket. Flat `text`/`toolActions` stay as back-compat summaries while
-  // rendering walks this list in order; absent on turns built before segmentation.
+  // Chronological timeline for this turn: text and tool batches alternate in the order the engine
+  // produced them so multi-round turns never collapse into one lumped bucket.
   segments?: ChatSegment[];
   // Completion instant as milliseconds since the epoch on the server clock.
   // The stamp stays grounded in the persisted creation time so live cards and
@@ -175,11 +167,7 @@ interface InFlightTurn {
   segments: ChatSegment[];
 }
 
-// One background turn parked while the user browses another session. The map
-// below keys these by normalized session so rapid switches never interleave
-// deltas and a return restores the exact live timeline instead of restarting.
-// Warnings and token progress travel with the turn for the same reason: one
-// session's skipped tools or running sum must never leak into another view.
+// One background turn parked while the user browses another session.
 interface ParkedFlight {
   turn: InFlightTurn | null;
   pending: boolean;
@@ -195,10 +183,8 @@ interface ParkedFlight {
   updatedAt: number;
 }
 
-// Normalizes a flight-map key so engine-uppercase and dashboard-lowercase
-// spellings of one session share a single parked entry. An empty result means
-// the caller lost the owning session, so report through the centralized
-// logger instead of letting the turn vanish silently into an unkeyed bucket.
+// Normalizes a flight-map key so engine-uppercase and dashboard-lowercase spellings of one session
+// share a single parked entry.
 function parkedFlightKey(id: string | null | undefined): string {
   const normalized = normalizeSessionID(id);
   if (!normalized) {
@@ -209,14 +195,8 @@ function parkedFlightKey(id: string | null | undefined): string {
   return normalized;
 }
 
-// Bounds the per-session flight map so hidden sessions cannot accumulate
-// without bound while the user keeps browsing. Completed shells evict first
-// because dropping a finished timeline loses nothing, with the stalest live
-// flight as the hard-cap fallback so the size never exceeds the bound,
-// while the expiry outlives the longest healthy inference budget so a slow
-// local evaluation never ages out mid-turn. The settle grace keeps a freshly
-// parked turn alive until its running row persists, so polling a stale settled
-// row never evicts a live turn on a slow persist.
+// Bounds the per-session flight map so hidden sessions cannot accumulate without bound while the
+// user keeps browsing.
 const MAX_PARKED_FLIGHTS = 10;
 const PARKED_FLIGHT_TTL_MS = 30 * 60 * 1000;
 const PARKED_SETTLE_GRACE_MS = 10 * 1000;
@@ -226,23 +206,16 @@ const PARKED_SETTLE_GRACE_MS = 10 * 1000;
 // discipline of the parked-flight and message caps above.
 const MAX_INPUT_HISTORY = 50;
 
-// Outcome of a capped store so callers can surface lossy evictions through
-// component state. Completed-shell evictions lose nothing and stay quiet;
-// live evictions and refusals drop runnable timelines and must reach visible
-// state instead of a production-silent log.
+// Outcome of a capped store so callers can surface lossy evictions through component state.
 interface ParkedFlightStoreOutcome {
   evictedKey: string | null;
   evictedLive: boolean;
   refused: boolean;
 }
 
-// Stores one flight under a least-recently-used cap: touching moves the entry
-// to the fresh end and an overfull map evicts the stalest completed shell,
-// falling back to the stalest entry overall so the size never exceeds the cap.
-// Completed shells go first because dropping a finished timeline loses nothing;
-// the fallback drops the stalest live flight whose next frame rebuilds it,
-// while expiry still reclaims idle shells and the settle grace keeps a freshly
-// parked turn alive until its running row persists.
+// Stores one flight under a least-recently-used cap: touching moves the entry to the fresh end and
+// an overfull map evicts the stalest completed shell, falling back to the stalest entry overall so
+// the size never exceeds the cap.
 function storeParkedFlight(
   flights: Map<string, ParkedFlight>,
   key: string,
@@ -274,11 +247,8 @@ function storeParkedFlight(
     flights.delete(oldestCompletedKey);
     return { evictedKey: oldestCompletedKey, evictedLive: false, refused: false };
   }
-  // Every remaining entry is still live, so evict the stalest entry overall to
-  // keep the atomic cap instead of growing past it. The evicted flight rebuilds
-  // from its next frame while the badge stays lit, so no running turn goes dark.
-  // The outcome reports the live drop so the caller surfaces it in state; the
-  // dev log stays as the loud local mirror, never the sole prod signal.
+  // Every remaining entry is still live, so evict the stalest entry overall to keep the atomic cap
+  // instead of growing past it.
   for (const candidateKey of flights.keys()) {
     if (candidateKey === key) continue;
     const evictedLive = flights.get(candidateKey)?.pending ?? false;
@@ -309,10 +279,7 @@ function storeParkedFlight(
   return { evictedKey: null, evictedLive: false, refused: false };
 }
 
-// Expired-flight reclaim result so callers can clear badges and surface live
-// drops through state. Idle shells of either kind age identically because both
-// stop receiving frames once settled; the grace for freshly parked turns lives
-// with the caller, not here.
+// Expired-flight reclaim result so callers can clear badges and surface live drops through state.
 interface PrunedParkedFlights {
   prunedKeys: string[];
   prunedLiveKeys: string[];
@@ -453,12 +420,8 @@ function appendToolStartToSegments(
   return [...next, { kind: "tools" as const, actions: [action] }];
 }
 
-// Merges one completed result into the matching live batch by call identity so
-// resumed batches rejoin the same timeline instead of forking a duplicate row.
-// Without a call-identity match the result attributes to at most the first
-// pending same-tool row in timeline order, so batches with multiple same-tool
-// calls never fan one result out to every pending sibling; when no pending
-// same-tool row exists the frame drops instead of guessing an owner.
+// Merges one completed result into the matching live batch by call identity so resumed batches
+// rejoin the same timeline instead of forking a duplicate row.
 function updateToolEndInSegments(
   segments: ChatSegment[],
   callID: string,
@@ -512,10 +475,8 @@ function updateToolEndInSegments(
   });
 }
 
-// Shared copy/append shape for streamed prose segments, parameterized by kind
-// so text and reasoning never drift apart. Opens a fresh segment when the
-// previous piece is a tool batch or a different kind so deltas never merge
-// across round or kind bounds.
+// Shared copy/append shape for streamed prose segments, parameterized by kind so text and reasoning
+// never drift apart.
 function appendSegmentDelta(
   segments: ChatSegment[],
   kind: "text" | "thought",
@@ -567,10 +528,9 @@ function appendReasoningDeltaToSegments(
 // by the authoritative call identifier, so narration fallback lines never
 // double-count with structured actions while unrelated prose stays visible.
 function filterUncoveredText(text: string, coveredCallIDs: Set<string>): string {
-  // Single line-ending and placeholder sources keep history coverage identical
-  // to the shared helpers: carriage returns fold like the engine before
-  // matching, and the set grammar decides cover so prose that merely mentions
-  // an identifier never hides and future grammar changes land in one place.
+  // Carriage returns fold like the engine before matching; the set grammar decides coverage
+  // so prose that merely mentions an identifier is never hidden and grammar changes land in
+  // one place.
   const normalized = normalizeLineEndings(text);
   return normalized
     .split("\n")
@@ -614,10 +574,8 @@ function deduplicateToolActionsByCallID(actions: ToolAction[]): ToolAction[] {
   return [...order.map((id) => best.get(id) as ToolAction), ...unidentified];
 }
 
-// Shared cold builder for terminal timelines without a live skeleton: dedups by
-// preserved call identity, orders oldest-first, groups one tools segment per
-// round, then trails uncovered prose. Done and REST paths share it so polling
-// and streaming clients interleave identically instead of drifting.
+// Shared cold builder for terminal timelines without a live skeleton: dedups by preserved call
+// identity, orders oldest-first, groups one tools segment per round, then trails uncovered prose.
 function buildSegmentsFromActionsAndText(
   actions: ToolAction[],
   text: string,
@@ -629,10 +587,8 @@ function buildSegmentsFromActionsAndText(
     built.push({ kind: "tools" as const, actions: group });
   }
   const trailing = text.trim();
-  // Avoid duplicating narration fallback lines already covered by structured
-  // actions: only uncovered prose becomes a text segment. Without a structured
-  // record every line stays visible, so fall back to the full text when all
-  // lines filter but no tool segment exists.
+  // Avoid duplicating narration fallback lines already covered by structured actions: only
+  // uncovered prose becomes a text segment.
   if (trailing.length > 0) {
     const covered = new Set(ordered.map((a) => a.callID).filter(Boolean));
     const uncovered = filterUncoveredText(trailing, covered);
@@ -695,11 +651,8 @@ function buildDoneSegments(
         merged.push({ kind: "tools" as const, actions: group });
       }
     }
-    // The streamed skeleton already carries every round's prose in order; the
-    // terminal text repeats only the final round, so preferring it blindly would
-    // discard intermediate narration. Keep streamed prose unless nothing streamed,
-    // with one reattach exception below where the streamed fragment is a prefix
-    // of the authoritative reply and the tail would otherwise be lost.
+    // The streamed skeleton already carries every round's prose in order; the terminal text repeats
+    // only the final round, so preferring it blindly would discard intermediate narration.
     const hasStreamedText = merged.some(
       (segment) => segment.kind === "text" && segment.text.trim().length > 0,
     );
@@ -714,13 +667,8 @@ function buildDoneSegments(
     ) {
       merged.push({ kind: "text" as const, text: snapshotText });
     } else if (hasStreamedText && doneTrimmed.length > 0) {
-      // A reloaded tab adopts mid-turn, so its streamed fragment misses every
-      // delta from before the reload while the terminal frame carries the full
-      // reply. When the streamed text is a leading fragment of the terminal
-      // text the tail has never rendered, so adopt the terminal copy instead
-      // of truncating at the last live delta. Equal copies converge to the
-      // same value, while a longer streamed timeline (intermediate narration
-      // the terminal omits) keeps its prose because it is not a prefix.
+      // A reloaded tab adopts mid-turn, so its streamed fragment misses every delta from before the
+      // reload while the terminal frame carries the full reply.
       const streamedFlat = flatTextFromSegments(merged).trim();
       const hasToolSegments = merged.some(
         (segment) => segment.kind === "tools",
@@ -741,10 +689,8 @@ function buildDoneSegments(
           ];
         }
       } else {
-        // Multi-round turns interleave prose with tool batches, so only the
-        // final prose piece may extend into the terminal copy. Extending the
-        // last text piece preserves earlier rounds while still recovering a
-        // tail that arrived only in the terminal frame.
+        // Multi-round turns interleave prose with tool batches, so only the final prose piece may
+        // extend into the terminal copy.
         let lastTextIndex = -1;
         for (let index = merged.length - 1; index >= 0; index--) {
           const candidate = merged[index];
@@ -936,10 +882,8 @@ function historyStorageKey(id: string | null | undefined): string {
   return `rw_input_history_${normalized}`;
 }
 
-// Loads the persisted Up/Down recall stack for one session, sanitized to at
-// most MAX_INPUT_HISTORY trimmed non-empty strings oldest-first. Corrupt
-// payloads degrade to an empty stack so a tampered key renders an empty
-// input with no throw.
+// Loads the persisted Up/Down recall stack for one session, sanitized to at most MAX_INPUT_HISTORY
+// trimmed non-empty strings oldest-first.
 function loadInputHistory(id: string | null | undefined): string[] {
   const key = historyStorageKey(id);
   if (!key) return [];
@@ -1002,11 +946,9 @@ function mergeHistoryEntries(stored: string[], additions: string[]): string[] {
   return merged.slice(-MAX_INPUT_HISTORY);
 }
 
-// Carries an in-memory recall stack forward when a provisional draft adopts
-// its authoritative session identifier: merges the draft stack into whatever
-// is already stored under the adopted key, persists the merged result, and
-// removes the orphan draft key so first turns never leave a permanent
-// `rw_input_history_<draft-uuid>` entry behind.
+// Carries an in-memory recall stack forward when a provisional draft adopts its authoritative
+// session identifier: merges and persists under the adopted key, then removes the orphan draft key
+// so first turns never leave a permanent `rw_input_history_<draft-uuid>` entry behind.
 function carryHistoryForward(
   fromEntries: string[],
   adoptedID: string | null | undefined,
@@ -1029,11 +971,7 @@ function carryHistoryForward(
   return merged;
 }
 
-// Compact session total for the collapsed handheld summary line. A full
-// locale-grouped thousands value would push the single-line footer past a
-// narrow viewport, so large totals collapse to one-decimal k/M while small
-// totals keep locale grouping for readability. Invalid inputs degrade to zero
-// through the shared integer contract so a drifted cache never renders NaN.
+// Compact session total for the collapsed handheld summary line.
 function formatSessionShort(value: number): string {
   const safe = toNonNegativeInt(value) ?? 0;
   if (safe >= 1_000_000) {
@@ -1082,11 +1020,9 @@ function isToolAction(value: unknown): value is ToolAction {
   return result == null || isToolResult(result);
 }
 
-// Normalizes a completion instant from either wire shape the engine emits
-// (ISO-8601 strings from Vapor versus Unix seconds as JSON numbers from
-// SQLite persistence) into milliseconds since the epoch. Epoch and
-// unparseable stamps drop to undefined so callers render no footer rather
-// than a 1970 date, and future skew is handled by the relative formatter.
+// Normalizes a completion instant from either wire shape the engine emits (ISO-8601 strings from
+// Vapor versus Unix seconds as JSON numbers from SQLite persistence) into milliseconds since the
+// epoch.
 function normalizeCompletedAtMs(value: unknown): number | undefined {
   if (value == null) return undefined;
   if (typeof value !== "string" && typeof value !== "number") return undefined;
@@ -1095,10 +1031,8 @@ function normalizeCompletedAtMs(value: unknown): number | undefined {
   return parsed;
 }
 
-// Relative completion label sharing the approvals countdown ladder so elapsed
-// time reads with identical granularity across the dashboard. Future stamps
-// from clock skew and sub-second deltas collapse to "just now" rather than
-// rendering a negative countdown or "0s ago".
+// Relative completion label sharing the approvals countdown ladder so elapsed time reads with
+// identical granularity across the dashboard.
 export function formatCompletionRelative(
   completedAtMs: number,
   nowMs: number = Date.now(),
@@ -1121,23 +1055,14 @@ export function approvalsForSession(
   });
 }
 
-// Liveness-aware inactivity budget for a WebSocket-started turn. A socket that
-// drops with no subsequent activity must not strand the input disabled forever,
-// but healthy local inference can spend minutes in prompt evaluation with zero
-// deltas to render — the server covers those stretches with session-tagged
-// turn_alive heartbeats that re-arm this timer without rendering. Reset on each
-// tool execution, streaming delta, approval prompt, warning, or heartbeat so
-// multi-turn tool chains never time out while active; only a truly silent
-// socket (no frames at all) trips the timeout, while a dropped socket takes
-// the immediate close path instead.
+// Liveness-aware inactivity budget for a WebSocket-started turn.
 const TURN_TIMEOUT_BASE_MS = 600_000;
 const TURN_TIMEOUT_PER_CONTEXT_TOKEN_MS = 30;
 const TURN_TIMEOUT_MAX_MS = 900_000;
 
-// Scales the inactivity budget with the model's context window so large prompts
-// on slow local models get room to finish prompt evaluation: a small window
-// stays at the 10-minute minimum while a large window stretches toward the
-// 15-minute cap instead of the old fixed 5 minutes that cancelled healthy evals.
+// Scales the inactivity budget with the model's context window so large prompts on slow local
+// models get room to finish prompt evaluation: a small window stays at the 10-minute minimum while a
+// large window stretches toward the 15-minute cap instead of the old fixed 5 minutes that cancelled.
 function turnTimeoutMs(contextTokens: number): number {
   const normalized =
     Number.isFinite(contextTokens) && contextTokens > 0
@@ -1170,11 +1095,7 @@ interface ChatViewProps {
   // Shell tab selector so the goal drawer can jump to the full Goals surface.
   // Optional so standalone ChatView renders (and tests) stay shell-free.
   onSelectTab?: (tab: "goals") => void;
-  // Shell activation flag for the Chat tab. The shell keeps this view mounted
-  // behind `display: none`, so activation is a state transition rather than a
-  // mount; children that revalidate when the tab is shown watch the
-  // false→true edge. Optional, and absent means active, so standalone renders
-  // (and tests) behave exactly as they did before the flag existed.
+  // Shell activation flag for the Chat tab.
   isActive?: boolean;
   initialPrompt?: string | null;
   onClearInitialPrompt?: () => void;
@@ -1182,10 +1103,7 @@ interface ChatViewProps {
   onClearTargetSessionId?: () => void;
 }
 
-// Indexes server-derived per-message groups by parent message ID, oldest message
-// first. Each group's actions dedup by preserved call identity with results winning
-// then sort chronologically by round so reloads interleave identically to live turns;
-// untracked rounds keep stored order at their stored slot.
+// Indexes server-derived per-message groups by parent message ID, oldest message first.
 export function toolActionMap(
   groups: SessionMessageToolActions[] | undefined,
 ): Map<string, ToolAction[]> {
@@ -1197,11 +1115,8 @@ export function toolActionMap(
   return map;
 }
 
-// Indexes server-derived per-message completion times by parent message ID so
-// reloads reconcile to the same server instant that live done frames advertise.
-// Values normalize through the shared run-timestamp parser so ISO strings and
-// Unix seconds converge; unparseable or epoch stamps drop so callers fall back
-// to the sibling history timestamp for the same message instead of 1970.
+// Indexes server-derived per-message completion times by parent message ID so reloads reconcile to
+// the same server instant that live done frames advertise.
 export function toolActionCompletedAtMap(
   groups: SessionMessageToolActions[] | undefined,
 ): Map<string, number> {
@@ -1237,10 +1152,7 @@ export function reconstructMessages(
   // actions` via `toolActionMap`).
   structuredByMessageID?: Map<string, ToolAction[]> | Record<string, ToolAction[]>,
   // Per-message completion times from the same tool-actions payload (via
-  // `toolActionCompletedAtMap`). Values arrive already normalized to
-  // milliseconds, so this map is read directly without re-entering the
-  // seconds-vs-milliseconds heuristic. Optional for back-compat; absent
-  // entries fall back to the sibling history `createdAt` for the same note.
+  // `toolActionCompletedAtMap`).
   completedAtByMessageID?: Map<string, number> | Record<string, number>,
 ): MessageItem[] {
   const getStructured = (messageID: string | undefined): ToolAction[] | undefined => {
@@ -1373,10 +1285,9 @@ export function reconstructMessages(
         const coveredCallIDs = new Set(
           dedupedStructured.map((action) => action.callID).filter(Boolean),
         );
-        // Single coverage path keeps history grouping identical to live turns:
-        // the shared filter folds line endings and matches the placeholder set
-        // grammar, so narration lines collapse with their record while
-        // mention-only prose stays visible.
+        // Single coverage path keeps history grouping identical to live turns: the shared filter
+        // folds line endings and matches the placeholder set grammar, so narration lines collapse
+        // with their record while mention-only prose stays visible.
         const uncovered = filterUncoveredText(m.content, coveredCallIDs);
         // Preserve live order per round: this note's prose precedes its tools, and
         // successive notes append as successive segments instead of one bucket.
@@ -1456,10 +1367,9 @@ export function reconstructMessages(
   );
 }
 
-// Single first-turn title policy: first line truncated to 40 graphemes,
-// sharing the engine's line-fold, terminator handling, and grapheme discipline
-// so concurrent client pre-names and server auto-titles converge on one value
-// instead of flickering between two spellings under last-write-wins.
+// Single first-turn title policy: truncates first line to 40 graphemes, matching engine discipline
+// so concurrent client pre-names and server auto-titles converge on one value instead of flickering
+// under last-write-wins.
 export function autoTitleFromPrompt(text: string): string {
   const normalized = normalizeLineEndings(text);
   const parts = normalized.split("\n");
@@ -1515,10 +1425,7 @@ function mergeWarningLists(previous: string[], next: string[]): string[] {
   return merged;
 }
 
-// Strict session-ID validator for attacker-controlled URL values (`?session=`,
-// `#chat/...`). The loose 36-char hex/dash class would adopt 36 dashes or any
-// hex/dash mix as a session ID, so require canonical 8-4-4-4-12 UUID grouping
-// before the value is adopted as state and persisted.
+// Strict session-ID validator for attacker-controlled URL values (`?session=`, `#chat/...`).
 const strictSessionIDPattern =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -1537,11 +1444,8 @@ function getURLSessionID(): string | null {
   return null;
 }
 
-// Collects every tool action a rendered transcript shows, in display order:
-// persisted messages in order, then the in-flight turn, which always renders
-// last. The shared write-review scan filters this sequence down to files.write
-// cards, so ownership and batched hydration read one list and can never
-// disagree on which cards the user actually sees.
+// Collects every tool action a rendered transcript shows, in display order: persisted messages in
+// order, then the in-flight turn, which always renders last.
 function renderedToolActions(
   messages: MessageItem[],
   inFlightTurn: InFlightTurn | null,
@@ -1633,26 +1537,14 @@ export default function ChatView({
       }, 2000);
     }
   };
-  // Per-session flights for turns left running while the user browses another
-  // session. The active view keeps its own pending/in-flight state for
-  // rendering while this map preserves every parked session's timeline,
-  // warnings, and token progress so switching never cancels the server turn
-  // and returning restores the live bubble instead of restarting.
+  // Per-session flights for turns left running while the user browses another session.
   const parkedFlightsRef = useRef<Map<string, ParkedFlight>>(new Map());
   // Sessions with a parked running turn, mirrored to state so the sidebar can
   // badge them. The ref stays the source of truth for handlers while state
   // drives rendering; both hold normalized lowercase identifiers.
   const [backgroundRunningIDs, setBackgroundRunningIDs] = useState<string[]>([]);
   const backgroundRunningRef = useRef<Set<string>>(new Set());
-  // Persona name mirror for the chat header. This view stays the single writer
-  // of the activity clock and the working flag: it sees every turn-terminal
-  // frame, every run frame, and every REST completion, so no other surface
-  // publishes those signals and no new transport rides them. The greeting
-  // cluster consumes both flags from the store combined with its REST
-  // snapshot to resolve one avatar state. The persona field itself is
-  // published by Settings (and the nav's one-shot load); the header only
-  // renders the muted name span, never an image — the Wisp renders exactly
-  // once in the dashboard greeting cluster.
+  // Persona name mirror for the chat header.
   const { persona } = usePersonaSignals();
   const personaDisplayName = personaAssistantName(persona);
   const agentWorking = pending || backgroundRunningIDs.length > 0;
@@ -1664,11 +1556,7 @@ export default function ChatView({
   // reconnect instead of cancelling anything.
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectDismissed, setReconnectDismissed] = useState(false);
-  // Visible record of lossy flight trims (live evictions, refusals, expired
-  // live reclaims). The dev log stays loud locally but is silent in
-  // production, so this state is the shipped signal that a background timeline
-  // was dropped and will rebuild from its next frame; completed-shell trims
-  // lose nothing and never land here.
+  // Visible record of lossy flight trims (live evictions, refusals, expired live reclaims).
   const [trimmedLiveFlights, setTrimmedLiveFlights] = useState<string[]>([]);
   // Latest live progress per tool call, keyed by call identity. Keying by callID
   // rather than tool name keeps sibling executions of one tool distinct, so a
@@ -1676,10 +1564,7 @@ export default function ChatView({
   const [toolProgressByCallID, setToolProgressByCallID] = useState<
     Map<string, ToolProgress>
   >(() => new Map());
-  // Call identities with a cancel in flight. The optimistic mark persists until
-  // the terminal frame (tool_end/done/cancelled/error) proves the stop landed or
-  // a non-terminal `tool_cancel_miss` frame reports the call was never running,
-  // so the row never claims a cancel completed before the engine confirms it.
+  // Call identities with a cancel in flight.
   const [cancellingToolCallIDs, setCancellingToolCallIDs] = useState<Set<string>>(
     () => new Set<string>(),
   );
@@ -1699,12 +1584,9 @@ export default function ChatView({
   // mount never pushes the input off a small screen.
   const [footerExpanded, setFooterExpanded] = useState(false);
 
-  // Sidebar visibility starts from the viewport at mount only: handheld
-  // widths begin with the history drawer closed so the conversation keeps the
-  // screen, while desktop begins with the inline sidebar open. Later resizes
-  // never overwrite this state so an explicit user toggle survives rotation
-  // or window drags; the live breakpoint for layout decisions rides the
-  // `isMobile` hook below instead.
+  // Sidebar visibility starts from the viewport at mount only: handheld widths begin with the
+  // history drawer closed so the conversation keeps the screen, while desktop begins with the inline
+  // sidebar open.
   const [sidebarOpen, setSidebarOpen] = useState(() => !isMobileViewport());
   // Live handheld flag for drawer versus inline rendering. Kept separate from
   // `sidebarOpen` above so layout can follow the viewport while the toggle
@@ -1725,10 +1607,7 @@ export default function ChatView({
     setSidebarOpen((previous) => !previous);
   }, []);
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
-  // Goal linked to the session currently on screen. Resolved from the session
-  // detail fetch so the header chip appears only for a session the engine
-  // tagged with a `goalId`; the separate effect below re-reads it when the
-  // session switches, and `goal_updated` pushes patch it in place.
+  // Goal linked to the session currently on screen.
   const [sessionGoalId, setSessionGoalId] = useState<string | null>(null);
   const [sessionGoal, setSessionGoal] = useState<Goal | null>(null);
   // Drawer open state owned here so the chip is the single opener and Escape or
@@ -1742,10 +1621,8 @@ export default function ChatView({
   const sessionGoalIdRef = useRef<string | null>(null);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
-  // When the user scrolls up to review earlier messages, suppress auto-scroll
-  // so newly arriving content doesn't yank the viewport away from what they
-  // are reading.  We consider the user "at the bottom" when they are within a
-  // small threshold (150 px) of the scroll end.
+  // When the user scrolls up to review earlier messages, suppress auto-scroll so newly arriving
+  // content doesn't yank the viewport away from what they are reading.
   const userHasScrolledUpRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Per-session Up/Down recall stack, seeded from localStorage + server backfill.
@@ -1764,10 +1641,8 @@ export default function ChatView({
   // window and the close handler below surfaces a retry immediately.
   const turnTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRef = useRef(false);
-  // Tracks optimistic steering bubbles so a server rejection can retract
-  // the right one and restore the draft instead of showing guidance never
-  // received. A list because rapid steers queue server-side: a single slot
-  // would let the second steer overwrite the first and orphan it on error.
+  // Tracks optimistic steering bubbles so a server rejection can retract the right one and restore
+  // the draft instead of showing guidance never received.
   const pendingSteerRef = useRef<Array<{ id: string; text: string }>>([]);
   // Timestamp of the latest steering action to debounce and protect against accidental cancels
   const lastSteerTimestampRef = useRef<number>(0);
@@ -1799,16 +1674,10 @@ export default function ChatView({
   const knownDraftIDRef = useRef<string | null>(
     localStorage.getItem("rw_active_session_id") ? null : sessionID,
   );
-  // Wall-clock instant the active turn started or resumed. Guards the
-  // missed-terminal reconcile so a just-sent turn never settles before its
-  // running row persists; live frames prove liveness while this stamp proves
-  // recency after a socket outage.
+  // Wall-clock instant the active turn started or resumed.
   const activeTurnStartMsRef = useRef<number | null>(null);
-  // Latest polled run-log snapshot mirrored for socket handlers that cannot
-  // depend on state closures. Lets reconnect revalidate the active turn
-  // against the same authoritative rows the poller uses instead of blindly
-  // re-arming the timer. Read-only because the shared poller hands out a
-  // frozen snapshot that callers iterate without mutating.
+  // Latest polled run-log snapshot mirrored for socket handlers that cannot depend on state
+  // closures.
   const sharedRunsRef = useRef<ReadonlyArray<FrozenRunLogEntry>>([]);
   const sharedRunningIDsRef = useRef<string[]>([]);
 
@@ -1878,11 +1747,8 @@ export default function ChatView({
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
     }
-    // Notice-only liveness timer: expiry never cancels the server turn, never
-    // clears pending, and never clears the live bubble. It surfaces a
-    // long-running notice and re-arms for the next interval so a healthy
-    // multi-round local-inference turn can run past the interval with zero
-    // error state; explicit Cancel stays the sole path that aborts a turn.
+    // Notice-only liveness timer: expiry never cancels the server turn, never clears pending, and
+    // never clears the live bubble.
     const schedule = () => {
       const budgetMs = turnTimeoutMs(contextLimitRef.current);
       turnTimeoutRef.current = setTimeout(() => {
@@ -1934,11 +1800,8 @@ export default function ChatView({
     });
   }, []);
 
-  // Retires only one call's optimistic "Cancelling…" mark while leaving its live
-  // progress row in place. A cancel miss can land before the bus registers the
-  // call, so the tool may still be running and only its terminal frame knows the
-  // execution is over; dropping progress here would blank a live row and strand
-  // it behind a settled-looking error. Identity scoping mirrors forgetToolCall.
+  // Retires only one call's optimistic "Cancelling…" mark while leaving its live progress row in
+  // place.
   const forgetToolCancelMark = useCallback((callID: string) => {
     setCancellingToolCallIDs((previous) => {
       if (!previous.has(callID)) return previous;
@@ -1960,10 +1823,8 @@ export default function ChatView({
     );
   }, []);
 
-  // Single first-turn pre-name so streaming and REST terminal paths share one
-  // PUT instead of triplicating the block. The flag clears only after the
-  // server confirms the rename, so a failed PUT keeps the retry for the next
-  // terminal frame instead of losing it behind a synchronous clear.
+  // Single first-turn pre-name so streaming and REST terminal paths share one PUT instead of
+  // triplicating the block.
   const preNameSessionIfFirst = useCallback(
     (sessionId: string, promptText: string) => {
       if (!isFirstMessageRef.current) return;
@@ -1986,9 +1847,6 @@ export default function ChatView({
   );
 
   // Reaps expired parked flights and surfaces live drops through visible state.
-  // Every entry point that can observe a settled shell funnels here so expiry
-  // cannot pin idle flights between parks: badges clear for each pruned key
-  // while live reclaims join the eviction banner instead of the dev-only log.
   const reapExpiredFlightsAndSurface = useCallback(() => {
     const expired = pruneExpiredParkedFlights(parkedFlightsRef.current);
     for (const prunedKey of expired.prunedKeys) {
@@ -2002,10 +1860,7 @@ export default function ChatView({
     }
   }, [markBackgroundRunning]);
 
-  // Reloads persisted history for one session after its terminal frame was
-  // missed. Live timelines cannot reconstruct a finished turn, so the server
-  // record wins here; a deleted session recovers the same way as the initial
-  // load instead of resurrecting a stale identifier on the next send.
+  // Reloads persisted history for one session after its terminal frame was missed.
   const reloadActiveHistory = useCallback((activeID: string) => {
     if (!activeID) return;
     if (knownDraftIDRef.current === activeID) return;
@@ -2037,15 +1892,9 @@ export default function ChatView({
               ? toolActionCompletedAtMap(structured.actions)
               : undefined,
           );
-          // A stale reload must never clobber a just-completed turn: when the
-          // server record is shorter while the live timeline's last message is
-          // a successful assistant reply the fetch missed, keep the rendered
-          // list. The decision is computed once from the tracked list and the
-          // result is assigned to state and the ref together, because the
-          // keep-prev path hands React the identical array — the [messages]
-          // sync effect never re-runs, so a ref still pointing at the shorter
-          // mapped list would stay truncated and a subsequently parked flight
-          // would persist the turn list missing its final turn.
+          // A stale reload must never clobber a just-completed turn: when the server record is
+          // shorter while the live timeline's last message is a successful assistant reply the fetch
+          // missed, keep the rendered list.
           const prevList = messagesRef.current;
           const lastPrev = prevList[prevList.length - 1];
           const lastMapped = mapped[mapped.length - 1];
@@ -2081,12 +1930,8 @@ export default function ChatView({
       });
   }, []);
 
-  // A dropped socket must never cancel server turns: the engine keeps
-  // evaluating while the shared client reconnects, and heartbeats re-arm the
-  // active timer on recovery. Only surface a reconnecting notice so the user
-  // knows live updates are paused; explicit Cancel stays the sole path that
-  // aborts a turn. The liveness timer suspends across the outage so it cannot
-  // fire while hidden and cancel a turn the server still owns.
+  // A dropped socket must never cancel server turns: the engine keeps evaluating while the shared
+  // client reconnects, and heartbeats re-arm the active timer on recovery.
   const handleWSClose = useCallback(() => {
     setReconnecting(true);
     setReconnectDismissed(false);
@@ -2096,15 +1941,9 @@ export default function ChatView({
     }
   }, []);
 
-  // Reattaches a reloaded tab to a turn the server still owns. A fresh mount
-  // starts idle with no live shell, but the run log may already carry a
-  // running row for the active session from before the reload. Adopting an
-  // empty live shell plus a re-armed budget lets later broadcast deltas
-  // rebuild the timeline without fabricating messages and without issuing a
-  // cancel; settled rows keep the existing history-reload path. The start
-  // stamp reuses the run's own timestamp so the existing settle evidence
-  // still matches instead of stranding the shell behind a grace computed
-  // from the adoption instant, while the timeout budget itself arms from now.
+  // Reattaches a reloaded tab to a turn the server still owns. A fresh mount starts idle with no
+  // live shell, but the run log may already carry a running row for the active session from before
+  // the reload.
   const tryAdoptReloadedTurn = useCallback(() => {
     if (pendingRef.current) return false;
     if (cancelledRef.current) return false;
@@ -2224,16 +2063,7 @@ export default function ChatView({
     return true;
   }, [armTurnTimeout]);
 
-  // Clears the reconnecting notice once the shared socket recovers. A turn
-  // that finished while the socket was down misses both its terminal frame
-  // and its run broadcast, so revalidating against the polled run log keeps
-  // a completed turn from waiting out the full liveness budget and then
-  // surfacing a misleading timeout plus a no-op cancel. Persisted history
-  // wins when no running row remains; live turns resume from their next
-  // frame with a re-armed budget because nothing was cancelled outright.
-  // A reloaded tab with no live shell reattaches here when the run log shows
-  // a running row for the active session, adopting pending state with zero
-  // cancel traffic so broadcast deltas rebuild the timeline.
+  // Clears the reconnecting notice once the shared socket recovers.
   const handleWSOpen = useCallback(() => {
     setReconnecting(false);
     // Reconnect reaps expired shells on the same tick that reconciles the
@@ -2306,10 +2136,8 @@ export default function ChatView({
     reloadActiveHistory(sessionIDRef.current);
   }, [armTurnTimeout, clearTurnTimeout, markBackgroundRunning, reloadActiveHistory, reapExpiredFlightsAndSurface, tryAdoptReloadedTurn]);
 
-  // Parks the active turn into the per-session map before leaving it, keeping
-  // the server turn alive. The inactivity timer is cleared because the parked
-  // view no longer locks the input; liveness resumes from the next frame
-  // after returning instead of firing a spurious timeout while hidden.
+  // Parks the active turn into the per-session map before leaving it, keeping the server turn
+  // alive.
   const parkActiveFlight = useCallback(() => {
     const activeID = sessionIDRef.current;
     const key = parkedFlightKey(activeID);
@@ -2373,13 +2201,8 @@ export default function ChatView({
     }
   }, [markBackgroundRunning, reapExpiredFlightsAndSurface]);
 
-  // Restores a parked turn when returning to its session, re-arming the
-  // liveness timer so a silent socket still releases the input. Sessions with
-  // no parked flight return to an idle view; their history reloads from the
-  // persisted messages below instead of a stale live snapshot. Completed
-  // background turns (terminal arrived while hidden) still restore their
-  // warning banner so the return shows the same skipped-tool notice the live
-  // view would have, without replaying the done message itself.
+  // Restores a parked turn when returning to its session, re-arming the liveness timer so a silent
+  // socket still releases the input.
   const restoreParkedFlight = useCallback(
     (id: string) => {
       const key = parkedFlightKey(id);
@@ -2453,20 +2276,12 @@ export default function ChatView({
     [markBackgroundRunning, armTurnTimeout, reapExpiredFlightsAndSurface],
   );
 
-  // Applies one background frame to its owning parked flight without touching
-  // the active view. Rapid switches stay safe because deltas for a hidden
-  // session only grow that session's parked timeline; the visible messages
-  // never interleave. Terminal frames clear the parked pending flag and
-  // persist token totals so returning reloads the completed history instead
-  // of replaying a stale bubble or duplicating the done message.
+  // Applies one background frame to its owning parked flight without touching the active view.
   const updateParkedFlightFromFrame = useCallback(
     (frameSessionID: string, data: WSIncomingFrame) => {
       const key = parkedFlightKey(frameSessionID);
-      // Untagged background frames have no owner to attribute progress to, so
-      // drop them instead of merging one session's deltas into another. The
-      // drop is lossy, so it surfaces through visible state like live
-      // evictions: the dev log stays silent in production and cannot be the
-      // only signal that streamed progress was discarded.
+      // Untagged background frames have no owner to attribute progress to, so drop them instead of
+      // merging one session's deltas into another.
       if (!key) {
         logWarn(
           "[ChatView] dropping background frame for empty session key",
@@ -2610,10 +2425,9 @@ export default function ChatView({
           const hasMatch = flight.turn.toolActions.some(
             (action) => action.callID === callID,
           );
-          // One end frame belongs to one execution: call identity wins, and
-          // without it only the first pending same-tool row completes so one
-          // result never fans out across sibling executions; with no pending
-          // same-tool row the frame drops instead of guessing an owner.
+          // One end frame belongs to one execution: call identity wins, and without it only the
+          // first pending same-tool row completes so one result never fans out across sibling
+          // executions; with no pending same-tool row the frame drops instead of guessing an owner.
           if (hasMatch) {
             flight.turn.toolActions = flight.turn.toolActions.map((action) =>
               action.callID === callID
@@ -2800,8 +2614,7 @@ export default function ChatView({
 
   // Decides one inline approval without blocking the chat input or sibling rows: each row tracks
   // its own in-flight decision so concurrent approvals stay actionable, matching the inbox per-row
-  // pattern. The "chat" surface tag rides the shared decision body so the audit trail can name
-  // this banner as the deciding origin.
+  // pattern.
   const handleDecideApproval = useCallback(
     async (id: string, approved: boolean, duration: TrustDuration) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
@@ -2870,11 +2683,9 @@ export default function ChatView({
       typeof data.sessionID === "string" ? data.sessionID : undefined;
     const frameType = typeof data.type === "string" ? data.type : undefined;
 
-    // Avatar liveness mirror: every turn-terminal and run-lifecycle frame that
-    // reaches this handler is agent traffic regardless of which session owns
-    // it, so the activity clock advances before the routing below can park or
-    // drop the frame. The store keeps the clock monotonic, so duplicate late
-    // frames never rewind it.
+    // Avatar liveness mirror: every turn-terminal and run-lifecycle frame that reaches this handler
+    // is agent traffic regardless of which session owns it, so the activity clock advances before
+    // the routing below can park or drop the frame.
     if (
       frameType === "done" ||
       frameType === "cancelled" ||
@@ -2885,10 +2696,8 @@ export default function ChatView({
       publishAgentActivity(Date.now());
     }
 
-    // Frames for a hidden session must never leak into the active view, but
-    // they still grow that session's parked flight so returning restores the
-    // live timeline. Only turn-scoped frames route to the map; global
-    // broadcasts (approvals, runs) continue below so badges stay fresh.
+    // Frames for a hidden session must never leak into the active view, but they still grow that
+    // session's parked flight so returning restores the live timeline.
     if (
       frameSessionID &&
       normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
@@ -2911,17 +2720,8 @@ export default function ChatView({
       }
       return;
     }
-    // Untagged session frames carry no owner, so they must never touch the
-    // current view; only global broadcasts (approval/run_*) bypass tagging.
-    // Warnings stay session-scoped with the turn frames so one session's
-    // skipped tools never alarm another session's banner. Heartbeats stay
-    // session-scoped for the same reason so one turn's proof of life never
-    // re-arms another session's timer. Token progress stays session-scoped so
-    // one turn's running sum never leaks into another session's footer.
-    // Terminal failures stay session-scoped as well so a session-less error
-    // never retracts the current session's steering bubble. Cancel misses stay
-    // session-scoped too so an ownerless frame cannot clear a mark it does not
-    // own.
+    // Untagged session frames carry no owner, so they must never touch the current view; only
+    // global broadcasts (approval/run_*) bypass tagging.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
@@ -2941,10 +2741,9 @@ export default function ChatView({
     }
 
     if (frameType === "goal_updated") {
-      // Goal snapshots are global broadcasts with no owning session, so the
-      // chip patches by goal identity instead of session: only a snapshot for
-      // the button's own goal updates the header, and the push itself is the
-      // refresh so no extra read is issued here.
+      // Goal snapshots are global broadcasts with no owning session, so the chip patches by goal
+      // identity instead of session: only a snapshot for the button's own goal updates the header,
+      // and the push itself is the refresh so no extra read is issued here.
       const snapshot = parseGoalUpdatedFrame(data);
       if (
         snapshot &&
@@ -2957,13 +2756,8 @@ export default function ChatView({
     }
 
     if (frameType === "turn_tokens") {
-      // Per-round usage progress: Turn shows this message's running sum and
-      // Session shows the prior base plus running, without waiting for done.
-      // The shared guard already drops frames missing any counter so a partial
-      // payload never zeroes the footer here; out-of-range totals still degrade
-      // to no update, cancelled turns keep partials without persisting, and
-      // done stays authoritative so multi-tab viewers converge on the next
-      // terminal frame.
+      // Per-round usage progress: Turn shows this message's running sum and Session shows the prior
+      // base plus running, without waiting for done.
       const record = data as unknown as Record<string, unknown>;
       const rawTurnTotal = record.turnTotalTokens;
       const rawRoundIndex = record.roundIndex;
@@ -2983,10 +2777,9 @@ export default function ChatView({
       if (toNonNegativeInt(rawRoundTokens) == null) {
         return;
       }
-      // Token progress is session-tagged like heartbeats, so a frame for
-      // another turn must never rewrite this view's footer: gate the footer
-      // updates below on the owning turn, mirroring the liveness check, with
-      // the top-of-handler viewed-session filter covering idle viewers.
+      // Token progress is session-tagged like heartbeats, so a frame for another turn must never
+      // rewrite this view's footer: gate the footer updates below on the owning turn, mirroring the
+      // liveness check, with the top-of-handler viewed-session filter covering idle viewers.
       if (pendingRef.current && turnSessionIDRef.current != null) {
         if (
           !frameSessionID ||
@@ -3030,12 +2823,7 @@ export default function ChatView({
     }
 
     if (frameType === "turn_alive") {
-      // Liveness heartbeat: the engine is still in prompt evaluation with no
-      // deltas to render. Re-arm the inactivity timer without touching message
-      // state so healthy long evals never look like a dropped socket, and
-      // render nothing so older dashboards that drop unknown types agree.
-      // Only re-arm while a turn is actually in flight so a parked approval
-      // arriving with no active turn never starts a spurious timer.
+      // Liveness heartbeat: the engine is still in prompt evaluation with no deltas to render.
       if (pendingRef.current && turnSessionIDRef.current != null) {
         // Heartbeats are session-tagged liveness for one turn, so a frame for
         // another session must never re-arm this turn's timer after a mid-turn
@@ -3053,20 +2841,12 @@ export default function ChatView({
     }
 
     if (frameType === "tool_progress") {
-      // Live per-tool progress keeps a long scan observable without waiting for
-      // its terminal frame. The shared guard already dropped malformed payloads,
-      // so a partial frame never zeroes a row; the keyed map replaces the prior
-      // snapshot for the same call so counters stay monotonic instead of
-      // accumulating duplicates across throttled updates.
+      // Live per-tool progress keeps a long scan observable without waiting for its terminal frame.
       if (cancelledRef.current) return;
       const progress = parseToolProgress(data);
       if (!progress) return;
-      // Session-tagged like heartbeats: a frame for another turn must never
-      // repaint this view's rows after a mid-turn session switch, nor keep this
-      // turn's inactivity timer alive. Re-arm only after the ownership check so
-      // a foreign turn's progress cannot extend the current turn, mirroring the
-      // liveness and token-progress branches; idle viewers still repaint below
-      // without arming.
+      // Session-tagged like heartbeats: a frame for another turn must never repaint this view's
+      // rows after a mid-turn session switch, nor keep this turn's inactivity timer alive.
       if (pendingRef.current && turnSessionIDRef.current != null) {
         if (
           !frameSessionID ||
@@ -3086,16 +2866,8 @@ export default function ChatView({
     }
 
     if (frameType === "tool_cancel_miss") {
-      // A per-tool cancel that stopped nothing is non-terminal: the engine sends
-      // this dedicated type instead of an `error` frame precisely so the view
-      // keeps the running turn. Clear only that row's optimistic "Cancelling…"
-      // mark and surface the note, matching the REST fallback; touching the
-      // timer, segments, or in-flight turn here would drop a live reply over a
-      // cancel that never landed. Live progress stays put because a miss can
-      // land before the bus registers the call, where the tool is still running
-      // and only its terminal frame may retire the row. The top-of-handler
-      // filter already proved this frame belongs to the viewed session, so the
-      // identity match is scoped.
+      // A per-tool cancel that stopped nothing is non-terminal: the engine sends this dedicated
+      // type instead of an `error` frame precisely so the view keeps the running turn.
       const rawMissCallID = (data as unknown as Record<string, unknown>).callID;
       if (typeof rawMissCallID !== "string" || rawMissCallID.trim().length === 0) {
         return;
@@ -3143,10 +2915,9 @@ export default function ChatView({
       if (activeTurnStartMsRef.current == null) {
         activeTurnStartMsRef.current = Date.now();
       }
-      // Evict only this batch's waiting placeholder (same preserved callID in actions
-      // or in the persisted narration text) or uncorrelated waiting with no
-      // tool actions; other parked batches in the same session keep their placeholders so resuming
-      // one never wipes the other. Non-waiting duplicates still evict by callID overlap.
+      // Evict only this batch's waiting placeholder (same preserved callID in actions or in the
+      // persisted narration text) or uncorrelated waiting with no tool actions; other parked batches
+      // in the same session keep their placeholders so resuming one never wipes the other.
       setMessages((prev) =>
         prev.filter((m) => {
           if (m.role !== "assistant") return true;
@@ -3206,10 +2977,9 @@ export default function ChatView({
         (data as WSToolEndFrame).roundIndex,
       );
       setMessages((prev) => {
-        // One end frame belongs to one execution globally: call identity wins
-        // everywhere, and without any identity match only the first pending
-        // same-tool row across messages completes so one result never fans out
-        // to sibling executions or sibling messages; later pendings drop it.
+        // One end frame belongs to one execution globally: call identity wins everywhere, and
+        // without any identity match only the first pending same-tool row across messages completes
+        // so one result never fans out to sibling executions or sibling messages; later pendings.
         const hasGlobalCallIDMatch = prev.some(
           (msg) =>
             msg.toolActions?.some((a) => a.callID === endCallID) ?? false,
@@ -3405,10 +3175,8 @@ export default function ChatView({
       if (pendingRef.current && turnSessionIDRef.current != null) {
         armTurnTimeout();
       }
-      // Same-id upsert: an enrichment rebroadcast for a known id replaces
-      // the stored pending entry in place so the inline banner swaps its
-      // pending copy for the valued copy without remounting. Decided-frame
-      // eviction and timeout arming stay unchanged.
+      // Same-id upsert: an enrichment rebroadcast for a known id replaces the stored pending entry
+      // in place so the inline banner swaps its pending copy for the valued copy without remounting.
       setPendingApprovals((previous) =>
         previous.some((item) => item.id === request.id)
           ? previous.map((item) => (item.id === request.id ? request : item))
@@ -3437,11 +3205,9 @@ export default function ChatView({
       clearAllToolProgress();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
-      // Late guidance stays queued server-side for the next turn, so only the
-      // server-confirmed retained count survives: consumed steers were answered
-      // in this turn and release, while the newest retained entries re-attach
-      // to the next timeline. An absent signal means an older engine with no
-      // late-steering report, so consumed tracking clears as answered.
+      // Late guidance stays queued server-side for the next turn, so only the server-confirmed
+      // retained count survives: consumed steers were answered in this turn and release, while the
+      // newest retained entries re-attach to the next timeline.
       const doneRecord = data as unknown as Record<string, unknown>;
       const rawRetained = doneRecord.retainedSteerCount;
       const retained = toNonNegativeInt(rawRetained);
@@ -3471,11 +3237,8 @@ export default function ChatView({
         frameSessionID &&
         normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
       ) {
-        // A terminal frame can adopt the authoritative identifier for a turn
-        // that started under a provisional draft. The session effect reloads
-        // recall from the adopted key, so carry the in-memory stack forward
-        // merged with any stack already stored there; otherwise the reload
-        // would present an empty stack and drop prior sends from recall.
+        // A terminal frame can adopt the authoritative identifier for a turn that started under a
+        // provisional draft.
         inputHistoryRef.current = carryHistoryForward(
           inputHistoryRef.current,
           frameSessionID,
@@ -3497,10 +3260,9 @@ export default function ChatView({
       const modelName = typeof rawModelName === "string" ? rawModelName : undefined;
       const contextLength =
         typeof rawContextLength === "number" ? rawContextLength : undefined;
-      // Terminal counters share the live turn-tokens integer contract (finite,
-      // non-negative integers): a fractional or otherwise malformed done frame
-      // drops to absent instead of flooring, so live and terminal footers agree
-      // with the hub and engine decoders and never corrupt the persisted base.
+      // Terminal counters share the live turn-tokens integer contract (finite, non-negative
+      // integers): a fractional or otherwise malformed done frame drops to absent instead of
+      // flooring, so live and terminal footers agree with the hub and engine decoders and never.
       const totalTokens = toNonNegativeInt(rawTotalTokens);
       const sessionTokensValue = toNonNegativeInt(rawSessionTokens);
       const contextTokensValue = toNonNegativeInt(rawContextTokens);
@@ -3523,12 +3285,9 @@ export default function ChatView({
           // Storage is best-effort only.
         }
       }
-      // Authoritative cumulative total wins when present so reloads,
-      // multi-client turns, and retries never drift from local sums. Live token
-      // frames already showed base plus running, so this overwrites with the same
-      // value. A parked turn keeps the pre-park base because the resume synthesis
-      // re-reports the parked tokens inside its running total; advancing the base
-      // here would count them twice in the live footer until done reconciles.
+      // Authoritative cumulative total wins when present so reloads, multi-client turns, and
+      // retries never drift from local sums. Live token frames already showed base plus running, so
+      // this overwrites with the same value.
       if (typeof sessionTokensValue === "number") {
         const cumulative = sessionTokensValue;
         setSessionTokens(cumulative);
@@ -3541,10 +3300,8 @@ export default function ChatView({
           // Storage is best-effort only.
         }
       } else if (typeof totalTokens === "number") {
-        // No authoritative total: derive from the prior base plus this turn so a
-        // live footer that already added the running sum does not double-count.
-        // A parked turn still moves the displayed total forward while keeping the
-        // pre-park base for the same resume overlap reason above.
+        // No authoritative total: derive from the prior base plus this turn so a live footer that
+        // already added the running sum does not double-count.
         const turnTotal = totalTokens;
         const base = sessionBaseRef.current;
         // The derived base keeps the integer contract: a drifted stored base
@@ -3618,11 +3375,9 @@ export default function ChatView({
         ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),
       };
       setMessages((prev) => {
-        // Terminal dedup stays batch-scoped: any prior bubble whose callIDs
-        // overlap this turn's terminal actions is the same execution (including
-        // an optimistic pre-steer commit), so it evicts; uncorrelated waiting
-        // with no actions is stale and evicts as well. Other batches share no
-        // callIDs and stay, so completing one resume never wipes the other.
+        // Terminal dedup stays batch-scoped: any prior bubble whose callIDs overlap this turn's
+        // terminal actions is the same execution (including an optimistic pre-steer commit), so it
+        // evicts; uncorrelated waiting with no actions is stale and evicts as well.
         const base = !isParked
           ? prev.filter((m) => {
               if (m.role !== "assistant") return true;
@@ -3688,11 +3443,9 @@ export default function ChatView({
       setInFlightTurn(null);
       setPending(false);
     } else if (frameType === "error") {
-      // Only guidance the engine never stored rolls back: a steering miss or
-      // an authoritative length refusal retracts its optimistic bubble, while
-      // turn-wide failures leave received guidance visible for the retry. The
-      // engine withdraws the newest queued text on a race loss, so the newest
-      // tracked bubble goes first and the frame must own this session.
+      // Only guidance the engine never stored rolls back: a steering miss or an authoritative
+      // length refusal retracts its optimistic bubble, while turn-wide failures leave received
+      // guidance visible for the retry.
       const errorRecord = data as unknown as Record<string, unknown>;
       const ownsSession =
         !!frameSessionID &&
@@ -3733,10 +3486,9 @@ export default function ChatView({
           pendingNormalRef.current = null;
         }
       }
-      // Foreign-session failures must leave the foreground turn alone: hidden
-      // sessions already settle into parked flights above, so reaching here
-      // without ownership means the timer, pending flag, and banner below
-      // all belong to another turn.
+      // Foreign-session failures must leave the foreground turn alone: hidden sessions already
+      // settle into parked flights above, so reaching here without ownership means the timer,
+      // pending flag, and banner below all belong to another turn.
       if (!ownsSession) {
         return;
       }
@@ -3800,11 +3552,7 @@ export default function ChatView({
       inFlightTurnRef.current = null;
       setPending(false);
     } else if (frameType === "run_started" || frameType === "run_completed") {
-      // Run lifecycle broadcasts keep the background badge honest across tabs
-      // and reloads. The nested run carries the owning session while the
-      // envelope stays untagged, so extract it here instead of the top-level
-      // filter above. Completion also reconciles approvals because a parked
-      // resume means its inbox rows were decided elsewhere.
+      // Run lifecycle broadcasts keep the background badge honest across tabs and reloads.
       const nestedRun: unknown = (data as unknown as Record<string, unknown>).run;
       const owner = runSessionID(
         nestedRun as Parameters<typeof runSessionID>[0],
@@ -3954,14 +3702,9 @@ export default function ChatView({
     if (isOpen()) setReconnecting(false);
   }, [retryConnection, isOpen]);
 
-  // Cancels one executing tool by call identity, distinct from the session-wide
-  // turn cancel: this stops a single call and lets the model reason about the
-  // partial result instead of aborting the whole reply. The optimistic mark
-  // flips before the request leaves so the row stops inviting a second click
-  // immediately, and the terminal frame or a non-terminal miss frame clears it.
-  // The WebSocket frame is preferred while the shared socket is open because it
-  // skips a round trip, with the REST route as the fallback so a dropped socket
-  // still stops the tool.
+  // Cancels one executing tool by call identity, distinct from the session-wide turn cancel: this
+  // stops a single call and lets the model reason about the partial result instead of aborting the
+  // whole reply.
   const handleCancelTool = useCallback(
     (callID: string, reason?: string) => {
       const trimmedCallID = callID.trim();
@@ -3983,10 +3726,8 @@ export default function ChatView({
       if (!sent) {
         void toolCancel(cancelSID, trimmedCallID, trimmedReason)
           .then((response) => {
-            // A resolved miss means the call settled before the request landed,
-            // so no terminal frame is coming to clear the mark. Drop it here and
-            // report the miss rather than leaving the row on a false
-            // "Cancelling…" forever.
+            // A resolved miss means the call settled before the request landed, so no terminal
+            // frame is coming to clear the mark.
             if (!response.cancelled) {
               forgetToolCall(trimmedCallID);
               setError("Tool cancel missed — the tool call already settled");
@@ -4011,10 +3752,9 @@ export default function ChatView({
   useEffect(() => {
     let cancelled = false;
     const activeID = sessionID;
-    // Hydrate the status bar from the cached cumulative total so a reload
-    // does not reset a live session to zero; the next authoritative done
-    // frame corrects it when the server has newer usage. The hydrated value
-    // doubles as the prior base for the next turn's live token frames.
+    // Hydrate the status bar from the cached cumulative total so a reload does not reset a live
+    // session to zero; the next authoritative done frame corrects it when the server has newer
+    // usage.
     const hydrated = loadSessionTokens(activeID);
     setSessionTokens(hydrated);
     sessionBaseRef.current = hydrated;
@@ -4025,10 +3765,8 @@ export default function ChatView({
     // lingers while this session's detail fetch is in flight.
     setSessionGoalId(null);
 
-    // Seed the Up/Down recall stack from per-session storage so a reload
-    // restores prior sends without resending; the server backfill below only
-    // adds missing user texts. Resetting the recall index exits history mode
-    // so the fresh session starts from an honest empty draft.
+    // Seed the Up/Down recall stack from per-session storage so a reload restores prior sends
+    // without resending; the server backfill below only adds missing user texts.
     inputHistoryRef.current = loadInputHistory(activeID);
     historyIndexRef.current = -1;
     draftRef.current = "";
@@ -4072,12 +3810,9 @@ export default function ChatView({
               ? res.goalId
               : null,
           );
-          // Backfill the recall stack from persisted user texts oldest-first
-          // by createdAt (wire order is oldest-first but never trusted),
-          // deduplicated against the stored stack so reloads and cross-tab
-          // sends converge without duplicates; the merged result persists
-          // for the next reload. Only the fetched window backfills, so a
-          // truncated history restores at most that window.
+          // Backfill recall stack from user texts oldest-first by createdAt, deduplicated
+          // against stored entries so cross-tab sends converge without duplicates and persist
+          // for the next reload.
           if (
             normalizeSessionID(sessionIDRef.current) !==
             normalizeSessionID(activeID)
@@ -4163,20 +3898,10 @@ export default function ChatView({
   }, [sessionID]);
 
   // Shared run-log poller feeding background badges and parked-settle reconcile.
-  // One module-level interval serves both this view and the sidebar so two
-  // mounted pollers never double the run-log QPS; live broadcasts above stay
-  // the immediate path while these polled rows cover reloads, missed sockets,
-  // and cross-tab turns. Parked flights remain the source for live timelines.
   const { runs: sharedRuns, runningIDs: sharedRunningIDs } = useRunningRuns();
 
-  // Reconciles background badges with the authoritative run log so reloads
-  // and turns started in another tab still badge without a live socket.
-  // Parked flights stay the source for live timelines while polled runs cover
-  // missed broadcasts; settled runs evict only when no parked pending remains
-  // so a stream terminal that arrives just after the poll never flashes.
-  // The active turn revalidates here as well so a terminal missed during a
-  // socket outage releases the input via persisted history instead of waiting
-  // out the liveness budget and then reporting a misleading timeout.
+  // Reconciles background badges with the authoritative run log so reloads and turns started in
+  // another tab still badge without a live socket.
   useEffect(() => {
     sharedRunsRef.current = sharedRuns;
     sharedRunningIDsRef.current = sharedRunningIDs;
@@ -4192,23 +3917,17 @@ export default function ChatView({
         markBackgroundRunning(norm, true);
       }
     }
-    // Reloaded-tab reattach from the poll tick: when the active view is idle
-    // but the run log shows a live row for its session and the socket is open,
-    // adopt an empty shell with zero cancel traffic so later deltas rebuild.
-    // The open handler covers the socket-recovery ordering while this tick
-    // covers a poll that lands after the open; both share one helper so the
-    // two orderings converge instead of drifting.
+    // Reloaded-tab reattach from the poll tick: when the active view is idle but the run log shows
+    // a live row for its session and the socket is open, adopt an empty shell with zero cancel
+    // traffic so later deltas rebuild.
     if (!pendingRef.current && !cancelledRef.current && activeNorm) {
       if (running.includes(activeNorm) && isOpen()) {
         tryAdoptReloadedTurn();
       }
     }
-    // Sessions with a settled row but no running row finished while the
-    // socket was away; settle the parked shell so the concurrency cap
-    // frees and a return reloads history instead of a stale bubble. A
-    // fresh flight keeps its grace until its running row persists, and a
-    // stream terminal arriving just after the poll still wins via the
-    // pending check below.
+    // Sessions with a settled row but no running row finished while the socket was away; settle the
+    // parked shell so the concurrency cap frees and a return reloads history instead of a stale
+    // bubble.
     const settled = new Set<string>();
     for (const run of sharedRuns) {
       const raw = (run as { sessionID?: unknown }).sessionID;
@@ -4234,15 +3953,8 @@ export default function ChatView({
         markBackgroundRunning(norm, false);
       }
     }
-    // Active-session missed terminal: the socket can drop after send but
-    // before done while the engine keeps evaluating, so both the targeted
-    // terminal and its run broadcast are missed. Polling stays authoritative
-    // here because it runs over REST even while the socket is down. An
-    // explicit cancel never lands here since it already releases the input,
-    // and a just-sent turn keeps its grace until its running row persists so
-    // a slow persist never evicts a live turn. Only a settled row newer than
-    // the turn start settles, so stale rows from prior turns never clear a
-    // fresh prompt and session filtering keeps background turns untouched.
+    // Active-session missed terminal: the socket can drop after send but before done while the
+    // engine keeps evaluating, so both the targeted terminal and its run broadcast are missed.
     if (pendingRef.current && !cancelledRef.current && activeNorm && !isOpen()) {
       const liveTurnSID = turnSessionIDRef.current;
       const ownsActive =
@@ -4306,10 +4018,8 @@ export default function ChatView({
   }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface, reconcileReconnecting, tryAdoptReloadedTurn, isOpen]);
 
   useEffect(() => {
-    // Own sends reset the lock before appending, so this suppresses only remote
-    // deltas while the user reviews history; the user's own bubble always lands in view.
-    // An active in-list text selection also suppresses auto-scroll so reading
-    // a highlighted passage never loses the range to a scroll jump.
+    // Own sends reset the lock before appending, so this suppresses only remote deltas while the
+    // user reviews history; the user's own bubble always lands in view.
     if (
       !userHasScrolledUpRef.current &&
       chatSettings.autoScrollOnStream &&
@@ -4391,11 +4101,8 @@ export default function ChatView({
       role: "user",
       text,
     };
-    // Queue every optimistic bubble so a rejection retracts exactly one entry
-    // in send order instead of the last send overwriting earlier ones. Sheds
-    // the oldest like the engine queue when rapid taps exceed its bound, and
-    // removes its bubble so the timeline never shows guidance the engine
-    // already dropped.
+    // Queue every optimistic bubble so a rejection retracts exactly one entry in send order instead
+    // of the last send overwriting earlier ones.
     pendingSteerRef.current.push({ id: steerId, text });
     let shedSteerId: string | null = null;
     if (pendingSteerRef.current.length > MAX_PENDING_STEERS) {
@@ -4403,11 +4110,8 @@ export default function ChatView({
       if (shed) shedSteerId = shed.id;
     }
 
-    // Snapshot and seal synchronously with no await between: the handler runs
-    // to completion on one event-loop turn, so no tool_end/delta frame can
-    // interleave between the read and the reset. The committed snapshot keeps
-    // the live turn's call identities verbatim, so the later done frame
-    // collapses it by callID overlap instead of doubling one execution.
+    // Snapshot and seal synchronously with no await between: the handler runs to completion on one
+    // event-loop turn, so no tool_end/delta frame can interleave between the read and the reset.
     const currentTurn = inFlightTurnRef.current;
     const currentFullText =
       (currentTurn?.text ?? "") + (currentTurn?.held ?? "");
@@ -4483,10 +4187,8 @@ export default function ChatView({
     // Never hijack IME composition: Up/Down/Enter belong to the candidate
     // window while composing, so leave the keystroke untouched.
     if (event.nativeEvent?.isComposing || (event as unknown as { isComposing?: boolean }).isComposing) return;
-    // Up/Down history recall at caret edges only: first-line Up steps toward
-    // the oldest send while last-line Down steps toward newer and restores
-    // the pre-recall draft past the newest. Anywhere else keeps native
-    // cursor movement with no preventDefault.
+    // Up/Down history recall at caret edges only: first-line Up steps toward the oldest send while
+    // last-line Down steps toward newer and restores the pre-recall draft past the newest.
     if (
       event.key === "ArrowUp" &&
       !event.shiftKey &&
@@ -4603,14 +4305,9 @@ export default function ChatView({
       );
       return;
     }
-    // Bound parallel turns so slow local inference never stacks silently:
-    // the active turn plus every parked background turn counts toward the
-    // server-advertised cap, and a full house refuses with an honest busy
-    // notice. The active slot counts even though the input lock usually
-    // guards it, so a state commit that lags behind the ref never admits a
-    // turn past the shared limit. The cap resolves through the health
-    // advertisement so client refusal agrees with server enforcement instead
-    // of drifting on a local constant.
+    // Bound parallel turns so slow local inference never stacks silently: the active turn plus
+    // every parked background turn counts toward the server-advertised cap, and a full house refuses
+    // with an honest busy notice.
     const parkedPendingCount = [...parkedFlightsRef.current.values()].filter(
       (flight) => flight.pending,
     ).length;
@@ -4629,10 +4326,9 @@ export default function ChatView({
     setTurnWarnings([]);
 
     const isFirst = messages.length === 0;
-    // Arm the pre-name flag without renaming yet: the terminal frame owns the
-    // single PUT through the shared helper, so a failed send keeps the retry
-    // instead of losing it behind a synchronous clear. Only set on first turns
-    // so a later send never clears a pending retry from an earlier failure.
+    // Arm the pre-name flag without renaming yet: the terminal frame owns the single PUT through
+    // the shared helper, so a failed send keeps the retry instead of losing it behind a synchronous
+    // clear.
     if (isFirst) {
       isFirstMessageRef.current = true;
       latestPromptRef.current = text;
@@ -4672,11 +4368,8 @@ export default function ChatView({
     // when the user switches sessions before the terminal frame arrives.
     turnSessionIDRef.current = targetSid;
     activeTurnStartMsRef.current = Date.now();
-    // Freeze the prior session base so live token frames add the running turn
-    // total onto a stable starting point instead of compounding onto themselves.
-    // The live ref holds the latest committed total even when a prior turn's
-    // update has not re-rendered yet, so the next turn never restarts from a
-    // stale snapshot and reconciles without double-counting.
+    // Freeze the prior session base so live token frames add the running turn total onto a stable
+    // starting point instead of compounding onto themselves.
     sessionBaseRef.current = sessionTokensRef.current;
 
     // Stream via WebSocket if connection is open
@@ -4709,12 +4402,8 @@ export default function ChatView({
         response.sessionID &&
         normalizeSessionID(response.sessionID) !== normalizeSessionID(targetSid)
       ) {
-        // A REST reply can adopt the authoritative identifier for a send that
-        // started under a provisional draft. The session effect reloads recall
-        // from the adopted key, so carry the in-memory stack (which already
-        // holds this send) forward merged with any stack already stored there;
-        // otherwise the reload would present an empty stack and drop prior
-        // sends from recall.
+        // A REST reply can adopt the authoritative identifier for a send that started under a
+        // provisional draft.
         inputHistoryRef.current = carryHistoryForward(
           inputHistoryRef.current,
           response.sessionID,
@@ -4753,11 +4442,9 @@ export default function ChatView({
           // Storage is best-effort only.
         }
       } else if (typeof total === "number") {
-        // REST has no live footer, so the cached base plus this turn is the
-        // honest total. A parked turn keeps the pre-park base because a later
-        // resume synthesis re-reports the parked tokens in its running total.
-        // The base keeps the integer contract so a drifted store never seeds
-        // a fractional sum.
+        // REST has no live footer, so the cached base plus this turn is the honest total. A parked
+        // turn keeps the pre-park base because a later resume synthesis re-reports the parked tokens
+        // in its running total.
         const restBase = sessionBaseRef.current;
         const restFallbackBase =
           toNonNegativeInt(restBase) ?? sessionTokensRef.current;
@@ -4914,10 +4601,9 @@ export default function ChatView({
     // listener never acts on a stale mount-time closure; otherwise an A→B→A
     // return via URL early-returns against the initial A and drops the switch.
     if (normalizeSessionID(id) === normalizeSessionID(sessionIDRef.current)) return;
-    // Keep the prior server turn alive in the background instead of
-    // cancelling it; its frames accumulate in the parked map and the return
-    // restores the live bubble without duplicating completed history.
-    // The target session opens at its latest message, so release the lock.
+    // Keep the prior server turn alive in the background instead of cancelling it; its frames
+    // accumulate in the parked map and the return restores the live bubble without duplicating
+    // completed history.
     userHasScrolledUpRef.current = false;
     parkActiveFlight();
     knownDraftIDRef.current = null;
@@ -4999,10 +4685,8 @@ export default function ChatView({
     }
   }, [targetSessionId, onClearTargetSessionId]);
 
-  // Sanitized footer totals share the hub integer contract so a fractional,
-  // negative, or NaN payload renders as zero instead of NaN; the limit guards
-  // division. Turn stays nullable so a fresh session renders an em dash until
-  // its first terminal frame lands.
+  // Sanitized footer totals share the hub integer contract so a fractional, negative, or NaN
+  // payload renders as zero instead of NaN; the limit guards division.
   const safeContextTokens = toNonNegativeInt(contextTokens) ?? 0;
   const safeSessionTokens = toNonNegativeInt(sessionTokens) ?? 0;
   const safeContextLimit = toNonNegativeInt(contextLimit) ?? 0;
@@ -5024,12 +4708,9 @@ export default function ChatView({
   // leak into this header.
   const sessionApprovals = approvalsForSession(pendingApprovals, sessionID);
   const sessionPendingCount = sessionApprovals.length;
-  // Liveness helpers for the persistent footer below: a tool with no result is
-  // still running on the engine, while completed tools plus partial text mean
-  // the next prompt round is processing silently with no frames to render.
-  // The full turn text (committed plus held) decides liveness so a held-only
-  // emoji still counts as progress, while the live bubble below renders only
-  // the committed prefix with zero render-mode flip on done.
+  // Liveness helpers for the persistent footer below: a tool with no result is still running on the
+  // engine, while completed tools plus partial text mean the next prompt round is processing
+  // silently with no frames to render.
   const hasRunningTools =
     inFlightTurn?.toolActions.some((action) => !action.result) ?? false;
   const hasPartialText =
@@ -5048,11 +4729,9 @@ export default function ChatView({
     }
   }
 
-  // Newest-card rule for the rendered transcript: only the last files.write
-  // card per (path, envelope kind) keeps review controls, so an older card can
-  // never resolve a review the newer write already replaced. The in-flight turn
-  // participates only while the live bubble actually renders, matching the JSX
-  // condition below, and both write-review scans read this one ordered list.
+  // Newest-card rule for the rendered transcript: only the last files.write card per (path,
+  // envelope kind) keeps review controls, so an older card can never resolve a review the newer
+  // write already replaced.
   const renderedActions = renderedToolActions(
     messages,
     pending ? inFlightTurn : null,
@@ -5218,12 +4897,8 @@ export default function ChatView({
             const hasTools = actions.length > 0;
             const hasText = Boolean(message.text && message.text.trim().length > 0);
             if (!hasText && !hasTools && !message.isError) return null;
-            // Persisted failures store the failure string as the bubble text,
-            // so a prefix match keeps the dedicated error card as the single
-            // owner. Live snapshots instead keep the verbatim partial reply
-            // while the failure lives on `errorText`, so a partial that merely
-            // starts with `Error:` must stay visible and only an exact
-            // duplicate of the failure collapses.
+            // Persisted failures store the failure string as the bubble text, so a prefix match
+            // keeps the dedicated error card as the single owner.
             const isPersistedErrorText = (text: string) =>
               text.trim().startsWith("Error:") ||
               text.trim().startsWith("Chat request failed");

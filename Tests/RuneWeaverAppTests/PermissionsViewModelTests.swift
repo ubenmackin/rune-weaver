@@ -1,35 +1,10 @@
 // Rune Weaver App Tests — Permissions view model over stubbed seams.
-//
-// Pins the window contract without touching real TCC state: silent refresh
-// populates every row without prompting, Enable prompts once then reconciles
-// all rows, Settings navigation opens the exact pane without prompting, the
-// no-op affordance stays silent, relaunch delegates, and unread rows read
-// unavailable. Stubs record every probe and action call plus a combined log so
-// ordering between the prompt write and the reconciling re-read is verifiable.
-//
-// Scope: view-model behavior through main-actor stubs only. No live probes, no
-// Settings links, no app relaunch, so the suite never prompts for Contacts,
-// Automation, or Full Disk Access on the machine running it.
-// Shared Contract:
-// - status(for:) is unavailable before the first refresh.
-// - refresh() fills all seven rows from status reads and never calls request.
-// - request(_:) stores the prompt result then re-reads every row.
-// - perform(.enable) runs the request path and re-reads all rows.
-// - perform(.openSettings, for: .fullDiskAccess) opens the allFiles pane and prompts nothing.
-// - perform(.none) touches neither seam; relaunchApp() delegates to the seam.
-// Owner: Sources/RuneWeaverApp/PermissionsViewModel.swift rows plus routing,
-// backed by Sources/RuneWeaverApp/PermissionTypes.swift kinds and panes.
 
 import Foundation
 @testable import RuneWeaverApp
 import Testing
 
 /// Main-actor stub probes recording every read and prompt.
-///
-/// Seeded statuses answer `status(_:)` reads while `requestResults` answer
-/// `request(_:)` prompts, so tests can separate what the prompt returned from
-/// what the reconciling refresh observed. The combined log preserves
-/// cross-seam ordering that per-array counts alone cannot show.
 @MainActor
 final class StubPermissionProbes: PermissionProbing {
     var seededStatuses: [PermissionKind: PermissionStatus]

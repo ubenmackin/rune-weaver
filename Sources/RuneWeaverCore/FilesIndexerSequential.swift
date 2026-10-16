@@ -1,17 +1,10 @@
 // Rune Weaver Core — Sequential file walk and indexing for the document index.
-//
-// Enumerates roots sequentially, evaluates pruning rules and iCloud eviction,
-// checks fingerprints and content hashes, extracts text, embeds chunks, and
-// persists document records to the store.
 
 import Foundation
 
 extension FilesIndexer {
-    /// Walks one root, pruning excluded and symlinked directories in place.
-    /// - Parameters:
-    ///   - root: Raw configured root.
-    ///   - start: Instant the run began.
-    ///   - counters: Cumulative run counters.
+    /// Walks one root, pruning excluded and symlinked directories in place. root:
+    /// Raw configured root.
     func indexRoot(_ root: String, start: ContinuousClock.Instant, counters: inout Counters) async {
         let rootURL = resolvedRootURL(root)
         var isDirectory: ObjCBool = false
@@ -82,14 +75,9 @@ extension FilesIndexer {
         }
     }
 
-    /// Indexes one regular file, counting it as scanned before any skip decision.
-    /// Evicted iCloud files honor `IndexConfig.iCloudEvicted`: skipped by
-    /// default and downloaded only under the `download` policy.
-    /// - Parameters:
-    ///   - fileURL: Canonical file URL the guard allowed.
-    ///   - root: Root the file was discovered under, for display paths.
-    ///   - start: Instant the run began.
-    ///   - counters: Cumulative run counters.
+    /// Indexes one regular file, counting it as scanned before any skip decision. Evicted iCloud
+    /// files honor `IndexConfig.iCloudEvicted`: skipped by default and downloaded only under the
+    /// `download` policy.
     func indexFile(_ fileURL: URL, root: URL, start: ContinuousClock.Instant, counters: inout Counters) async {
         counters.scanned += 1
         // Cooperative stop between files: a cancel arriving while the
@@ -99,10 +87,9 @@ extension FilesIndexer {
             cancelBox.set()
             return
         }
-        // Canonicalize for a stable external identifier: temporary roots
-        // resolve differently (`/var` vs `/private/var`) between the walk
-        // and the caller, so the stored key must not depend on which
-        // spelling the enumerator happened to return.
+        // Canonicalize for a stable external identifier: temporary roots resolve differently
+        // (`/var` vs `/private/var`) between the walk and the caller, so the stored key must not
+        // depend on which spelling the enumerator happened to return.
         let canonicalURL = fileURL.resolvingSymlinksInPath().standardizedFileURL
         let canonicalPath = canonicalURL.path
         let relative = Self.relativePath(of: canonicalURL, root: root)
@@ -350,11 +337,7 @@ extension FilesIndexer {
     }
 
     /// Persists one extraction as a document plus chunks, updating counters.
-    /// - Parameters:
-    ///   - pending: Extraction plus its stable identity.
-    ///   - relative: Root-relative display path.
-    ///   - start: Instant the run began.
-    ///   - counters: Cumulative run counters.
+    /// pending: Extraction plus its stable identity.
     func persistExtraction(
         pending: PendingExtraction,
         relative: String,
@@ -459,26 +442,17 @@ extension FilesIndexer {
         await reportWork(relative, counters: counters, start: start)
     }
 
-    /// Counts one failed file and records a content-free warning.
-    /// - Parameters:
-    ///   - relative: Root-relative item path.
-    ///   - counters: Cumulative run counters.
-    ///   - start: Instant the run began.
-    ///   - reason: Short failure reason, never file content.
+    /// Counts one failed file and records a content-free warning. relative:
+    /// Root-relative item path.
     func fail(_ relative: String, counters: inout Counters, start: ContinuousClock.Instant, reason: String) async {
         counters.errors += 1
         counters.warnings.append(Self.skipWarningText(relative: relative, reason: reason))
         await reportWork(relative, counters: counters, start: start)
     }
 
-    /// Stamps one visited file as seen by the current run.
-    ///
-    /// Best-effort: a store failure marks the run so the end-of-run reconcile
-    /// stays skipped rather than retiring live rows against a partial stamp
-    /// set. Cancellation propagates through the shared flag.
-    /// - Parameters:
-    ///   - canonicalPath: Stable external identifier.
-    ///   - counters: Cumulative run counters.
+    /// Stamps one visited file as seen by the current run. Best-effort: a store failure marks the
+    /// run so the end-of-run reconcile stays skipped rather than retiring live rows against a
+    /// partial stamp set.
     func stampSeen(_ canonicalPath: String, counters: inout Counters) async {
         do {
             try await store.markSeen(source: .files, externalID: canonicalPath, runID: counters.runID)
@@ -490,20 +464,9 @@ extension FilesIndexer {
         }
     }
 
-    /// Embeds a document's chunks, degrading to keyword-only on any failure.
-    ///
-    /// Cancellation propagates instead of degrading: a cancelled run should
-    /// stop rather than silently keep spending embedding work. A width or count
-    /// mismatch is treated as a backend failure so a partial vector list never
-    /// pairs the wrong vector with a chunk. The probe runs before the batch so
-    /// a cancel observed between files never starts another embedding batch.
-    /// Only the first `max_vector_chunks_per_document` chunks are sent for
-    /// embedding; the remainder keep an empty embedding through `makeChunks`
-    /// so they stay fully keyword-searchable.
-    /// - Parameters:
-    ///   - extraction: Extracted document body.
-    ///   - embedder: Backend to consult.
-    /// - Returns: Vectors plus whether the visual multimodal path produced them.
+    /// Embeds a document's chunks, degrading to keyword-only on any failure. A width or count
+    /// mismatch is treated as a backend failure so a partial vector list never pairs the wrong
+    /// vector with a chunk.
     func embedChunks(
         of extraction: DocumentExtraction,
         fileURL: URL,

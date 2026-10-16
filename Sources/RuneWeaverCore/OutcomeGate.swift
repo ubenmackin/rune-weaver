@@ -1,13 +1,4 @@
 // Rune Weaver Core — Proactive surfacing gate for background interruptions.
-//
-// Decides which scheduler and goal outcomes may interrupt the owner via a
-// macOS notification or a dashboard interruption frame. Routine successes stay
-// quiet under the stricter modes while milestones, errors, and parked turns
-// always break through; the guarded mode consults a single model judge for
-// routine scheduler successes with a bounded timeout and fails open so a judge
-// miss never swallows something the owner might need. The gate filters
-// interruptions only — run history, WebSocket run frames, and the approvals
-// inbox record regardless of mode.
 
 import Foundation
 
@@ -32,15 +23,9 @@ public enum ProactiveEventKind: String, Sendable, Codable, CaseIterable, Equatab
     /// A proactive suggestion the Wayfinder engine proposed outside any turn.
     case ideaProposed
 
-    /// Whether this kind breaks through under the milestones policy.
-    ///
-    /// Milestones are owner-meaningful transitions (goal completions, input
-    /// needs, blocks), failures, and parked turns. Routine successes
-    /// (`schedulerOk`, `goalStepDone`) and volunteered suggestions
-    /// (`ideaProposed`) stay quiet under `milestones`; under `guarded` only
-    /// `schedulerOk` reaches the model judge while `goalStepDone` and
-    /// `ideaProposed` stay suppressed, so only `all` surfaces them
-    /// unconditionally.
+    /// Whether this kind breaks through under the milestones policy. Milestones are
+    /// owner-meaningful transitions (goal completions, input needs, blocks), failures, and parked
+    /// turns.
     var isMilestone: Bool {
         switch self {
         case .schedulerError, .goalAchieved, .goalNeedsInput, .goalBlocked, .runParked, .runBudgetExceeded:
@@ -65,15 +50,8 @@ public struct ProactiveEvent: Sendable, Equatable {
     /// Longest interruption headline shown on badges and notifications.
     public static let maxHeadlineChars = 90
 
-    /// Creates an event, bounding the outcome to the shared preview budget.
-    ///
-    /// The preview shares the notify short-text truncation rule (trimmed,
-    /// capped at 160 characters with an ellipsis) so judge context and
-    /// default headlines quote the same prefix the logs already show.
-    /// - Parameters:
-    ///   - kind: What happened.
-    ///   - title: Job or goal title.
-    ///   - outcome: Full outcome text (response, error detail, or prompt fallback).
+    /// Creates an event, bounding the outcome to the shared preview budget. - outcome: Full outcome
+    /// text (response, error detail, or prompt fallback).
     public init(kind: ProactiveEventKind, title: String, outcome: String) {
         self.kind = kind
         self.title = title
@@ -89,12 +67,6 @@ public struct ProactiveEvent: Sendable, Equatable {
     }
 
     /// Clamps a headline to the interruption budget.
-    ///
-    /// Stays at or under 90 characters without an ellipsis so the judge
-    /// contract (`headline <= 90`) holds byte-exactly; overlong input is cut
-    /// to the prefix rather than growing with a trailing marker.
-    /// - Parameter text: Candidate headline.
-    /// - Returns: Trimmed headline capped at 90 characters.
     public static func clampHeadline(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count > maxHeadlineChars ? String(trimmed.prefix(maxHeadlineChars)) : trimmed
@@ -108,10 +80,7 @@ public struct SurfacingVerdict: Sendable, Equatable {
     /// Short headline for the interruption frame, clamped at use.
     public let headline: String
 
-    /// Creates a verdict.
-    /// - Parameters:
-    ///   - surface: Whether to interrupt.
-    ///   - headline: Short headline (clamped to 90 characters at use).
+    /// Creates a verdict. surface: Whether to interrupt.
     public init(surface: Bool, headline: String) {
         self.surface = surface
         self.headline = headline
@@ -119,17 +88,9 @@ public struct SurfacingVerdict: Sendable, Equatable {
 }
 
 /// Judge closure consulted once per guarded routine success.
-///
-/// Throwing (including unparseable model output mapped to a throw by the
-/// Server judge) reads as fail-open at the call site so a judge miss never
-/// silently swallows something the owner might need.
 public typealias ProactiveJudge = @Sendable (ProactiveEvent) async throws -> SurfacingVerdict
 
 /// Interruption gate for background scheduler and goal outcomes.
-///
-/// An actor so concurrent job and goal fires serialize their guarded judge
-/// calls without sharing mutable state; the stored judge closure is the only
-/// model dependency and stays nil for the deterministic modes.
 public actor OutcomeGate {
     /// Surfacing mode from `[proactive]`.
     private let mode: ProactiveMode
@@ -138,16 +99,8 @@ public actor OutcomeGate {
     /// Model judge for guarded routine successes, nil for deterministic modes.
     private let judge: ProactiveJudge?
 
-    /// Creates a gate.
-    ///
-    /// The timeout defaults to the `[proactive]` default so callers using the
-    /// `init(mode:judge:)` shape keep the documented budget without naming it.
-    /// The range is owned by load-time validation (1-120); this stores the
-    /// value verbatim so misconfiguration surfaces instead of silently clamping.
-    /// - Parameters:
-    ///   - mode: Surfacing mode.
-    ///   - judgeTimeoutSeconds: Guarded judge budget in seconds.
-    ///   - judge: Model judge for guarded routine successes.
+    /// Creates a gate. The range is owned by load-time validation (1-120); this stores the value
+    /// verbatim so misconfiguration surfaces instead of silently clamping.
     public init(
         mode: ProactiveMode = .all,
         judgeTimeoutSeconds: Int = ProactiveConfig.defaultJudgeTimeoutSeconds,
@@ -163,18 +116,9 @@ public actor OutcomeGate {
         mode
     }
 
-    /// Decides whether an event interrupts the owner.
-    ///
-    /// `all` surfaces everything, `off` surfaces nothing, `milestones`
-    /// surfaces milestone kinds only, and `guarded` adds one bounded judge
-    /// call for routine scheduler successes. Judge errors and timeouts fail
-    /// open to surfacing; a missing judge under `guarded` degrades to the
-    /// milestones posture so routine successes stay quiet without a judge.
-    /// The returned headline is always clamped to 90 characters, falling back
-    /// to the event preview (or title when the preview is empty) whenever the
-    /// judge has no headline to offer.
-    /// - Parameter event: Background outcome to judge.
-    /// - Returns: Whether to interrupt plus the clamped headline.
+    /// Decides whether an event interrupts the owner. `all` surfaces everything, `off` surfaces
+    /// nothing, `milestones` surfaces milestone kinds only, and `guarded` adds one bounded judge
+    /// call for routine scheduler successes.
     public func decide(event: ProactiveEvent) async -> (surface: Bool, headline: String) {
         let fallback = defaultHeadline(for: event)
         switch mode {
@@ -208,10 +152,6 @@ public actor OutcomeGate {
     }
 
     /// Default headline when no judge headline applies.
-    ///
-    /// Prefers the bounded outcome preview so the badge summarizes what
-    /// happened; falls back to the title for empty outcomes (for example a
-    /// blank model reply where the prompt is the only context).
     private func defaultHeadline(for event: ProactiveEvent) -> String {
         let base = event.preview.isEmpty ? event.title : event.preview
         return ProactiveEvent.clampHeadline(base)
@@ -239,8 +179,5 @@ public actor OutcomeGate {
     }
 }
 
-// Dashboard interruption frames ride the shared proactive_message wire shape
-// in WSWire as WSProactiveMessageFrame, so worker turns and REST share one
-// encoding. The gate returns only the surface verdict plus the clamped
-// headline, leaving frame construction with session and goal links to the
-// caller.
+// Dashboard interruption frames ride the shared proactive_message wire shape in WSWire as
+// WSProactiveMessageFrame, so worker turns and REST share one encoding.

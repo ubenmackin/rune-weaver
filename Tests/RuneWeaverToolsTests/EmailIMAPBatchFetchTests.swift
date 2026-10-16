@@ -1,9 +1,4 @@
 // Rune Weaver Tools Tests — Batched IMAP message fetch coverage.
-//
-// Purpose: pin batchFetch encoding, script compile, payload parsing, and redaction mapping.
-// Scope: batch_fetch request JSON, Python script parse, parseBatchFetchPayload success and
-// failure envelopes, adapter mapping into indexed messages with credential redaction.
-// Architectural role: guards the one-shot batch fetch path without touching live IMAP.
 
 import Foundation
 @testable import RuneWeaverCore

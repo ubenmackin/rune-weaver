@@ -1,11 +1,4 @@
 // Rune Weaver Core — Memory query router offset windows plus shared helpers.
-//
-// Purpose: own offset day/week/month arithmetic plus shared token tables and
-// mailbox alias folding so the main router keeps dispatch plus primary windows.
-// Scope: offset builders, token tables, date-string matching, and alias
-// folding only; precedence plus primary windows stay in the main file.
-// Architectural role: focused extension backing `MemoryQueryRouter` keeping
-// the enum body within the type-length budget.
 
 import Foundation
 
@@ -223,10 +216,6 @@ extension MemoryQueryRouter {
     }
 
     /// Ordered word-boundary replacements from alias phrases to canonical mailboxes.
-    ///
-    /// Only multi-word mailbox phrases plus the unambiguous `archived` form
-    /// fold; single-word verbs such as `deleted` or `draft` stay untouched so
-    /// action queries never misfire into mailbox tokens.
     static let mailboxAliasReplacements: [(pattern: String, replacement: String)] = [
         ("\\bsent items\\b", "sent"),
         ("\\bsent mail\\b", "sent"),

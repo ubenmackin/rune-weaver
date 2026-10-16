@@ -1,18 +1,9 @@
 // Rune Weaver Tools — Mailbox listing and single-message move models.
-//
-// Covers the read-only folder-discovery surface (`email.listMailboxes` with the
-// server hierarchy delimiter) and the approval-gated single-message relocation
-// (`email.move` with an opt-in Seen flag). Wire parsing here stays fail-closed
-// so partial bridge payloads surface as decode failures instead of silent
-// no-op successes.
 
 import Foundation
 import RuneWeaverCore
 
 /// Selectable mailbox listing returned by the gateway `LIST` operation.
-///
-/// Bundles the folder names with the server hierarchy delimiter so presenters can render
-/// nested trees without re-querying the bridge for separator metadata.
 public struct EmailMailboxListing: Sendable, Equatable, Codable {
     /// Selectable mailbox names in server order.
     public let mailboxes: [String]
@@ -33,10 +24,6 @@ public struct EmailMailboxListing: Sendable, Equatable, Codable {
 }
 
 /// Mailbox STATUS snapshot returned by the gateway `STATUS` operation.
-///
-/// Bundles the next-assigned UID with the server validity token so fixed
-/// backfill windows anchor from `uidNext - 1` and validity mismatches reset
-/// the incremental watermark without duplicating documents.
 public struct EmailMailboxStatus: Sendable, Equatable, Codable {
     /// Mailbox the status was read from.
     public let mailbox: String
@@ -45,11 +32,8 @@ public struct EmailMailboxStatus: Sendable, Equatable, Codable {
     /// Server validity token for the mailbox.
     public let uidValidity: Int
 
-    /// Creates a mailbox status snapshot.
-    /// - Parameters:
-    ///   - mailbox: Mailbox the status was read from.
-    ///   - uidNext: Next UID the server will assign.
-    ///   - uidValidity: Server validity token.
+    /// Creates a mailbox status snapshot. mailbox: Mailbox the status was read
+    /// from.
     public init(mailbox: String, uidNext: Int, uidValidity: Int) {
         self.mailbox = mailbox
         self.uidNext = uidNext
@@ -157,10 +141,9 @@ public struct EmailMoveArgs: Sendable, Equatable, Decodable {
         case markAsReadSnake = "mark_as_read"
     }
 
-    /// Decodes arguments, accepting every documented id, source, and destination alias.
-    /// Blank aliases behave as omitted so a valid later alias still wins, mirroring
-    /// the message-id handling where empty strings are skipped.
-    /// - Parameter decoder: Decoder for the arguments document.
+    /// Decodes arguments, accepting every documented id, source, and destination alias. Blank
+    /// aliases behave as omitted so a valid later alias still wins, mirroring the message-id
+    /// handling where empty strings are skipped.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)

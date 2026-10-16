@@ -49,9 +49,6 @@ public struct BashDecision: Sendable, Equatable {
 }
 
 /// Minimal `bash.exec` command arguments for rule evaluation.
-/// Single decoder for the `command` field shared by the permission gate and
-/// the tool, so trimming and wire-shape handling stay anchored in one place
-/// instead of drifting between two parallel structs.
 public struct BashCommandArgs: Codable, Sendable, Equatable {
     /// Shell command string to evaluate.
     public let command: String
@@ -140,12 +137,6 @@ public enum BashSecurity: Sendable {
     }
 
     /// Determines whether a shell command matches a rule pattern.
-    ///
-    /// Patterns support:
-    /// - `*`: matches any command.
-    /// - Wildcards (`*`, `?`): matched using standard fnmatch.
-    /// - Command prefixes: e.g. `"echo"` matches `"echo"` and `"echo hello world"`.
-    /// - Exact match: e.g. `"git status"` matches `"git status"` and `"git status --short"`.
     public static func matches(command: String, pattern: String) -> Bool {
         let trimmedCmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPat = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -192,14 +183,6 @@ public enum BashSecurity: Sendable {
     }
 
     /// Evaluates a bash command against security configuration and chaining rules.
-    ///
-    /// Rules:
-    /// 1. If chaining is detected (`&&`, `||`, `;`, `|`, `&`, `\n`, `$()`, backticks):
-    ///    Any rule that would evaluate to `allow` is **immediately demoted to `ask`**.
-    ///    `deny` remains `deny`.
-    /// 2. Rules evaluate top-to-bottom and the last matching rule decides (last-match-wins).
-    ///    Put the catch-all first and specifics after.
-    /// 3. If no rule matches, falls back to `config.defaultAction`.
     public static func evaluate(command: String, config: BashConfig = BashConfig()) -> BashDecision {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {

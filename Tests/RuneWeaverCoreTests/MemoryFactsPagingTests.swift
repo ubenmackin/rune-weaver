@@ -1,14 +1,4 @@
 // Rune Weaver Core Tests — Engine-owned paged facts search without episodic rows.
-//
-// Purpose: pins the facts paging owner so empty queries read the recent window,
-// filtered queries narrow by token overlap across content plus source, and
-// offset paging walks the full match set with accurate tallies.
-// Scope: searchFactsPage windowing, normalization, clamping, and episodic
-// exclusion only; REST parsing, dashboard tabs, and vector ranking stay with
-// their own suites.
-// Architectural role: guards the single paged reader the REST facts route and
-// the dashboard delegate to, so future edits cannot widen scope into episodic
-// turns or drift normalization away from the route.
 
 import Foundation
 @testable import RuneWeaverCore

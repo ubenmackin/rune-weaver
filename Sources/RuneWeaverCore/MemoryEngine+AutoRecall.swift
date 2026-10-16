@@ -6,23 +6,12 @@ import Foundation
 
 extension MemoryEngine {
     /// Maximum memories injected as system context on one chat turn.
-    ///
-    /// Legacy default for the threshold-based `automaticRecallContext` and
-    /// `automaticRecallMessage` overloads below. The budgets-aware overloads
-    /// read `RecallBudgets.autoLimit` instead; see `RecallBudgets` for the
-    /// single source on the auto path.
     public static let automaticRecallLimit = 5
 
     /// Minimum calibrated score for an injected recall hit.
-    ///
-    /// Legacy default for the threshold-based overloads. The budgets-aware
-    /// overloads read `RecallBudgets.threshold` instead.
     public static let automaticRecallThreshold = 0.1
 
     /// Maximum characters for the injected recall block, header included.
-    ///
-    /// Legacy default for the threshold-based overloads. The budgets-aware
-    /// overloads read `RecallBudgets.maxChars` instead.
     public static let automaticRecallMaxChars = 2000
 
     /// Header labeling injected recall as system context.
@@ -30,26 +19,11 @@ extension MemoryEngine {
         "Relevant memories (use for context; do not mention unless relevant):"
 
     /// Whether a recall tier may carry attacker-controlled bytes.
-    ///
-    /// Indexed chunks hold file, mail, and message text, so they always
-    /// re-enter as labeled data. Episodic tool mirrors (`Used <tool>: ...`)
-    /// may carry web, browser, mail, and API bytes; plain user and assistant
-    /// turns stay trusted verbatim so everyday recall pays no label tax.
-    /// Semantic facts and profile preferences are owner-stored and stay
-    /// trusted verbatim.
     public static func isUntrustedRecallSource(_ source: MemorySource) -> Bool {
         source == .docIndex
     }
 
     /// Whether one recall hit must re-enter as labeled data.
-    ///
-    /// Structural, not advisory: tool mirrors are identified by the
-    /// engine-authored `Used ` prefix the mirror writer owns, never by tool
-    /// names, so a renamed tool keeps its provenance and user turns that
-    /// happen to mention a tool stay trusted unless they carry the prefix.
-    /// Index chunks always qualify through the single-sourced tier policy
-    /// above; all other tiers qualify only when they carry the tool-mirror
-    /// prefix.
     public static func shouldLabelRecallResult(_ result: MemoryResult) -> Bool {
         if isUntrustedRecallSource(result.source) {
             return true
@@ -62,15 +36,6 @@ extension MemoryEngine {
     }
 
     /// Whether a recall payload already carries the data-only block.
-    ///
-    /// Fresh tool mirrors wrap at storage, so recall must not wrap them again:
-    /// re-labeling would sanitize the inner delimiters into placeholder text
-    /// and double the token tax. The check requires the full block structure
-    /// in order (banner, then opening stem, then closing delimiter) so prose
-    /// merely quoting one marker never reads as already-labeled. Index chunks
-    /// always take the outer label regardless — sanitization neutralizes any
-    /// forged delimiters inside — so a chunk quoting the banner cannot dodge
-    /// labeling.
     public static func isAlreadyLabeledRecallPayload(_ compact: String) -> Bool {
         guard let bannerRange = compact.range(of: ContentTrustLabeler.banner),
               let beginRange = compact.range(of: ContentTrustLabeler.beginPrefix),
@@ -82,9 +47,6 @@ extension MemoryEngine {
     }
 
     /// Truncates one recall block to `maxChars`, preserving the `maxChars == 1` edge.
-    ///
-    /// Single source for the header-plus-lines block cap so the
-    /// threshold-based and budgets-aware overloads cannot drift.
     public static func truncateRecallBlock(_ block: String, maxChars: Int) -> String {
         guard block.count > maxChars else { return block }
         if maxChars == 1 {
@@ -94,18 +56,6 @@ extension MemoryEngine {
     }
 
     /// Builds source-labeled recall context, token-bounded with truncation.
-    ///
-    /// Tool-mirror and index lines wrap their compact payload in the
-    /// single-sourced data-only block so mirrored attacker bytes cannot
-    /// re-enter as trusted system instructions; the `[source]` prefix stays
-    /// outside the label as engine-authored routing. Indexed chunks always
-    /// label so quoted delimiters cannot dodge the boundary (sanitization
-    /// neutralizes inner copies); tool mirrors skip only when the full block
-    /// structure is already present. Trusted tiers pass through with the
-    /// historical shape, and a disabled labeler passes through
-    /// byte-identically for debugging. Doc lines always carry one trailing
-    /// citation suffix `[date|path|display_name]` built from hit metadata
-    /// outside the truncation budget so it is never truncated away.
     public static func automaticRecallContext(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
@@ -133,16 +83,8 @@ extension MemoryEngine {
         return Message(role: .system, content: text)
     }
 
-    /// Builds source-labeled recall context bounded by recall budgets.
-    ///
-    /// Budgets-aware entry for automatic recall: threshold, block cap,
-    /// per-hit truncation, and injected-hit cap all come from the clamped
-    /// budgets so file-load and live paths agree. Each hit keeps single-line
-    /// squash plus `…` at `perHitChars`, preserves one trailing citation
-    /// suffix `[date|path|display_name]` outside that truncation budget, and
-    /// the whole block keeps the header plus `maxChars` total truncation.
-    /// Labeling mirrors the threshold-based helper above.
-    /// Result of packing recall hits into a bounded context block.
+    /// Builds source-labeled recall context bounded by recall budgets. Result of packing recall
+    /// hits into a bounded context block.
     public struct PackedRecall: Sendable, Equatable {
         /// Candidate memory hits successfully included in the context block.
         public let injectedHits: [MemoryResult]
@@ -159,11 +101,8 @@ extension MemoryEngine {
     }
 
     /// Packs complete recall hits into an injected system context block using "Drop, Don't Chop".
-    ///
-    /// Candidates are evaluated in score-descending order up to `clamped.autoLimit`.
     /// Each candidate's formatted line is added if and only if the ENTIRE line fits within the
-    /// remaining `clamped.maxChars` budget. If a candidate cannot fit completely, it is dropped
-    /// (along with any lower-ranked items) rather than amputating text with trailing ellipses.
+    /// remaining `clamped.maxChars` budget.
     public static func packRecallHits(
         from results: [MemoryResult],
         budgets: RecallBudgets,
@@ -224,10 +163,6 @@ extension MemoryEngine {
     }
 
     /// Formats recall content, collapsing excessive blank runs and bounding to `perHitChars`.
-    ///
-    /// Preserves internal structure (newlines and tabs) for structured document chunks and
-    /// multi-line facts while collapsing excessive blank runs (`\n\n\n+` -> `\n\n`) and trimming
-    /// outer whitespace.
     public static func formattedHitContent(_ content: String, perHitChars: Int, isDocument: Bool = false) -> String {
         let text: String
         if isDocument {
@@ -247,12 +182,6 @@ extension MemoryEngine {
     }
 
     /// One recall line with per-hit truncation plus a preserved citation suffix.
-    ///
-    /// Content is squashed to one line and truncated to `perHitChars` with
-    /// `…`; the citation suffix is appended outside that budget so it is never
-    /// truncated away. Untrusted payloads label only the content bytes while
-    /// the `[source]` prefix and the trailing citation stay outside as
-    /// engine-authored routing.
     public static func recallLine(for result: MemoryResult, perHitChars: Int, labelingEnabled: Bool) -> String {
         let compact = formattedHitContent(result.content, perHitChars: perHitChars, isDocument: result.source == .docIndex)
         let citation = citationSuffix(for: result)
@@ -264,12 +193,9 @@ extension MemoryEngine {
                 }
                 return "[\(result.source.rawValue)] \(labeled)"
             }
-            // Check the emitted truncated payload, not the pre-truncation line:
-            // a stored tool-mirror block truncated to `perHitChars` can lose
-            // its closing delimiter, so a full-content check would skip
-            // re-labeling and emit an unclosed block. Re-wrapping the
-            // truncated bytes keeps the delimiters well-formed (labeling
-            // sanitizes inner copies).
+            // Check the emitted truncated payload, not the pre-truncation line: a stored
+            // tool-mirror block truncated to `perHitChars` can lose its closing delimiter, so a
+            // full-content check would skip re-labeling and emit an unclosed block.
             if !isAlreadyLabeledRecallPayload(compact) {
                 let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
                 if let citation {
@@ -308,12 +234,6 @@ extension MemoryEngine {
     }
 
     /// One trailing citation suffix from hit metadata, never truncated away.
-    ///
-    /// Exactly one bracketed suffix per hit: available `date`, `path`, and
-    /// `display_name` fields joined with `|` as `[date|path|display_name]`.
-    /// Doc-index lines always carry a suffix (falling back to the chunk's
-    /// `document_id` when the parent lookup missed); other tiers carry one
-    /// only when they already hold such metadata.
     public static func citationSuffix(for result: MemoryResult) -> String? {
         var parts: [String] = []
         if let date = result.metadata["date"]?.trimmingCharacters(in: .whitespacesAndNewlines), !date.isEmpty {
@@ -380,9 +300,6 @@ extension MemoryEngine {
     }
 
     /// Inserts injected recall at a stable slot keeping the prefix identical across rounds.
-    /// In multi-turn history, recall is inserted directly before the active user turn so
-    /// all prior (system, user, assistant) turns preserve their prefix-cache tokens.
-    /// If no user message is present, recall sits after leading system messages.
     public static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         guard let recall else { return history }
         guard !history.isEmpty else { return [recall] }
@@ -401,17 +318,6 @@ extension MemoryEngine {
     }
 
     /// Resolves automatic recall for one user turn, failure-isolated except cancellation.
-    ///
-    /// Temporal plus freshness-aware entry: the caller builds one `RecallPlan`
-    /// via `MemoryQueryRouter.plan` and passes `RecallBudgets` alongside it.
-    /// The plan window bounds `recall(query:embedding:limit:since:until:)`,
-    /// `skipDocIndex` drops document hits via post-filter so the skip flag
-    /// stays honest without extra index I/O, and a
-    /// forced `LiveSearchOverride.shouldUseLiveSearch` filters remaining
-    /// document hits so profile and semantic hits still inject.
-    /// Embedding is best-effort: cancellation propagates while other errors
-    /// fall back to nil for the keyword path. Empty queries, store errors,
-    /// and below-threshold hits yield nil without failing the turn.
     public func recallMessage(
         for query: String,
         sessionID: UUID,
@@ -431,19 +337,9 @@ extension MemoryEngine {
         return message
     }
 
-    /// Resolves automatic recall while reporting observability alongside the message.
-    ///
-    /// Retrieved-vs-injected: the intermediate `recall` hits are the retrieved
-    /// set (deduped, pre-threshold, up to `perTier * 4`); diagnostics describe
-    /// the injected set (threshold-filtered plus `autoLimit`-capped via
-    /// `injectedRecallHits`, matching what the returned message injects and
-    /// what `recallWithDiagnostics` reports, so both paths log the same
-    /// injected `hits/ids/scores`). Diagnostics carry hit identifiers plus
-    /// sources plus scores plus the injected char count plus the doc-index
-    /// skip flag, never content.
-    /// Silent-nil recalls (empty query, embedding fallback, store error, or
-    /// below-threshold hits) return nil with zero-hit diagnostics so callers
-    /// still emit one observability line per turn.
+    /// Resolves automatic recall while reporting observability alongside the message. Diagnostics
+    /// carry hit identifiers plus sources plus scores plus the injected char count plus the
+    /// doc-index skip flag, never content.
     public func recallMessageWithDiagnostics(
         for query: String,
         sessionID: UUID,
@@ -490,11 +386,8 @@ extension MemoryEngine {
             let windowed: [MemoryResult] = if effectivePlan.skipDocIndex {
                 results.filter { $0.source != .docIndex }
             } else if await LiveSearchOverride.shared.shouldUseLiveSearch(for: query) {
-                // In this branch the plan did not request a skip, so a live
-                // verdict here can only come from the forced override. Doc
-                // hits filter out explicitly so a zero threshold cannot
-                // re-admit them via `score >= threshold` while profile and
-                // semantic hits still inject.
+                // In this branch the plan did not request a skip, so a live verdict here can only
+                // come from the forced override.
                 results.filter { $0.source != .docIndex }
             } else {
                 results

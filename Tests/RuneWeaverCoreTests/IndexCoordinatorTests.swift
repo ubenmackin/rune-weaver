@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Index coordinator sequencing, cancellation, and watermark behavior.
-//
-// Drives the coordinator against deterministic closure-backed source stages so
-// the tests observe ordering, liveness frames, run lifecycle reporting, and the
-// persisted watermark without touching a mailbox, the Messages database, or a
-// real home directory. Cancel-and-resume proves that committed work survives an
-// interrupted pass and the next run picks up where it stopped.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -193,11 +187,6 @@ private actor IndexCoordinatorHolder {
 }
 
 /// Tracks simultaneous stage entries to prove files plus mail overlap.
-///
-/// Each overlapped body holds the window open with a short sleep while
-/// registered as active; a serial pass never exceeds one entrant while an
-/// overlapped pass observes two, without relying on wall-clock bounds that
-/// flake on loaded runners.
 private actor IndexOverlapProbe {
     /// Currently entered stages.
     private var active = 0
@@ -223,10 +212,6 @@ private actor IndexOverlapProbe {
 }
 
 /// Records per-run budget snapshots to prove peers stay isolated.
-///
-/// Both overlapped peers receive the same policy snapshot and enforce their
-/// own caps from it; sharing would halve or serialize the counts, so
-/// observing the full value in both bodies proves isolation.
 private actor IndexBudgetRecorder {
     /// Budgets observed in invocation order.
     private var budgets: [Int] = []
@@ -253,12 +238,8 @@ private func makeIndexTemporaryDirectory() -> URL {
     return url
 }
 
-/// Single `index_aggregates` row observed without touching the store cache.
-///
-/// Reads the persisted aggregate directly from `index.db` so the run-end
-/// proofs observe what the refresh wrote rather than what an in-memory
-/// snapshot projects. A missing table or row reads as nil, distinguishing a
-/// never-refreshed store from a freshly stamped one.
+/// Single `index_aggregates` row observed without touching the store cache. A missing table or row
+/// reads as nil, distinguishing a never-refreshed store from a freshly stamped one.
 private struct IndexAggregateProbeRow: Sendable, Equatable {
     /// Persisted document count.
     var documents: Int
@@ -272,14 +253,9 @@ private struct IndexAggregateProbeRow: Sendable, Equatable {
     var indexAsOf: Date?
 }
 
-/// Opens a raw probe handle with the production busy-timeout.
-///
-/// Mirrors `SQLiteHelpers.openHandle`'s `busy_timeout = 5000` so a probe racing
-/// a parallel aggregate refresh waits instead of failing with `SQLITE_BUSY`.
-/// Probes stay read-only and never change `journal_mode`, so only the timeout
-/// is shared.
-/// - Parameter dbPath: SQLite file path backing the store.
-/// - Returns: Open handle, or nil when the database cannot be opened.
+/// Opens a raw probe handle with the production busy-timeout. Mirrors `SQLiteHelpers.openHandle`'s
+/// `busy_timeout = 5000` so a probe racing a parallel aggregate refresh waits instead of failing
+/// with `SQLITE_BUSY`.
 private func openIndexProbe(dbPath: String) -> OpaquePointer? {
     #if canImport(SQLite3)
         var handle: OpaquePointer?
@@ -324,11 +300,8 @@ private func readIndexAggregateRow(dbPath: String) -> IndexAggregateProbeRow? {
     #endif
 }
 
-/// Reads one per-source aggregate row from `index.db`.
-/// - Parameters:
-///   - dbPath: SQLite file path backing the store.
-///   - source: Source string to look up (for example `files`).
-/// - Returns: Document and chunk counts, or nil when the refresh never wrote the source.
+/// Reads one per-source aggregate row from `index.db`. dbPath: SQLite file path
+/// backing the store.
 private func readIndexAggregateBySource(dbPath: String, source: String) -> (documents: Int, chunks: Int)? {
     #if canImport(SQLite3)
         guard let handle = openIndexProbe(dbPath: dbPath) else { return nil }
@@ -345,11 +318,8 @@ private func readIndexAggregateBySource(dbPath: String, source: String) -> (docu
     #endif
 }
 
-/// Reads one per-extract-status aggregate row from `index.db`.
-/// - Parameters:
-///   - dbPath: SQLite file path backing the store.
-///   - status: Status string to look up (for example `extracted`).
-/// - Returns: Document count, or nil when the refresh never wrote the status.
+/// Reads one per-extract-status aggregate row from `index.db`. dbPath: SQLite file
+/// path backing the store.
 private func readIndexAggregateByExtractStatus(dbPath: String, status: String) -> Int? {
     #if canImport(SQLite3)
         guard let handle = openIndexProbe(dbPath: dbPath) else { return nil }
@@ -498,10 +468,9 @@ struct IndexCoordinatorTests {
 
     @Test
     func `Cancel interrupts a slow batch within one batch`() async {
-        // Staged double with a slow cancellable batch per item, standing in for
-        // an IMAP fetch or an embedding batch: each batch awaits
-        // a cancellable sleep so task cancellation throws at the next checkpoint
-        // instead of running to stage end.
+        // Staged double with a slow cancellable batch per item, standing in for an IMAP fetch or an
+        // embedding batch: each batch awaits a cancellable sleep so task cancellation throws at the
+        // next checkpoint instead of running to stage end.
         let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in
             var report = IndexSourceRunReport(kind: .files)
             for _ in 0 ..< 5 {
@@ -529,10 +498,8 @@ struct IndexCoordinatorTests {
         #expect(summary.status == .cancelled)
         #expect(summary.documentsIndexed < 5)
         #expect(summary.indexAsOf == nil)
-        // No wall-clock bound: task cancellation already bounds the overrun to
-        // the batch in flight, and elapsed assertions false-fail on slow CI.
-        // Partial progress plus the cancelled status is the deterministic proof
-        // the run stopped early instead of draining every batch.
+        // No wall-clock bound: task cancellation already bounds the overrun to the batch in flight,
+        // and elapsed assertions false-fail on slow CI.
     }
 
     @Test
@@ -880,10 +847,8 @@ struct IndexCoordinatorTests {
 
     @Test
     func `Heartbeat arrives on stalled stage and totals stay monotonic`() async {
-        // Stalled double: one interim frame carrying a relative current item,
-        // then a stall waiting for the coordinator heartbeat cadence with no further
-        // stage frames. The coordinator heartbeat must still emit with the
-        // same cumulative totals, current item, and phase/stage tokens.
+        // Stalled double: one interim frame carrying a relative current item, then a stall waiting
+        // for the coordinator heartbeat cadence with no further stage frames.
         let progressRecorder = IndexProgressRecorder()
         let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, _ in
             await reporter(ToolProgress(
@@ -1043,11 +1008,9 @@ struct IndexCoordinatorTests {
 
     @Test
     func `Disabled source skips while enabled source runs without rebuilt stages`() async {
-        // Live selection re-derives every run from the saved policy snapshot:
-        // post-boot enable selects the next run with no rebuilt stages, while
-        // post-boot disable skips via selection plus the synthesized gap. The
-        // per-run policy guard inside each body stays as defense for direct
-        // indexer use; the coordinator filters before it.
+        // Live selection re-derives every run from the saved policy snapshot: post-boot enable
+        // selects the next run with no rebuilt stages, while post-boot disable skips via selection
+        // plus the synthesized gap.
         let recorder = IndexPolicyRecorder()
         let calls = IndexStageCallRecorder()
         let filesStage = IndexClosureStage(kind: .files, isEnabled: true) { policy, _, _ in
@@ -1247,11 +1210,9 @@ struct IndexCoordinatorTests {
 
     @Test
     func `Files plus mail plus messages overlap with messages finishing before mail and vision after peers`() async {
-        // CPU-bound files, network-bound mail, and light local messages wait
-        // on different resources, so the trio overlaps while vision stays
-        // sequential after the join; staggered sleeps make the light local
-        // messages peer finish before mail deterministically without
-        // wall-clock bounds that flake on loaded runners.
+        // CPU-bound files, network-bound mail, and light local messages wait on different
+        // resources, so the trio overlaps while vision stays sequential after the join; staggered
+        // sleeps make the light local messages peer finish before mail deterministically without.
         let probe = IndexOverlapProbe()
         let started = IndexStageCallRecorder()
         let finished = IndexStageCallRecorder()

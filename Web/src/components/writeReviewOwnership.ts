@@ -1,25 +1,13 @@
 // Rune Weaver Dashboard — Newest-write ownership and hydration-target scan for
 // rendered files.write cards.
-//
-// Purpose: one shared implementation of the scan that decides which rendered
-// write card owns a file's review and which cards belong in a surface's batched
-// review-status hydration request. The chat transcript and the run detail view
-// each adapt their own render source into one ordered action sequence and call
-// these helpers, so the ownership key, the batched target list, and the
-// shadowing predicate can never drift apart.
-// Scope: pure list scanning over already-rendered actions in display order; no
-// ledger reads and no React state.
-// Architectural role: consumed by ChatView and RunDetailModal, feeding the
-// `useFileReviewHydration` batch and the `ownsFileReview` gate on DiffCard.
 
 import type { ToolAction } from "../api";
 import { writeReviewKey, writeReviewTarget } from "./DiffCard";
 import type { WriteReviewHydrationTarget } from "../hooks/useFileReviewHydration";
 
-// Newest-write ownership across one surface's rendered action sequence: the
-// last files.write card per (path, envelope kind) owns the review, and every
-// earlier card for the same key shows a note instead of controls so it cannot
-// race the newer write's ledger row.
+// Newest-write ownership across one surface's rendered action sequence: the last files.write card
+// per (path, envelope kind) owns the review, and every earlier card for the same key shows a note
+// instead of controls so it cannot race the newer write's ledger row.
 export function collectWriteReviewOwners(
   actions: Iterable<ToolAction>,
 ): Map<string, ToolAction> {

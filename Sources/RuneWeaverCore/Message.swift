@@ -35,16 +35,12 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     public let errorKind: ToolErrorKind?
     /// Model reasoning or Chain-of-Thought text, if produced during this turn.
     public let reasoning: String?
-    /// Process exit status of a `tool`-role result, recorded directly by the tool.
-    /// Persisted as typed metadata so history reloads render the same exit badge as
-    /// the live turn without parsing untrusted content. Nil for non-process tools and
-    /// for rows written before the column existed.
+    /// Process exit status of a `tool`-role result, recorded directly by the tool. Persisted as
+    /// typed metadata so history reloads render the same exit badge as the live turn without parsing
+    /// untrusted content.
     public let exitCode: Int32?
-    /// Creation timestamp.
-    /// The conversation store quantizes this to whole milliseconds on append so the live
-    /// stamp and the reloaded history share one instant across persistence round-trips.
-    /// Mutation stays confined to this type so timestamp requantization can copy the whole
-    /// value instead of re-listing fields, keeping future fields on the stored copy.
+    /// Creation timestamp. The conversation store quantizes this to whole milliseconds on append so
+    /// the live stamp and the reloaded history share one instant across persistence round-trips.
     public private(set) var createdAt: Date
 
     /// Creates a new message.
@@ -71,11 +67,6 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     }
 
     /// Returns a copy stamped with the given creation instant.
-    /// Copies the whole value and moves only the timestamp so persistence can quantize
-    /// without reconstructing the message at each call site, where a new field would
-    /// otherwise be silently dropped from the stored copy.
-    /// - Parameter createdAt: Creation instant for the copy.
-    /// - Returns: An equal message except for the creation instant.
     public func withCreatedAt(_ createdAt: Date) -> Message {
         var copy = self
         copy.createdAt = createdAt

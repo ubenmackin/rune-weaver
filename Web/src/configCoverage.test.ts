@@ -1,12 +1,4 @@
 // Rune Weaver Dashboard — Guard test for the config to Settings coverage ledger.
-//
-// Purpose: pins that every RuneWeaverConfig leaf key resolves to one Settings
-// surface with exclusions carrying reasons, so mapping, interface, and example
-// drift fails loudly, including bash sandbox keys resolving to bash-pane.
-// Scope: ledger behavior only; engine decoding plus the TOML example stay with
-// their owners and are probed here as text for drift.
-// Architectural role: regression net forcing ledger, UI, and example updates to
-// ride the same change whenever a config key is added.
 
 import { describe, expect, it } from "vitest";
 import {

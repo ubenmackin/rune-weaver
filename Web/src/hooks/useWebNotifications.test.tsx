@@ -1,11 +1,4 @@
 // Rune Weaver Dashboard — Tests for the proactive goal-notification path.
-//
-// Pins the contract that a `proactive_message` goal nudge always raises the
-// goals attention badge while the native Web Notification is best-effort: it
-// fires exactly once when permission is granted and is skipped entirely when
-// permission is not, leaving the visual signal intact either way. Frames travel
-// through the real shared socket singleton so the test exercises the same
-// message path a mounted dashboard uses.
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";

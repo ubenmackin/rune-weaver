@@ -1,11 +1,4 @@
 // Rune Weaver Core — SQLite persistence for staged files and live-write review state.
-//
-// Purpose: DB-backed review ledger tracking staged edits and live writes that await review.
-// Scope: record/resolve/list, self-healing prune, and the serialized live-review
-// sections (claim/write, resolve/mutate) that keep the ledger and the filesystem
-// from diverging under concurrency; filesystem walking stays with callers.
-// Architectural role: `StagedFilesStore` actor plus `SQLiteSerialIO` source of truth beside scheduler/runs,
-// `episodes.db` `staged_files` and `live_reviews` tables.
 
 import Foundation
 #if canImport(SQLite3)
@@ -25,10 +18,8 @@ public struct StagedFileRecord: Sendable, Equatable {
     }
 }
 
-/// Durable review resolution for one file path.
-///
-/// Terminal states persist so a reloaded dashboard can still answer how a
-/// review ended; only `pending` — a row whose `resolution` column is NULL —
+/// Durable review resolution for one file path. Terminal states persist so a reloaded dashboard can
+/// still answer how a review ended; only `pending` — a row whose `resolution` column is NULL —
 /// belongs to the review inbox.
 public enum FileReviewState: String, Sendable, Codable, Equatable, CaseIterable {
     case pending
@@ -38,10 +29,9 @@ public enum FileReviewState: String, Sendable, Codable, Equatable, CaseIterable 
     case reverted
 }
 
-/// Record of a live write awaiting review, backed by its rollback copy.
-///
-/// A nil `resolution` means the review is still pending; `resolvedAt` is only
-/// populated once the row reaches a terminal state.
+/// Record of a live write awaiting review, backed by its rollback copy. A nil `resolution` means
+/// the review is still pending; `resolvedAt` is only populated once the row reaches a terminal
+/// state.
 public struct LiveReviewRecord: Sendable, Equatable {
     public let path: String
     public let backupPath: String?
@@ -77,12 +67,6 @@ public enum LiveReviewSnapshot: Sendable, Equatable {
 }
 
 /// Outcome of an atomic live-review start attempt.
-///
-/// A fresh series is claimed in one store-owned critical section: the ledger
-/// read, the rollback snapshot, the row write, and the caller's live write
-/// cannot interleave with a peer, so a second first-write joins instead of
-/// re-cloning over the copy the first one captured, and a decision that
-/// consumes the copy cannot interleave with a joined write.
 public enum LiveReviewStart: Sendable, Equatable {
     /// This call started the fresh series; the associated path is the recorded
     /// rollback copy, nil when the series owns no copy (a newly created file).
@@ -90,11 +74,8 @@ public enum LiveReviewStart: Sendable, Equatable {
     /// A peer's pending review already owned the path; the associated path is
     /// its recorded rollback copy, which this call left untouched.
     case joined(backupPath: String?)
-    /// The ledger could not be read or the fresh row could not be recorded;
-    /// the caller must fail the write closed. A copy captured before a failed
-    /// row write is removed only when a re-read proves no row owns it, so a
-    /// peer's rollback point is never deleted; a pending row written by a peer
-    /// is joined instead.
+    /// The ledger could not be read or the fresh row could not be recorded; the caller must fail
+    /// the write closed.
     case unreadable
     /// The snapshot refused or failed; `reason` is the caller-facing sentence.
     case refused(reason: String)
@@ -115,9 +96,6 @@ public actor StagedFilesStore {
     }
 
     /// Records or updates a staged file in SQLite.
-    ///
-    /// A fresh staged write clears any prior terminal resolution for the same
-    /// path so the file re-enters the inbox instead of reading as decided.
     public func recordStaged(path: String, stagingPath: String, updatedAt: Date = Date()) async {
         let record = StagedFileRecord(path: path, stagingPath: stagingPath, updatedAt: updatedAt)
         await SQLiteSerialIO.runUncancellable {
@@ -125,13 +103,8 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Marks a pending staged row as reviewed.
-    ///
-    /// The terminal state is durable: replayed actions and racing resolutions
-    /// only ever transition NULL -> terminal, never overwrite an answer.
-    /// - Returns: True when this call transitioned a pending row, false when
-    ///   nothing matched (or the store could not be written), so a live write
-    ///   can tell whether it actually superseded anything worth reporting.
+    /// Marks a pending staged row as reviewed. The terminal state is durable: replayed actions and
+    /// racing resolutions only ever transition NULL -> terminal, never overwrite an answer.
     @discardableResult
     public func resolveStaged(pathOrStagingPath: String, resolution: FileReviewState, at date: Date = Date()) async -> Bool {
         let trimmed = pathOrStagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -153,13 +126,6 @@ public actor StagedFilesStore {
     }
 
     /// Returns durable review states for the known subset of `paths`.
-    ///
-    /// Unlike the single-path probe this read throws when the ledger cannot be
-    /// opened or queried: a caller rendering review controls must be able to
-    /// tell "no row" from "no answer", because a store failure reported as
-    /// absent would turn a still-pending review into a settled no-action card.
-    /// - Returns: Only found rows keyed by path; unknown paths are omitted.
-    /// - Throws: When the ledger cannot be read.
     public func states(forPaths paths: [String]) async throws -> [String: FileReviewState] {
         let trimmed = paths.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !trimmed.isEmpty else { return [:] }
@@ -176,10 +142,6 @@ public actor StagedFilesStore {
     }
 
     /// Lists pending staged file records, optionally filtered by root directory prefix.
-    ///
-    /// Resolved rows are never listed, and the prune pass therefore only ever
-    /// sees pending rows, so a terminal decision survives even after its
-    /// staging file disappears.
     public func list(under rootPath: String? = nil) async -> [StagedFileRecord] {
         let rawRecords = await SQLiteSerialIO.runUncancellable {
             SQLiteStagedFilesStore.read(dbPath: self.dbPath)
@@ -230,10 +192,6 @@ public actor StagedFilesStore {
     // MARK: - Live review ledger
 
     /// Reads the live-write review row for an exact path.
-    ///
-    /// Unlike the best-effort staged lookups this read throws when the store
-    /// cannot be opened or queried, so callers fail closed instead of
-    /// mistaking a store failure for "no pending review".
     public func liveReview(forPath path: String) async throws -> LiveReviewRecord? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -242,35 +200,9 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Atomically starts a fresh live review and applies the live write, or
-    /// joins a peer's pending one.
-    ///
-    /// The ledger read, the rollback snapshot, the row write, and the caller's
-    /// live write run in one store-owned critical section, so two concurrent
-    /// first writes cannot both see "no pending review" and re-clone over the
-    /// same original, and a live decision that consumes the rollback copy
-    /// cannot interleave with a joined write. A pending row short-circuits the
-    /// snapshot entirely: later writes join without touching the copy. A
-    /// refused or failed snapshot leaves no pending row, so the ledger never
-    /// claims a copy that does not exist. A row write that fails removes the
-    /// copy it captured only when no pending row explains it — `episodes.db`
-    /// is shared by the CLI and the serve process while the serial lane only
-    /// orders one process, so a cross-process loser re-reads the ledger and
-    /// preserves (and joins) a winning pending row's copy instead of deleting
-    /// it.
-    /// - Parameters:
-    ///   - path: Canonical live path under review.
-    ///   - applyingWrite: Optional live write applied inside the critical
-    ///     section once the series is claimed or joined. A throw is reported
-    ///     as `.writeFailed` and leaves the review row and copy in place.
-    ///   - snapshot: Runs only when this call owns the fresh series. It
-    ///     receives whether the ledger already holds a settled (terminal) row
-    ///     for the path, so the caller can refuse to overwrite a copy that no
-    ///     settled series explains.
-    /// - Returns: `.started` with the recorded copy path (nil for a new-file
-    ///   series), `.joined` with a peer's copy path, `.unreadable` when the
-    ///   ledger could not answer or record, `.refused` when the snapshot
-    ///   itself failed, or `.writeFailed` when the live write failed.
+    /// Atomically starts a fresh live review and applies the live write, or joins a peer's pending
+    /// one. A refused or failed snapshot leaves no pending row, so the ledger never claims a copy
+    /// that does not exist.
     public func startLiveReview(
         path: String,
         applyingWrite write: (@Sendable () throws -> Void)? = nil,
@@ -287,10 +219,8 @@ public actor StagedFilesStore {
             } catch {
                 return .unreadable
             }
-            // A pending row owns its copy: joining must not re-clone the live
-            // file or touch the recorded rollback point. The live write still
-            // runs inside this critical section so a decision cannot consume
-            // the copy between the join and the bytes landing.
+            // A pending row owns its copy: joining must not re-clone the live file or touch the
+            // recorded rollback point.
             if let existing, existing.resolution == nil {
                 if let writeFailure = Self.applyLiveWrite(write) {
                     return writeFailure
@@ -320,12 +250,9 @@ public actor StagedFilesStore {
                 }
                 return .started(backupPath: backupPath)
             case .pendingExists:
-                // Zero changes means the conflict gate skipped the write
-                // because a pending row already owns the path — possibly one
-                // recorded by another process, since `episodes.db` is shared
-                // while the serial lane is per-process. Re-read it to join,
-                // and never delete the copy at the derived path: it may be
-                // the winner's only rollback point.
+                // Zero changes means the conflict gate skipped the write because a pending row
+                // already owns the path — possibly one recorded by another process, since
+                // `episodes.db` is shared while the serial lane is per-process.
                 let winner: LiveReviewRecord
                 do {
                     guard let found = try SQLiteStagedFilesStore.liveReview(forPath: trimmed, dbPath: dbPath),
@@ -343,11 +270,7 @@ public actor StagedFilesStore {
                 }
                 return .joined(backupPath: winner.backupPath)
             case .failed:
-                // The row write itself failed. A concurrent process may still
-                // have recorded a pending row between this call's read and
-                // now, so re-read before removing the captured copy; when the
-                // ledger cannot answer, the copy stays because deleting it
-                // could destroy a peer's rollback point.
+                // The row write itself failed.
                 do {
                     if let existingRow = try SQLiteStagedFilesStore.liveReview(forPath: trimmed, dbPath: dbPath),
                        existingRow.resolution == nil
@@ -371,9 +294,7 @@ public actor StagedFilesStore {
     }
 
     /// Applies the caller's live write inside a start critical section.
-    /// - Parameter write: Live write to run, or nil when the caller only
-    ///   claims the review.
-    /// - Returns: `.writeFailed` when the write throws, otherwise nil.
+    /// - Parameter write: Live write to run, or nil when the caller only claims the review.
     private static func applyLiveWrite(_ write: (@Sendable () throws -> Void)?) -> LiveReviewStart? {
         guard let write else { return nil }
         do {
@@ -384,25 +305,7 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Atomically resolves a pending live review around its filesystem
-    /// mutation.
-    ///
-    /// The ledger read, the caller's mutation, and the terminal row write all
-    /// run in one store-owned critical section on the serial lane, so a
-    /// concurrent `startLiveReview` can only observe the row before the
-    /// decision (pending, and may join) or after it (terminal, and starts a
-    /// fresh series) — never mid-resolution, when the rollback copy a join
-    /// would promise may already be consumed. The mutation's error propagates
-    /// unchanged and leaves the row pending, so a refusal (a missing copy, a
-    /// non-regular entry) can be retried once the cause is fixed.
-    /// - Parameters:
-    ///   - path: Canonical live path under review.
-    ///   - mutate: Filesystem mutation for the pending review, receiving the
-    ///     pending record and returning the terminal state to record. Only
-    ///     `accepted`, `reverted`, and `discarded` are recorded.
-    /// - Returns: The terminal state recorded, or nil when no pending row
-    ///   exists for the path.
-    /// - Throws: Whatever `mutate` throws, plus store failures reading the row.
+    /// Atomically resolves a pending live review around its filesystem mutation.
     public func resolveLiveReviewAtomically(
         path: String,
         _ mutate: @Sendable @escaping (LiveReviewRecord) throws -> FileReviewState
@@ -429,12 +332,8 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Starts a fresh pending live review.
-    ///
-    /// A pending row owns its decision, so a second start is a no-op; only a
-    /// terminal row is replaced by the new review.
-    /// - Returns: True when a new review was started, false when one was
-    ///   already pending or the store could not be written.
+    /// Starts a fresh pending live review. A pending row owns its decision, so a second start is a
+    /// no-op; only a terminal row is replaced by the new review.
     public func beginLiveReview(path: String, backupPath: String?, at date: Date = Date()) async -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -443,11 +342,9 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Resolves a pending live review to a terminal state.
-    ///
-    /// Only `accepted`, `reverted`, and `discarded` are valid live
-    /// resolutions; pending -> terminal happens once and a replayed call is a no-op.
-    /// - Returns: True when this call performed the transition.
+    /// Resolves a pending live review to a terminal state. Only `accepted`, `reverted`, and
+    /// `discarded` are valid live resolutions; pending -> terminal happens once and a replayed call
+    /// is a no-op.
     public func resolveLiveReview(path: String, resolution: FileReviewState, at date: Date = Date()) async -> Bool {
         guard resolution == .accepted || resolution == .reverted || resolution == .discarded else { return false }
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -466,12 +363,9 @@ public actor StagedFilesStore {
         }
     }
 
-    /// Returns durable live review states for the known subset of `paths`.
-    ///
-    /// Throwing for the same reason as `states(forPaths:)`: a store failure
-    /// must reach the caller as a failure, never as absent rows.
-    /// - Returns: Only found rows keyed by path; unknown paths are omitted.
-    /// - Throws: When the ledger cannot be read.
+    /// Returns durable live review states for the known subset of `paths`. Throwing for the same
+    /// reason as `states(forPaths:)`: a store failure must reach the caller as a failure, never as
+    /// absent rows.
     public func liveStates(forPaths paths: [String]) async throws -> [String: FileReviewState] {
         let trimmed = paths.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !trimmed.isEmpty else { return [:] }
@@ -488,10 +382,6 @@ private struct StagedFilesStoreDBError: Error {
 }
 
 /// The two review ledgers sharing the `resolution` read shape.
-///
-/// The staged and live tables differ only in name for the batched state read,
-/// so one parameterized probe serves both and a fix to one read path cannot
-/// miss the other.
 private enum ReviewLedgerTable: String {
     /// Staged-edit ledger written by `recordStaged`/`resolveStaged`.
     case staged = "staged_files"
@@ -534,13 +424,7 @@ private enum SQLiteStagedFilesStore {
         #endif
     }
 
-    /// Adds the review-resolution columns to databases created before the
-    /// review ledger existed.
-    ///
-    /// The probe keeps later opens a schema no-op instead of erroring on
-    /// duplicate `ALTER` statements; only the duplicate-column race is
-    /// tolerated, every other failure surfaces so a broken migration cannot
-    /// masquerade as migrated.
+    /// Adds the review-resolution columns to databases created before the review ledger existed.
     private static func migrateResolutionColumns(handle: OpaquePointer?) throws {
         let existing = columnNames(handle: handle, pragma: "PRAGMA table_info(staged_files);")
         let pendingMigrations: [(column: String, sql: String)] = [
@@ -699,10 +583,8 @@ private enum SQLiteStagedFilesStore {
         #endif
     }
 
-    /// Best-effort single-row read from one review ledger: nil when no row
-    /// exists, `.pending` when the row is unresolved, otherwise the stored
-    /// terminal state. A store failure is logged and folds to nil, mirroring
-    /// the callers that treat unknown and unreadable alike.
+    /// Best-effort single-row read from one review ledger: nil when no row exists, `.pending` when
+    /// the row is unresolved, otherwise the stored terminal state.
     static func state(forPath path: String, table: ReviewLedgerTable, dbPath: String) -> FileReviewState? {
         #if canImport(SQLite3)
             let handle: OpaquePointer?
@@ -725,13 +607,8 @@ private enum SQLiteStagedFilesStore {
         #endif
     }
 
-    /// Throwing batched read from one review ledger, shared by the staged and
-    /// live tables so a fix to one read path cannot miss the other.
-    ///
-    /// Any store failure — open or per-row probe — propagates instead of
-    /// folding into an empty map: a caller answering "unknown" for every
-    /// requested path would present a transient store failure as a definitive
-    /// absent-row answer.
+    /// Throwing batched read from one review ledger, shared by the staged and live tables so a fix
+    /// to one read path cannot miss the other.
     static func states(forPaths paths: [String], table: ReviewLedgerTable, dbPath: String) throws -> [String: FileReviewState] {
         #if canImport(SQLite3)
             let handle = try open(dbPath: dbPath)
@@ -752,11 +629,8 @@ private enum SQLiteStagedFilesStore {
         #endif
     }
 
-    /// Single-path probe shared by both ledger reads: nil means no row,
-    /// `.pending` means the row exists with a NULL resolution. Throws when
-    /// the probe itself fails, so a batched caller can fail closed instead of
-    /// mistaking a broken read for absent rows; the best-effort single-path
-    /// read folds that throw back to nil.
+    /// Single-path probe shared by both ledger reads: nil means no row, `.pending` means the row
+    /// exists with a NULL resolution.
     private static func state(forPath path: String, table: ReviewLedgerTable, handle: OpaquePointer?) throws -> FileReviewState? {
         let sql = "SELECT resolution FROM \(table.rawValue) WHERE path = ? LIMIT 1;"
         var statement: OpaquePointer?

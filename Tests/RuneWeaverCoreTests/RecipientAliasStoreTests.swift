@@ -1,20 +1,4 @@
 // Rune Weaver Core Tests — Durable recipient-alias store behavior.
-//
-// Purpose: pin the learned-alias contract the Messages send flow writes and
-// recipient resolution reads: a recorded name-to-handle pair round-trips with
-// the alias source, repeated confirmations increment the use count without
-// erasing a stored service or display name (COALESCE), names are keyed by the
-// shared normalizer, blank input is a true no-op, unreadable paths degrade to
-// an empty array instead of throwing, and concurrent records and reads stay
-// safe over the shared serial SQLite lane.
-//
-// Scope: the store against isolated temporary databases only. Tests never
-// touch the real `~/.runeweaver/memory` store, and the resolver integration
-// with the concrete store lives in the resolver suite.
-//
-// Architectural role: guards the production `MessageAliasStoring`
-// implementation so alias persistence and the non-throwing degradation
-// contract cannot drift silently.
 
 import Foundation
 @testable import RuneWeaverCore

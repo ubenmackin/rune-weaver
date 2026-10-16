@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Client-side chat preferences and settings store.
-//
-// Manages user-configurable chat options such as default thinking expansion,
-// default file write card expansion, message submission shortcut, and streaming
-// auto-scroll. Backed by localStorage with event-driven synchronization across
-// components and tabs.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -15,15 +10,9 @@ export interface ChatSettings {
    * Whether thought/reasoning blocks should be expanded or collapsed by default.
    */
   thinkingDefault: ThinkingDefaultState;
-  /**
-   * Whether in-chat files.write diff cards should show their diff body by
-   * default; collapsed keeps write cards to their header until clicked.
-   */
+  /** Whether in-chat files.write diff cards show diff bodies by default. */
   fileWriteDefault: FileWriteDefaultState;
-  /**
-   * Whether pressing Enter sends the message (Shift+Enter for newline)
-   * vs Cmd/Ctrl+Enter to send (Enter for newline).
-   */
+  /** Whether pressing Enter sends the message (Shift+Enter for newline). */
   sendOnEnter: boolean;
   /**
    * Whether to auto-scroll the message stream as new tokens and tool actions arrive.

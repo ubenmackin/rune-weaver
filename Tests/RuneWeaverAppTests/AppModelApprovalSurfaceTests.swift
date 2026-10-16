@@ -1,13 +1,4 @@
 // Rune Weaver App Tests — Menu bar approval surface is signal-only.
-//
-// Purpose: Pins that the macOS menu bar never decides an approval: the only
-// native affordance is the attention row routing to the dashboard inbox, and
-// an approval notification carries information only. Scope: the AppModel
-// routing surface plus the notification payload builder, with no embedded
-// service, no boot, and no live notification center. Architectural role:
-// guards the decision contract where the served decide route is the only
-// decision path, so a reintroduced native decide path fails this build instead
-// of reaching the owner.
 
 import Foundation
 @testable import RuneWeaverApp
@@ -40,11 +31,9 @@ struct AppModelApprovalSurfaceTests {
         #expect(inbox?.absoluteString == "http://127.0.0.1:8080/#approvals")
     }
 
-    /// Absence of the native decision surface is pinned by call-site compile:
-    /// the test target builds the app module, so a dangled reference to a
-    /// removed decision entry point fails this build. This case exercises what
-    /// replaced it — the badge-bearing pending list plus the routing row — so
-    /// the replacement stays reachable and the count still refreshes.
+    /// Absence of the native decision surface is pinned by call-site compile: the test target
+    /// builds the app module, so a dangled reference to a removed decision entry point fails this
+    /// build.
     @Test
     func `pending request routes to the inbox instead of deciding`() async {
         let model = AppModel()

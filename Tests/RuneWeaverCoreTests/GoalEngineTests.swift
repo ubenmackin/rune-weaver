@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Goal pursuit engine, decomposition, and advancement.
-//
-// Exercises the goal engine against isolated temporary databases with a stub
-// language provider: opt-in creation gates, active-goal caps, single-call
-// decomposition with fenced and prefixed JSON recovery, resilient fallback
-// plans, per-run prompt composition, due-date bumps, and lifecycle
-// transitions. Configuration coverage pins the additive [goals] section
-// defaults, decoding, round-trips, and bounds. Tests never touch the real
-// `~/.runeweaver/memory` store.
 
 import Foundation
 import os

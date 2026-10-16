@@ -1,9 +1,4 @@
 // Rune Weaver Server — Run history and fan-out cancellation DTOs.
-//
-// Extracted from ServerDTOs.swift to keep file length within lint bounds.
-// Carries the run-log list response backing the dashboard history view plus the
-// fan-out cancellation response, so the run wire contracts stay beside the run
-// routes and their store instead of growing the shared DTO file.
 
 import Foundation
 import Vapor
@@ -23,12 +18,8 @@ public struct RunLogsResponse: Content, Equatable {
     }
 }
 
-/// Response payload from `POST /runs/:id/cancel`.
-///
-/// Only a live fan-out swarm or worker accepts a stop; every refusal answers a
-/// conflict, so a returned body always means a stop was applied. The scope
-/// names what was stopped, and the worker count is present only for a
-/// whole-swarm stop.
+/// Response payload from `POST /runs/:id/cancel`. Only a live fan-out swarm or worker accepts a
+/// stop; every refusal answers a conflict, so a returned body always means a stop was applied.
 public struct RunCancelResponse: Content, Equatable {
     /// Whether a live run or worker accepted the stop (always `true` when a
     /// body is returned).
@@ -42,10 +33,6 @@ public struct RunCancelResponse: Content, Equatable {
     public let workerCount: Int?
 
     /// Creates a cancel response.
-    /// - Parameters:
-    ///   - cancelled: Whether a stop was applied.
-    ///   - scope: Stopped scope (`"run"` or `"worker"`).
-    ///   - workerCount: Workers stopped by a run-scope cancel, or nil.
     public init(cancelled: Bool, scope: String, workerCount: Int? = nil) {
         self.cancelled = cancelled
         self.scope = scope

@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Shared toast for transient notices.
-// Renders auto-dismissing notices in a top-right stack so action feedback
-// never blocks the form, with role=status for confirmations and role=alert
-// for errors so assistive technology announces failures promptly. Supports
-// success (green) and error (red) variants so both confirmation and failure
-// messages share the same surface instead of persistent inline banners.
 
 import { useEffect, useRef } from "react";
 
@@ -64,12 +59,9 @@ export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
 }
 
 export default function Toast({ message, onDismiss, durationMs = TOAST_DISMISS_MS, variant = "success" }: ToastProps) {
-  // Auto-dismiss on a timer so the notice never needs a manual clear to leave.
-  // Each stacked toast owns its timer through the stack list, so notices
-  // dismiss independently instead of sharing one expiration.
-  // Finite-elapsed guard: normalize arbitrary durations to a positive
-  // integer, falling back to the shared delay so NaN/Infinity/non-positive never
-  // renders an immediate or sticky dismissal.
+  // Auto-dismiss on a timer so the notice never needs a manual clear to leave. Each stacked toast
+  // owns its timer through the stack list, so notices dismiss independently instead of sharing one
+  // expiration.
   const safeDurationMs =
     typeof durationMs === "number" &&
     Number.isFinite(durationMs) &&

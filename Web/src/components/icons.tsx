@@ -1,5 +1,4 @@
 // Rune Weaver Dashboard — Shared icon set for dashboard navigation, run badges, and tool activity.
-// Provides lightweight Lucide-compatible SVGs with zero external dependencies so nav, scheduler badges, and chat tool rows share one stroke style.
 
 import React from "react";
 
@@ -179,10 +178,7 @@ export function SchedulesIcon({ size = 18, className = "", ...props }: IconProps
   );
 }
 
-// Work group glyph: a goal flag planted on a target. The flag carries the
-// long-horizon pursuit behind the Work menu while the concentric rings echo the
-// target used by the goal surfaces, so the dropdown trigger reads as intent at
-// a glance without a bespoke color token.
+// Work group glyph: a goal flag planted on a target.
 export function WorkIcon({ size = 18, className = "", ...props }: IconProps) {
   return (
     <svg

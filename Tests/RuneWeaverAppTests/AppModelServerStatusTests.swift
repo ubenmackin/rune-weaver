@@ -1,23 +1,4 @@
 // Rune Weaver App Tests — AppModel server status shape for the menu bar.
-//
-// Guards the narrow-menu presentation contract: the Server section keeps a
-// fixed short title plus a one-line failure summary so a long bind error or
-// hostname never widens the menu, while the full diagnostic stays in the log.
-// Branching stays on the single failure flag so a title-text check can never
-// stand in for health, and every transition flows through the three normalizing
-// helpers without booting the embedded service.
-//
-// Scope: direct helper calls on a freshly constructed model only. No Vapor
-// boot, no polling, and no home-directory state, so the suite stays hermetic.
-//
-// Shared Contract:
-// - AppModel.serverStatus holds the single-line menu title only, max 40 characters, never the full errorDescription.
-// - AppModel.serverStatusDetail holds the one-line failure summary only, max 140 characters, nil when the service is healthy.
-// - AppModel.isServerFailed is the sole selector for the Failed UI in RuneWeaverApp.swift. Views never inspect serverStatus text with hasPrefix.
-// - Owner: Sources/RuneWeaverApp/AppModel.swift func setServerStarting() plus
-//   func setServerRunning(host: String, port: Int, authConfigured: Bool) plus
-//   func setServerFailed(detail: String) normalizes every writer. All other
-//   call sites delegate to these three helpers.
 
 import Foundation
 @testable import RuneWeaverApp

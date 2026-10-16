@@ -14,9 +14,6 @@ public actor Orchestrator {
     /// Developer instructions prepended to every turn.
     private let storedSystemPrompt: String?
     /// Maximum tool-call rounds per response, plus one final synthesis turn.
-    /// Readable module-wide for progress reporting but writable only through
-    /// ``updateMaxToolIterations(_:)`` so no caller can park an out-of-range
-    /// budget and bypass the shared clamp.
     private(set) var maxToolIterations: Int
     /// Optional resolver mapping an assistant turn to tool calls.
     private let toolResolver: OrchestratorToolResolver?
@@ -25,16 +22,10 @@ public actor Orchestrator {
     /// Optional embeddings producer for vector-ranked automatic recall.
     private let embedder: (any EmbeddingsBackend)?
     /// Context window compaction threshold percentage (10-100).
-    /// Mutable so persisted settings changes apply to the live engine without
-    /// requiring a restart; writes go through the updater below to keep the
-    /// validated range invariant.
     private var compactionPercent: Int
     /// Queue receiving narrated gated calls, when configured.
     private let approvalInbox: ApprovalQueue?
     /// Parked gated narrations indexed by approval request identifier.
-    /// Mutated only through `takeParkedNarratedApproval(id:)` and
-    /// `storeParkedNarratedApproval(_:id:)` so resume decisions cannot drop or
-    /// duplicate a sibling approval filed in the same batch.
     private(set) var parkedNarratedApprovals: [UUID: ParkedNarratedApproval] = [:]
     /// Executed gated actions buffered per parked batch while siblings stay pending.
     /// Mutated only through the buffer/take helpers so a batch never half-clears.
@@ -48,18 +39,12 @@ public actor Orchestrator {
     /// Bounds token totals so deleted sessions never leak memory.
     private static let maxTrackedSessions = 500
     /// Mid-turn steering queue for injecting user guidance into running loops.
-    /// Held nonisolated so the service layer can verify identity synchronously
-    /// at context construction; safe because the reference never mutates after
-    /// init and the queue actor guards its own mutable state.
     private nonisolated let steeringQueue: SteeringQueue?
     /// Defense policy carrying the `[security] untrusted_labeling` off-switch.
     /// Stored so every tool-result message conversion honors the configured
     /// labeling posture instead of a hardcoded default.
     private let securityConfig: SecurityConfig
     /// Graduated-trust gate consulted for structured admission.
-    /// Held alongside the bus so the turn loop can partition requiresApproval calls
-    /// before execution; callers pass the same instance the bus consults so covering
-    /// grants agree. Nil keeps the legacy execute path with zero parking.
     private let permissionGate: PermissionGate?
     /// Recall budgets bounding automatic recall fan-out.
     /// Stored so every turn injects with the same clamped limits the config
@@ -180,11 +165,6 @@ public actor Orchestrator {
     }
 
     /// Shared mid-turn steering queue draining user guidance into running loops.
-    /// Public so the service layer can verify it holds the identical instance
-    /// it enqueues through; a mismatched pair enqueues honestly yet never
-    /// dequeues, silently dropping guidance behind an optimistic bubble.
-    /// Nonisolated so context construction can precondition identity without
-    /// hopping; the immutable reference stays safe to share synchronously.
     public nonisolated var sharedSteeringQueue: SteeringQueue? {
         steeringQueue
     }
@@ -258,12 +238,9 @@ public actor Orchestrator {
             throw OrchestratorError.emptyInput
         }
         let sessionID = input.sessionID
-        // Goal-tagged turns overwrite the session link so an explicit tag wins
-        // over a stale link and runs stay joinable; a nil tag never clears, so
-        // plain chat turns keep a link set by an earlier tagged turn.
-        // The session record also keeps the turn's honest origin — title,
-        // source, and parent link — so history can classify worker sessions
-        // and nest them under the session that spawned them.
+        // Goal-tagged turns overwrite the session link so an explicit tag wins over a stale link
+        // and runs stay joinable; a nil tag never clears, so plain chat turns keep a link set by an
+        // earlier tagged turn.
         _ = await conversations.ensureSession(
             id: sessionID,
             title: input.title,
@@ -366,21 +343,6 @@ public actor Orchestrator {
     }
 
     /// Resolves a turn that answers before the model loop, if one applies.
-    ///
-    /// An explicit remember request wins over a cached answer, and a repeated
-    /// pure question hit in the semantic answer cache comes second; both bypass
-    /// the loop because their text is already known. Excluded turns — tool
-    /// turns, approvals, sends, parked turns, background sources, and voice
-    /// prompts — fall through because the cache owner files nothing they could
-    /// match, so a nil result here is the fail-closed default that continues
-    /// into the full loop.
-    ///
-    /// The shared epilogue exists because both paths complete a turn the same
-    /// way: one zero-hit diagnostics line so every turn carries exactly one
-    /// entry (with the freshness-plus-store skip flag a full recall turn logs),
-    /// a cancellation checkpoint, the episodic flush, and the task-grant clear.
-    /// Splitting the two paths would duplicate that sequence twice and let it
-    /// drift between remember turns and cached turns.
     private func earlyTurnResponse(
         text: String,
         source: String,
@@ -447,10 +409,8 @@ public actor Orchestrator {
                 return TurnRecallResolution(recall: nil, starterPack: nil, summary: RecallSummary(from: zero))
             }
         } catch let recallError as CancellationError {
-            // Cancelled recall still emits one zero-hit line before the
-            // outer handler restores history and propagates. The skip flag
-            // mirrors the recall path (freshness plus store presence) since
-            // the shared wiring threw before returning its plan.
+            // Cancelled recall still emits one zero-hit line before the outer handler restores
+            // history and propagates.
             let fallbackSkip = earlyRecallSkip(for: text)
             RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: fallbackSkip)))")
             didEmitRecallDiagnostics = true
@@ -465,10 +425,8 @@ public actor Orchestrator {
         sessionID: UUID,
         preTurnSnapshot: ConversationSession?
     ) async {
-        // Guarantee one diagnostics line even when cancellation lands
-        // before the recall slot; turns that already emitted keep exactly
-        // one and do not double-log here. The fallback derives the same
-        // freshness-plus-store skip flag so pre-recall cancels agree.
+        // Guarantee one diagnostics line even when cancellation lands before the recall slot; turns
+        // that already emitted keep exactly one and do not double-log here.
         if !didEmitRecallDiagnostics {
             RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
         }
@@ -547,12 +505,6 @@ public actor Orchestrator {
 
 extension Orchestrator {
     /// Early-turn doc-index skip flag for zero-hit diagnostics.
-    ///
-    /// Mirrors `recallMessageWithDiagnostics` (`plan.skipDocIndex ||
-    /// store == nil`) so remember-bypass, nil-engine, and pre-recall
-    /// cancellation turns log the same honest flag as a full recall turn
-    /// for the same query. Freshness comes from the router plan; a missing
-    /// engine reads as a missing store.
     private func earlyRecallSkip(for query: String) -> Bool {
         let freshnessSkip = MemoryQueryRouter.plan(for: query, currentDate: Date(), budgets: recallBudgets).skipDocIndex
         let store = memoryEngine?.docIndexStore
@@ -560,21 +512,11 @@ extension Orchestrator {
     }
 
     /// Whether a turn source runs detached from interactive chat.
-    /// Scheduler, goal, and fan-out turns share the background system prompt
-    /// and the parked-resume background branch so future detached sources
-    /// extend in one place instead of scattering string matches across the
-    /// loop. The semantic answer cache delegates here too, so the background
-    /// exclusion cannot drift between the prompt owner and the cache owner.
-    /// - Parameter source: Turn or session source label, nil when untagged.
-    /// - Returns: True for known background sources.
     public static func isBackgroundSource(_ source: String?) -> Bool {
         source == "scheduler" || source == "goal" || source == "fanout" || source == "fanout_worker"
     }
 
     /// Returns a copy of a turn response carrying the content-free recall summary.
-    ///
-    /// Existing summaries win so a parked resume keeps its original footing
-    /// instead of adopting a later turn's counts.
     static func responseWithRecall(_ response: OrchestratorResponse, summary: RecallSummary?) -> OrchestratorResponse {
         guard let summary else { return response }
         guard response.recallDiagnostics == nil else { return response }
@@ -601,32 +543,15 @@ extension Orchestrator {
     }
 
     /// Prepares the tool-loop request and degraded-tool warnings for one turn.
-    ///
-    /// Resolves the tool snapshot filtered by caller permissions, the effective
-    /// system prompt, turn recall and starter pack, history compaction, and
-    /// degraded tool warnings before dispatching into the tool loop.
-    /// - Parameters:
-    ///   - input: User input driving this turn.
-    ///   - text: Trimmed prompt text.
-    ///   - didEmitRecallDiagnostics: Whether recall diagnostics were emitted.
-    ///   - onEvent: Stream event callback.
-    /// - Returns: Prepared turn loop request and degraded-tool warnings.
     private func prepareTurnLoopRequest(
         input: UserInput,
         text: String,
         didEmitRecallDiagnostics: inout Bool,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     ) async throws -> (request: TurnLoopRequest, warnings: [String]) {
-        // Single registry snapshot shared by the prompt and the wire so both omit the
-        // same disabled tools; sorted order mirrors the prompt so leading bytes stay
-        // identical for server prefix caching. Both branches recompose from this snapshot
-        // (vision-aware) so a mid-run tool toggle reaches the next turn's prompt as well
-        // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
-        // the next user message. An explicit operator override bypasses composition verbatim.
-        // A turn carrying an explicit allowedTools subset filters the snapshot here,
-        // before the loop, so the prompt and the wire advertise only the callable subset
-        // and a worker can never narrate or call outside it; nil keeps the full registry
-        // so plain turns pay nothing.
+        // Single registry snapshot shared by the prompt and the wire so both omit the same disabled
+        // tools; sorted order mirrors the prompt so leading bytes stay identical for server prefix
+        // caching.
         let availableTools = await toolBus.availableTools()
         let sortedTools = VisionSchemaFilter.sortedByName(availableTools, name: { $0.name })
         let tools = UserInput.filteredTools(
@@ -634,10 +559,8 @@ extension Orchestrator {
             allowed: input.allowedTools
         )
         let effectiveSystemPrompt = resolveEffectiveSystemPrompt(input: input, tools: tools)
-        // Temporal plus freshness-aware auto-recall through the shared
-        // turn wiring: one plan plus recall plus starter so service and
-        // CLI turns cannot drift. No date math here; the router owns every
-        // calendar derivation inside the shared helper.
+        // Temporal plus freshness-aware auto-recall through the shared turn wiring: one plan plus
+        // recall plus starter so service and CLI turns cannot drift.
         let resolvedRecall = try await resolveTurnRecall(
             text: text,
             sessionID: input.sessionID,
@@ -692,9 +615,6 @@ extension Orchestrator {
     }
 
     /// Resolves the effective system prompt for one turn.
-    /// Custom overrides bypass composition verbatim so live turns and parked
-    /// resumes honor the same prompt instead of diverging; background turns
-    /// recompose on the background branch with the vision-aware snapshot.
     private func resolveEffectiveSystemPrompt(input: UserInput, tools: [any Tool]) -> String? {
         if let custom = input.systemPrompt, !custom.isEmpty {
             // Custom override bypasses composition and its cache verbatim.
@@ -775,16 +695,6 @@ extension Orchestrator {
     }
 
     /// Returns a cached answer response for a repeated pure question, if one hits.
-    ///
-    /// The single delegation point into the semantic answer cache: keying,
-    /// similarity, threshold, expiry, and every exclusion rule live in the
-    /// owner, so this helper only decides whether the turn may consult it and
-    /// shapes the response. An excluded turn — a tool turn, approval, send,
-    /// parked turn, background source, or voice prompt — falls through to the
-    /// full loop because the owner holds nothing it could match, and a miss
-    /// falls through the same way. Parked state resolves from the live parked
-    /// session here so a session awaiting an inbox decision never serves a
-    /// replay instead of resuming.
     private func answerCacheEarlyResponse(
         text: String,
         source: String,
@@ -794,13 +704,9 @@ extension Orchestrator {
     ) async -> OrchestratorResponse? {
         let isParked = isSessionParked(sessionID)
         guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: 0, isParked: isParked) else { return nil }
-        // A cached pure answer must never preempt recall or live freshness:
-        // the lookup runs before the recall slot, so a freshness query would
-        // otherwise hit a stale pure answer and skip the live tools the
-        // router plan would have required. The plan owns the skip verdict
-        // and delegates to the shared freshness guidance in one place, and
-        // the forced-live override joins it so an operator-forced live path
-        // bypasses the cache exactly like the recall it governs.
+        // A cached pure answer must never preempt recall or live freshness: the lookup runs before
+        // the recall slot, so a freshness query would otherwise hit a stale pure answer and skip the
+        // live tools the router plan would have required.
         guard !MemoryQueryRouter.plan(for: text, currentDate: Date()).skipDocIndex else {
             return nil
         }
@@ -829,13 +735,6 @@ extension Orchestrator {
     }
 
     /// Files one pure Q&A answer so the next identical question hits the cache.
-    ///
-    /// The owner refuses the turn through the same exclusion rule the lookup
-    /// consults — tool turns, approvals, sends, parked turns, background
-    /// sources, and voice prompts never store, and therefore never hit — so
-    /// this helper forwards the turn's shape and nothing else. Blank text is
-    /// skipped here because the turn already refused to persist it, keeping
-    /// history and the cache in agreement.
     private func storeAnswerCacheIfPure(query: String, source: String, finalText: String, executedToolCalls: Int, isParked: Bool = false) async {
         guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: executedToolCalls, isParked: isParked) else { return }
         guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return }
@@ -879,9 +778,6 @@ extension Orchestrator {
     }
 
     /// Sums pre-park and synthesis usage into one turn total for a resumed user message.
-    /// Stored session totals already hold the pre-park share from park time, so this shapes
-    /// only the terminal turn total: nil when neither round reported usage, otherwise the
-    /// sum with absent sides treated as zero. Negatives drop like the dashboard.
     static func combinedTurnTokens(_ prior: Int?, _ synthesis: Int?) -> Int? {
         let validPrior: Int? = if let prior, prior >= 0 {
             prior

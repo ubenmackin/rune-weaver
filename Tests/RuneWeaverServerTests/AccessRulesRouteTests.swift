@@ -1,18 +1,4 @@
 // Rune Weaver Tests — Access-rules REST surface plus session trust and files settings merge.
-//
-// Purpose: pin the rules surface the dashboards drive — listing allows and
-// denies newest-first with their counters and display scopes, revoking,
-// minting a standing allow or deny, widening, re-arming, reading one session's
-// ephemeral trust beside the egress supervisor's grants, and clearing that
-// trust — plus the `[files] write_path_rules` merge and bounds the settings PUT
-// shares with the config document.
-// Scope: route status codes, DTO shapes, and the live-apply wiring; rule
-// evaluation, deny-outranks ordering, and expiry math stay with the Core
-// suites, and the decision mapping itself stays with `EgressDecisionTests`.
-// Architectural role: guards the surface that turns one owner decision into a
-// durable rule, so a route edit cannot store a half-described rule, answer
-// "unknown" for a listed rule, or persist a policy the config loader would
-// refuse.
 
 import Foundation
 import NIOWebSocket
@@ -37,12 +23,8 @@ private struct AccessRulesHarness {
     }
 }
 
-/// Builds an isolated context whose gate, policy store, and supervisor are the
-/// exact instances the routes read.
-///
-/// The fallback context supplies the shared turn machinery because these tests
-/// exercise the routes alone: no boot, no auth, no tool registration.
-/// - Returns: The harness with a loaded store and live supervisor.
+/// Builds an isolated context whose gate, policy store, and supervisor are the exact instances the
+/// routes read.
 private func makeAccessRulesHarness() async throws -> AccessRulesHarness {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("rw-access-rules-\(UUID().uuidString)")
@@ -69,12 +51,9 @@ private func makeAccessRulesHarness() async throws -> AccessRulesHarness {
     return AccessRulesHarness(context: context, store: store, directory: directory)
 }
 
-/// Runs one test body against an application serving the full engine routes
-/// over the isolated context, shutting the app down on every exit path.
-/// - Parameters:
-///   - context: Context the routes must serve.
-///   - body: Test body receiving the configured app.
-/// - Returns: Whatever `body` returns.
+/// Runs one test body against an application serving the full engine routes over the isolated
+/// context, shutting the app down on every exit path. context: Context the routes
+/// must serve.
 private func withAccessRulesApp<T>(
     context: ServerContext,
     _ body: (Application) async throws -> T
@@ -92,13 +71,7 @@ private func withAccessRulesApp<T>(
     }
 }
 
-/// Performs one route call and returns its response.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Request path.
-///   - body: Content body, when the request carries one.
-/// - Returns: The route response.
+/// Performs one route call and returns its response. app: Configured application.
 private func accessRulesCall(
     app: Application,
     method: HTTPMethod,
@@ -127,11 +100,8 @@ private func accessRulesCall(
     return try await accessRulesCall(app: app, method: method, path: path, body: Empty?.none)
 }
 
-/// Posts one rule body so a payload the decoder refuses is observable.
-/// - Parameters:
-///   - app: Configured application.
-///   - body: Body to encode.
-/// - Returns: The route response.
+/// Posts one rule body so a payload the decoder refuses is observable. app:
+/// Configured application.
 private func postRuleBody(app: Application, body: some Content) async throws -> Response {
     let request = Request(
         application: app,
@@ -144,10 +114,6 @@ private func postRuleBody(app: Application, body: some Content) async throws -> 
 }
 
 /// Wire-shaped rule body the malformed-scope tests submit.
-///
-/// The fields travel as plain strings so the engine's decoders, not the test
-/// double, decide which scopes are canonical: an unknown kind, a wildcard
-/// host, or a one-shot tier must fail at the route boundary.
 private struct RawScopeRuleBody: Content {
     /// Tool the rule would cover.
     let toolName: String
@@ -801,9 +767,7 @@ struct FilesWritePathRulesSettingsTests {
 }
 
 /// Applies one update and converts the thrown validation error into a record.
-/// - Parameters:
-///   - field: Dotted field name the error must carry.
-///   - body: Throwing apply closure under test.
+/// field: Dotted field name the error must carry.
 private func expectValidationError(field: String, body: () throws -> Void) {
     do {
         try body()

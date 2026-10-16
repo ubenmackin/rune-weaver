@@ -1,6 +1,5 @@
 // Rune Weaver Dashboard — Tests pinning the inline approval banner's
 // duration-only allow chevron, deny split, egress mapping, standing-rules
-// link, and keyboard contract to the shared duration tiers.
 
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

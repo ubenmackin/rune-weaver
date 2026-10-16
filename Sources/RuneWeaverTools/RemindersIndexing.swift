@@ -1,10 +1,4 @@
 // Rune Weaver Tools — Reminders indexer feeding the local document index.
-//
-// Purpose: single owner of reminders indexing over the live ReminderStore seam.
-// Scope: reminder-to-document mapping, content-hash skip, completion-flip re-index,
-// prune of vanished identifiers, plus the coordinator stage builder.
-// Architectural role: mirrors the messages stage guard while field types stay owned
-// by RemindersGateway.swift.
 
 import CryptoKit
 import Foundation
@@ -58,10 +52,7 @@ public struct RemindersIndexState: Sendable, Codable, Equatable {
 
 // MARK: - Indexer
 
-/// Reads live reminders and persists one document per reminder row.
-///
-/// One document per live reminder: the external identifier is the reminder
-/// identifier and the display name is the title. Completed rows stay indexed
+/// Reads live reminders and persists one document per reminder row. Completed rows stay indexed
 /// while present; only identifiers absent from the live fetch are pruned.
 public actor RemindersIndexer {
     /// Default location of the persisted known-identifier file.
@@ -78,13 +69,7 @@ public actor RemindersIndexer {
     /// Wall-clock seam for the indexed-at stamp.
     private let now: @Sendable () -> Date
 
-    /// Creates a reminders indexer.
-    /// - Parameters:
-    ///   - store: Live reminder seam.
-    ///   - index: Document store the run writes into.
-    ///   - embedder: Optional embeddings backend for vector-eligible reminders.
-    ///   - statePath: Persisted known-identifier file; `~` is expanded.
-    ///   - now: Wall-clock seam for the indexed-at stamp.
+    /// Creates a reminders indexer. store: Live reminder seam.
     public init(
         store: any ReminderStore,
         index: DocIndexStore,
@@ -137,13 +122,8 @@ public actor RemindersIndexer {
         return report
     }
 
-    /// Builds the reminders source stage over the shared document store.
-    /// - Parameters:
-    ///   - config: Index policy snapshot used only for boot-time selection.
-    ///   - store: Document store the run writes into.
-    ///   - reminderStore: Live reminder seam.
-    ///   - embedder: Optional embeddings backend for vector-eligible reminders.
-    /// - Returns: A reminders source stage.
+    /// Builds the reminders source stage over the shared document store. config:
+    /// Index policy snapshot used only for boot-time selection.
     public static func makeRemindersStage(
         config: IndexConfig,
         store: DocIndexStore,
@@ -357,9 +337,6 @@ public actor RemindersIndexer {
     }
 
     /// Reads persisted known identifiers, defaulting to empty when absent.
-    ///
-    /// A corrupt file warns once and rebuilds from the live fetch; pruning is
-    /// skipped for that pass rather than deleting against an empty set.
     private func readKnownIDs() -> (Set<String>, String?) {
         guard FileManager.default.fileExists(atPath: stateURL.path) else {
             return ([], nil)
@@ -385,10 +362,9 @@ public actor RemindersIndexer {
     }
 }
 
-/// Exactly-once guard for the reminder callback bridge.
-///
-/// A store that calls its completion twice would trap on the second resume,
-/// so the fetch and the timeout-free bridge race through this guard.
+/// Exactly-once guard for the reminder callback bridge. A store that calls its completion twice
+/// would trap on the second resume, so the fetch and the timeout-free bridge race through this
+/// guard.
 private final class ReminderFetchGuard: Sendable {
     private let didResume = OSAllocatedUnfairLock(initialState: false)
 

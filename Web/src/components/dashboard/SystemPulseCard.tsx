@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Verified System Pulse card.
-//
-// Renders the closed green/yellow/red engine verdict from GET /health with
-// exception-only detail: green collapses to Operational, yellow opens a
-// Details disclosure with the degraded reasons, and red offers inbox plus
-// re-verify plus policy actions. Also carries the workspace staged-changes
-// count and the settings shortcut.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -24,11 +18,9 @@ interface SystemPulseCardProps {
   onOpenPolicy?: () => void;
 }
 
-// Closed pulse presentation: red parks fail-closed, yellow degrades when
-// degradedReasons is non-empty, and green requires an explicit green/ok
-// status. Anything else with a payload present still reads as degraded.
-// Info notes never move the dot. A null payload (unanswered probe)
-// still reads as degraded, never as healthy and never as fail-closed.
+// Closed pulse presentation: red parks fail-closed, yellow degrades when degradedReasons is
+// non-empty, and green requires an explicit green/ok status. Anything else with a payload present
+// still reads as degraded.
 type PulseState = "green" | "yellow" | "red";
 
 function resolvePulseReasons(health: HealthResponse | null): string[] {

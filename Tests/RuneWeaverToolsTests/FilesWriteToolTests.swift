@@ -815,10 +815,9 @@ struct FilesWriteToolTests {
         let backupURL = home.appendingPathComponent(".rune_backup_series.txt")
         #expect(await store.resolveLiveReview(path: target.path, resolution: .accepted) == true)
 
-        // An entry survives at the rollback path although the series reads
-        // terminal (a crash between a decision's copy consumption and its row
-        // write, an out-of-band copy, or a peer's in-flight capture). A fresh
-        // snapshot must never replace it, so the write fails closed.
+        // An entry survives at the rollback path although the series reads terminal (a crash
+        // between a decision's copy consumption and its row write, an out-of-band copy, or a peer's
+        // in-flight capture).
         let output = try await tool.execute(
             input: ToolInput(
                 toolName: "files.write",
@@ -1013,11 +1012,9 @@ struct FilesWriteToolTests {
         let stagingURL = home.appendingPathComponent(".rune_document.txt")
         #expect(await store.state(forPath: document.path) == .pending)
 
-        // A live write at the staging artifact path would match the document's
-        // pending row through the staging-path lookup and supersede it, so the
-        // reserved name must be refused at the tool boundary. Case-folded
-        // spellings are refused too because the default APFS volume folds case
-        // and would resolve them to the same artifact.
+        // A live write at the staging artifact path would match the document's pending row through
+        // the staging-path lookup and supersede it, so the reserved name must be refused at the tool
+        // boundary.
         let reservedTargets = [stagingURL, home.appendingPathComponent(".RUNE_document.txt")]
         for target in reservedTargets {
             let output = try await tool.execute(
@@ -1095,10 +1092,9 @@ struct FilesWriteToolTests {
 
     @Test
     func `Fresh-series live preview refuses a non-regular live target exactly like disk`() async throws {
-        // A directory planted at the live path is an existing non-regular
-        // entry: the snapshot's no-follow source guard refuses it on disk, so
-        // the preview must carry the identical refusal instead of promising a
-        // live write and a backup that disk would reject.
+        // A directory planted at the live path is an existing non-regular entry: the snapshot's
+        // no-follow source guard refuses it on disk, so the preview must carry the identical refusal
+        // instead of promising a live write and a backup that disk would reject.
         let (base, home) = try WriteTestSupport.makeBaseAndHome()
         defer { WriteTestSupport.cleanup(base) }
         let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
@@ -1146,10 +1142,9 @@ struct FilesWriteToolTests {
         let target = home.appendingPathComponent("guarded_staged.txt")
         try WriteTestSupport.write("Original Version 1\n", at: target)
 
-        // A directory planted at the reserved sibling name is a non-regular
-        // entry that `Data.write(.atomic)` cannot land on; both the staged
-        // write and its preview must refuse before any disk mutation instead
-        // of surfacing a late write error.
+        // A directory planted at the reserved sibling name is a non-regular entry that
+        // `Data.write(.atomic)` cannot land on; both the staged write and its preview must refuse
+        // before any disk mutation instead of surfacing a late write error.
         let stagingURL = home.appendingPathComponent(".rune_guarded_staged.txt")
         try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
         let sentinel = stagingURL.appendingPathComponent("sentinel.txt")
@@ -1242,14 +1237,9 @@ struct FilesWriteToolTests {
         try WriteTestSupport.write("Original Version 1\n", at: target)
         let backupURL = home.appendingPathComponent(".rune_backup_series.txt")
 
-        // Simulates the cross-process interleaving the write path must survive
-        // in both ledger postures a fresh series can observe — no row at all
-        // and a settled row whose copy a decision already consumed: this
-        // call's presence probe observes an absent destination, then a peer
-        // process wins the race and lands its captured original before the
-        // snapshot runs. The snapshot creates exclusively and never deletes,
-        // so it must refuse and leave the peer's bytes — the only rollback
-        // point — in place.
+        // Simulates cross-process race where destination is initially absent, but a peer lands an
+        // original before the snapshot runs; exclusive creation must refuse to overwrite the peer's
+        // bytes, leaving the sole rollback point intact.
         for previousSeriesSettled in [false, true] {
             try? FileManager.default.removeItem(at: backupURL)
             if previousSeriesSettled {
@@ -1302,10 +1292,9 @@ struct FilesWriteToolTests {
 
         let tool = FilesWriteTool(homeDirectoryURL: home, stagedFilesStore: store)
 
-        // A dangling link and a link onto an existing file are both existing
-        // non-regular entries: `fileExists` resolves them to "missing" or
-        // "file", but the no-follow probe sees the link and must refuse before
-        // anything can be written through it.
+        // A dangling link and a link onto an existing file are both existing non-regular entries:
+        // `fileExists` resolves them to "missing" or "file", but the no-follow probe sees the link
+        // and must refuse before anything can be written through it.
         let linkTargets = [home.appendingPathComponent("never-created.txt"), protected]
         for linkTarget in linkTargets {
             try? FileManager.default.removeItem(at: backupURL)
@@ -1383,10 +1372,9 @@ struct FilesWriteToolTests {
 
     @Test
     func `A settled series with a non-regular rollback entry refuses the preview and the write`() async throws {
-        // A terminal row plus a regular leftover is covered above; a directory
-        // or symlink at the rollback destination must refuse the preview too,
-        // because the snapshot's exclusive create refuses any entry and an
-        // approval card must never promise a write disk rejects.
+        // A terminal row plus a regular leftover is covered above; a directory or symlink at the
+        // rollback destination must refuse the preview too, because the snapshot's exclusive create
+        // refuses any entry and an approval card must never promise a write disk rejects.
         for plantDirectory in [false, true] {
             let (base, home) = try WriteTestSupport.makeBaseAndHome()
             defer { WriteTestSupport.cleanup(base) }
@@ -1502,11 +1490,8 @@ struct FilesWriteToolTests {
         try WriteTestSupport.write("Original Version 1\n", at: target)
         let backupURL = home.appendingPathComponent(".rune_backup_series.txt")
 
-        // Each racer snapshots the live bytes and then applies its own live
-        // write inside the same start section, mirroring the tool's
-        // snapshot-then-write order. Without serialized starts the second
-        // racer would re-clone the already-overwritten live file and lose the
-        // pre-series original the first racer captured.
+        // Each racer snapshots the live bytes and then applies its own live write inside the same
+        // start section, mirroring the tool's snapshot-then-write order.
         let racer: @Sendable (String) async -> LiveReviewStart = { version in
             await store.startLiveReview(path: target.path) { _ in
                 guard FileManager.default.fileExists(atPath: target.path) else { return .noCopy }
@@ -1918,11 +1903,9 @@ struct LiveFileBackupTests {
         let (base, home) = try WriteTestSupport.makeBaseAndHome()
         defer { WriteTestSupport.cleanup(base) }
 
-        // A directory and a symlink — even onto a regular file — are both
-        // non-regular live sources for the no-follow guard: cloning either
-        // would produce a rollback copy that can never restore a file. The
-        // refusal predicate is shared with preview callers, so the sentence it
-        // returns must be exactly what `snapshot` throws.
+        // A directory and a symlink — even onto a regular file — are both non-regular live sources
+        // for the no-follow guard: cloning either would produce a rollback copy that can never
+        // restore a file.
         let directory = home.appendingPathComponent("directory.txt")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let protected = home.appendingPathComponent("protected.txt")

@@ -1,19 +1,4 @@
 // Rune Weaver Tests — Persona settings patch contract.
-//
-// Purpose: pins the `PUT /settings` persona contract at the DTO layer: a
-// partial patch preserves every omitted identity field, a save without the
-// `persona` key never disturbs the stored persona (the regression guard for
-// the merge logic), unknown tone and avatar spellings fail closed with the
-// dotted field path the route maps to a 400, the shared core normalizers
-// keep their documented repair-versus-refuse split on the wire path, and a
-// saved persona survives the config-file round trip so `GET /settings`
-// reflects exactly what was PUT.
-// Scope: settings DTO merge and validation behavior plus wire spellings;
-// prompt rendering and composer-cache semantics stay with the core suites.
-// Architectural role: guards the one owner surface that edits the assistant
-// identity, so a route or DTO edit cannot silently reset the persona,
-// persist a spelling the TOML loader would refuse, or drop the persona from
-// the settings GET the dashboard renders.
 
 import Foundation
 import RuneWeaverCore
@@ -22,11 +7,8 @@ import Testing
 
 @Suite("Persona Settings Patch")
 struct PersonaSettingsTests {
-    /// Applies a persona patch the settings merge must refuse and returns the
-    /// dotted field path from the `ConfigError` the route maps to a 400. A
-    /// refused save must leave the stored persona untouched, so the helper
-    /// pins the pre-apply snapshot on the way out — the same atomicity the
-    /// route reports before ever touching the file.
+    /// Applies a persona patch the settings merge must refuse and returns the dotted field path
+    /// from the `ConfigError` the route maps to a 400.
     private func rejectedPersonaField(for update: PersonaUpdate) -> String {
         var config = RuneWeaverConfig.default
         let preserved = config.persona

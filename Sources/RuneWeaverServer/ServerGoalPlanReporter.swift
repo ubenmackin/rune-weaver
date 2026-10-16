@@ -1,8 +1,4 @@
 // Rune Weaver Server — Goal plan run reporter.
-//
-// Delivers goal decomposition and planning lifecycle events onto the server's
-// durable run log and live WebSocket hub so planning appears in Working Right Now,
-// Dashboard greeting, and audit logs.
 
 import Foundation
 import RuneWeaverCore
@@ -18,9 +14,6 @@ public struct ServerGoalPlanReporter: GoalPlanReporting {
     private let hub: WSHub
 
     /// Creates a reporter.
-    /// - Parameters:
-    ///   - runs: Run audit trail to persist into.
-    ///   - hub: Socket hub to broadcast through.
     public init(runs: RunLogStore, hub: WSHub) {
         self.runs = runs
         self.hub = hub

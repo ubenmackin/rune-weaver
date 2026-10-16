@@ -1,15 +1,4 @@
 // Rune Weaver Server Tests — Paged facts REST surface over the engine owner.
-//
-// Purpose: pins GET /memory/facts paging without a live network: filtered pages
-// carry their total, an empty query reads the recent window, offset paging
-// advances, tallies stay accurate, and malformed paging rejects before any
-// store read.
-// Scope: route status codes, paging DTO shape, and delegation to the engine
-// owner only; fact persistence, episodic listing, and dashboard refetching stay
-// with their own suites.
-// Architectural role: guards the thin adapter so future route edits cannot
-// bypass the engine owner, reorder memory routes, or silently clamp invalid
-// paging into a valid window.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -38,13 +27,6 @@ private final class FactsRouteStubLLM: LLMProvider, Sendable {
 }
 
 /// Builds a configured application sharing an isolated episodes database.
-///
-/// The temporary directory keeps facts, vectors, and the profile off the
-/// operator's live data directory; every caller-supplied store points at the
-/// same `episodes.db` so the engine observes one file without leaking into
-/// sibling tests.
-/// - Parameter body: Test body receiving the app plus its context.
-/// - Returns: Whatever `body` returns.
 private func withFactsApp<T>(
     _ body: (Application, ServerContext) async throws -> T
 ) async throws -> T {
@@ -101,12 +83,8 @@ private func withFactsApp<T>(
     }
 }
 
-/// Sends one request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Path plus optional query string.
-/// - Returns: Route response.
+/// Sends one request through the full registered surface. app: Configured
+/// application.
 private func factsRequest(app: Application, method: HTTPMethod, path: String) async throws -> Response {
     let request = Request(
         application: app,
@@ -117,13 +95,8 @@ private func factsRequest(app: Application, method: HTTPMethod, path: String) as
     return try await app.responder.respond(to: request).get()
 }
 
-/// Sends one body-carrying request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Path plus optional query string.
-///   - body: Request payload encoded as the wire content.
-/// - Returns: Route response.
+/// Sends one body-carrying request through the full registered surface. app:
+/// Configured application.
 private func factsWriteRequest(
     app: Application,
     method: HTTPMethod,

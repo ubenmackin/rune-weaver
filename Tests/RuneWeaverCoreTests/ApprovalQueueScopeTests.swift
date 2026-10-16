@@ -1,22 +1,4 @@
 // Rune Weaver Tests — Approval decision scope derivation and durable minting.
-//
-// Purpose: pin the contract that one decision resolves one parked request into
-// the scope the owner actually authorized — a nil scope derives the parked
-// egress host for an unlisted-host request and the descriptor target for every
-// other request, a durable denial mints a standing deny rule that outranks
-// every allow, the one-shot tools (engine.continue, question.ask,
-// desktop.resume, behavior.brake) never mint a row even under a durable tier
-// with a non-nil scope, a scheduled send (email.send or messages.send
-// carrying a wire-valid scheduleAt) coerces the approval to thisTime with no
-// stored rule while a durable denial still mints the recipient deny, and the
-// per-recipient messages.send invariant refuses any send scope that is not a
-// recipient set or a canonical handle. The same boundary keeps the
-// enrichment-cancel-before-decide ordering, so a late model result never
-// resurrects a decided entry or mints a second row.
-// Architectural role: the regression suite for `ApprovalQueue.decide`, the one
-// decision path the chat banner, inbox, dashboard, and WebSocket triage all
-// share, so no surface can drift onto a scope or a durable row the queue never
-// resolved.
 
 import Foundation
 @testable import RuneWeaverCore

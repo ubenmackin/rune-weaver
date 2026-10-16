@@ -1,10 +1,4 @@
 // Rune Weaver Core — Office and PDF extraction for document text.
-//
-// Holds the format-specific extraction paths for `DocumentTextExtractor`:
-// native PDF text layers, DOCX word-processing XML, XLSX worksheets via the
-// shared string table, PPTX slide XML, and best-effort iWork packages. Plain
-// text, HTML, dispatch, and chunking stay in `DocumentTextExtractor.swift`
-// while shared decoding lives beside it.
 
 import Foundation
 #if canImport(PDFKit)
@@ -156,32 +150,12 @@ extension DocumentTextExtractor {
     }
 
     /// Single-source fallback body for a zero-chunk office document.
-    ///
-    /// Guarantees one searchable row carrying the file identity when no text
-    /// survives extraction, so every indexed file owns at least one chunk.
-    /// - Parameters:
-    ///   - displayName: File name for the `Document` line.
-    ///   - formatToken: Format family for the `Format` line.
-    ///   - path: Relative display path for the `File path` line.
-    /// - Returns: Three-line metadata text.
     static func fallbackMetadataText(displayName: String, formatToken: String, path: String) -> String {
         let resolvedPath = path.isEmpty ? displayName : path
         return "Document: \(displayName)\nFile path: \(resolvedPath)\nFormat: \(formatToken)"
     }
 
     /// Best-effort text extraction from an iWork package.
-    ///
-    /// Tries the legacy XML entries first and returns them as `partial`, then
-    /// decompresses the Snappy IWA payload via `DocumentIWorkArchive` and returns
-    /// it as `extracted`, and finally returns exactly one fallback chunk as
-    /// `partial` carrying `Document` plus `File path` plus `Format` lines.
-    /// The fallback `File path` line carries the file name only; root-relative
-    /// display paths for zero-chunk documents are owned by the indexer fallback.
-    /// - Parameters:
-    ///   - data: iWork package bytes.
-    ///   - format: Recognized iWork format.
-    ///   - fileName: Optional file name for fallback metadata chunk.
-    /// - Returns: `partial` or `extracted` result, or `.failed` when the package is unreadable.
     func extractIWork(data: Data, format: DocumentFormat, fileName: String = "") -> DocumentExtraction {
         guard let archive = ZipArchiveReader(data: data) else {
             return makeResult(

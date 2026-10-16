@@ -1,21 +1,4 @@
 // Rune Weaver Dashboard — Bash & Shell section of the owner configuration surface.
-//
-// Purpose: Owns the sandboxed shell execution policy ([bash]) as its own settings
-// surface: the ordered `pattern = action` rules list evaluated top-to-bottom
-// last-match-wins (so line order is the policy and the catch-all belongs first),
-// the execution tier with its host allow patterns, the wall-clock, CPU, and
-// memory budgets, the default action, and network confinement. The section
-// edits that owner configuration only, and no rule-engine behavior lives here.
-// Scope: Loading the [bash] snapshot, inline fail-closed editing with field
-// errors, and persisting the changed-only bash patch through PUT /settings.
-// Tool enablement, Keychain values, and engine rule evaluation stay with their
-// owners — the section in particular carries no Enabled checkbox, because
-// enablement lives solely in the Settings → Tools toggle and a second gate here
-// could only disagree with it.
-// Architectural role: Settings-adjacent surface rendered outside the shared
-// config form, mirroring the indexing and policy panel precedents. Writes apply
-// live through the engine with no restart and no filesystem watcher, so the
-// saved banner never promises a restart.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -53,10 +36,8 @@ import {
 } from "../../api";
 import { AlertTriangleIcon, PlusIcon } from "../icons";
 
-// Last-loaded [bash] snapshot driving the changed-only patch: a field the
-// owner never touches stays omitted so the stored value survives, while a
-// cleared allowlist sends an explicit empty list. Rules ride the formatted
-// textarea text so the comparison sees the same parse the editor does.
+// Last-loaded [bash] snapshot driving the changed-only patch: a field the owner never touches stays
+// omitted so the stored value survives, while a cleared allowlist sends an explicit empty list.
 interface BashLoadedSnapshot {
   defaultAction: string;
   rulesText: string;
@@ -68,10 +49,7 @@ interface BashLoadedSnapshot {
   hostAllowPatterns: string[];
 }
 
-// The editor draft as the knobs sit in the form. Numeric fields hold raw
-// input (including empty) so a cleared field surfaces a range error instead of
-// silently keeping a stale value, and the rules textarea holds raw text so
-// blank lines survive editing and only collapse on save.
+// The editor draft as the knobs sit in the form.
 interface BashDraft {
   defaultAction: string;
   rulesText: string;
@@ -111,15 +89,7 @@ function freshBashLoaded(): BashLoadedSnapshot {
   };
 }
 
-// Canonicalizes a draft for dirty tracking. The rules parse through the shared
-// codec so a trailing newline or a reordered blank line reads clean, and the
-// numbers coerce the same way the patch builder reads them, so an edit that
-// returns to the loaded shape never stays dirty on formatting alone. A
-// malformed line has no parsed shape to compare, so the raw text stands in and
-// the editor reads dirty until the line is repaired. The host allowlist parses
-// uncapped here because the validator judges the uncapped read: an over-limit
-// paste must read dirty while the editor still carries the extra entries
-// instead of reading clean against a truncated copy of itself.
+// Canonicalizes a draft for dirty tracking.
 function bashDraftSignature(draft: BashDraft): string {
   let rules: unknown;
   try {
@@ -152,11 +122,8 @@ function countBashRules(text: string): number {
   }
 }
 
-// Copies one settings fetch into the bash fields, and tolerates an absent
-// [bash] section from older engines by keeping the form defaults. Only
-// overwrites keys the engine returns so older engines without bash leave the
-// form untouched. Rules arrive as an ordered array and render through the
-// shared textarea codec so line order survives the round trip.
+// Copies one settings fetch into the bash fields, and tolerates an absent [bash] section from older
+// engines by keeping the form defaults.
 function applyBashConfigToDraft(draft: BashDraft, bash: BashConfigData): BashDraft {
   const next: BashDraft = { ...draft };
   const defaultAction =
@@ -261,18 +228,15 @@ export function AccessBashSection() {
   const [defaultAction, setDefaultAction] = useState<string>(
     DEFAULT_BASH_CONFIG.defaultAction
   );
-  // The rules editor holds raw textarea text (one `pattern = action` per line)
-  // so blank lines survive editing and only collapse on save; the parsed count
-  // drives the live badge while copy and paste of rule sets works through this
-  // text.
+  // The rules editor holds raw textarea text (one `pattern = action` per line) so blank lines
+  // survive editing and only collapse on save; the parsed count drives the live badge while copy and
+  // paste of rule sets works through this text.
   const [rulesText, setRulesText] = useState<string>(DEFAULT_BASH_RULES_TEXT);
   const [timeoutSeconds, setTimeoutSeconds] = useState<number | string>(
     DEFAULT_BASH_CONFIG.timeoutSeconds
   );
-  // Resource budgets bound each shell turn beside the wall-clock timeout: CPU
-  // seconds cap compute via `ulimit -t` while memory megabytes cap address
-  // space via `ulimit -v`. Numeric inputs hold raw text (including empty) so a
-  // cleared field surfaces a range error instead of silently keeping stale.
+  // Resource budgets bound each shell turn beside the wall-clock timeout: CPU seconds cap compute
+  // via `ulimit -t` while memory megabytes cap address space via `ulimit -v`.
   const [cpuSeconds, setCpuSeconds] = useState<number | string>(
     DEFAULT_BASH_CPU_SECONDS
   );
@@ -309,10 +273,8 @@ export function AccessBashSection() {
   };
   const changed = bashDraftSignature(draft) !== loadedSignatureRef.current;
 
-  // Copies one loaded snapshot into every field at once, then reseeds the
-  // loaded ref and the dirty signature from that same snapshot. Deriving both
-  // from one freshly built draft keeps the next changed-only patch honest
-  // instead of comparing against state that has not re-rendered yet.
+  // Copies one loaded snapshot into every field at once, then reseeds the loaded ref and the dirty
+  // signature from that same snapshot.
   const applyLoadedConfig = useCallback((bash: BashConfigData | undefined | null) => {
     if (!bash) return;
     const next = applyBashConfigToDraft(
@@ -455,10 +417,9 @@ export function AccessBashSection() {
     return patch;
   }
 
-  // Client-side validation mirrors the engine clamps so a bad default action, a
-  // malformed rule line, an empty rule list, an out-of-range budget, an unknown
-  // tier, or an over-limit, blank, overlong, control-char, or TOML-breaking
-  // host pattern fails in the form with the same field the server 400 names.
+  // Client-side validation mirrors engine clamps: malformed rules, empty lists, invalid budgets
+  // or tiers, and invalid/TOML-breaking host patterns fail in the form with the same field the
+  // server 400 names.
   function validateBashFields(): string | null {
     const normalizedAction = draft.defaultAction.trim().toLowerCase();
     if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
@@ -500,12 +461,8 @@ export function AccessBashSection() {
     return null;
   }
 
-  // Saves the changed-only [bash] patch through PUT /settings. Only edited keys
-  // travel so stored values survive; an emptied allowlist sends an
-  // explicit empty list. Client validation reports inline without closing while
-  // a server 400 lands in the error path without discarding the draft.
-  // Confinement applies live, so success shows the saved banner with no
-  // restart banner.
+  // Saves the changed-only [bash] patch through PUT /settings. Only edited keys travel so stored
+  // values survive; an emptied allowlist sends an explicit empty list.
   const handleSave = async (): Promise<void> => {
     const validationError = validateBashFields();
     if (validationError) {

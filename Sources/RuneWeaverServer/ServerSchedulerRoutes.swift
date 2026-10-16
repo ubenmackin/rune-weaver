@@ -93,11 +93,6 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
 }
 
 /// Resumes a parked approval in its tagged session, best-effort.
-/// Exposed so non-Vapor clients (the menu-bar app) can resolve an approval
-/// through the exact same resume, run-row, and `approval_decided` broadcast
-/// path as the REST and WebSocket routes instead of reimplementing it.
-/// Structured and narrated approvals converge here on the identical decided
-/// frame plus orchestrator resume with zero new event type.
 public func resumeNarratedApproval(
     id: UUID,
     approved: Bool,
@@ -384,10 +379,9 @@ private func handleSchedulerRun(req: Request) async throws -> OrchestratorRespon
         )
         throw Abort(.conflict, reason: "Job \(raw) is already running")
     }
-    // The single-flight lock is held for the whole turn and released with a
-    // structured await on every terminal path before returning, so the next
-    // acquire never observes a stale held lock from a detached release
-    // racing the return.
+    // The single-flight lock is held for the whole turn and released with a structured await on
+    // every terminal path before returning, so the next acquire never observes a stale held lock
+    // from a detached release racing the return.
     let startTime = Date()
     let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: context.conversations)
 
@@ -420,11 +414,9 @@ private func executeManualJobRun(
 ) async throws -> OrchestratorResponse {
     do {
         let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
-        // Manual runs carry the same framework cursor as automatic ticks so the
-        // agent never re-improvises memories.store bookkeeping; the job resolved
-        // at request start predates the single-flight lock, so the prompt is
-        // re-read from the freshest stored cursor under the lock, exactly like
-        // the automatic tick path, keeping both paths identical.
+        // Manual runs carry the same framework cursor as automatic ticks; because the initial job
+        // predates the single-flight lock, the prompt is re-read from the freshest stored cursor
+        // under the lock, keeping both paths identical.
         let effectivePrompt = await context.schedulerWorker.freshSchedulerRunPrompt(for: job)
         let response = try await context.orchestrator.process(
             input: UserInput(

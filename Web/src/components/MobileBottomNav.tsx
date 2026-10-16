@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Mobile bottom navigation bar for narrow viewports.
-//
-// Bottom-layout owner for handheld widths: renders the 5 canonical groups
-// (Dashboard, Chat, Approvals, Work, Memory) with touch-sized targets, drop-up menus for
-// grouped views, and unread badges. Hidden on desktop via stylesheet
-// breakpoints; selection and routing stay with the app shell.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDownIcon } from "./icons";
@@ -34,10 +29,9 @@ export interface MobileBottomNavProps {
   badges?: Partial<Record<NavTabId, number>>;
 }
 
-// Resolves the display count for one tab: the explicit per-tab map wins when
-// present, otherwise the named approvals/runs/goals props apply. Tabs without a
-// badge source resolve to zero so the badge stays hidden. Normalization is
-// single-sourced in the navigation contract so desktop and mobile never drift.
+// Resolves the display count for one tab: the explicit per-tab map wins when present, otherwise the
+// named approvals/runs/goals props apply. Tabs without a badge source resolve to zero so the badge
+// stays hidden.
 function badgeForTab(
   id: NavTabId,
   props: Pick<MobileBottomNavProps, "runsBadge" | "approvalsBadge" | "goalsBadge" | "badges">,

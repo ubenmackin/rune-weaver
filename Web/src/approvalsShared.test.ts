@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Shared approvals vocabulary tests.
-// Pins the single decision-surface contract every surface imports: the full
-// duration vocabulary for ordinary requests with exactly the three egress
-// tiers for parked hosts, displayTarget-first derivation with its legacy
-// argument fallback, the shared truncation bound, and the history client
-// paths plus the decision surface tag.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {

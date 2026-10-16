@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Recent Reports (Run Digests).
-//
-// Shows executive report summaries of completed background runs rather than
-// raw message threads:
-// - Status outcome badges (OK, Error)
-// - Execution duration and token expenditure
-// - Direct inspection of run logs and linked chat turns
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -91,10 +85,8 @@ export default function RecentReports({
 }: RecentReportsProps) {
   const [reports, setReports] = useState<RunLogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-  // True only for the initial load so co-mounted widgets show a spinner instead
-  // of flashing their empty state before the shared fetch settles. Later
-  // WebSocket refetches reuse the same setter without re-entering loading, so
-  // live updates never flicker back to a skeleton.
+  // True only for the initial load so co-mounted widgets show a spinner instead of flashing their
+  // empty state before the shared fetch settles.
   const [isLoading, setIsLoading] = useState(true);
 
   // Periodic tick for live relative time formatting ("just now" -> "1m ago")
@@ -109,10 +101,8 @@ export default function RecentReports({
   const fetchReports = useCallback(async (forceRefresh = false) => {
     try {
       setError(null);
-      // Shared single-flight fetch: concurrent dashboard widgets collapse onto
-      // one `GET /runs` sized for the hungriest caller, then slice locally.
-      // Lifecycle frames force past the freshness window so a newly settled
-      // run appears now instead of at the next poll tick.
+      // Shared single-flight fetch: concurrent dashboard widgets collapse onto one `GET /runs`
+      // sized for the hungriest caller, then slice locally.
       const runs = await getSharedRecentRuns(25, { forceRefresh });
       // Filter to terminal / completed runs (non-running, non-parked)
       const completed = (runs || []).filter(

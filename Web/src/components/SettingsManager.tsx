@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Settings manager for config.toml configuration.
-// Allows managing LLM providers, engine identity, container policy, memory, voice, web search, email accounts, and the owner-facing assistant persona.
-// The persona pane persists [persona] through the shared settings PUT with a
-// changed-only patch and publishes every loaded and saved snapshot to the
-// shared persona store, so identity surfaces mirror the owner's edits live.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -192,18 +188,9 @@ import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import { useIsMobile } from "../hooks/useIsMobile";
 
-// Vertical navigation keeps every category visible without horizontal scrolling; Access leads
-// because it is the owner "what the agent may do" home — standing rules, Bash & Shell, Network,
-// Credentials, and Files write posture all live on its section rail, and the policy.toml editor
-// is reached through its Network sub-tabs, so no separate Policy tab remains. Security keeps
-// container governance plus the Files & Access guard (allow roots, deny patterns, approval on
-// deny) plus token rotation. The `search` id stays verbatim while the pane displays as Web: the
-// search* API aliases and the /search/* health routes are keyed to that id, so only the label
-// moves. The `network` pane owns the [server] bind (hostname, port, allowed_hosts) plus the
-// restart banner.
-// Persona and goals sit beside providers because the owner reaches for identity
-// and durable pursuit as often as model routing; engine keeps only its own
-// knobs plus the background interruption policy so each surface stays scannable.
+// Vertical tabs keep categories visible without horizontal scroll; Access houses permission
+// postures (rules, Bash, Network, Credentials, Files) and the policy.toml editor is reached
+// through Network sub-tabs.
 type SettingsTab =
   | "access"
   | "providers"
@@ -238,11 +225,9 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   "engine",
 ];
 
-// Section-finder index behind the sidenav search: each tab matches its own
-// label plus the capability words owners reach for, so one query discovers the
-// pane wherever its knob actually lives. Access carries the section names the
-// approvals inbox and owner vocabulary use (rules, bash, network, credentials,
-// files) because those editors live behind the pane, not on the tab itself.
+// Section-finder index behind the sidenav search: each tab matches its own label plus the
+// capability words owners reach for, so one query discovers the pane wherever its knob actually
+// lives.
 const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string> = {
   access:
     "access rules permissions allow deny standing bash shell commands network domains egress credentials keys files write posture policy sandbox review",
@@ -275,22 +260,15 @@ export function isSettingsTab(value: unknown): value is SettingsTab {
   );
 }
 
-// An access deep link lands on Access whether it names the section or a
-// single rule. The shared readers resolve raw values and rule ids across hash
-// and query-string forms; the bare section token returns null from the rule
-// reader by design, so it is matched explicitly here while everything else
-// delegates — this file never re-runs the URLSearchParams loop itself.
+// An access deep link lands on Access whether it names the section or a single rule.
 function hasAccessSectionLink(): boolean {
   if (typeof window === "undefined") return false;
   if (readAccessDeepLink() !== null) return true;
   return readAccessParamValue() === ACCESS_RULES_SECTION_TOKEN;
 }
 
-// Converges a loaded tone/accent spelling to the closed set the engine merge
-// accepts, falling back to the stock default for an unknown or absent value.
-// The populate path and the delta baseline must start from identical converged
-// values: if one kept a drifted stored spelling while the other normalized,
-// the pane would open dirty on a value the owner never typed.
+// Converges a loaded tone/accent spelling to the closed set the engine merge accepts, falling back
+// to the stock default for an unknown or absent value.
 function canonicalPersonaTone(value: unknown): string {
   const normalized = normalizePersonaTone(value);
   return (PERSONA_TONES as readonly string[]).includes(normalized)
@@ -312,15 +290,9 @@ interface ToolCategoryMeta {
   icon: (props: { size?: number; className?: string }) => React.JSX.Element;
 }
 
-// Browser and web tools share one section because they dial the same [browser]
-// timeout surface (SearXNG plus request timeouts) and one Configure editor;
-// splitting them stranded web.fetch away from the timeout UI its calls need.
-// The browser-web id is the sole grouping for both prefixes, so pills, search
-// filtering, and bulk toggles stay in lockstep and any future browser.* or
-// web.* tool lands here without a second pill or section. Bash, files, and
-// calendar-reminders each keep a dedicated section carrying only the
-// enablement toggle; their policy editors live on the Access surface, so no
-// category-level Configure is offered here.
+// Browser and web tools share one section because they dial the same [browser] timeout surface
+// (SearXNG plus request timeouts) and one Configure editor; splitting them stranded web.fetch away
+// from the timeout UI its calls need.
 const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
   { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
@@ -336,12 +308,9 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "other", name: "Other Tools", description: "General utility tools and external plugins", icon: WrenchIcon },
 ];
 
-// Prefix routing keeps the category vocabulary closed: every builtin lands in
-// exactly one section, with browser.*, web.*, and api.* intentionally collapsed
-// into browser-web so the single Browser, Web & API editor owns all three.
-// External plugin tools stay in Other regardless of name prefix, so a
-// colliding bash.evil or files.evil never joins a builtin section; only builtin
-// names route by prefix.
+// Prefix routing keeps the category vocabulary closed: every builtin lands in exactly one section,
+// with browser.*, web.*, and api.* intentionally collapsed into browser-web so the single Browser,
+// Web & API editor owns all three.
 const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "desktop.screenshot": "desktop",
   "desktop.action": "desktop",
@@ -402,11 +371,8 @@ function resolveBuiltinCategoryByName(toolName: string): string {
   return "other";
 }
 
-// Groups tools by name prefix into builtin sections, with provenance gating
-// so external names never join a builtin section. The string form has no
-// provenance, so it resolves only exact known builtin names and falls through
-// to other otherwise; object callers carry isBuiltIn and route by prefix once
-// the external gate passes.
+// Groups tools by name prefix into builtin sections, with provenance gating so external names never
+// join a builtin section.
 export function getToolCategory(tool: ToolInfo): string;
 export function getToolCategory(toolName: string): string;
 export function getToolCategory(tool: ToolInfo | string): string {
@@ -417,19 +383,9 @@ export function getToolCategory(tool: ToolInfo | string): string {
   return resolveBuiltinCategoryByName(tool.name);
 }
 
-// One Configure entry per integration surface keeps a single modal per editor:
-// desktop, media, fanout, and browser-web each own one existing modal, so the
-// header button opens that editor whenever any rendered tool in the category
-// reports hasConfig. Bash, files, and calendar-reminders have no entry: their
-// editors live on the Access surface and each keeps a dedicated section with
-// only the enablement toggle, so no category header can dangle a Configure
-// for a moved editor. Security stays the single config-form editor
-// for allow roots, deny patterns, and approval on deny. The server hasConfig
-// flag is the sole authority — a null key or no flagged tool hides the button,
-// which keeps unconfigurable categories clean and avoids stale per-tool
-// buttons when new tools gain editors later.
-// Edge case: a filtered view with zero flagged tools in a configurable
-// category still hides Configure, so search never offers a dead editor.
+// One Configure entry per integration surface keeps a single modal per editor: desktop, media,
+// fanout, and browser-web each own one existing modal, so the header button opens that editor
+// whenever any rendered tool in the category reports hasConfig.
 function getCategoryConfigKey(categoryId: string): string | null {
   if (categoryId === "desktop") return "desktop";
   if (categoryId === "media") return "media.arr";
@@ -456,10 +412,8 @@ function getEmailPasswordEnv(name: string): string {
   return `EMAIL_${safeName}_PASSWORD`;
 }
 
-// Shared desktop capture bounds check for the full-save and Configure
-// modal-save paths so both reject a bad dimension or quality before any
-// network write with one message. Mirrors Config+Validation bounds
-// (256-3840, 0.1-1.0).
+// Shared desktop capture bounds check for the full-save and Configure modal-save paths so both
+// reject a bad dimension or quality before any network write with one message.
 function validateDesktopCaptureBounds(
   maxImageDimension: number | string,
   jpegQuality: number | string
@@ -475,10 +429,9 @@ function validateDesktopCaptureBounds(
   return null;
 }
 
-// Shared browser automation timeout bounds check for the full-save and the
-// browser modal-save paths so an out-of-range value fails on the client
-// instead of returning a server 400 from load validation. Mirrors the
-// Config+Validation browser.timeout_seconds bound (5-300).
+// Shared browser automation timeout bounds check for the full-save and the browser modal-save paths
+// so an out-of-range value fails on the client instead of returning a server 400 from load
+// validation.
 function validateBrowserTimeoutSeconds(value: number | string): string | null {
   const timeoutNum = Number(value);
   if (!Number.isInteger(timeoutNum) || timeoutNum < 5 || timeoutNum > 300) {
@@ -487,10 +440,9 @@ function validateBrowserTimeoutSeconds(value: number | string): string | null {
   return null;
 }
 
-// Shared direct HTTP request timeout bounds check for the full-save and the
-// browser modal-save paths so an out-of-range value fails on the client
-// instead of returning a server 400 from load validation. Mirrors the
-// Config+Validation browser.fetch_timeout_seconds bound (1-120).
+// Shared direct HTTP request timeout bounds check for the full-save and the browser modal-save
+// paths so an out-of-range value fails on the client instead of returning a server 400 from load
+// validation.
 function validateBrowserFetchTimeoutSeconds(value: number | string): string | null {
   const timeoutNum = Number(value);
   if (!Number.isInteger(timeoutNum) || timeoutNum < 1 || timeoutNum > 120) {
@@ -499,10 +451,8 @@ function validateBrowserFetchTimeoutSeconds(value: number | string): string | nu
   return null;
 }
 
-// Shared media request timeout bounds check for the full-save and the media
-// modal-save paths so an out-of-range value fails on the client instead of
-// returning a server 400 from load validation. Mirrors the
-// Config+Validation media.timeout_seconds bound (5-120).
+// Shared media request timeout bounds check for the full-save and the media modal-save paths so an
+// out-of-range value fails on the client instead of returning a server 400 from load validation.
 function validateMediaTimeoutSeconds(value: number | string): string | null {
   const timeoutNum = Number(value);
   if (!Number.isInteger(timeoutNum) || timeoutNum < 5 || timeoutNum > 120) {
@@ -511,13 +461,8 @@ function validateMediaTimeoutSeconds(value: number | string): string | null {
   return null;
 }
 
-// Managed browser Python (Playwright) staged progress, mirroring the search
-// health shape so the Settings Web pane stays in lockstep instead of
-// duplicating timer logic. Homebrew system pythons refuse `pip install`
-// outside a venv while `pipx` and the Homebrew `playwright-cli` formula never
-// satisfy `import playwright`, so the engine provisions `~/.runeweaver/python`
-// once (venv, `pip install playwright`, `playwright install chromium`) and
-// publishes one of these steps plus the Start time while the flight runs.
+// Managed browser Python (Playwright) staged progress, mirroring the search health shape so the
+// Settings Web pane stays in lockstep instead of duplicating timer logic.
 export const BROWSER_PYTHON_VENV_DISPLAY = "~/.runeweaver/python";
 export const BROWSER_START_POLL_INTERVAL_MS = 1000;
 export const BROWSER_START_CAP_MS = 600_000;
@@ -525,10 +470,7 @@ export const BROWSER_START_CAP_MS = 600_000;
 // from PlaywrightPythonEnsurer so an operator's manual recovery converges on
 // the same exact release instead of floating across breaking helper APIs.
 export const BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT = "playwright==1.49.1";
-// User copy per managed-browser provision stage. Mirrors the engine provision
-// stage copy so the Preparing line names the same step on both sides; the
-// contract test pins this table to the engine wording so drift fails loudly
-// instead of silently relabeling the flight.
+// User copy per managed-browser provision stage.
 export const BROWSER_PYTHON_STAGE_COPY: Record<string, string> = {
   resolving: "Finding system Python",
   creating: "Creating managed browser environment",
@@ -536,19 +478,13 @@ export const BROWSER_PYTHON_STAGE_COPY: Record<string, string> = {
   browsers: "Installing Chromium browser",
 };
 
-// Preset bind targets for the single Network bind control: loopback-only
-// serves without a token, while the all-interfaces value needs a resolvable
-// owner token and fails closed otherwise. Any other value (localhost, ::1, a
-// literal LAN IP) stays on the custom option with its address held directly in
-// serverHostname. An explicit custom pick preserves the preset value in the
-// revealed input instead of clearing to empty, tracked by the custom flag so
-// the selector can stay on custom while holding a preset spelling.
+// Preset bind targets for the single Network bind control: loopback-only serves without a token,
+// while the all-interfaces value needs a resolvable owner token and fails closed otherwise.
 export const SERVER_BIND_PRESETS = ["127.0.0.1", "0.0.0.0"];
 
-// Compares a bind hostname against the preset list case-insensitively via the
-// shared restart canonicalization (trim plus lowercase plus IPv6-bracket
-// handling) so casing or bracket-only spellings the gate treats identically
-// never force a spurious custom pick.
+// Compares a bind hostname against the preset list case-insensitively via the shared restart
+// canonicalization (trim plus lowercase plus IPv6-bracket handling) so casing or bracket-only
+// spellings the gate treats identically never force a spurious custom pick.
 function isServerBindPreset(hostname: string): boolean {
   const candidate = canonicalRestartHost(hostname);
   return SERVER_BIND_PRESETS.some(
@@ -556,19 +492,13 @@ function isServerBindPreset(hostname: string): boolean {
   );
 }
 
-// Re-anchor cadence for the live bind while the Network pane is open: polls
-// /health so an external restart moves live to the new boot and the banner
-// clears without a manual Refresh. Five seconds keeps the banner honest
-// without adding steady-state QPS once file converges with boot.
+// Re-anchor cadence for the live bind while the Network pane is open: polls /health so an external
+// restart moves live to the new boot and the banner clears without a manual Refresh.
 export const SERVER_BOOT_POLL_INTERVAL_MS = 5000;
 
-// Compares allowed_hosts as an order-insensitive IPv6-bracket-canonicalized
-// set so a reorder-only, case-only, or IPv6 bracket-only edit never trips a
-// spurious restart; each entry runs through the stored Host normalization
-// plus the restart bracket canonicalization, matching the server compare of
-// normalizedAllowedHost wrapped in canonicalRestartHost. Only bracketed
-// spellings whose inner text holds a colon (IPv6) canonicalize, so bracketed
-// non-IPv6 spellings stay distinct.
+// Compares allowed_hosts as an order-insensitive IPv6-bracket-canonicalized set so a reorder-only,
+// case-only, or IPv6 bracket-only edit never trips a spurious restart; each entry runs through the
+// stored Host normalization plus the restart bracket canonicalization, matching the server compare.
 function areServerAllowedHostsEqual(a: string[], b: string[]): boolean {
   const sortedA = [...new Set(a.map((h) => canonicalRestartHost(normalizeServerAllowedHost(h))))].sort();
   const sortedB = [...new Set(b.map((h) => canonicalRestartHost(normalizeServerAllowedHost(h))))].sort();
@@ -639,12 +569,8 @@ function trimBrowserText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-// Badge-probe chunk size pinned to the server status cap (`maxSecretStatusKeys`
-// in `Sources/RuneWeaverServer/ServerSettingsRoutes.swift`). The server owns
-// the bound; this mirror must stay equal at 500 distinct keys so the email
-// plus provider plus media union merges chunks instead of tripping a 400 when
-// the list grows. Both sides pin 500 (see `SettingsRouteTests` plus the
-// dashboard contract test); update both together.
+// Badge-probe chunk size pinned to the server status cap (`maxSecretStatusKeys` in
+// `Sources/RuneWeaverServer/ServerSettingsRoutes.swift`).
 export const SECRET_STATUS_CHUNK_SIZE = 500;
 
 export interface SettingsManagerProps {
@@ -681,9 +607,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Transient toast queue for action feedback (tool toggles, plugin ops, saves).
-  // Distinct notices stack with independent timers; an identical copy replaces
-  // its sibling so repeat saves refresh one notice instead of duplicating.
-  // Contextual health/state errors stay as persistent inline banners.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast, clearToasts } =
     useToastStack();
   // Active-run guard: staged when a save is requested while in-flight work
@@ -696,10 +619,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // the form keeps the screen on first paint; desktop renders the same sidenav
   // inline via stylesheet alone, so this flag only moves the handheld drawer.
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
-  // Section-finder query for the sidenav. Blank shows every tab; a non-blank
-  // query keeps only tabs whose label or keyword index matches, so one word
-  // ("bash", "rules", "credentials") surfaces the Access pane whose editors
-  // live behind the pane rather than on the tab label itself.
+  // Section-finder query for the sidenav.
   const [settingsNavQuery, setSettingsNavQuery] = useState("");
   // Trigger that opens the settings drawer. Dismissals return focus here so
   // keyboard users land back on the control that opened the drawer instead of
@@ -729,12 +649,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     returnFocusToMenuButton();
   }, [closeSettingsMenu, returnFocusToMenuButton]);
 
-  // Selects a settings tab while clearing any transient toasts so they
-  // never follow navigation. Contextual errors stay as persistent banners.
-  // Fail-closed on unknown ids: an invalid tab keeps the current tab instead
-  // of blanking the pane. On handheld widths a valid select also dismisses
-  // the drawer and returns focus to the hamburger; desktop keeps the inline
-  // sidenav open across switches.
+  // Selects a settings tab while clearing any transient toasts so they never follow navigation.
+  // Contextual errors stay as persistent banners.
   const selectSettingsTab = useCallback(
     (tab: SettingsTab) => {
       if (!isSettingsTab(tab)) return;
@@ -775,11 +691,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
-  // Unified container runtime policy ([containers]): one table governs the
-  // three knobs across bash tiers plus detonation, so the editors share one
-  // Security section. Numeric inputs hold raw text (including empty) so a
-  // cleared field surfaces a range error instead of silently keeping the
-  // stored value; the images are pinned in code and never editable here.
+  // Unified container runtime policy ([containers]): one table governs the three knobs across bash
+  // tiers plus detonation, so the editors share one Security section.
   const [containersMemoryMB, setContainersMemoryMB] = useState<number | string>(
     DEFAULT_CONTAINERS_CONFIG.memoryMb
   );
@@ -824,10 +737,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // Single source for the toggle direction: running offers Stop while stopped
   // and unknown both offer Start, so the header never shows two buttons.
   const searchRunning = searchReachable === true;
-  // Guarded remove enablement: only a known stopped entry or an
-  // unknown-never-started host may delete, never a running entry and never
-  // while any lifecycle action is busy. A running entry must stop first so the
-  // server never half-deletes a live container.
+  // Guarded remove enablement: only a known stopped entry or an unknown-never-started host may
+  // delete, never a running entry and never while any lifecycle action is busy.
   const searchRemoveEnabled = !searchActionBusy && !searchRunning;
   // Non-blocking remove confirmation: the pending flag renders the shared modal
   // so the container entry is never deleted by an accidental click.
@@ -849,12 +760,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [searchDiagnostics, setSearchDiagnostics] = useState<string | null>(
     null
   );
-  // Managed browser Python health for the Web pane: probed on tab open and
-  // updated directly from the Ensure response so the state stays honest
-  // without a reload. Tri-state (Ready/Missing/Unknown) plus a Preparing
-  // state with stage copy and elapsed while a provision flight runs. The
-  // venv path, resolved interpreter, and manual fallback live behind Advanced
-  // so the common case shows one action rather than setup internals.
+  // Managed browser Python health for the Web pane: probed on tab open and updated directly from
+  // the Ensure response so the state stays honest without a reload.
   const [browserReady, setBrowserReady] = useState<boolean | null>(null);
   const [browserPythonPath, setBrowserPythonPath] = useState<string>("");
   const [browserVenvPath, setBrowserVenvPath] = useState<string>(
@@ -947,10 +854,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     DEFAULT_MEDIA_TIMEOUT_SECONDS
   );
 
-  // Single probe list for every Keychain-backed name so the status map drives
-  // all badges: email password envs, provider apiKeyEnvs, and the Sonarr /
-  // Radarr apiKeyEnv names. Media names come from the live form plus the last
-  // loaded settings so a custom name stays probed before and after populate.
+  // Single probe list for every Keychain-backed name so the status map drives all badges: email
+  // password envs, provider apiKeyEnvs, and the Sonarr / Radarr apiKeyEnv names.
   const relevantSecretKeys = React.useMemo(() => {
     const keys = new Set<string>();
     for (const item of emailAccountsList) {
@@ -1039,12 +944,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
   const browserSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Native desktop vision and gated control ([desktop]): capture knobs for
-  // desktop.screenshot plus the blocked-apps list for desktop.action. Each
-  // tool configures from its own modal, so this form holds only the knobs —
-  // tool enablement lives in the tool-state toggles above. The blocked-apps
-  // editor holds raw textarea text (one app per line) so blank lines survive
-  // editing and only collapse on save.
+  // Native desktop vision and gated control ([desktop]): capture knobs for desktop.screenshot plus
+  // the blocked-apps list for desktop.action.
   const [desktopMaxImageDimension, setDesktopMaxImageDimension] = useState<
     number | string
   >(DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION);
@@ -1060,12 +961,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const desktopSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Parallel worker fan-out ([fanout]): swarm knobs for fanout.run. Number
-  // inputs hold raw text (including empty) so clearing a field saves the
-  // modal default instead of preserving the stale value; the toggle stays a
-  // plain boolean. Enablement lives in the tool-state switch, so no enabled
-  // key travels here. The fresh form seeds from the modal defaults before the
-  // first settings fetch.
+  // Parallel worker fan-out ([fanout]): swarm knobs for fanout.run.
   const [fanoutMaxWorkers, setFanoutMaxWorkers] = useState<number | string>(
     DEFAULT_FANOUT_MAX_WORKERS
   );
@@ -1089,11 +985,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const fanoutSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Steady long-horizon pursuit ([goals]): enablement plus the cadence hint
-  // stored on each new goal and the active-goal cap bounding scheduler
-  // fan-out. Planning bounds stay file-owned. The fresh form seeds from the
-  // engine defaults so the editor matches the boundary before the first
-  // settings fetch.
+  // Steady long-horizon pursuit ([goals]): enablement plus the cadence hint stored on each new goal
+  // and the active-goal cap bounding scheduler fan-out. Planning bounds stay file-owned.
   const [goalsEnabled, setGoalsEnabled] = useState<boolean>(DEFAULT_GOALS_ENABLED);
   const [goalsStepIntervalMinutes, setGoalsStepIntervalMinutes] = useState<number | string>(
     DEFAULT_GOALS_STEP_INTERVAL_MINUTES
@@ -1125,57 +1018,34 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [proactiveJudgeTimeoutSeconds, setProactiveJudgeTimeoutSeconds] = useState<number | string>(
     DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS
   );
-  // Owner-facing assistant persona ([persona]): assistant name, tone preset,
-  // free-form style guidance, the owner's preferred address name, and the
-  // client-side avatar accent. Drafts hold raw text so a cleared field saves
-  // the documented fallback rather than a coerced default, while tone and
-  // accent drafts stay closed-set (populate normalizes, the picker only ever
-  // writes known spellings). `personaLoadedRef` keeps the last-loaded snapshot
-  // for the changed-only delta: a field the owner never touches stays omitted
-  // so the stored value survives exactly like the goals and proactive patches.
+  // Owner-facing assistant persona ([persona]): assistant name, tone preset, free-form style
+  // guidance, the owner's preferred address name, and the client-side avatar accent.
   const [personaAssistantNameDraft, setPersonaAssistantNameDraft] = useState("");
   const [personaToneDraft, setPersonaToneDraft] = useState<string>(DEFAULT_PERSONA_TONE);
   const [personaStyleDraft, setPersonaStyleDraft] = useState("");
   const [personaUserNameDraft, setPersonaUserNameDraft] = useState("");
   const [personaAvatarDraft, setPersonaAvatarDraft] = useState<string>(DEFAULT_PERSONA_AVATAR);
   const personaLoadedRef = useRef<PersonaData>({});
-  // Files & Access lives in the Security pane as the single files editor:
-  // the page Save owns persistence through executeSave with
-  // validateFilesFields and buildFilesPayload, so guard shapes never fork.
-  // Network bind ([server] hostname, port, allowed_hosts): the socket and the
-  // Host gate are fixed at boot, so saves persist to the file and return
-  // requiresRestart instead of live-reloading. The allowed-hosts editor holds
-  // raw textarea text (one exact host per line) so blank lines survive editing
-  // and only collapse on save; the restart flag from the last PUT plus the
-  // file-vs-boot comparison below drives the pending-vs-live banner.
+  // Files & Access lives in the Security pane as the single files editor: the page Save owns
+  // persistence through executeSave with validateFilesFields and buildFilesPayload, so guard shapes
+  // never fork.
   const [serverHostname, setServerHostname] = useState<string>(DEFAULT_SERVER_HOSTNAME);
-  // Tracks an explicit Custom pick so entering custom mode preserves the
-  // preset value in the revealed input instead of clearing to empty; the
-  // selector stays on custom while the input holds the preset until edited,
-  // and picking a preset clears the flag.
+  // Tracks an explicit Custom pick so entering custom mode preserves the preset value in the
+  // revealed input instead of clearing to empty; the selector stays on custom while the input holds
+  // the preset until edited, and picking a preset clears the flag.
   const [serverHostnameCustom, setServerHostnameCustom] = useState(false);
   const [serverPort, setServerPort] = useState<number | string>(DEFAULT_SERVER_PORT);
   const [serverAllowedHostsText, setServerAllowedHostsText] = useState<string>("");
   const [serverRestartRequired, setServerRestartRequired] = useState(false);
-  // Live boot bind snapshot: the socket and Host gate values fixed at process
-  // start. File values from GET/PUT drift ahead after a network save, so the
-  // restart banner compares the pending file against this boot snapshot
-  // instead of file against file (which would render identical after
-  // populateForm syncs the form to the PUT response). Seeded from the first
-  // settings fetch and corrected from /health when the engine advertises its
-  // boot bind; preserved across PUTs so a second save without a restart keeps
-  // the original boot instead of sliding to an intermediate file.
+  // Live boot bind snapshot: the socket and Host gate values fixed at process start.
   const [liveServerBind, setLiveServerBind] = useState<{
     hostname: string;
     port: number;
     allowedHosts: string[];
   } | null>(null);
-  // Access-management flow: rotating the single owner token signs out every
-  // other device the moment the engine swaps it, so the dashboard asks twice
-  // before calling the route, then reveals the new token once. The API client
-  // adopts the token as soon as rotation returns because the old one is already
-  // invalid; the reveal stays until the owner acknowledges storing it, since a
-  // false "saved" is the one unrecoverable mistake in this flow.
+  // Access-management flow: rotating the single owner token signs out every other device the moment
+  // the engine swaps it, so the dashboard asks twice before calling the route, then reveals the new
+  // token once.
   const [rotateConfirmStep, setRotateConfirmStep] = useState<0 | 1 | 2>(0);
   const [rotating, setRotating] = useState(false);
   const [rotateError, setRotateError] = useState<string | null>(null);
@@ -1185,19 +1055,12 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
-  // Agent scratch workspace usage lives on
-  // the Tools tab beside the builtin switches. Usage bars read the live tree
-  // from GET /workspace/usage while the quota editors below seed from
-  // GET /settings [workspace] and persist through the tab save, so the bars
-  // stay honest about the tree even while an edit is in flight.
+  // Agent scratch workspace usage lives on the Tools tab beside the builtin switches.
   const [workspaceUsage, setWorkspaceUsage] = useState<WorkspaceUsageResponse | null>(null);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-  // Editable scratch quotas bounding the workspace tree. Numeric inputs hold
-  // raw text (including empty) so a cleared field surfaces a range error
-  // instead of silently keeping the stored quota. The fresh form seeds from
-  // the combined workspace default so the editors match the engine boundary
-  // before the first settings fetch.
+  // Editable scratch quotas bounding the workspace tree. Numeric inputs hold raw text (including
+  // empty) so a cleared field surfaces a range error instead of silently keeping the stored quota.
   const [workspaceQuotaMB, setWorkspaceQuotaMB] = useState<number | string>(
     DEFAULT_WORKSPACE_CONFIG.quotaMB
   );
@@ -1230,8 +1093,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
 
   // Refreshes the Web pane health line without touching the settings form: Start/Stop change
   // container state, not config values, so health stays separate from Save.
-  // Honest tri-state: only a boolean reachable flag may move the dot, matching TopNav; empty or
-  // shape-drifted payloads keep unknown gray (null) instead of coercing missing to false red Stopped.
   const refreshSearchHealth = useCallback(async () => {
     setSearchHealthLoading(true);
     setSearchHealthError(null);
@@ -1269,11 +1130,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, []);
 
-  // Refreshes the browser Python health line without touching the form:
-  // provisioning changes the managed venv, not config values. Honest
-  // tri-state like search: only a boolean ready flag may move the pill, while
-  // a 404 from an older engine without `/browser/health` keeps Unknown with
-  // the static venv hint instead of an error banner.
+  // Refreshes the browser Python health line without touching the form: provisioning changes the
+  // managed venv, not config values.
   const refreshBrowserHealth = useCallback(async () => {
     setBrowserHealthLoading(true);
     try {
@@ -1306,11 +1164,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, []);
 
-  // Arms a fresh provision poll: resets the stage line, records the
-  // client-side Start instant, and polls health about 1s for the live step
-  // plus elapsed. The cap fires only past the minutes budget while not in a
-  // long download; it clears the stage line and re-probes the dot while
-  // keeping the button locked until the terminal ensure result lands.
+  // Arms a fresh provision poll: resets the stage line, records the client-side Start instant, and
+  // polls health about 1s for the live step plus elapsed.
   const beginBrowserProgress = useCallback(() => {
     setBrowserStage(null);
     browserStageRef.current = null;
@@ -1368,11 +1223,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setBrowserStage(null);
   }, [clearBrowserPoll]);
 
-  // Provisions the managed venv through the dedicated ensure path: the server
-  // collapses concurrent callers onto one flight, reuses an existing entry
-  // instead of clobbering it, and fails closed offline with the venv path plus
-  // manual fallback. The pill moves solely on the terminal result below, so
-  // mid-flight flaps never flip it early.
+  // Provisions the managed venv through the dedicated ensure path: the server collapses concurrent
+  // callers onto one flight, reuses an existing entry instead of clobbering it, and fails closed
+  // offline with the venv path plus manual fallback.
   const handleEnsureBrowser = async () => {
     // Guard on the ref, not the state, so a second click before the re-render
     // still sees the in-flight flight and drops instead of racing it.
@@ -1498,10 +1351,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setSearchHealthError(null);
     setSearchDiagnostics(null);
     // A Start fans out to a minutes-budget cascade (notably the first-run image pull), so poll
-    // health about 1s for the live step while it runs. Polls feed the Starting line only; the pill
-    // moves solely on the terminal result below, so mid-flight flaps never flip it early.
-    // The cap clears only the stage line plus a dot re-probe; busy stays locked until the
-    // terminal result below lands so the toggle cannot race the hung pull.
+    // health about 1s for the live step while it runs.
     if (wasStarting) {
       beginSearchStartProgress(() => {
         void refreshSearchHealth();
@@ -1511,10 +1361,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       const response = wasStarting ? await ensureSearch() : await stopSearch();
       // Honest tri-state: only a boolean reachable flag may move the pill; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of optimistically flipping.
-      // A failed start (reachable false) renders the trimmed banner in the existing error slot
-      // with chained detail in the collapsed diagnostics below, instead of flipping silently to red.
-      // A failed stop (still reachable) surfaces its message; a clean stop clears the slot.
-      // Stop carries no chained diagnostics today, but the slot clears symmetrically with ensure.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchDiagnostics(resolveSearchDiagnostics(response));
@@ -1550,12 +1396,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Guarded remove through the dedicated remove path: the server stops a
-  // running entry first rather than half-deleting, the image cache survives so
-  // the next Start recreates the entry, and the pill moves solely on the
-  // honest reachable re-probe below. The button stays disabled while running
-  // or busy, so this path normally runs from stopped or unknown only; a
-  // still-reachable result refuses with guidance instead of claiming deleted.
+  // Guarded remove through the dedicated remove path: the server stops a running entry first rather
+  // than half-deleting, the image cache survives so the next Start recreates the entry, and the pill
+  // moves solely on the honest reachable re-probe below.
   const handleConfirmRemoveSearch = async () => {
     if (searchAction !== null) return;
     setPendingRemoveSearch(false);
@@ -1564,11 +1407,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setSearchDiagnostics(null);
     try {
       const response = await removeSearch();
-      // Honest tri-state like the toggle: only a boolean reachable flag may
-      // move the pill; shape-drifted payloads preserve state with an error.
-      // A refused remove (still reachable, or stopped-but-still-listed via
-      // removed false) surfaces its guidance; a clean delete clears to
-      // Stopped so the next Start recreates the entry.
+      // Honest tri-state like the toggle: only a boolean reachable flag may move the pill;
+      // shape-drifted payloads preserve state with an error.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchDiagnostics(resolveSearchDiagnostics(response));
@@ -1683,10 +1523,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setPendingUninstallPlugin(null);
   }
 
-  // Final rotate step: the engine persists the replacement before it goes live
-  // and returns it once. rotateToken adopts it immediately so background polls
-  // and the shared socket keep working on the new credential; only the one-time
-  // display value stays in component state.
+  // Final rotate step: the engine persists the replacement before it goes live and returns it once.
   const handleConfirmRotate = async () => {
     if (rotating) return;
     setRotateConfirmStep(0);
@@ -1732,10 +1569,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     clearAuthToken();
   };
 
-  // Whether this tab holds an owner credential at all. The loopback no-auth
-  // posture never mints one, so offering "Log Out" there would present a
-  // session-less control whose only effect is a login gate that accepts any
-  // value; the button is omitted until a real token-backed session exists.
+  // Whether this tab holds an owner credential at all.
   const hasOwnerSession = isSessionAuthenticated();
 
   // Flips one builtin engine tool without a protected list: every builtin toggles independently so
@@ -1880,10 +1714,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Copies one settings fetch into the Sonarr/Radarr fields, tolerating both
-  // snake_case and camelCase DTO aliases and falling back to the conventional
-  // key names. Only overwrites sections the engine returns so older engines
-  // without [media] leave the form defaults untouched.
+  // Copies one settings fetch into the Sonarr/Radarr fields, tolerating both snake_case and
+  // camelCase DTO aliases and falling back to the conventional key names.
   const populateMediaSettings = useCallback(
     (media: MediaConfigData | undefined | null) => {
       if (media?.timeoutSeconds !== undefined) {
@@ -1923,14 +1755,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the [media] delta from the Sonarr/Radarr form fields so the
-  // full-settings save and the modal-only save share one shape. Emptied URL,
-  // quality, and root-folder fields send as "" so the engine clears back to
-  // auto-detect/unconfigured instead of preserving the stale value; the engine
-  // reads blank and missing identically, so "" is the explicit clear signal.
-  // An emptied credential env-var name keeps the last loaded stored value
-  // instead of resetting to the conventional name, so clearing the input never
-  // overwrites a custom name with the default.
+  // Builds the [media] delta from the Sonarr/Radarr form fields so the full-settings save and the
+  // modal-only save share one shape.
   const buildMediaPayload = useCallback(
     (): MediaConfigData => {
       const storedSonarrEnv =
@@ -1976,10 +1802,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     ]
   );
 
-  // Copies one settings fetch into the desktop knob fields, tolerating an
-  // absent [desktop] section from older engines by keeping the form defaults.
-  // Only overwrites sections the engine returns so older engines without
-  // desktop leave the form defaults untouched.
+  // Copies one settings fetch into the desktop knob fields, tolerating an absent [desktop] section
+  // from older engines by keeping the form defaults.
   const populateDesktopSettings = useCallback(
     (desktop: DesktopConfigData | undefined | null) => {
       if (!desktop) return;
@@ -1996,14 +1820,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the unified [desktop] delta for the single Configure Desktop
-  // Integration modal so the full-settings save and the modal-only save share
-  // one shape. Both call sites always send every knob (capture bounds plus the
-  // application blocklist). Enable keys never travel here — tool enablement
-  // lives in the tool-state toggles.
-  // Numeric fields preserve the raw input (including empty/invalid) so the
-  // modal validation surfaces range errors instead of silently coercing back
-  // to defaults.
+  // Builds the unified [desktop] delta for the single Configure Desktop Integration modal so the
+  // full-settings save and the modal-only save share one shape.
   const buildDesktopPayload = useCallback(
     (): DesktopSettingsUpdate => {
       return {
@@ -2019,11 +1837,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     ]
   );
 
-  // Copies one settings fetch into the fan-out knob fields, tolerating an
-  // absent [fanout] section from older engines by keeping the modal defaults.
-  // Only overwrites keys the engine returns so a stored value always wins over
-  // the empty-field fallback, and records the snapshot the changed-only patch
-  // compares against so untouched knobs stay omitted on save.
+  // Copies one settings fetch into the fan-out knob fields, tolerating an absent [fanout] section
+  // from older engines by keeping the modal defaults.
   const populateFanoutSettings = useCallback(
     (fanout: FanoutConfigData | undefined | null) => {
       const next: FanoutConfigData = { ...fanoutLoadedRef.current };
@@ -2044,11 +1859,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the changed-only [fanout] delta for the Configure modal: a knob
-  // matching its last-loaded value stays omitted so the stored value survives,
-  // while a cleared numeric input sends the modal default as an explicit
-  // change. Only snake_case keys travel; no enabled key, which lives in the
-  // tool-state toggles.
+  // Builds the changed-only [fanout] delta for the Configure modal: a knob matching its last-loaded
+  // value stays omitted so the stored value survives, while a cleared numeric input sends the modal
+  // default as an explicit change.
   const buildFanoutPayload = useCallback(
     (): FanoutSettingsUpdate => {
       const patch: FanoutSettingsUpdate = {};
@@ -2086,10 +1899,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     [fanoutMaxWorkers, fanoutWorkerTimeoutSeconds, fanoutFullTools]
   );
 
-  // Copies one settings fetch into the goals fields, tolerating both
-  // snake_case and camelCase DTO aliases and an absent [goals] section from
-  // older engines by keeping the form defaults. Only overwrites sections the
-  // engine returns so older engines without goals leave the form untouched.
+  // Copies one settings fetch into the goals fields, tolerating both snake_case and camelCase DTO
+  // aliases and an absent [goals] section from older engines by keeping the form defaults.
   const populateGoalsSettings = useCallback(
     (goals: GoalsConfigData | undefined | null) => {
       if (!goals) return;
@@ -2150,11 +1961,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     };
   }, [ideasEnabled, ideasMaxPerCycle, ideasTimeoutSeconds]);
 
-  // Builds the [goals] delta from the pursuit form fields so the
-  // full-settings save shares one shape with future modal saves.
-  // Numeric fields preserve the raw input (including empty/invalid) so the
-  // page validation surfaces range errors instead of silently coercing back
-  // to defaults.
+  // Builds the [goals] delta from the pursuit form fields so the full-settings save shares one
+  // shape with future modal saves.
   const buildGoalsPayload = useCallback(
     (): GoalsSettingsUpdate => {
       return {
@@ -2223,11 +2031,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     return null;
   }, [ideasMaxPerCycle, ideasTimeoutSeconds]);
 
-  // Copies one settings fetch into the proactivity fields, tolerating an
-  // absent [proactive] section from older engines by keeping the form
-  // defaults. Only overwrites sections the engine returns. The mode converges
-  // to its canonical lowercase spelling so a file-configured `ALL` or padded
-  // value lands on the matching select option instead of blanking it.
+  // Copies one settings fetch into the proactivity fields, tolerating an absent [proactive] section
+  // from older engines by keeping the form defaults. Only overwrites sections the engine returns.
   const populateProactiveSettings = useCallback(
     (proactive: ProactiveConfigData | undefined | null) => {
       if (!proactive) return;
@@ -2244,11 +2049,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the [proactive] delta from the interruption form fields so the
-  // full-settings save shares one shape with future modal saves. Sends the
-  // snake_case keys the engine persists. The mode travels as its canonical
-  // lowercase spelling so a differently-cased edit sends what the file
-  // loader and the closed-set 400 both recognize.
+  // Builds the [proactive] delta from the interruption form fields so the full-settings save shares
+  // one shape with future modal saves. Sends the snake_case keys the engine persists.
   const buildProactivePayload = useCallback(
     (): ProactiveSettingsUpdate => {
       return {
@@ -2259,11 +2061,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     [proactiveMode, proactiveJudgeTimeoutSeconds]
   );
 
-  // Shared proactivity validation for the full-save path so it rejects an
-  // unknown mode or an out-of-range judge budget before any network write.
-  // Mirrors ProactiveMode plus the 1-120 judge bound. Matching is
-  // case-insensitive (trim plus lowercase) so the dashboard accepts the same
-  // spellings the file loader does.
+  // Shared proactivity validation for the full-save path so it rejects an unknown mode or an
+  // out-of-range judge budget before any network write. Mirrors ProactiveMode plus the 1-120 judge
+  // bound.
   const validateProactiveFields = useCallback((): string | null => {
     const normalizedMode = normalizeProactiveMode(proactiveMode);
     if (!isValidProactiveMode(normalizedMode)) {
@@ -2276,12 +2076,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     return null;
   }, [proactiveMode, proactiveJudgeTimeoutSeconds]);
 
-  // Copies one settings fetch into the persona fields, tolerating an absent
-  // [persona] section from older engines by keeping the stock defaults, and
-  // records the loaded snapshot that drives the changed-only delta. Tone and
-  // accent converge to their canonical lowercase spellings the way the engine
-  // normalizers do, so a file-configured `WARM` or a drifted accent never
-  // blanks the select or leaves the picker with no ring.
+  // Copies one settings fetch into the persona fields, tolerating an absent [persona] section from
+  // older engines by keeping the stock defaults, and records the loaded snapshot that drives the
+  // changed-only delta.
   const populatePersonaSettings = useCallback(
     (persona: PersonaData | undefined | null) => {
       const loaded = persona ?? {};
@@ -2295,12 +2092,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     [],
   );
 
-  // Builds the [persona] delta from the identity drafts: only fields that
-  // moved since the last load travel on the wire, so one save is a partial
-  // patch that preserves every stored key the owner never touched — including
-  // the rest of the persona itself. An emptied assistant name still sends the
-  // blank string, which the engine documents as the fall back to the stock
-  // identity, rather than silently omitting a deliberate clear.
+  // Builds the [persona] delta from the identity drafts: only fields that moved since the last load
+  // travel on the wire, so one save is a partial patch that preserves every stored key the owner
+  // never touched — including the rest of the persona itself.
   const buildPersonaDelta = useCallback((): PersonaSettingsUpdate => {
     const loaded = personaLoadedRef.current;
     const delta: PersonaSettingsUpdate = {};
@@ -2334,10 +2128,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     personaAvatarDraft,
   ]);
 
-  // Shared persona validation so the pane rejects an oversized or drifted
-  // field before any network write, mirroring the core normalizer bounds. The
-  // inputs clamp with maxLength already, so these checks are the closed-set
-  // and pasted-shape backstop, not the primary guard.
+  // Shared persona validation so the pane rejects an oversized or drifted field before any network
+  // write, mirroring the core normalizer bounds.
   const validatePersonaFields = useCallback((): string | null => {
     if (personaAssistantNameDraft.length > MAX_PERSONA_ASSISTANT_NAME_LENGTH) {
       return `Invalid assistant name: must be at most ${MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.`;
@@ -2368,11 +2160,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // Builds the [files] delta for the single page Save via executeSave; no section save remains.
 
 
-  // Copies one settings fetch into the workspace quota editors, tolerating
-  // both snake_case and camelCase DTO aliases and an absent [workspace]
-  // section from older engines by keeping the form defaults. Only overwrites
-  // keys the engine returns so a stored quota always wins over the fresh-form
-  // fallback, keeping the bars and the editors on the same stored truth.
+  // Copies one settings fetch into the workspace quota editors, tolerating both snake_case and
+  // camelCase DTO aliases and an absent [workspace] section from older engines by keeping the form
+  // defaults.
   const populateWorkspaceSettings = useCallback(
     (workspace: WorkspaceConfigData | undefined | null) => {
       if (!workspace) return;
@@ -2407,12 +2197,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the [workspace] delta from the Tools-tab quota editors so the tab
-  // save persists quotas beside the usage bars through one PUT. Sends the
-  // snake_case keys the engine persists; reads accept both spellings so a
-  // file-configured quota survives the round trip. Numeric fields preserve the
-  // raw input so validation surfaces range errors instead of silently
-  // coercing back to defaults.
+  // Builds the [workspace] delta from the Tools-tab quota editors so the tab save persists quotas
+  // beside the usage bars through one PUT.
   const buildWorkspacePayload = useCallback(
     (): WorkspaceSettingsUpdate => {
       return {
@@ -2424,10 +2210,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]
   );
 
-  // Shared workspace validation for the tab save so an out-of-range quota or
-  // retention fails in the form before any network write with one message.
-  // Bounds mirror WorkspaceConfig clamps so the form agrees with the server
-  // 400 instead of persisting a quota the loader rejects.
+  // Shared workspace validation for the tab save so an out-of-range quota or retention fails in the
+  // form before any network write with one message.
   const validateWorkspaceFields = useCallback((): string | null => {
     const quotaMBNum = Number(workspaceQuotaMB);
     if (!Number.isInteger(quotaMBNum) || quotaMBNum < WORKSPACE_QUOTA_MB_MIN || quotaMBNum > WORKSPACE_QUOTA_MB_MAX) {
@@ -2444,11 +2228,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     return null;
   }, [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]);
 
-  // Copies one settings fetch into the containers knob editors, tolerating
-  // both snake_case and camelCase DTO aliases and an absent [containers]
-  // section from older engines by keeping the form defaults. Only overwrites
-  // keys the engine returns so a stored knob always wins over the
-  // fresh-form fallback.
+  // Copies one settings fetch into the containers knob editors, tolerating both snake_case and
+  // camelCase DTO aliases and an absent [containers] section from older engines by keeping the form
+  // defaults.
   const populateContainersSettings = useCallback(
     (containers: ContainersConfigData | undefined | null) => {
       if (!containers) return;
@@ -2479,10 +2261,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     []
   );
 
-  // Builds the [containers] delta from the Security-tab knob editors so the
-  // page save persists the three knobs through one PUT.
-  // Numeric fields preserve the raw input so validation surfaces range errors instead of silently
-  // coercing back to defaults.
+  // Builds the [containers] delta from the Security-tab knob editors so the page save persists the
+  // three knobs through one PUT.
   const buildContainersPatch = useCallback(
     (): ContainersSettingsUpdate => {
       return {
@@ -2494,11 +2274,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     [containersMemoryMB, containersMaxConcurrent, containersTTLMinutes]
   );
 
-  // Shared containers validation for the page save so an out-of-range knob
-  // fails in the form before any network write with one message. Bounds
-  // mirror ContainersConfig clamps (256-8192 MB, 1-32 concurrent, 5-1440
-  // TTL minutes) so the form agrees with the server 400 instead of
-  // persisting a knob the loader rejects.
+  // Shared containers validation for the page save so an out-of-range knob fails in the form before
+  // any network write with one message.
   const validateContainersFields = useCallback((): string | null => {
     const memoryNum = Number(containersMemoryMB);
     if (!Number.isInteger(memoryNum) || memoryNum < CONTAINERS_MEMORY_MIN_MB || memoryNum > CONTAINERS_MEMORY_MAX_MB) {
@@ -2603,11 +2380,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     // Proactivity fields share one helper so load and save stay symmetric; an
     // absent [proactive] keeps the form defaults instead of blanking the pane.
     populateProactiveSettings(data.proactive);
-    // Persona fields share one helper so load and save stay symmetric; an
-    // absent [persona] keeps the stock identity instead of blanking the pane.
-    // Every settings read then republishes the persona into the shared store
-    // so the profile block and chat header mirror this pane exactly, including
-    // after a persona save whose response carries the merged snapshot.
+    // Persona fields share one helper so load and save stay symmetric; an absent [persona] keeps
+    // the stock identity instead of blanking the pane.
     populatePersonaSettings(data.persona);
     publishPersonaFromSettings(data.persona);
     // Fan-out knobs share one helper so load and save stay symmetric; an
@@ -2629,11 +2403,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         ? data.serverHostname
         : DEFAULT_SERVER_HOSTNAME
     );
-    // A freshly loaded preset never starts in explicit custom mode, while a
-    // stored custom address does, so the selector reflects the file instead
-    // of lingering on a prior custom pick. Compared case-insensitively via
-    // the restart canonicalization so casing the gate ignores never forces
-    // custom.
+    // A freshly loaded preset never starts in explicit custom mode, while a stored custom address
+    // does, so the selector reflects the file instead of lingering on a prior custom pick.
     setServerHostnameCustom(
       typeof data.serverHostname === "string" && data.serverHostname.trim()
         ? !isServerBindPreset(data.serverHostname)
@@ -2645,13 +2416,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         : DEFAULT_SERVER_PORT
     );
     setServerAllowedHostsText(formatServerAllowedHostsText(data.serverAllowedHosts));
-    // Seed the boot snapshot once from the first fetch; later PUTs preserve
-    // the original boot via the pre-save snapshot in executeSave, so the
-    // banner keeps comparing pending file versus boot instead of file versus
-    // file. The flag itself mirrors the server: true only when the last PUT
-    // really moved the bind (the route diffs old versus new), while the
-    // render-time file-vs-boot check preserves the banner across non-server
-    // saves that return false.
+    // Seed the boot snapshot once from the first fetch; later PUTs preserve the original boot via
+    // the pre-save snapshot in executeSave, so the banner keeps comparing pending file versus boot
+    // instead of file versus file.
     const fileBindHostname =
       typeof data.serverHostname === "string" && data.serverHostname.trim()
         ? data.serverHostname
@@ -2669,12 +2436,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setServerRestartRequired(Boolean(data.requiresRestart));
   }, [populateMediaSettings, populateDesktopSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings, populateWorkspaceSettings]);
 
-  // Reconciles the boot snapshot from /health when the engine advertises its
-  // live bind. Older engines omit the keys, in which case the pre-save file
-  // snapshot above stays as the live source of truth. Newer engines correct an
-  // initial seed that assumed file equals boot (for example a file edited
-  // without a restart before the first fetch) and re-anchor live after a
-  // restart so the banner clears once file converges with boot.
+  // Reconciles the boot snapshot from /health when the engine advertises its live bind. Older
+  // engines omit the keys, in which case the pre-save file snapshot above stays as the live source
+  // of truth.
   const refreshBootBind = useCallback(async () => {
     try {
       const res = await fetch("/health", {
@@ -2728,10 +2492,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     void refresh();
   }, [refresh]);
 
-  // Loads live container health when the Web pane opens so the health
-  // line reflects the running container rather than the saved URL alone.
-  // Runs on tab entry only; Start/Stop update directly from their action
-  // response without an extra probe so the health line never flashes stale.
+  // Loads live container health when the Web pane opens so the health line reflects the running
+  // container rather than the saved URL alone.
   useEffect(() => {
     if (activeTab === "search") {
       void refreshSearchHealth();
@@ -2741,20 +2503,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, [activeTab, refreshSearchHealth, refreshBrowserHealth, refreshEmbeddingsStatus]);
 
-  // Re-anchors the boot snapshot when the Network pane opens so a restart
-  // performed outside the dashboard (file now converges with the new boot)
-  // clears the banner without a manual Refresh. Runs on tab entry only; the
-  // pending-restart poll below covers a restart while the pane stays open.
+  // Re-anchors the boot snapshot when the Network pane opens so a restart performed outside the
+  // dashboard (file now converges with the new boot) clears the banner without a manual Refresh.
   useEffect(() => {
     if (activeTab === "network") {
       void refreshBootBind();
     }
   }, [activeTab, refreshBootBind]);
 
-  // Loads scratch quotas when the Tools tab opens so
-  // the bars reflect the live tree rather than a stale mount. Runs on tab
-  // entry only; prune refreshes its own slice without an extra probe so
-  // the pane never flashes empty mid-action.
+  // Loads scratch quotas when the Tools tab opens so the bars reflect the live tree rather than a
+  // stale mount.
   useEffect(() => {
     if (activeTab === "tools") {
       void refreshWorkspaceUsage();
@@ -2762,10 +2520,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, [activeTab, refreshWorkspaceUsage, refreshWorkspaceMachine]);
 
-  // Clears the sticky restart flag once the saved file converges with the
-  // re-anchored boot: the health poll moves live to the new boot after an
-  // external restart, so equality proves the pending bind is live and the
-  // banner must clear instead of staying stuck on the pre-restart PUT flag.
+  // Clears the sticky restart flag once the saved file converges with the re-anchored boot: the
+  // health poll moves live to the new boot after an external restart, so equality proves the pending
+  // bind is live and the banner must clear instead of staying stuck on the pre-restart PUT flag.
   useEffect(() => {
     if (!serverRestartRequired || !settings || !liveServerBind) return;
     const fileHostname =
@@ -2789,10 +2546,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, [serverRestartRequired, settings, liveServerBind]);
 
-  // Polls the live bind while the Network pane shows a pending restart so an
-  // external restart re-anchors live when file converges with boot and the
-  // banner clears. Idle while converged so steady state adds no QPS; cleared
-  // on tab change or unmount.
+  // Polls the live bind while the Network pane shows a pending restart so an external restart
+  // re-anchors live when file converges with boot and the banner clears.
   useEffect(() => {
     if (activeTab !== "network") return;
     const fileHostname =
@@ -2852,29 +2607,22 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     };
   }, []);
 
-  // Force Advanced open whenever a provision error lands: the inline banner
-  // names the cause, and the venv path plus manual fallback inside Advanced are
-  // the operator's recovery route. The ref (not a controlled `open` prop) keeps
-  // the disclosure user-togglable the rest of the time.
+  // Force Advanced open whenever a provision error lands: the inline banner names the cause, and
+  // the venv path plus manual fallback inside Advanced are the operator's recovery route.
   useEffect(() => {
     if (browserError && browserAdvancedRef.current) {
       browserAdvancedRef.current.open = true;
     }
   }, [browserError]);
 
-  // Validates the form and persists it through PUT /settings, then hot-reloads
-  // safe sections live. Providers, engine identity, and DB paths still need a
-  // restart to take effect, but the notice stays a plain saved confirmation
-  // without blanket restart claims.
+  // Validates the form and persists it through PUT /settings, then hot-reloads safe sections live.
   const executeSave = async () => {
     setSaving(true);
     setError(null);
 
-    // The persona tab owns the identity drafts alone: its save folds the
-    // changed-only delta into this shared footer path so validation and server
-    // 400s surface through the same banner as every other pane. The engine
-    // merge preserves every omitted key, and an untouched tab never reaches
-    // the network.
+    // The persona tab owns the identity drafts alone: its save folds the changed-only delta into
+    // this shared footer path so validation and server 400s surface through the same banner as every
+    // other pane.
     if (activeTab === "persona") {
       const personaValidationError = validatePersonaFields();
       if (personaValidationError) {
@@ -3045,30 +2793,24 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
 
 
-    // Workspace quotas share their validation helper so the Tools-tab save
-    // rejects an out-of-range quota or retention before any network write.
-    // Mirrors WorkspaceConfig clamps (10-10240 MB, 100-100000 files, 0-90
-    // days) so the form agrees with the server 400.
+    // Workspace quotas share their validation helper so the Tools-tab save rejects an out-of-range
+    // quota or retention before any network write.
     const workspaceValidationError = validateWorkspaceFields();
     if (workspaceValidationError) {
       setError(workspaceValidationError);
       setSaving(false);
       return;
     }
-    // Container knobs share their validation helper so the page save rejects
-    // an out-of-range memory, concurrency, or TTL before any network write.
-    // Mirrors ContainersConfig clamps (256-8192 MB, 1-32 concurrent, 5-1440
-    // TTL minutes) so the form agrees with the server 400.
+    // Container knobs share their validation helper so the page save rejects an out-of-range
+    // memory, concurrency, or TTL before any network write.
     const containersValidationError = validateContainersFields();
     if (containersValidationError) {
       setError(containersValidationError);
       setSaving(false);
       return;
     }
-    // Goals and proactivity share their validation helpers so the full-save
-    // rejects the same shapes a modal would before any network write. Mirrors
-    // GoalsConfig bounds (5-20160, 1-50) plus the ProactiveMode closed set and
-    // the 1-120 judge bound.
+    // Goals and proactivity share their validation helpers so the full-save rejects the same shapes
+    // a modal would before any network write.
     const goalsValidationError = validateGoalsFields();
     if (goalsValidationError) {
       setError(goalsValidationError);
@@ -3103,11 +2845,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         return;
       }
     }
-    // IMAP ports fail closed on non-integer or out-of-range values instead
-    // of coercing to 993, mirroring Config+Validation 1-65535; explicit
-    // SMTP ports follow the narrow submission allowlist (25, 465, 587, 2525)
-    // mirroring Config+Validation/EmailConfig so a saved port never fails
-    // server load validation.
+    // IMAP ports fail closed on non-integer or out-of-range values instead of coercing to 993,
+    // mirroring Config+Validation 1-65535; explicit SMTP ports follow the narrow submission
+    // allowlist (25, 465, 587, 2525) mirroring Config+Validation/EmailConfig so a saved port never.
     for (const entry of emailAccountsList) {
       const label = entry.account.name.trim() || "(unnamed)";
       const portNum = Number(entry.account.port);
@@ -3174,10 +2914,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       setSaving(false);
       return;
     }
-    // Browser automation, HTTP request, and media request timeouts share their
-    // bounds helpers so the full-save rejects the same shapes their modal saves
-    // do before any network write. Mirrors browser 5-300, fetch 1-120, and
-    // media 5-120.
+    // Browser automation, HTTP request, and media request timeouts share their bounds helpers so
+    // the full-save rejects the same shapes their modal saves do before any network write.
     const browserTimeoutError = validateBrowserTimeoutSeconds(browserTimeoutSeconds);
     if (browserTimeoutError) {
       setError(browserTimeoutError);
@@ -3208,16 +2946,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       setSaving(false);
       return;
     }
-    // [server] bind fails closed before any network write so a bad hostname,
-    // port, or allowed_hosts entry never persists to config.toml. Mirrors
-    // ServerEndpointConfig plus RuneWeaverConfig.validateServerHostname and
-    // validateAllowedHosts: port 1-65535, exact-only hostname and hosts
-    // (lowercase, port-stripped, no scheme/wildcard/CIDR/bare *,
-    // unbalanced brackets, or trailing dot, max 20 hosts, max 253 chars).
-    // A non-loopback hostname without a resolvable owner token is refused
-    // server-side (400, never a silent downgrade); the form lets the attempt
-    // through so that authoritative message surfaces instead of a stale
-    // client-side block.
+    // [server] bind fails closed before any network write so a bad hostname, port, or allowed_hosts
+    // entry never persists to config.toml.
     const trimmedServerHostname = serverHostname.trim();
     if (!trimmedServerHostname) {
       setError("Server hostname cannot be empty.");
@@ -3291,9 +3021,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         ? Math.max(TOOL_ROUNDS_MIN, Math.min(TOOL_ROUNDS_MAX, Math.floor(maxToolIterationsValue)))
         : DEFAULT_ENGINE_MAX_TOOL_ITERATIONS;
       // Only send [server] keys when the form differs from the loaded file.
-      // Resending unchanged bind keys would trip carriesServerPatch on every
-      // save and return requiresRestart true for non-network edits; the route
-      // also diffs old versus new server-side as defense in depth.
       const loadedServerHostname =
         typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
           ? settings.serverHostname
@@ -3364,10 +3091,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             }
           : {}),
       });
-      // Preserve the original boot across saves: the first network save seeds
-      // live from the pre-save file, and later saves keep it so the banner
-      // compares the latest file against the still-live boot. populateForm
-      // below seeds live only when null, so this pre-save value wins.
+      // Preserve the original boot across saves: the first network save seeds live from the
+      // pre-save file, and later saves keep it so the banner compares the latest file against the
+      // still-live boot.
       if (updated.requiresRestart) {
         setLiveServerBind((prev) => prev ?? preSaveFileBind);
       }
@@ -3396,12 +3122,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Checks for actively-running work before any PUT so a save never silently
-  // cancels an in-flight turn. Only running counts; parked or awaiting_approval
-  // rows wait on the inbox and never trigger the guard. A fresh run-log read
-  // keeps the check honest when the shared poller has not ticked yet; the
-  // shared snapshot backs the probe only when it fails, so a stale poll never
-  // overrides a fresh idle read.
+  // Checks for actively-running work before any PUT so a save never silently cancels an in-flight
+  // turn. Only running counts; parked or awaiting_approval rows wait on the inbox and never trigger
+  // the guard.
   const hasRunningWork = async (): Promise<boolean> => {
     try {
       const live = await listRuns(RUN_LOG_POLL_LIMIT);
@@ -3519,11 +3242,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Saves the unified [desktop] delta for the desktop modal through PUT
-  // /settings, mirroring the media-only save shape so unsaved edits in other
-  // tabs survive. Validates capture bounds through the shared helper and
-  // saves both screen capture knobs and application blocklists without enable
-  // keys, which live exclusively in tool-state toggles.
+  // Saves the unified [desktop] delta for the desktop modal through PUT /settings, mirroring the
+  // media-only save shape so unsaved edits in other tabs survive.
   const handleSaveDesktopConfig = async () => {
     const desktopBoundsError = validateDesktopCaptureBounds(
       desktopMaxImageDimension,
@@ -3558,12 +3278,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Saves the changed-only [fanout] delta for the fan-out modal through PUT
-  // /settings, mirroring the media-only save shape so unsaved edits in other
-  // tabs survive. Only knobs travel here — enablement lives in the tool-state
-  // toggles — and untouched knobs stay omitted so the stored value survives.
-  // A cleared numeric input sends the modal default as an explicit change, and
-  // the honest server message surfaces on failure.
+  // Saves the changed-only [fanout] delta for the fan-out modal through PUT /settings, mirroring
+  // the media-only save shape so unsaved edits in other tabs survive.
   const handleSaveFanoutConfig = async () => {
     setFanoutSaveLoading(true);
     setFanoutModalError(null);
@@ -3774,10 +3490,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const serverAllowedHostsError = validateServerAllowedHosts(
     parseServerAllowedHostsText(serverAllowedHostsText),
   );
-  // File-vs-boot truth for the Network badge: the saved file from settings
-  // against the boot snapshot (or the file itself before the first snapshot).
-  // ORed with the server flag so a pending restart survives non-server saves
-  // that return false, while an unchanged bind never lights the badge.
+  // File-vs-boot truth for the Network badge: the saved file from settings against the boot
+  // snapshot (or the file itself before the first snapshot).
   const serverFileHostnameForBadge =
     typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
       ? settings.serverHostname
@@ -3799,10 +3513,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     !areServerAllowedHostsEqual(serverFileHostsForBadge, serverBootHostsForBadge);
   const serverRestartVisible = serverRestartRequired || serverFileDiffersFromBootForBadge;
 
-  // Section-finder visibility: a tab shows when its keyword index matches the
-  // trimmed query or when it is the active tab, so narrowing the list never
-  // hides the pane the owner is already looking at. A blank query keeps the
-  // full list.
+  // Section-finder visibility: a tab shows when its keyword index matches the trimmed query or when
+  // it is the active tab, so narrowing the list never hides the pane the owner is already looking
+  // at.
   const settingsNavFilter = settingsNavQuery.trim().toLowerCase();
   const navTabVisible = (tab: SettingsTab) =>
     activeTab === tab || matchesSettingsTab(tab, settingsNavFilter);
@@ -5566,11 +5279,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                     const anyEnabled = enabledCount > 0;
                     const isTogglingCat = togglingCategory === cat.id;
                     const Icon = cat.icon;
-                    // Header Configure resolves once per rendered category: the config key
-                    // must exist and at least one tool in this filtered view must report
-                    // hasConfig, so search or pill filtering never offers a dead editor.
-                    // Clearing all modal errors first keeps a prior failed save
-                    // from lingering when a different category editor opens.
+                    // Header Configure resolves once per rendered category: the config key must
+                    // exist and at least one tool in this filtered view must report hasConfig, so
+                    // search or pill filtering never offers a dead editor.
                     const categoryConfigKey = getCategoryConfigKey(cat.id);
                     const categoryHasConfig = cat.tools.some((t) => t.hasConfig);
                     const categoryConfigTitle =
@@ -6764,12 +6475,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
               </p>
             </div>
             {(() => {
-              // File holds the last saved values from GET/PUT; boot holds the
-              // still-live socket from the pre-save snapshot (or /health when
-              // advertised); pending holds the unsaved form. Comparing file
-              // against boot keeps the restart banner truthful after
-              // populateForm syncs the form to the file, instead of rendering
-              // identical file-versus-file values.
+              // File holds the last saved values from GET/PUT; boot holds the still-live socket
+              // from the pre-save snapshot (or /health when advertised); pending holds the unsaved
+              // form.
               const fileHostname =
                 typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
                   ? settings.serverHostname
@@ -6856,10 +6564,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                   onChange={(e) => {
                     const next = e.target.value;
                     if (next === "custom") {
-                      // Entering custom mode preserves the preset value in the
-                      // revealed input instead of clearing to empty, so the
-                      // pending bind never forces a required-field error nor
-                      // loses the preset until the operator edits it.
+                      // Entering custom mode preserves the preset value in the revealed input
+                      // instead of clearing to empty, so the pending bind never forces a
+                      // required-field error nor loses the preset until the operator edits it.
                       setServerHostnameCustom(true);
                     } else {
                       setServerHostnameCustom(false);

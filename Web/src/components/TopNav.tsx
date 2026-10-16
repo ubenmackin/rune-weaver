@@ -1,16 +1,5 @@
 // Rune Weaver Dashboard — Top navigation bar for section switching and service status.
-// Keeps primary tabs focused on operational views while related sections fold
-// into a Work dropdown and the profile dropdown surfaces Settings plus live
-// engine health, so configuration and pursuit stay reachable without crowding
-// chat. Group and profile menus share the same click/keyboard mechanics with no
-// hover-open path, keeping pointer and keyboard orderings deterministic.
-// The operator space shows operator identity only: the trigger keeps a static
-// "Profile" label in every persona state and the menu header shows the stored
-// owner name, falling back to "Operator" when absent or blank. The assistant
-// name lives in the greeting row plus the chat header plus settings only, so a
-// rename never ripples into this bar. The avatar image itself lives in the
-// sole identity surface (settings picker editor excluded); this bar never
-// renders it, keeping one identity image for the whole app.
+
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { HealthResponse } from "../api";
 import {
@@ -96,10 +85,8 @@ export default function TopNav({
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
   const profileButtonRef = useRef<HTMLButtonElement>(null);
-  // Desktop group dropdowns (currently Work) mirror the profile menu exactly:
-  // click/keyboard toggled with no hover path. Refs are keyed by group id so
-  // outside-click and Escape can resolve the owning container and trigger even
-  // when another group is added later.
+  // Desktop group dropdowns (currently Work) mirror the profile menu exactly: click/keyboard
+  // toggled with no hover path.
   const [openGroup, setOpenGroup] = useState<NavGroupId | null>(null);
   const groupRefs = useRef<Partial<Record<NavGroupId, HTMLDivElement | null>>>({});
   const groupButtonRefs = useRef<Partial<Record<NavGroupId, HTMLButtonElement | null>>>({});
@@ -137,39 +124,25 @@ export default function TopNav({
     health?.searchURL ||
     DEFAULT_SEARCH_SEARXNG_URL;
 
-  // Desktop groups derive labels, icons, and membership from the shared
-  // navigation contract so the top bar cannot drift from the tab model. Badge
-  // wiring stays local: approvals keeps its own top-level count, while the Work
-  // trigger rolls its unread children into one number.
+  // Desktop groups derive labels, icons, and membership from the shared navigation contract so the
+  // top bar cannot drift from the tab model.
   const badgeByTab: Partial<Record<NavTabId, number>> = {
     approvals: approvalsBadge,
     runs: runsBadge,
     goals: goalsBadge,
   };
-  // Shared normalization keeps the bell badge floored through the single
-  // navigation-contract helper so desktop and mobile never drift; the
-  // normalized count feeds both the display string and the owning button's
-  // accessible name so fractional inputs announce what they render.
+  // Shared normalization keeps the bell badge floored through the single navigation-contract helper
+  // so desktop and mobile never drift; the normalized count feeds both the display string and the
+  // owning button's accessible name so fractional inputs announce what they render.
   const normalizedWarnings = normalizeBadgeCount(warningsBadge);
   const warningsDisplay = formatBadgeCount(normalizedWarnings);
 
-  // Staged drawer trigger stays always visible (including zero, fetch
-  // failure, and reload) so review never waits on the tool path. The badge
-  // always shows the numeric count with a muted style at zero, and clicking
-  // always delegates to the upstream drawer wiring where the empty state
-  // already renders `No staged changes`. Never auto-opens on tool_end.
+  // Staged drawer trigger stays always visible (including zero, fetch failure, and reload) so
+  // review never waits on the tool path.
   const normalizedStagedCount = normalizeBadgeCount(stagedFilesCount);
 
-  // Operator name for the profile block. The shared persona store owns the
-  // data flow: Settings publishes on every load and save, so a rename lands
-  // here live. The one-shot mount fetch only runs when nobody has loaded
-  // settings yet this session, so a dashboard opened on a saved persona still
-  // shows the name without waiting for a Settings visit — and a failed fetch
-  // keeps the stock identity instead of blanking the block. The store
-  // subscription stays even though this bar renders no avatar image (text
-  // identity only; the Wisp renders in the sole identity surface (settings picker editor excluded)):
-  // the attention mirror below publishes the store flag the greeting cluster
-  // combines with its REST snapshot to resolve avatar state.
+  // Operator name for the profile block. The shared persona store owns the data flow: Settings
+  // publishes on every load and save, so a rename lands here live.
   const { persona, personaLoaded } = usePersonaSignals();
   useEffect(() => {
     if (personaLoaded) return;
@@ -177,11 +150,9 @@ export default function TopNav({
     getSettings()
       .then((settings) => {
         if (cancelled) return;
-        // Discard the probe once any other reader has loaded settings first:
-        // the store already carries an equal-or-fresher persona, and a late
-        // response from a stale request must never clobber it. This also
-        // keeps a test (or pane save) that publishes while the probe is in
-        // flight authoritative.
+        // Discard the probe once any other reader has loaded settings first: the store already
+        // carries an equal-or-fresher persona, and a late response from a stale request must never
+        // clobber it.
         if (peekPersonaSignals().personaLoaded) return;
         publishPersonaFromSettings(settings?.persona);
       })
@@ -194,33 +165,22 @@ export default function TopNav({
     };
   }, [personaLoaded]);
 
-  // The avatar's attention signal is the same two global counts the nav already
-  // surfaces — pending approvals and unread goal nudges (the goal-needs-input
-  // badge) — published once here for the greeting cluster, which combines this
-  // store flag with its REST snapshot to resolve one avatar state. Badge
-  // counting and clearing stay owned upstream; this effect only mirrors their
-  // truth.
+  // The avatar's attention signal is the same two global counts the nav already surfaces — pending
+  // approvals and unread goal nudges (the goal-needs-input badge) — published once here for the
+  // greeting cluster, which combines this store flag with its REST snapshot to resolve one avatar.
   useEffect(() => {
     publishAgentAttention(approvalsBadge > 0 || goalsBadge > 0);
   }, [approvalsBadge, goalsBadge]);
 
-  // Operator identity with the same blank normalization as the greeting row
-  // plus the chat header: a stored owner name that trims to empty is
-  // indistinguishable from an absent persona, so both fall back to "Operator"
-  // instead of rendering an empty string. The bar renders text identity only:
-  // the Wisp image lives in the sole identity surface (settings picker editor excluded),
-  // so this block never branches on avatar presence. The assistant name never
-  // appears here; it lives in the greeting row plus the chat header plus
-  // settings only.
+  // Operator identity with the same blank normalization as the greeting row plus the chat header: a
+  // stored owner name that trims to empty is indistinguishable from an absent persona, so both fall
+  // back to "Operator" instead of rendering an empty string.
   const operatorNameRaw = personaUserName(persona).trim();
   const operatorDisplayName =
     operatorNameRaw.length > 0 ? operatorNameRaw : "Operator";
 
-  // Local transient feedback for the bell: the shared stack owns timers plus
-  // the dismiss surface, so this nav never invents a second toast system and
-  // badge counting stays untouched upstream. One handler covers both
-  // breakpoints because the bell stays mounted while only the tab links hide
-  // on handheld widths, keeping desktop and mobile behavior identical.
+  // Local transient feedback for the bell: the shared stack owns timers plus the dismiss surface,
+  // so this nav never invents a second toast system and badge counting stays untouched upstream.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
     useToastStack();
 
@@ -257,11 +217,7 @@ export default function TopNav({
   );
   useSharedWebSocket(handleWSFrame);
 
-  // Every tap acknowledges with a toast, even when the Notification API is
-  // missing or blocked. Granted taps with pending warnings route to chat (the
-  // banner there already explains each skip) while zero-warning taps simply
-  // confirm the toggle; denied taps never re-prompt silently and instead point
-  // at site settings. All copy stays well under the transient-toast bound.
+  // Every tap acknowledges with a toast, even when the Notification API is missing or blocked.
   const handleBellClick = useCallback(async () => {
     const unsupportedCopy = "Notifications not supported in this browser.";
     const blockedCopy =
@@ -307,11 +263,7 @@ export default function TopNav({
       return;
     }
 
-    // Default: delegate the prompt to the owner wiring, then toast the
-    // resolved outcome. Prefer the wiring return when it names one so test
-    // doubles that never mutate the global still resolve honestly; otherwise
-    // read the live permission. A still-default outcome means the prompt was
-    // dismissed, which fails closed to guidance rather than retrying.
+    // Default: delegate the prompt to the owner wiring, then toast the resolved outcome.
     let outcome: unknown;
     try {
       outcome = await onRequestNotifications();
@@ -408,10 +360,7 @@ export default function TopNav({
     setProfileOpen((prev) => !prev);
   }, []);
 
-  // Outside-click closes the open group menu. Containment is probed against the
-  // owning container ref so a click on a menu item (which closes the menu
-  // itself after selecting) is never double-handled, and `instanceof Node`
-  // guards the nullable/non-Node targets synthetic flows can produce.
+  // Outside-click closes the open group menu.
   useEffect(() => {
     if (openGroup === null) return;
     const handleClickOutside = (event: MouseEvent) => {
@@ -427,10 +376,8 @@ export default function TopNav({
     };
   }, [openGroup]);
 
-  // Escape closes the open group menu and returns focus to its trigger so
-  // keyboard users never lose place. Deliberately no hover-open path exists:
-  // pointer and keyboard orderings therefore toggle deterministically instead
-  // of racing a mouseenter against a click toggle.
+  // Escape closes the open group menu and returns focus to its trigger so keyboard users never lose
+  // place.
   useEffect(() => {
     if (openGroup === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -495,13 +442,7 @@ export default function TopNav({
     };
   }, [profileOpen, health?.searchReachable, health?.searchURL, searchHealth]);
 
-  // Toggles the SearXNG container through the engine service. The result becomes the local override
-  // only on an honest boolean reachable flag; shape-drifted payloads keep the previous dot and
-  // surface an inline error instead of optimistically flipping. A failed start (reachable false
-  // after ensure) renders the trimmed banner (terminal cause plus one remediation) in the existing
-  // error slot instead of flipping silently to red; chained per-stage detail stays in server warn
-  // logs plus the Settings collapsed diagnostics, so this slot renders once. A failed stop (still
-  // reachable) does the same. Failures keep the menu open.
+  // Toggles the SearXNG container through the engine service.
   const handleToggleSearch = useCallback(async () => {
     if (searchBusyAction !== null) return;
     // Capture whether this action is a start so the error slot can tell a
@@ -511,10 +452,7 @@ export default function TopNav({
     setSearchBusyAction(wasStarting ? "start" : "stop");
     setSearchError(null);
     // A Start fans out to a minutes-budget cascade (notably the first-run image pull), so poll
-    // health about 1s for the live step while it runs. Polls feed the Starting line only; the dot
-    // moves solely on the terminal ensure result below, so mid-flight flaps never flip it early.
-    // The cap clears only the stage line plus a dot re-probe; busy stays locked until the
-    // terminal result below lands so Start/Stop cannot race the hung pull.
+    // health about 1s for the live step while it runs.
     if (wasStarting) {
       beginSearchStartProgress(() => {
         getSearchHealth()
@@ -582,12 +520,9 @@ export default function TopNav({
           if (group.kind === "tab") {
             const Icon = group.icon;
             const isActive = currentTab === group.id;
-            // Normalized display keeps top and bottom bars identical through
-            // the shared contract helper: the floored non-negative count feeds
-            // both the capped display string and the owning button's accessible
-            // name so fractional inputs announce honestly. The badge pill
-            // itself is presentational (aria-hidden) because a bare aria-label
-            // on a generic span without a role is ignored by assistive tech.
+            // Normalized display keeps top and bottom bars identical through the shared contract
+            // helper: the floored non-negative count feeds both the capped display string and the
+            // owning button's accessible name so fractional inputs announce honestly.
             const normalizedBadge = normalizeBadgeCount(badgeByTab[group.id] ?? 0);
             const badgeDisplay = formatBadgeCount(normalizedBadge);
             const tabAccessibleLabel =
@@ -674,10 +609,9 @@ export default function TopNav({
                   {group.children.map((child) => {
                     const ChildIcon = child.icon;
                     const childActive = currentTab === child.id;
-                    // Each open-menu row names its own unread share so the
-                    // rolled-up trigger total stays auditable without opening
-                    // another surface; the pill renders the capped display
-                    // string while the accessible name keeps the honest count.
+                    // Each open-menu row names its own unread share so the rolled-up trigger total
+                    // stays auditable without opening another surface; the pill renders the capped
+                    // display string while the accessible name keeps the honest count.
                     const childCount = normalizeBadgeCount(badgeByTab[child.id] ?? 0);
                     const childDisplay = formatBadgeCount(childCount);
                     const childAccessibleLabel = childCount > 0 ? `${child.label}, ${childCount} unread` : child.label;

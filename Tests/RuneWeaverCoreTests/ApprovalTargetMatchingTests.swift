@@ -1,14 +1,4 @@
 // Rune Weaver Tests — Approval grant target matching for specialized tools.
-//
-// Guards the invariant that a durable narrow grant stores the exact descriptor
-// the permission gate derives on the next call. Tools with a composed target
-// (`browser.act`, `api.request`) or a canonicalized target (`messages.send`)
-// must round-trip through the shared descriptor derivation so approving "this
-// target" once keeps covering that same target instead of silently re-prompting
-// or collapsing to the wrong scope, and so a send grant can never key on a
-// display name. The same boundary refuses empty send targets (malformed calls)
-// and tool-wide send scopes outright, so the CLI approval path cannot mint a
-// grant a malformed call could never have earned.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -191,11 +181,9 @@ struct ApprovalTargetMatchingTests {
 
     @Test
     func `malformed messages.send durable approval mints no grant and no tool-wide scope`() async {
-        // The CLI approval handler mints straight through `grantTrust` with the
-        // descriptor derived from the live call, so the malformed shapes — a
-        // missing, blank, or non-string recipient — must store nothing at that
-        // boundary. Their derived target is empty, which is an invalid send
-        // descriptor, never the tool-wide scope every other tool supports.
+        // The CLI approval handler mints straight through `grantTrust` with the descriptor derived
+        // from the live call, so the malformed shapes — a missing, blank, or non-string recipient —
+        // must store nothing at that boundary.
         let gate = PermissionGate()
         let tool = MessagesSendProbeTool()
         for arguments in [
@@ -224,13 +212,8 @@ struct ApprovalTargetMatchingTests {
 
     @Test
     func `array or non-string recipient with a handle to mints no grant`() async {
-        // `MessagesSendArgs` cannot decode an array recipient, nor a non-string
-        // recipient beside a handle-shaped `to`, so admission proceeds. The
-        // generic target path would still derive a canonical-looking handle
-        // from the array or from the `to` alias, which is exactly how such a
-        // call could mint a durable per-handle grant for a send that can never
-        // execute. The strict send derivation returns the empty target for both
-        // shapes, and `isGrantable` refuses that empty target.
+        // `MessagesSendArgs` cannot decode an array recipient, nor a non-string recipient beside a
+        // handle-shaped `to`, so admission proceeds.
         let gate = PermissionGate()
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: MessagesSendProbeTool())
@@ -271,11 +254,8 @@ struct ApprovalTargetMatchingTests {
 
     @Test
     func `CLI-style durable approval stores only the canonical handle grant`() async {
-        // Reproduces the CLI's durable-approval handler without the REPL:
-        // the handler derives the descriptor from the call and mints it straight
-        // through the gate. Malformed and name-shaped calls must leave the grant
-        // list empty; a handle-shaped call must store exactly its canonical
-        // handle and cover the respelled next send without prompting again.
+        // Reproduces the CLI's durable-approval handler without the REPL: the handler derives the
+        // descriptor from the call and mints it straight through the gate.
         let gate = PermissionGate()
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: MessagesSendProbeTool())
@@ -320,10 +300,7 @@ struct ApprovalTargetMatchingTests {
 
     @Test
     func `legacy tool-wide messages.send rule is dropped and never covers a send`() async throws {
-        // A row written before the per-recipient invariant may carry the
-        // tool-wide scope. It is dropped at load and, even if it survived, a
-        // tool-wide send scope is an invalid rule shape rather than a scope
-        // that can authorize a send.
+        // A row written before the per-recipient invariant may carry the tool-wide scope.
         let legacy = try #require(AccessRule(
             toolName: "messages.send",
             scope: .toolWide,
@@ -354,10 +331,8 @@ struct ApprovalTargetMatchingTests {
             return
         }
 
-        // There is no tool-wide send scope, so a promotion to every recipient
-        // is refused with the honest reason and the handle grant stays exactly
-        // as approved. The outcome is `notWidenable`, never `notFound`, so the
-        // widen route cannot misreport the live grant as unknown.
+        // There is no tool-wide send scope, so a promotion to every recipient is refused with the
+        // honest reason and the handle grant stays exactly as approved.
         #expect(
             await gate.widenGrant(id: rule.id)
                 == .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)

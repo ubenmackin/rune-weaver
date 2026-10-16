@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Contacts name ranking and match-record shaping.
-//
-// Pins the pure half of address-book name search: exact/prefix/whole-token
-// scoring across display and alternate names, diacritic and case folding,
-// deterministic tie-breaking, the 1...25 limit clamp, and the snapshot shaping
-// rules (formatter-name requirement, handle trimming, order-preserving dedupe).
-// Every test drives `MessagesContactMatcher` or `MessageContactMatch.assemble`,
-// so no test touches `CNContactStore` or prompts for Contacts access.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -13,13 +6,8 @@ import Testing
 
 @Suite("Messages Contact Search")
 struct MessagesContactSearchTests {
-    /// Builds one contact snapshot for ranking tests.
-    /// - Parameters:
-    ///   - id: Stable contact identifier.
-    ///   - name: Primary display name.
-    ///   - alternates: Additional searchable names.
-    ///   - handles: Phone and email strings.
-    /// - Returns: Snapshot ready for the pure matcher.
+    /// Builds one contact snapshot for ranking tests. id: Stable contact
+    /// identifier.
     private func record(
         id: String,
         name: String,

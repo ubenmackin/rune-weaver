@@ -1,4 +1,5 @@
 // Rune Weaver LLM Tests — Multimodal wire formatting and provider supportsVision tests.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM
@@ -79,11 +80,8 @@ struct MultimodalWireFormatTests {
         let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
         let wireMessages = try #require(json?["messages"] as? [[String: Any]])
 
-        // Expect:
-        // 0: user "Take a screenshot"
-        // 1: assistant with tool_calls
-        // 2: tool with cleaned metadata string (no huge base64)
-        // 3: injected user message with image_url
+        // Expect: 0: user "Take a screenshot" 1: assistant with tool_calls 2: tool with cleaned
+        // metadata string (no huge base64) 3: injected user message with image_url
         try #require(wireMessages.count == 4)
 
         let toolMsg = wireMessages[2]

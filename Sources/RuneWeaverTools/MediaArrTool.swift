@@ -1,13 +1,4 @@
 // Rune Weaver Tools — Media management tool for Sonarr & Radarr.
-//
-// Purpose: exposes the Sonarr/Radarr library to the model as approval-gated
-// writes plus approval-free reads, with dry-run previews that never dial.
-// Scope: argument decoding plus client dispatch only; HTTP, validation, and
-// secrets live with the client layer. Architectural role: the split read/write
-// surface for media — the read tool stays read-only so search, queue, and
-// status never park, while adds stay gated. Secrets resolve via
-// `SecretsManager` at execution time and never enter schemas or logs; network
-// dials stay behind the client's timeout, byte-cap, and redirect bounds.
 
 import Foundation
 import RuneWeaverCore
@@ -24,9 +15,6 @@ public struct MediaArrTool: Tool, Sendable {
             + "For approval-free reads prefer 'media.arr.read'."
 
     /// Function-calling contract for the combined tool.
-    /// Advertises only the canonical keys (`service`/`action`/`query`/`id`/`qualityProfile`/`rootFolder`);
-    /// decoder aliases stay compatibility-only and are never advertised so a
-    /// strict `additionalProperties:false` validator accepts exactly the canonical shape.
     public let inputSchema = JSONSchema(
         rawValue: """
         {
@@ -85,10 +73,8 @@ public struct MediaArrTool: Tool, Sendable {
             return .failure("Invalid media.arr arguments: \(error.localizedDescription)", callID: input.callID)
         }
 
-        // Dry-run previews for reads stay local so planning never dials: the
-        // gated path still parks through the approval handler, while the
-        // read-only sibling never parks. Mutating previews flow through the
-        // client, which also avoids dialing for adds.
+        // Dry-run previews for reads stay local so planning never dials: the gated path still parks
+        // through the approval handler, while the read-only sibling never parks.
         if context.dryRun, args.action != .add {
             return .success(MediaArrDryRun.preview(for: args), callID: input.callID)
         }
@@ -102,10 +88,6 @@ public struct MediaArrTool: Tool, Sendable {
 }
 
 /// Approval-free read surface for Sonarr & Radarr library state.
-///
-/// Search, queue, and status never change library state, so they run without
-/// parking; any `add` routed here fails with guidance to use the gated
-/// `media.arr` tool instead. Dry runs preview without dialing.
 public struct MediaArrReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "media.arr.read"
@@ -115,10 +97,9 @@ public struct MediaArrReadTool: Tool, Sendable {
             + "Use for searching titles, viewing the download queue, or checking service health. "
             + "Approval-free; adding titles requires 'media.arr'."
 
-    /// Function-calling contract for reads.
-    /// Advertises only the canonical read keys (`service`/`action`/`query`);
-    /// decoder tolerance mirrors the combined tool compatibility-only and is never advertised.
-    /// `add` is absent here so strict validators route mutations to the gated tool.
+    /// Function-calling contract for reads. Advertises only the canonical read keys
+    /// (`service`/`action`/`query`); decoder tolerance mirrors the combined tool compatibility-only
+    /// and is never advertised.
     public let inputSchema = JSONSchema(
         rawValue: """
         {
@@ -186,11 +167,9 @@ public struct MediaArrReadTool: Tool, Sendable {
     }
 }
 
-/// Dry-run previews for media reads that never dial.
-///
-/// Single-sourced so the gated tool and the read-only tool describe the same
-/// would-do shape; mutating previews stay with the client, which already
-/// avoids dialing for adds.
+/// Dry-run previews for media reads that never dial. Single-sourced so the gated tool and the
+/// read-only tool describe the same would-do shape; mutating previews stay with the client, which
+/// already avoids dialing for adds.
 enum MediaArrDryRun: Sendable {
     /// Builds a no-dial preview for one read action.
     static func preview(for args: MediaArrArgs) -> String {

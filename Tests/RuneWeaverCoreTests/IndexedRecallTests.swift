@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Hybrid document-index recall: merge, rerank, watermark, live fallback.
-//
-// Exercises the MemoryEngine document-index retrieval path end to end against
-// isolated temporary databases: the keyword/vector candidate union, deterministic
-// reranking, index-watermark propagation, and the live-tool guidance plus runtime
-// override that steer freshness-sensitive queries away from the durable index.
-// Tests never touch the real `~/.runeweaver/memory` stores.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -26,13 +20,7 @@ private func makeIndexedRecallEngine() -> (engine: MemoryEngine, store: DocIndex
 }
 
 /// Stores one document with a single chunk and returns the persisted document.
-/// - Parameters:
-///   - store: Document index to write through.
-///   - externalID: Source-scoped identifier.
-///   - text: Chunk body text.
-///   - embedding: Chunk embedding; empty stores a keyword-only chunk.
-///   - indexedAt: Revision timestamp driving the index watermark.
-/// - Returns: The persisted document, including its stable identifier.
+/// store: Document index to write through.
 @discardableResult
 private func storeChunk(
     in store: DocIndexStore,
@@ -341,10 +329,8 @@ struct IndexedRecallTests {
         let (engine, store, base) = makeIndexedRecallEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Old-but-relevant doc: a unique keyword token and no embedding, so it
-        // never reaches the vector leg and can only surface through keywords.
-        // Every fixture is undated, so the vector leg falls back to the rowid
-        // tie-break and keeps the latest insertions at its head.
+        // Old-but-relevant doc: a unique keyword token and no embedding, so it never reaches the
+        // vector leg and can only surface through keywords.
         try await storeChunk(in: store, externalID: "old-atlas", text: "ancient cartography atlas compassrose")
         // Newer vector docs share the query embedding axis but not the keyword.
         for index in 0 ..< 4 {
@@ -506,10 +492,9 @@ struct IndexedRecallTests {
         let (engine, store, base) = makeIndexedRecallEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // One series row against twenty chatter rows, and the longest body of
-        // the lot, so the FTS rank order seats it last; it carries a
-        // distinctive token the rerank can score once a read wide enough
-        // holds it.
+        // One series row against twenty chatter rows, and the longest body of the lot, so the FTS
+        // rank order seats it last; it carries a distinctive token the rerank can score once a read
+        // wide enough holds it.
         try await storeChunk(
             in: store,
             externalID: "series-starlight",

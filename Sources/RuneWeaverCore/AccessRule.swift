@@ -1,16 +1,4 @@
 // Rune Weaver Core — Access rules, scopes, and the single scope matcher.
-//
-// Purpose: own the rule model the permission gate persists and evaluates — one
-// tool, one scope, one action, one optional lifetime — plus the single matcher
-// that decides whether a live tool call falls inside a scope, so no caller
-// re-derives target, recipient, host, path, or command comparison.
-// Scope: `AccessScope` with its canonicalizers, `AccessRule` with tolerant
-// durable decoding, `EphemeralGrant` for the non-durable task and session
-// tiers, and the matcher. Persistence, replay, and the approval decision flow
-// stay with `PermissionGate`, `ApprovalQueue`, and `AccessRuleStore`.
-// Architectural role: the Core model beside the gate that the CLI, service, and
-// dashboard surfaces share. `exactTarget` carries the legacy grant target so a
-// migrated row keeps covering the exact call the owner approved.
 
 import Foundation
 
@@ -29,12 +17,6 @@ public enum AccessAction: String, Sendable, Codable, Equatable, Hashable, CaseIt
 }
 
 /// How wide an access rule reaches for one tool.
-///
-/// Every case carries only canonical data: a scope created or decoded through
-/// ``AccessScope/canonicalized(_:)`` already holds the spelling the matcher
-/// compares against, so evaluation never has to judge a shape that should have
-/// died at creation. Unknown envelope kinds fail decoding rather than degrading
-/// into a scope that matches nothing silently.
 public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     /// Every call of the tool, whatever the arguments say.
     case toolWide
@@ -59,13 +41,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     public static let maxGlobChars = 256
 
     /// Normalized recipient spelling for a rule member or a live call.
-    ///
-    /// Single owner of recipient spelling so a rule and the call it compares
-    /// against agree: trimming and lowercasing both sides first means
-    /// `" B@X.COM "` and `"b@x.com"` are one recipient rather than two
-    /// near-misses that never join.
-    /// - Parameter raw: Candidate recipients.
-    /// - Returns: Deduplicated, sorted, lowercased spellings with blanks gone.
     public static func normalizeRecipients(_ raw: [String]) -> [String] {
         var seen: Set<String> = []
         var normalized: [String] = []
@@ -80,14 +55,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Canonical host for a domain scope, or nil when the value can never match.
-    ///
-    /// Lowercasing and the trailing-root-dot strip make the stored host agree
-    /// with the port-less lowercase form egress screening compares. Blank,
-    /// whitespace-carrying, wildcard, glob, and port-qualified shapes refuse
-    /// through the shared ``AllowedOriginPattern`` gate so a value that could
-    /// never authorize still cannot persist as a configured grant.
-    /// - Parameter raw: Candidate host.
-    /// - Returns: Canonical host, or nil when malformed.
     public static func canonicalDomain(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return nil }
@@ -104,15 +71,7 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
         return stripped
     }
 
-    /// Canonical filesystem prefix for a path scope, or nil when the value can
-    /// never match.
-    ///
-    /// Tilde expansion, standardization, and symlink resolution run on the
-    /// prefix so a call's path resolves against the same spelling the rule
-    /// stored. A relative value refuses because a prefix without a root could
-    /// only match whatever directory the process happened to be standing in.
-    /// - Parameter raw: Candidate prefix.
-    /// - Returns: Absolute canonical prefix, or nil when malformed.
+    /// Canonical filesystem prefix for a path scope, or nil when the value can never match.
     public static func canonicalPathPrefix(_ raw: String) -> String? {
         var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= Self.maxPathPrefixChars else { return nil }
@@ -142,12 +101,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Canonical glob pattern for a command scope, or nil when blank.
-    ///
-    /// Bash pattern semantics (`BashSecurity.matches`) own the wildcards, so the
-    /// canonicalizer only trims and bounds: a pattern with leading or trailing
-    /// whitespace spells a different command line than the one it names.
-    /// - Parameter raw: Candidate pattern.
-    /// - Returns: Trimmed pattern, or nil when blank or over-bound.
     public static func canonicalGlob(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= Self.maxGlobChars else { return nil }
@@ -155,13 +108,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Canonical form of a scope, or nil when it carries a malformed shape.
-    ///
-    /// The single gate creation and decoding share: every rule stores only what
-    /// the canonicalizers accept, so an over-bound recipient set, a wildcard
-    /// host, a relative prefix, or a blank glob is refused before it can become
-    /// a rule the matcher would later have to judge.
-    /// - Parameter scope: Candidate scope.
-    /// - Returns: Canonical scope, or nil when any part is malformed.
     public static func canonicalized(_ scope: AccessScope) -> AccessScope? {
         switch scope {
         case .toolWide:
@@ -188,18 +134,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Whether this scope may key a durable `messages.send` grant.
-    ///
-    /// Send trust is keyed to the exact canonical recipient the owner
-    /// authorized: a recipient set covers the handles it names, and an exact
-    /// target must itself spell a canonical handle. A tool-wide send scope is
-    /// the signature of a malformed call and a display-name target is the
-    /// signature of a name-shaped call; both store nothing while the approved
-    /// call still fails closed at execution. A wildcard exact target
-    /// (`*`, `?`) is exempt: pattern sends such as `+1555*` persist and match
-    /// through the same pathname glob the evaluator uses. Single owner of the
-    /// invariant so the approval queue, the rules routes, and the gate's grant
-    /// check agree on what send trust may cover.
-    /// - Returns: True when the scope may back a durable send grant.
     public var isMintableSendScope: Bool {
         switch self {
         case .recipientSet:
@@ -212,15 +146,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Whether a live tool call falls inside this scope.
-    ///
-    /// Callers gate on tool-name equality first: the scope matcher answers only
-    /// the "how wide" half of the question, so `toolWide` returns true without
-    /// reading the arguments at all. A malformed call (non-object, non-UTF-8, or
-    /// oversized JSON) matches nothing but `toolWide`.
-    /// - Parameters:
-    ///   - toolName: Name of the tool making the call.
-    ///   - argumentsJSON: Raw tool arguments document.
-    /// - Returns: True when the call falls inside this scope.
     public func matches(toolName: String, argumentsJSON: String) -> Bool {
         switch self {
         case .toolWide:
@@ -347,10 +272,6 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     }
 
     /// The error an envelope missing its payload throws.
-    /// - Parameters:
-    ///   - kind: Kind whose payload is absent.
-    ///   - container: Container that failed to carry it.
-    /// - Returns: A data-corrupted error naming the kind.
     private static func missingValue(
         _ kind: EnvelopeKind,
         in container: KeyedDecodingContainer<CodingKeys>
@@ -366,18 +287,12 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
 // MARK: - Scope Matching Internals
 
 extension AccessScope {
-    /// Argument keys a path scope reads, in priority order.
-    ///
-    /// The protected-path set the gate already screens, so a rule scoped to a
-    /// path and the guard that refuses engine edits read the same keys.
+    /// Argument keys a path scope reads, in priority order. The protected-path set the gate already
+    /// screens, so a rule scoped to a path and the guard that refuses engine edits read the same
+    /// keys.
     fileprivate static let pathArgumentKeys = ["path", "file_path", "filePath", "target", "destination", "directory", "dir"]
 
     /// Whether the scope's recipient set covers a live call's recipients.
-    ///
-    /// A `messages.send` call compares the canonical handle the owner
-    /// authorized, because the shared classifier proves `+1 (555) 123-4567` and
-    /// `+15551234567` are one recipient. Every other tool compares normalized
-    /// spellings so a comma-joined string and an array agree.
     private func matchesRecipientSet(_ members: [String], toolName: String, argumentsJSON: String) -> Bool {
         guard let object = ActionDescriptor.parsedArgumentsObject(from: argumentsJSON) else { return false }
         if toolName == "messages.send" {
@@ -394,10 +309,6 @@ extension AccessScope {
     }
 
     /// Whether the scope's host covers a live call's egress hosts.
-    ///
-    /// Hosts come from the shared egress extractor so an `api.request` URL and
-    /// a schemeless `curl example.com` inside a `bash.exec` command screen
-    /// against the same list instead of a second parse.
     private func matchesDomain(host: String, subdomains: Bool, toolName: String, argumentsJSON: String) -> Bool {
         for candidate in ApprovalQueue.extractAllEgressHosts(toolName: toolName, argumentsJSON: argumentsJSON) {
             let lowered = candidate.lowercased()
@@ -411,10 +322,9 @@ extension AccessScope {
         return false
     }
 
-    /// Whether the scope's prefix covers a live call's path argument.
-    ///
-    /// Only the first non-empty path-ish key decides: the other keys belong to
-    /// different shapes of the same call and must not widen the answer.
+    /// Whether the scope's prefix covers a live call's path argument. Only the first non-empty
+    /// path-ish key decides: the other keys belong to different shapes of the same call and must not
+    /// widen the answer.
     private func matchesPathPrefix(_ prefix: String, toolName _: String, argumentsJSON: String) -> Bool {
         guard let object = ActionDescriptor.parsedArgumentsObject(from: argumentsJSON) else { return false }
         for key in Self.pathArgumentKeys {
@@ -439,23 +349,6 @@ extension AccessScope {
     }
 
     /// Whether a concrete call target matches a pattern or exact target.
-    ///
-    /// Wildcards `*` and `?` match through fnmatch, and the slash rule follows
-    /// the shape of the comparison. A path-shaped comparison — `files.write`
-    /// paths, email addresses, phone prefixes, and every other single-part
-    /// target — runs with `FNM_PATHNAME`, so `*` never crosses `/` (`*.pem`
-    /// matches `a.pem` but not `a/b.pem`) and `?` matches exactly one
-    /// character other than `/`. A URL-shaped comparison — the multi-part
-    /// `api.request` (`METHOD URL`) and `browser.act` (`ACTION @ URL`) scopes
-    /// plus any pattern naming a `scheme://` target, as `web.fetch` carries —
-    /// matches across `/`, so `* https://api.kraken.com/*` covers every path
-    /// beneath that host. A leading dot carries no special meaning, and a bare
-    /// `*` pattern still matches every target. For multi-part scopes like
-    /// `api.request` (`METHOD URL`) and `browser.act` (`ACTION @ URL`), a
-    /// URL-only pattern matches any leading segment. For `email.send`,
-    /// comparison is case-insensitive. For `files.write`, tilde prefixes
-    /// expand before comparison. The non-Darwin/Glibc fallback implements the
-    /// same two slash modes without fnmatch.
     public static func matchesTarget(callTarget: String, pattern: String, toolName: String) -> Bool {
         let trimmedTarget = callTarget.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -543,18 +436,9 @@ extension AccessScope {
         return false
     }
 
-    /// Whether a pattern's wildcards match a candidate in the slash mode its
-    /// shape asks for.
-    ///
-    /// `FNM_PATHNAME` keeps `*` and `?` inside one path segment, while the
-    /// zero-flag form lets them span `/` for URL-shaped comparisons. The
-    /// non-Darwin/Glibc fallback implements the same two modes, so the slash
-    /// rule cannot drift between platforms.
-    /// - Parameters:
-    ///   - candidate: Call target under test.
-    ///   - pattern: Pattern carrying the wildcards.
-    ///   - crossesPathSeparator: Whether `*` and `?` also match `/`.
-    /// - Returns: True when the pattern matches the candidate.
+    /// Whether a pattern's wildcards match a candidate in the slash mode its shape asks for. The
+    /// non-Darwin/Glibc fallback implements the same two modes, so the slash rule cannot drift
+    /// between platforms.
     private static func matchesGlobString(candidate: String, pattern: String, crossesPathSeparator: Bool) -> Bool {
         #if canImport(Darwin) || canImport(Glibc)
             return fnmatch(pattern, candidate, crossesPathSeparator ? 0 : FNM_PATHNAME) == 0
@@ -564,18 +448,6 @@ extension AccessScope {
     }
 
     /// Hand-rolled wildcard match mirroring fnmatch in both slash modes.
-    ///
-    /// With `crossesPathSeparator` false the match carries `FNM_PATHNAME`
-    /// semantics: `*` consumes any run of characters except `/` and `?`
-    /// consumes exactly one character other than `/`. With it true both
-    /// consume `/` as well, mirroring fnmatch's zero flags for URL-shaped
-    /// patterns. Greedy star matching with one backtrack point keeps the walk
-    /// linear while still honoring the slash rule under backtracking.
-    /// - Parameters:
-    ///   - candidate: Call target under test.
-    ///   - pattern: Pattern carrying the wildcards.
-    ///   - crossesPathSeparator: Whether `*` and `?` also match `/`.
-    /// - Returns: True when the pattern matches the candidate.
     private static func wildcardPathnameMatch(candidate: String, pattern: String, crossesPathSeparator: Bool) -> Bool {
         let candidateChars = Array(candidate)
         let patternChars = Array(pattern)
@@ -634,9 +506,6 @@ extension AccessScope {
     }
 
     /// Trimmed, non-empty shell command from raw arguments, or nil when absent.
-    ///
-    /// Decodes through the shared `BashCommandArgs` shape so the matcher, the
-    /// gate, and the tool agree on what the command is.
     fileprivate static func bashCommand(from argumentsJSON: String) -> String? {
         guard let data = argumentsJSON.data(using: .utf8),
               let args = try? JSONDecoder().decode(BashCommandArgs.self, from: data)
@@ -646,11 +515,8 @@ extension AccessScope {
     }
 }
 
-/// One standing rule: a tool, a scope, an action, and an optional lifetime.
-///
-/// `duration` is nil for a standing rule that never expires, or one of the four
-/// durable tiers. `thisTime` stores nothing and the task and session tiers
-/// belong to ``EphemeralGrant``, so neither may back a durable row.
+/// One standing rule: a tool, a scope, an action, and an optional lifetime. `duration` is nil for a
+/// standing rule that never expires, or one of the four durable tiers.
 public struct AccessRule: Sendable, Codable, Equatable {
     /// Stable rule identifier.
     public let id: UUID
@@ -687,22 +553,9 @@ public struct AccessRule: Sendable, Codable, Equatable {
         case reason
     }
 
-    /// Creates a rule, refusing anything that could not later match.
-    ///
-    /// The tool name must name a tool, the scope must be canonical, and the
-    /// duration must be a tier that can back a durable row. A dated tier without
-    /// an explicit expiry derives one from `grantedAt`, while a standing or
-    /// forever rule drops a caller-supplied expiry rather than silently
-    /// shortening forever trust.
-    /// - Parameters:
-    ///   - id: Stable identifier. Defaults to a fresh one.
-    ///   - toolName: Tool the rule covers.
-    ///   - scope: Scope the rule reaches.
-    ///   - action: Allow or deny.
-    ///   - grantedAt: Creation time. Defaults to now.
-    ///   - duration: Durable tier, or nil for a standing rule.
-    ///   - expiresAt: Explicit expiry, honored only for a dated tier.
-    ///   - reason: Caller-facing note.
+    /// Creates a rule, refusing anything that could not later match. The tool name must name a
+    /// tool, the scope must be canonical, and the duration must be a tier that can back a durable
+    /// row.
     public init?(
         id: UUID = UUID(),
         toolName: String,
@@ -736,13 +589,6 @@ public struct AccessRule: Sendable, Codable, Equatable {
     }
 
     /// Whether a live call falls inside this rule.
-    ///
-    /// The tool-name gate lives here; the shape comparison is the single scope
-    /// matcher, so no second copy of the match rules exists.
-    /// - Parameters:
-    ///   - toolName: Name of the tool making the call.
-    ///   - argumentsJSON: Raw tool arguments document.
-    /// - Returns: True when the rule covers the call.
     public func covers(toolName: String, argumentsJSON: String) -> Bool {
         guard toolName == self.toolName else { return false }
         return scope.matches(toolName: toolName, argumentsJSON: argumentsJSON)
@@ -771,12 +617,9 @@ public struct AccessRule: Sendable, Codable, Equatable {
         !isExpired(at: date)
     }
 
-    /// Decodes a rule, tolerating rows written before usage tracking existed.
-    ///
-    /// Missing counters mean never observed in use, and negatives clamp to zero
-    /// so a hand-edited row cannot seed a negative baseline. A duration that is
-    /// not a durable tier rejects the whole row instead of trusting a lifetime
-    /// the gate never minted.
+    /// Decodes a rule, tolerating rows written before usage tracking existed. Missing counters mean
+    /// never observed in use, and negatives clamp to zero so a hand-edited row cannot seed a
+    /// negative baseline.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let id = try container.decode(UUID.self, forKey: .id)
@@ -833,10 +676,9 @@ public struct AccessRule: Sendable, Codable, Equatable {
     }
 }
 
-/// A non-durable grant that lives for one task or one conversation session.
-///
-/// The task and session tiers end on a lifecycle signal rather than a clock, so
-/// they never persist as ``AccessRule`` rows.
+/// A non-durable grant that lives for one task or one conversation session. The task and session
+/// tiers end on a lifecycle signal rather than a clock, so they never persist as ``AccessRule``
+/// rows.
 public struct EphemeralGrant: Sendable, Codable, Equatable, Hashable {
     /// How long the grant survives.
     public enum Kind: String, Sendable, Codable, Equatable, Hashable, CaseIterable {
@@ -853,14 +695,8 @@ public struct EphemeralGrant: Sendable, Codable, Equatable, Hashable {
     /// Which lifecycle boundary ends the grant.
     public let kind: Kind
 
-    /// Creates a grant, refusing anything that could not later match.
-    ///
-    /// Uses the same canonical gate as ``AccessRule`` so an ephemeral grant
-    /// cannot carry a shape a durable row would refuse.
-    /// - Parameters:
-    ///   - toolName: Tool the grant covers.
-    ///   - scope: Scope the grant reaches.
-    ///   - kind: Lifecycle boundary that ends the grant.
+    /// Creates a grant, refusing anything that could not later match. - kind: Lifecycle boundary
+    /// that ends the grant.
     public init?(toolName: String, scope: AccessScope, kind: Kind) {
         guard let canonicalTool = AccessRule.canonicalToolName(toolName),
               let canonicalScope = AccessScope.canonicalized(scope)

@@ -1,6 +1,4 @@
 // Rune Weaver Core — Shared tool-loop policy for turn orchestration.
-// Holds the permission-partitioned narration fallback, degraded-tool warnings, and turn-budget
-// helpers shared by the orchestrator and the CLI chat loop so both agree on one policy.
 
 import Foundation
 
@@ -9,11 +7,9 @@ public typealias OrchestratorToolResolver = @Sendable ([Message], [any Tool]) as
 
 /// Single shared tool-loop policy for the orchestrator and the CLI chat loop.
 public enum OrchestratorToolLoop {
-    /// Returns the assistant content to persist for a tool round.
-    /// Narration already carries the model's own placeholder lines, so regenerating
-    /// them would persist each call twice — the narration plus its generated twin.
-    /// Only calls with no placeholder line yet get an appended line, and repeated
-    /// call identifiers collapse so one call ID maps to one persisted line.
+    /// Returns the assistant content to persist for a tool round. Narration already carries the
+    /// model's own placeholder lines, so regenerating them would persist each call twice — the
+    /// narration plus its generated twin.
     public static func assistantNoteContent(text: String, calls: [ToolInput]) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let uniqueCalls = deduplicatedCalls(calls)
@@ -35,11 +31,9 @@ public enum OrchestratorToolLoop {
         return text + "\n" + ToolInput.placeholderContent(for: pending)
     }
 
-    /// Collapses calls that share one call identifier, first occurrence winning.
-    /// Duplicate identifiers would otherwise emit two wire calls answered by a
-    /// single result, which strict OpenAI-compatible endpoints reject. Blank
-    /// identifiers stay distinct because they cannot correlate to a result, so
-    /// collapsing them would merge unrelated calls under one empty key.
+    /// Collapses calls that share one call identifier, first occurrence winning. Duplicate
+    /// identifiers would otherwise emit two wire calls answered by a single result, which strict
+    /// OpenAI-compatible endpoints reject.
     private static func deduplicatedCalls(_ calls: [ToolInput]) -> [ToolInput] {
         var seen = Set<String>()
         var unique: [ToolInput] = []
@@ -55,20 +49,13 @@ public enum OrchestratorToolLoop {
         return unique
     }
 
-    /// Whether one line is persisted tool-call plumbing.
-    /// The parser trims each line itself, so raw lines stay on the same
-    /// boundaries `NormalizedText.splitLines` already folded for narration.
-    /// - Parameter line: One raw line from a persisted assistant note.
-    /// - Returns: True when the line parses as a `Calling <tool> ... [<callID>]` placeholder.
+    /// Whether one line is persisted tool-call plumbing. The parser trims each line itself, so raw
+    /// lines stay on the same boundaries `NormalizedText.splitLines` already folded for narration.
     public static func isPlaceholderPlumbingLine(_ line: String) -> Bool {
         ToolInput.parsePlaceholderLine(line) != nil
     }
 
     /// Strips any `Calling <tool> ... [<callID>]` lines from text.
-    /// Single source for history cleaning so episodic stripping and narration
-    /// parsing cannot drift on what counts as plumbing.
-    /// - Parameter text: Persisted assistant text, possibly carrying placeholders.
-    /// - Returns: Remaining text, trimmed, with placeholder lines removed.
     public static func scrubPlaceholderPlumbing(from text: String) -> String {
         let cleanLines = NormalizedText.splitLines(text).filter { !isPlaceholderPlumbingLine($0) }
         return cleanLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,16 +74,10 @@ public enum OrchestratorToolLoop {
     }
 
     /// Longest retained slice of a user-supplied per-tool cancel reason.
-    /// The reason is fed straight back into the model's tool history, so the cap
-    /// bounds prompt growth and keeps a pasted wall of text from crowding the
-    /// conversation context on the very next round.
     public static let maxToolCancelReasonLength = 500
 
     /// Trims and caps a per-tool cancel reason.
     /// - Parameter reason: Raw user reason, if any.
-    /// - Returns: The retained reason, or nil when nothing usable remains so the
-    ///   injected failure reads honestly as "no reason given" instead of trailing
-    ///   whitespace or an empty suffix.
     public static func normalizedToolCancelReason(_ reason: String?) -> String? {
         let trimmed = (reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -104,14 +85,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Builds the failure injected back to the model when a user cancels one call.
-    /// The model reads this as the tool's own result, so it names the tool and its
-    /// call identifier and states plainly that the user aborted it; that lets the
-    /// loop re-scope and continue the turn instead of failing the whole request.
-    /// - Parameters:
-    ///   - toolName: Tool whose execution was aborted.
-    ///   - callID: Correlation identifier the model used for the call.
-    ///   - reason: Optional user reason, normalized here.
-    /// - Returns: A failure result carrying the cancellation notice.
     public static func cancelledToolResult(toolName: String, callID: String, reason: String?) -> ToolResult {
         let detail = normalizedToolCancelReason(reason) ?? "no reason given"
         return .failure(
@@ -121,21 +94,14 @@ public enum OrchestratorToolLoop {
         )
     }
 
-    /// Builds the compact episodic record for one tool execution.
-    ///
-    /// Fail-closed legacy path: provenance is unknown here, so the record
-    /// labels as untrusted. Callers with a declared trust level use the
-    /// overload below.
+    /// Builds the compact episodic record for one tool execution. Fail-closed legacy path:
+    /// provenance is unknown here, so the record labels as untrusted.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
     }
 
-    /// Builds the compact episodic record with declared provenance.
-    ///
-    /// Declaration-driven like the model-context path: untrusted outcomes wrap
-    /// in the single-sourced labeled block while trusted outcomes keep the
-    /// historical shape. The flag is the `[security] untrusted_labeling`
-    /// off-switch plumbed from config for debugging.
+    /// Builds the compact episodic record with declared provenance. The flag is the `[security]
+    /// untrusted_labeling` off-switch plumbed from config for debugging.
     public static func episodicToolRecord(
         toolName: String,
         result: ToolResult,
@@ -151,11 +117,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Builds the compact episodic record from the producing tool's declaration.
-    ///
-    /// Nil tools (unknown names) fail closed to untrusted: the bus usually
-    /// answers those with engine-authored failures, but an unknown name
-    /// carries no declaration to trust, so labeling keeps a future
-    /// attacker-influenced failure from persisting as trusted history.
     public static func episodicToolRecord(
         toolName: String,
         result: ToolResult,
@@ -215,10 +176,8 @@ public enum OrchestratorToolLoop {
             guard let tool = byName[parsed.toolName] else { continue }
             guard predicate(tool) else { continue }
             guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
-            // Preserve the narrated identifier so the executed record collapses
-            // with its persisted placeholder twin when grouping by call identity.
-            // A blank identifier would collapse unrelated calls into one bucket,
-            // so mint a fresh one there instead of reusing an empty key.
+            // Preserve the narrated identifier so the executed record collapses with its persisted
+            // placeholder twin when grouping by call identity.
             let trimmedCallID = parsed.callID.trimmingCharacters(in: .whitespacesAndNewlines)
             let callID = trimmedCallID.isEmpty ? UUID().uuidString : trimmedCallID
             calls.append(ToolInput(
@@ -301,12 +260,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Names of registered tools whose schema was omitted for this turn.
-    /// Fail-closed denylist shared by the orchestrator and the CLI chat loop so a native
-    /// or narrated call naming a degraded tool is withheld identically in both paths.
-    /// Unknown or unregistered names stay absent, so they reach `ToolBus.execute` and the
-    /// bus answers `invalid_tool` with available-tool names for model self-correction.
-    /// - Parameter tools: Registered tools for this turn.
-    /// - Returns: Skipped tool names as a set for O(1) membership tests.
     public static func degradedSchemaNames(for tools: [any Tool]) -> Set<String> {
         Set(VisionSchemaFilter.partitionValidSchemas(
             entries: tools,
@@ -335,19 +288,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Returns the model-context content for one tool result, labeling untrusted output.
-    ///
-    /// Declaration-driven: the verdict comes from the tool's own
-    /// `contentTrustLevel`, never from a name list, so a renamed tool keeps its
-    /// provenance. Trusted results pass through byte-identical so local tools
-    /// (files, memory, goals, media) pay zero diff; untrusted results wrap in the
-    /// single-sourced labeled block. The flag is the `[security]
-    /// untrusted_labeling` off-switch plumbed from config for debugging.
-    /// - Parameters:
-    ///   - content: Raw tool result content.
-    ///   - trustLevel: Declared provenance of the producing tool.
-    ///   - toolName: Declaring tool attributed on the opening delimiter.
-    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
-    /// - Returns: Labeled content for untrusted tools, otherwise the input verbatim.
     public static func labeledResultContent(
         _ content: String,
         trustLevel: ContentTrustLevel,
@@ -360,16 +300,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Returns the model-context content for one tool's result.
-    ///
-    /// Nil tools (unknown or unregistered names) stay trusted and pass through:
-    /// the bus already answers those with an `invalid_tool` failure whose text is
-    /// engine-authored, not attacker-controlled, so wrapping it would only add
-    /// noise.
-    /// - Parameters:
-    ///   - content: Raw tool result content.
-    ///   - tool: Producing tool, or nil when unknown.
-    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
-    /// - Returns: Labeled content for untrusted tools, otherwise the input verbatim.
     public static func labeledResultContent(
         _ content: String,
         for tool: (any Tool)?,
@@ -380,16 +310,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Builds the `tool`-role message carrying one result into model context.
-    ///
-    /// Single-sourced composition point so the orchestrator, the parked resume
-    /// path, and the CLI agree: untrusted payloads arrive delimited as data while
-    /// trusted payloads keep their exact bytes. Role, call identifier, and error
-    /// taxonomy ride through untouched so history reloads keep their badges.
-    /// - Parameters:
-    ///   - tool: Producing tool, or nil when unknown.
-    ///   - result: Bus outcome to carry.
-    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
-    /// - Returns: Tool message with labeled or verbatim content.
     public static func toolResultMessage(
         for tool: (any Tool)?,
         result: ToolResult,
@@ -406,15 +326,9 @@ public enum OrchestratorToolLoop {
         )
     }
 
-    /// Appends one labeled tool result for an already-resolved tool.
-    /// Single-sources message composition with the lookup variant so parked
-    /// calls holding their tool avoid a redundant registry round-trip.
-    /// - Parameters:
-    ///   - tool: Producing tool, or nil when unknown.
-    ///   - result: Bus outcome to carry.
-    ///   - conversations: Session owner receiving the message.
-    ///   - sessionID: Session receiving the message.
-    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    /// Appends one labeled tool result for an already-resolved tool. Single-sources message
+    /// composition with the lookup variant so parked calls holding their tool avoid a redundant
+    /// registry round-trip.
     public static func appendLabeledResult(
         for tool: (any Tool)?,
         result: ToolResult,
@@ -429,19 +343,6 @@ public enum OrchestratorToolLoop {
     }
 
     /// Appends one labeled tool result to its session in a single lookup.
-    /// Single-sources the repeated `tool(named:)` plus
-    /// `toolResultMessage(labelingEnabled:)` pair so the orchestrator, the
-    /// parked resume path, and the CLI cannot drift on lookup versus labeling.
-    /// Returns the producing tool so callers reuse it for the episodic record
-    /// without a second lookup.
-    /// - Parameters:
-    ///   - bus: Registry owning the tool lookup.
-    ///   - conversations: Session owner receiving the message.
-    ///   - toolName: Tool that produced the result.
-    ///   - result: Bus outcome to carry.
-    ///   - sessionID: Session receiving the message.
-    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
-    /// - Returns: Producing tool, or nil when unknown.
     @discardableResult
     public static func appendLabeledResult(
         on bus: ToolBus,

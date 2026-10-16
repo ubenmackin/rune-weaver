@@ -1,14 +1,4 @@
 // Rune Weaver Tests — Durable auth-session store and sliding session lifecycle.
-//
-// The session store is the persistence seam for browser sessions, so these
-// tests pin two contracts: a saved document reloads exactly (schema version,
-// owner-token generation, and whole-second timestamps), and a loose, corrupt,
-// or unknown-version document is refused with a typed error instead of being
-// trusted. The sliding-session suite then exercises the verifier that owns the
-// store — digests-only persistence, the 24h idle window, cookie-renewal
-// throttling, LRU cap eviction, and restart/rotation handling. Every case runs
-// against an isolated temp directory, so no real credential or session file is
-// touched.
 
 import CryptoKit
 import Foundation
@@ -222,28 +212,16 @@ private final class TestClock: Sendable {
     }
 }
 
-/// SHA-256 hex digest of a session token, mirroring the verifier's keying so a
-/// staged file can target a token without ever persisting the raw value.
-/// - Parameter token: Raw session token.
-/// - Returns: 64 lowercase hex characters.
+/// SHA-256 hex digest of a session token, mirroring the verifier's keying so a staged file can
+/// target a token without ever persisting the raw value. - Parameter token: Raw session token.
 private func sessionDigestHex(_ token: String) -> String {
     let digest = SHA256.hash(data: Data(token.utf8))
     return digest.map { String(format: "%02x", $0) }.joined()
 }
 
-/// Builds a verifier over an isolated token file plus a temp session file, wired
-/// to a deterministic clock.
-///
-/// `persistedSessions` is staged through the real store before construction, so
-/// a test can hand the verifier a prewritten document (restart, retired
-/// generation, and load-time pruning cases); a nil value leaves the session file
-/// absent. The token file is always `0600` inside a `0700` directory, so
-/// rotation never touches a developer's real credential.
-/// - Parameters:
-///   - clock: Deterministic clock injected into the verifier.
-///   - token: Live owner token to initialize the verifier with.
-///   - persistedSessions: Optional document to stage before the verifier loads.
-/// - Returns: The verifier, its token store, the fixture directory, and the session file path.
+/// Builds a verifier over an isolated token file plus a temp session file, wired to a deterministic
+/// clock. The token file is always `0600` inside a `0700` directory, so rotation never touches a
+/// developer's real credential.
 private func makeSlidingSessionAuth(
     clock: TestClock,
     token: String = "owner-token",

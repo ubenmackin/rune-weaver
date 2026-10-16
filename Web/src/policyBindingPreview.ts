@@ -1,13 +1,5 @@
 // Rune Weaver Dashboard — Credential binding preview decision for the policy editor.
-//
-// Purpose: Client-side mirror of the engine `CredentialBinding.denyReason` gate so the
-// binding modal can answer live probe questions without a network round trip. One binding
-// pairs one key with hosts, methods, and path prefixes, and the secret is sent only when
-// all three match; empty methods or prefixes mean Any while empty hosts means unusable.
-// Scope: Pure string matching over host, method, and effective path only; network
-// allowlist, Keychain state, and TOML persistence stay with their owners.
-// Architectural role: Keeps the dashboard probe honest with the egress supervisor by
-// resolving the effective route path and wildcard edges the same way the engine does.
+
 import { classifyWildcard, normalizedHost, toStringList } from "./policyHostNormalize";
 
 // Binding shape accepted from the policy DTO or the modal draft. Both camelCase and
@@ -133,11 +125,8 @@ export function previewBindingDecision(
   return null;
 }
 
-// Host canonicalization plus wildcard classification plus list coercion live in
-// the shared policyHostNormalize owner so the preview and validation layers agree.
-// Whether one allowed_hosts entry authorizes a canonical destination. A
-// leading `*.` edge covers its base plus every subdomain depth; every other
-// star shape authorizes nothing so a malformed pattern never widens silently.
+// Host canonicalization plus wildcard classification plus list coercion live in the shared
+// policyHostNormalize owner so the preview and validation layers agree.
 function authorizes(canonicalHost: string, pattern: string): boolean {
   const trimmed = (pattern ?? "").trim();
   if (!trimmed) return false;
@@ -236,10 +225,7 @@ type EffectiveResolution =
   | { kind: "effective"; effective: string }
   | { kind: "rejected"; reason: string };
 
-// Resolves one raw host plus raw path pair to the route path an origin server
-// uses. Every decoding layer is checked before peeling so traversal wrapped in
-// deeper percent-encoding refuses instead of decoding into an authorized
-// prefix; malformed escapes and over-nested encodings refuse as well.
+// Resolves one raw host plus raw path pair to the route path an origin server uses.
 function resolveEffectiveRequestPath(
   host: string,
   rawPath: string,
@@ -265,10 +251,8 @@ function resolveEffectiveRequestPath(
         reason: `path '${rawPath}' carries malformed percent-encoding`,
       };
     }
-    // decodeURIComponent leaves `+` alone and decodes `%25` to `%`, so one
-    // call peels exactly one encoding layer and the loop re-checks the next.
-    // A lone `%` that is not an escape survives untouched above only when it
-    // is not malformed; a truly malformed escape throws and refuses.
+    // decodeURIComponent leaves `+` alone and decodes `%25` to `%`, so one call peels exactly one
+    // encoding layer and the loop re-checks the next.
     if (decoded === current) break;
     layers += 1;
     if (layers > maximumDecodeLayers) {

@@ -1,13 +1,4 @@
 // Rune Weaver Core Tests — Per-call tool cancellation race and session scoping.
-//
-// `ToolBus.cancelToolCall` lets a user abort exactly one running tool while its
-// owning turn keeps running, handing the model an injected failure so it can
-// re-scope instead of failing the whole request. Two properties are easy to
-// break and expensive to debug: the race between a tool settling and a cancel
-// arriving, and the session scoping that keeps two sessions' colliding call
-// identifiers from cancelling one another. The cancellation slot itself is
-// private, so every assertion drives the real execution path through the public
-// bus API with a blocking fixture rather than reaching into internals.
 
 import Foundation
 @testable import RuneWeaverCore

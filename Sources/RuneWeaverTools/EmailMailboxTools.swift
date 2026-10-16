@@ -96,10 +96,8 @@ public struct EmailMoveTool: Tool, Sendable {
             + "The destination must already exist: unknown names fail with the available folders and nothing is created. "
             + "Pass markAsRead true to set Seen on the moved message; "
             + "passing the same folder as source and destination marks the message read without moving it."
-    /// Function-calling contract for `account`, `id`, source `mailbox`, `destination`, and `markAsRead`.
-    /// Schema advertises only canonical keys; decoder tolerance for retired
-    /// spellings stays out of the schema as intentional compatibility so strict
-    /// validators and the decoder agree on what is advertised.
+    /// Function-calling contract for `account`, `id`, source `mailbox`, `destination`, and
+    /// `markAsRead`.
     public let inputSchema =
         JSONSchema(
             rawValue: """

@@ -1,33 +1,17 @@
 // Rune Weaver Core — Sole owner of temporal parsing for dated search tools.
-//
-// Purpose: parse the `since` / `until` parameters accepted by every search
-// tool into absolute bounds, and format instants for IMAP date searches.
-// Scope: date-only `YYYY-MM-DD` plus full ISO8601 datetimes; local-midnight
-// resolution for date-only days; IMAP `DD-Mon-YYYY` formatting (including
-// `BEFORE` rounding for non-midnight `until`); Unix-timestamp bound helpers
-// plus Mac-epoch conversion for SQLite-backed stores. No other file implements date math.
-// Architectural role: single choke point so day boundaries, exclusivity, and
-// fail-closed rejection behave identically across mail, messages, and memory.
 
 import Foundation
 
-/// Inclusive lower bound plus exclusive upper bound for a dated search.
-///
-/// `since` is inclusive and `until` is exclusive: an instant stamped exactly
-/// at `until` belongs to the next window, not this one. Exclusivity lets
-/// adjacent day windows (`[Sep-13, Sep-14)`, `[Sep-14, Sep-15)`) tile the
-/// timeline with neither overlap nor gaps. Either side may be nil, meaning
-/// unbounded on that side; a fully unbounded range matches everything.
+/// Inclusive lower bound plus exclusive upper bound for a dated search. Either side may be nil,
+/// meaning unbounded on that side; a fully unbounded range matches everything.
 public struct TemporalRange: Sendable, Equatable {
     /// Inclusive lower bound, or nil for unbounded below.
     public let since: Date?
     /// Exclusive upper bound, or nil for unbounded above.
     public let until: Date?
 
-    /// Creates a range from already-parsed bounds.
-    /// - Parameters:
-    ///   - since: Inclusive lower bound, or nil for unbounded below.
-    ///   - until: Exclusive upper bound, or nil for unbounded above.
+    /// Creates a range from already-parsed bounds. since: Inclusive lower bound, or
+    /// nil for unbounded below.
     public init(since: Date? = nil, until: Date? = nil) {
         self.since = since
         self.until = until
@@ -75,13 +59,6 @@ public struct TemporalRange: Sendable, Equatable {
     }
 
     /// Matches an optional document date against the range.
-    ///
-    /// Undated rows never match a dated query: without a stamp there is no
-    /// honest way to place the row inside a bounded window, so fail-closed
-    /// exclusion beats speculative inclusion. Only a fully unbounded query
-    /// matches an undated row.
-    /// - Parameter date: Document timestamp, or nil when the row carries none.
-    /// - Returns: True when the row belongs in the result set.
     public func matches(date: Date?) -> Bool {
         guard let date else {
             return isUnbounded
@@ -100,10 +77,8 @@ public struct TemporalRange: Sendable, Equatable {
     }
 }
 
-/// Fail-closed rejection reasons for `since` / `until` parsing.
-///
-/// Every message names the offending field so tool errors can surface which
-/// parameter the caller must fix without guessing.
+/// Fail-closed rejection reasons for `since` / `until` parsing. Every message names the offending
+/// field so tool errors can surface which parameter the caller must fix without guessing.
 public enum TemporalFilterError: Error, Sendable, Equatable, LocalizedError, CustomStringConvertible {
     /// The `since` value is neither date-only nor a full ISO8601 datetime.
     case invalidSince(String)
@@ -134,27 +109,10 @@ public enum TemporalFilterError: Error, Sendable, Equatable, LocalizedError, Cus
     }
 }
 
-/// Sole parser and formatter for the shared `since` / `until` contract.
-///
-/// Parameter names are `since` and `until` on every search tool with no
-/// aliases. Date-only `since` means 00:00:00 local inclusive; date-only
-/// `until` means 00:00:00 local of that day exclusive. Full datetimes convert
-/// exactly, honoring their offset. Blank strings behave as omitted, and both
-/// parameters are optional with omission meaning unbounded on that side.
+/// Sole parser and formatter for the shared `since` / `until` contract. Date-only `since` means
+/// 00:00:00 local inclusive; date-only `until` means 00:00:00 local of that day exclusive.
 public enum TemporalFilter: Sendable {
     /// Parses one side of the shared temporal contract.
-    ///
-    /// Date-only days resolve at midnight in `TimeZone.current` rather than
-    /// UTC so the parsed window lands on the same calendar day the prompt
-    /// advertises: `SystemPromptComposer.currentDateString` renders "today"
-    /// in the device zone, and a model reasoning about "since today" must get
-    /// that zone's midnight, not UTC's.
-    /// - Parameters:
-    ///   - since: Inclusive lower bound text, or nil/blank for unbounded below.
-    ///   - until: Exclusive upper bound text, or nil/blank for unbounded above.
-    /// - Returns: Absolute bounds with nil sides left unbounded.
-    /// - Throws: `TemporalFilterError` naming the offending field on malformed
-    ///   input, or on `since` falling after `until`.
     public static func parse(since: String?, until: String?) throws -> TemporalRange {
         let lower = try parseBound(since, field: .since)
         let upper = try parseBound(until, field: .until)
@@ -164,13 +122,8 @@ public enum TemporalFilter: Sendable {
         return TemporalRange(since: lower, until: upper)
     }
 
-    /// Formats an instant as `DD-Mon-YYYY` (for example `13-Sep-2026`) for
-    /// IMAP `SINCE` / `BEFORE` search criteria.
-    ///
-    /// The day renders in `TimeZone.current` so the calendar day matches the
-    /// local-day semantics `parse` applies to date-only bounds.
-    /// - Parameter date: Instant to render.
-    /// - Returns: English-abbreviated IMAP date string.
+    /// Formats an instant as `DD-Mon-YYYY` (for example `13-Sep-2026`) for IMAP `SINCE` / `BEFORE`
+    /// search criteria.
     public static func imapDateString(from date: Date) -> String {
         // Fresh formatter per call: IMAP searches are tool-call frequency,
         // and shared formatters would need locking under Swift 6 concurrency.
@@ -182,16 +135,7 @@ public enum TemporalFilter: Sendable {
     }
 
     /// Formats an `until` instant as `DD-Mon-YYYY` for IMAP `BEFORE`.
-    ///
-    /// IMAP day granularity truncates the time of day: `BEFORE 15-Jul-2026`
-    /// excludes the entire 15th, so a non-midnight `until` (for example
-    /// `2026-07-15T12:00`) rounds up to the next local day to keep the
-    /// `00:00-12:00` slice. An `until` exactly at local midnight already
-    /// names its own day, so it stays. `SINCE` needs no rounding (same-day
-    /// is a superset) and keeps `imapDateString`. The Swift exact
-    /// post-filter remains the narrowing step in both cases.
     /// - Parameter date: Exclusive upper bound to render.
-    /// - Returns: English-abbreviated IMAP date string covering the bound.
     public static func imapUntilDateString(from date: Date) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
@@ -217,31 +161,18 @@ public enum TemporalFilter: Sendable {
 
     // MARK: - Default search window
 
-    /// Days behind now covered when a search supplies neither bound.
-    ///
-    /// A week of history keeps an unbounded calendar or reminder search
-    /// answering recent context without scanning the whole store.
+    /// Days behind now covered when a search supplies neither bound. A week of history keeps an
+    /// unbounded calendar or reminder search answering recent context without scanning the whole
+    /// store.
     public static let defaultPastDays = 7
 
-    /// Days ahead of now covered when a search supplies neither bound.
-    ///
-    /// Two months of look-ahead keeps upcoming events and due tasks visible
-    /// while still bounding the EventKit predicate to a concrete window.
+    /// Days ahead of now covered when a search supplies neither bound. Two months of look-ahead
+    /// keeps upcoming events and due tasks visible while still bounding the EventKit predicate to a
+    /// concrete window.
     public static let defaultFutureDays = 60
 
-    /// Resolves the shared effective window for bounded EventKit searches.
-    ///
-    /// Both bounds present means the caller chose the window, so order is
-    /// verified fail-closed. Neither bound means the default recent-plus-soon
-    /// window around `now`. A single bound stays logically unbounded on the
-    /// missing side while returning a concrete distant date so callers can
-    /// still build a predicate without a nil branch.
-    /// - Parameters:
-    ///   - since: Inclusive lower bound, or nil for unbounded below.
-    ///   - until: Exclusive upper bound, or nil for unbounded above.
-    ///   - now: Reference instant for the default window, injectable for tests.
-    /// - Returns: Concrete start and end dates for the fetch predicate.
-    /// - Throws: `TemporalFilterError.invertedRange` when `since` falls after `until`.
+    /// Resolves the shared effective window for bounded EventKit searches. Both bounds present
+    /// means the caller chose the window, so order is verified fail-closed.
     public static func effectiveWindow(since: Date?, until: Date?, now: Date = Date()) throws -> (Date, Date) {
         if let since, let until {
             guard since <= until else {
@@ -300,10 +231,6 @@ public enum TemporalFilter: Sendable {
     // MARK: - Mac-epoch bound helpers
 
     /// Magnitude separating seconds-scale from nanoseconds-scale Mac-epoch ticks.
-    ///
-    /// Messages stores seconds on older databases and nanoseconds on current
-    /// ones; a seconds value cannot reach this bound within any realistic
-    /// date range, so the comparison distinguishes the scales.
     public static let macEpochNanosThreshold: Int64 = 1_000_000_000_000
 
     /// Converts a Mac-epoch tick to a wall-clock date, handling both scales.
@@ -329,24 +256,12 @@ public enum TemporalFilter: Sendable {
     }
 
     /// Normalizes a `message.date` column to seconds-scale Mac-epoch for SQL.
-    ///
-    /// The `CASE` divides nanosecond rows by 1e9 and leaves seconds rows
-    /// untouched, so one seconds bound filters both scales without comparing
-    /// raw ticks to a seconds-only value.
-    /// - Parameter column: SQL column expression holding the raw tick.
-    /// - Returns: SQL expression evaluating to seconds since 2001-01-01.
     public static func macEpochSecondsExpression(column: String) -> String {
         "CASE WHEN \(column) > \(macEpochNanosThreshold) THEN \(column) / 1000000000.0 ELSE \(column) END"
     }
 
-    /// Matches an optional raw Mac-epoch tick against the range.
-    ///
-    /// Undated rows never match a dated query; only a fully unbounded query
-    /// matches an undated row.
-    /// - Parameters:
-    ///   - raw: Raw `message.date` value, or nil when the row carries none.
-    ///   - range: Dated window with `since` inclusive and `until` exclusive.
-    /// - Returns: True when the row belongs in the result set.
+    /// Matches an optional raw Mac-epoch tick against the range. Undated rows never match a dated
+    /// query; only a fully unbounded query matches an undated row.
     public static func matches(macEpoch raw: Int64?, in range: TemporalRange) -> Bool {
         guard let raw else {
             return range.isUnbounded
@@ -426,10 +341,6 @@ public enum TemporalFilter: Sendable {
     }
 
     /// Resolves a date-only day to midnight in the device timezone.
-    ///
-    /// Month and day ranges are validated against the real calendar (so
-    /// `2026-02-30` and `2026-13-01` reject) because `Calendar.date(from:)`
-    /// normalizes overflow into neighboring months instead of failing.
     private static func dateOnlyMidnight(from text: String) -> Date? {
         guard let parts = dateOnlyParts(from: text) else {
             return nil
@@ -461,10 +372,6 @@ public enum TemporalFilter: Sendable {
     }
 
     /// Parses full ISO8601 datetimes, honoring the embedded offset exactly.
-    ///
-    /// The cascade covers fractional and whole seconds plus colon and
-    /// colon-less timezone spellings; each formatter either converts exactly
-    /// or declines, and a decline falls through to rejection by the caller.
     private static func iso8601Instant(from text: String) -> Date? {
         let optionSets: [ISO8601DateFormatter.Options] = [
             [.withInternetDateTime, .withFractionalSeconds],

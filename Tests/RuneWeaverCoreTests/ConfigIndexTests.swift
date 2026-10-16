@@ -1,4 +1,5 @@
 // Rune Weaver Core Tests — Config index tests.
+
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -482,10 +483,9 @@ struct ConfigIndexTests {
     @Test
     func `Files deny defaults include credential and history patterns`() {
         let patterns = FilesConfig.defaultDenyPatterns
-        // Long-standing entries stay denied so the widened list never trades
-        // an old boundary for a new one; the memory tree is pinned whole so
-        // the episodic database and plaintext profile cannot regress to
-        // vector-only coverage.
+        // Long-standing entries stay denied so the widened list never trades an old boundary for a
+        // new one; the memory tree is pinned whole so the episodic database and plaintext profile
+        // cannot regress to vector-only coverage.
         for expected in [
             ".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key",
             "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/*", ".runeweaver/memory/vectors/*"

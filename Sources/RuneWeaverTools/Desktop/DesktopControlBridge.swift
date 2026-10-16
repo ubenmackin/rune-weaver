@@ -1,10 +1,4 @@
 // Rune Weaver Tools — Desktop control bridge for macOS automation.
-//
-// Wraps CGEvent and NSWorkspace to provide mouse, keyboard, and app-switching
-// primitives. Safety checks enforce a blocked-app list and fail-safe corner
-// abort before every dispatched event. Coordinates arrive in the downscaled
-// screenshot space and are translated back to native display points using the
-// scale factors from `DesktopCaptureResult`.
 
 import Foundation
 import RuneWeaverCore
@@ -187,12 +181,8 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     case failSafeTriggered
     /// The operator requested an emergency stop mid-batch.
     case emergencyStopped
-    /// The operator moved the mouse mid-batch, displacing the cursor past the
-    /// displacement threshold, or an explicit takeover was latched on the
-    /// shared monitor. Production detects mouse displacement automatically;
-    /// there is no in-process HID key poll, so keyboard takeover arrives only
-    /// as an explicit `DesktopControlMonitor.requestOperatorTakeover()` latch
-    /// (Emergency Stop surface or host HID bridge), never as automatic sensing.
+    /// The operator moved the mouse mid-batch, displacing the cursor past the displacement
+    /// threshold, or an explicit takeover was latched on the shared monitor.
     case operatorTakeover
     /// The operator took over mid-batch after earlier steps already succeeded.
     /// Carries the completed step results so the tool envelope can report
@@ -208,10 +198,6 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     case blockedURL(host: String, url: String, reason: String)
 
     /// Whether this error signals operator takeover in either shape.
-    ///
-    /// Both the pre-step signal (no partial progress) and the mid-batch
-    /// signal (with completed steps) park the turn identically; the envelope
-    /// layer reads `partialResults` to keep the audit trail.
     public var isOperatorTakeover: Bool {
         switch self {
         case .operatorTakeover, .operatorTakeoverWithPartial:
@@ -222,9 +208,6 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     }
 
     /// Completed step results preserved by a mid-batch takeover.
-    ///
-    /// Empty for the pre-step signal (nothing had succeeded yet) and for all
-    /// non-takeover errors, so callers can unconditionally report the count.
     public var partialResults: [DesktopActionStepResult] {
         switch self {
         case let .operatorTakeoverWithPartial(results):
@@ -238,11 +221,6 @@ public enum DesktopControlError: Error, Sendable, Equatable {
 // MARK: - Shared emergency state
 
 /// Shared abort source for in-flight desktop automation.
-///
-/// The menu-bar app requests a stop here and the control bridge polls it
-/// before every step, so an operator can abort a runaway batch mid-flight.
-/// Activity counting also drives the menu-bar indicator: it is active while
-/// at least one batch holds the monitor.
 public actor DesktopControlMonitor {
     /// Process-wide shared instance bridging the menu bar and the tool.
     public static let shared = DesktopControlMonitor()
@@ -337,24 +315,11 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     /// Outbound egress supervisor screening URLs typed into apps against policy.toml.
     public let egressSupervisor: OutboundEgressSupervisor?
     /// Injected operator-takeover signal for tests and host HID bridges.
-    ///
-    /// Production factories leave this nil on purpose: no in-process HID key
-    /// poll ships, so automatic takeover is mouse displacement past
-    /// `operatorDisplacementThreshold` only. An explicit keyboard abort still
-    /// parks through the shared `DesktopControlMonitor.requestOperatorTakeover`
-    /// latch (Emergency Stop surface or host HID bridge wiring), which the
-    /// bridge polls on every checkpoint alongside this closure.
     private let operatorTakeoverDetector: (@Sendable () async -> Bool)?
 
-    /// Creates the live bridge.
-    ///
-    /// The injected gate exists so bridge-level tests can exercise the
-    /// fail-closed denial without touching real TCC trust; live turns keep
-    /// the silent non-prompting query as the default. The takeover detector
-    /// stays nil in production for the same reason: tests and host HID
-    /// bridges inject it, while shipped batches rely on cursor displacement
-    /// plus the explicit monitor latch instead of claiming an automatic
-    /// keyboard sensor that is never wired.
+    /// Creates the live bridge. The injected gate exists so bridge-level tests can exercise the
+    /// fail-closed denial without touching real TCC trust; live turns keep the silent non-prompting
+    /// query as the default.
     public init(
         accessibilityAccess: @escaping @Sendable () async -> Bool = {
             await MainActor.run { DesktopPermissionCheck.isAccessibilityTrusted() }
@@ -368,9 +333,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Extracts explicit HTTP/HTTPS URLs present in text.
-    ///
-    /// Delegates to the approval queue's shared link scanner so desktop
-    /// screening and inbox triage cannot drift on detector shape.
     public static func extractURLs(from text: String) -> [String] {
         ApprovalQueue.extractLinkURLs(from: text)
     }
@@ -399,10 +361,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Validates batch parameters and preflight safety checks before dispatching.
-    ///
-    /// Declared hosts travel from the tool's `network_hosts` claim into the
-    /// shared supervisor check, so typed URLs face the same declared-versus-
-    /// screened gate as shell commands instead of a desktop-only variant.
     private func validateBatchPreflight(
         actions: [DesktopAction],
         scaleX: Double,
@@ -482,11 +440,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Executes a batch screened against declared hosts plus session grants.
-    ///
-    /// Routes typed URLs through the identical supervisor host check the shell
-    /// uses: undeclared dials deny before policy evaluation, declared dials
-    /// still require the policy to permit them, and the typed-URL refusal
-    /// names the host so the approval card authorizes destinations.
     public func executeBatch(
         actions: [DesktopAction],
         scaleX: Double,
@@ -571,15 +524,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Screens all typed URLs in a batch against the egress supervisor before execution.
-    ///
-    /// Single stateful gate for the batch under the calling session: hosts
-    /// repeat-screened within the batch vet once, so a grant consumed for one
-    /// action still covers the identical host later in the same batch.
-    /// Triage badges the first host only while this gate screens every host
-    /// in every action, so multi-host batches re-park iteratively instead of
-    /// approving the whole batch on one badge. The declared-hosts check runs
-    /// first through the shared supervisor helper, so an undeclared typed
-    /// host denies even when the policy would allow it.
     private func screenBatchURLs(actions: [DesktopAction], sessionID: UUID?, declaredHosts: [String] = []) async throws {
         let batchHosts = collectedBatchHosts(from: actions)
         // Fail-closed on missing supervision: typed hosts without a
@@ -606,12 +550,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Collects every typed host once for the declared check.
-    ///
-    /// Sees the whole batch before any per-host policy charge is consumed,
-    /// so a grant consumed for one action still covers the identical host
-    /// later in the same batch.
-    /// - Parameter actions: Batch actions.
-    /// - Returns: Hosts in first-seen order, deduped canonically.
     private func collectedBatchHosts(from actions: [DesktopAction]) -> [String] {
         var batchHosts: [String] = []
         var batchSeen = Set<String>()
@@ -623,11 +561,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Collects link plus schemeless hosts from one typed text.
-    ///
-    /// - Parameters:
-    ///   - text: Typed text.
-    ///   - seen: Canonical hosts already collected.
-    ///   - hosts: Hosts in first-seen order.
     private func collectBatchHosts(from text: String, seen: inout Set<String>, hosts: inout [String]) {
         for rawURL in Self.extractURLs(from: text) {
             guard let host = URL(string: rawURL)?.host, !host.isEmpty else { continue }
@@ -670,14 +603,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Builds the fail-closed refusal when egress supervision is missing.
-    ///
-    /// Typed hosts without a supervisor would run unscreened, so the first
-    /// host denies instead of passing; the supervisor stays the second
-    /// opinion on declared hosts and never widens them.
-    /// - Parameters:
-    ///   - hosts: Screened hosts in first-seen order.
-    ///   - display: Optional display URL for the first host.
-    /// - Returns: Blocked-URL error naming the first host.
     private func nilSupervisorError(hosts: [String], display: String? = nil) -> DesktopControlError {
         let listed = hosts.sorted().joined(separator: ", ")
         RuneWeaverLog.tools.warning(
@@ -694,12 +619,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Collects link plus schemeless candidates for one typed text.
-    ///
-    /// Typed bare hosts never form a link match, so the schemeless pass
-    /// loops every match like `bash.exec`: each uncovered bare host
-    /// screens alongside the link hosts.
-    /// - Parameter text: Typed text.
-    /// - Returns: Display plus URL pairs in first-seen order.
     private func batchCandidates(for text: String) -> [(display: String, url: URL)] {
         var candidates: [(display: String, url: URL)] = []
         for rawURL in Self.extractURLs(from: text) {
@@ -720,12 +639,9 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         return candidates
     }
 
-    /// Screens one candidate list against the egress policy.
-    ///
-    /// Repeat-screened hosts vet once, so a grant consumed for one action
-    /// still covers the identical host later in the same batch. A missing
-    /// supervisor denies fail-closed: host-bearing candidates must not run
-    /// unscreened, while host-free candidates need no screening.
+    /// Screens one candidate list against the egress policy. A missing supervisor denies
+    /// fail-closed: host-bearing candidates must not run unscreened, while host-free candidates need
+    /// no screening.
     private func validateBatchCandidates(
         _ candidates: [(display: String, url: URL)],
         sessionID: UUID?,
@@ -788,9 +704,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         }
 
         /// Rejects a switch_app target that matches the blocked-app list.
-        /// Uses the same case-insensitive substring matching as `switchToApp`
-        /// so an abbreviated target that would focus a sensitive app is
-        /// refused before activation.
         private func checkSwitchTarget(_ target: String, blockedApps: [String]) throws {
             let loweredTarget = target.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
             guard !loweredTarget.isEmpty else { return }
@@ -902,9 +815,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         }
 
         /// Converts downscaled image coordinates to native display points.
-        /// Rejects non-finite, negative, or unreasonably large coordinates
-        /// and scales so a zero, mirrored, or NaN scale cannot collapse or
-        /// fling input into a corner via an unchecked `CGEvent`.
         private func validatedNativePoint(x: Double, y: Double, scaleX: Double, scaleY: Double) throws -> CGPoint {
             guard x.isFinite, y.isFinite else {
                 throw NSError(
@@ -1135,19 +1045,13 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         ]
 
         /// Reports whether a key name resolves to a hardware code.
-        ///
-        /// Shares the live table so shortcut-capability checks stay in sync
-        /// instead of duplicating its coverage elsewhere.
         static func isShortcutMappable(_ key: String) -> Bool {
             keyCodeTable[key.lowercased()] != nil
         }
 
         /// Presses a key with optional modifiers, routing through hardware codes when needed.
-        ///
-        /// Unicode posting carries the character itself, so the OS never
-        /// resolves it as a shortcut target when command is held. Modified
-        /// single characters therefore resolve through the hardware table and
-        /// fail closed when unmappable rather than typing a literal.
+        /// Unicode posting carries the character itself, so the OS never resolves it as a shortcut
+        /// target when command is held.
         private func pressKey(_ key: String, modifiers: [KeyModifier]) throws {
             // Bare characters stay on the Unicode path so typing remains
             // layout-exact; modified characters need hardware codes so the
@@ -1165,10 +1069,9 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             try postVirtualKey(keyCode, modifiers: modifiers)
         }
 
-        /// Posts a hardware key chord so the system sees a real shortcut press.
-        ///
-        /// Both halves must dispatch for the turn to report success; a half-posted
-        /// chord throws instead of masquerading as a completed shortcut.
+        /// Posts a hardware key chord so the system sees a real shortcut press. Both halves must
+        /// dispatch for the turn to report success; a half-posted chord throws instead of
+        /// masquerading as a completed shortcut.
         private func postVirtualKey(_ keyCode: CGKeyCode, modifiers: [KeyModifier]) throws {
             let flags = cgEventFlags(for: modifiers)
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) else {
@@ -1188,10 +1091,8 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             keyUp.post(tap: .cghidEventTap)
         }
 
-        /// Posts a single bare character via Unicode events.
-        ///
-        /// The bare path never carries modifiers, so flags stay empty; a
-        /// half-posted pair throws instead of reporting a completed press.
+        /// Posts a single bare character via Unicode events. The bare path never carries modifiers,
+        /// so flags stay empty; a half-posted pair throws instead of reporting a completed press.
         private func postUnicodeCharacter(_ character: Character) throws {
             let scalars = Array(character.unicodeScalars)
             guard !scalars.isEmpty else {
@@ -1251,10 +1152,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         }
 
         /// Maps names and shortcut characters to hardware key codes.
-        ///
-        /// Letters and digits share the named-key table so modified
-        /// single characters resolve to the physical key the shortcut
-        /// system expects, while bare typing stays on the Unicode path.
         private func virtualKeyCode(for key: String) -> CGKeyCode? {
             Self.keyCodeTable[key.lowercased()]
         }

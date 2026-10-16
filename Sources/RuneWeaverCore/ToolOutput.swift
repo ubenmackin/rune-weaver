@@ -12,11 +12,9 @@ public struct ToolOutput: Sendable, Codable, Equatable {
     public let callID: String?
     /// Classification of the failure if failed, or nil when the tool left it for the bus to infer.
     public let errorKind: ToolErrorKind?
-    /// Process exit status captured directly by tools that spawn a process.
-    ///
-    /// Typed metadata recorded at termination, never parsed from `content`, so
-    /// clients can render honest exit badges without inspecting untrusted output.
-    /// Nil for tools that do not run a process.
+    /// Process exit status captured directly by tools that spawn a process. Typed metadata recorded
+    /// at termination, never parsed from `content`, so clients can render honest exit badges without
+    /// inspecting untrusted output.
     public let exitCode: Int32?
 
     /// Creates a tool output.

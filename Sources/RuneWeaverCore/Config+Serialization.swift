@@ -173,11 +173,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[containers]` section.
-    ///
-    /// Every knob renders, including the defaults, so a saved file documents
-    /// the container policy and a round-trip never depends on an implicit
-    /// default silently diverging from what was written. The legacy `[sandbox]`
-    /// table never renders, so a resave sheds those retired keys.
     private func renderContainersTOML() -> [String] {
         [
             "[containers]",
@@ -199,10 +194,8 @@ extension RuneWeaverConfig {
             "require_approval_on_deny = \(files.requireApprovalOnDeny ? "true" : "false")",
             "write_mode = \(Self.tomlQuoted(files.writeMode.rawValue))"
         ]
-        // Per-path rules render as `[[files.write_paths]]` array-of-tables so a
-        // resave preserves them. An empty list renders no entry, and the load
-        // reseeds the documented defaults because TOML has no spelling for an
-        // empty array-of-tables.
+        // Per-path rules render as `[[files.write_paths]]` array-of-tables so a resave preserves
+        // them.
         for rule in files.writePathRules {
             lines.append("")
             lines.append("[[files.write_paths]]")
@@ -367,12 +360,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders one `[media.<service>]` section, or nothing when stock.
-    ///
-    /// The `isCustomized` gate is the single persistence decision so blank-vs-nil
-    /// cannot diverge between "should I write" and "what do I write": blanks read
-    /// as absent on both paths, and a nil/blank/default key name all read as stock
-    /// (the client falls back to the conventional name), collapsing to omitted
-    /// rather than emitting a section that would decode back as default.
     private func renderArrSection(name: String, config: ArrInstanceConfig, defaultAPIKeyEnv: String) -> [String] {
         guard config.isCustomized(defaultAPIKeyEnv: defaultAPIKeyEnv) else { return [] }
         var lines: [String] = [
@@ -429,10 +416,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[security]` section.
-    ///
-    /// Every key renders, including the default-ON values, so a saved file
-    /// documents the defense policy and a round-trip never depends on an
-    /// implicit default silently diverging from what was written.
     private func renderSecurityTOML() -> [String] {
         [
             "[security]",
@@ -443,10 +426,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[goals]` section.
-    ///
-    /// Every key renders, including the opt-in default, so a saved file
-    /// documents the pursuit policy and a round-trip never depends on an
-    /// implicit default silently diverging from what was written.
     private func renderGoalsTOML() -> [String] {
         [
             "[goals]",
@@ -463,12 +442,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[bash]` section.
-    ///
-    /// Every scalar key renders, including the enabled default, so a saved file
-    /// documents the shell policy and a round-trip never depends on an implicit
-    /// default silently diverging from what was written. Rules render as
-    /// `[[bash.rules]]` tables in stored order (top-to-bottom last-match-wins)
-    /// so a save/load cycle preserves evaluation order.
     private func renderBashTOML() -> [String] {
         var lines: [String] = [
             "[bash]",
@@ -492,10 +465,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[proactive]` section.
-    ///
-    /// Every key renders, including the surfacing default, so a saved file
-    /// documents the interruption policy and a round-trip never depends on an
-    /// implicit default silently diverging from what was written.
     private func renderProactiveTOML() -> [String] {
         [
             "[proactive]",
@@ -506,10 +475,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[ideas]` section.
-    ///
-    /// Every key renders, including the opt-in default, so a saved file
-    /// documents the suggestion policy and a round-trip never depends on an
-    /// implicit default silently diverging from what was written.
     private func renderIdeasTOML() -> [String] {
         [
             "[ideas]",
@@ -520,12 +485,9 @@ extension RuneWeaverConfig {
         ]
     }
 
-    /// Renders the additive `[fanout]` section.
-    ///
-    /// Every knob renders so a saved file documents the fan-out policy and a
-    /// round-trip never depends on an implicit default silently diverging from
-    /// what was written. Availability flows through tool registration, so no
-    /// enablement line renders here.
+    /// Renders the additive `[fanout]` section. Every knob renders so a saved file documents the
+    /// fan-out policy and a round-trip never depends on an implicit default silently diverging from
+    /// what was written.
     private func renderFanOutTOML() -> [String] {
         [
             "[fanout]",
@@ -536,10 +498,8 @@ extension RuneWeaverConfig {
         ]
     }
 
-    /// Renders the additive `[workspace]` section.
-    ///
-    /// Every knob renders so a saved file documents the scratch quotas and a
-    /// round-trip never depends on an implicit default silently diverging from
+    /// Renders the additive `[workspace]` section. Every knob renders so a saved file documents the
+    /// scratch quotas and a round-trip never depends on an implicit default silently diverging from
     /// what was written.
     private func renderWorkspaceTOML() -> [String] {
         [
@@ -552,12 +512,6 @@ extension RuneWeaverConfig {
     }
 
     /// Renders the additive `[persona]` section.
-    ///
-    /// Every key renders, including empty style and owner name, so a saved
-    /// file documents the full persona and a round-trip never depends on an
-    /// implicit default silently diverging from what was written. Tone and
-    /// avatar render as their closed string spellings, matching the decode
-    /// contract on both sides.
     private func renderPersonaTOML() -> [String] {
         [
             "[persona]",

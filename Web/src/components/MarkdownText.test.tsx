@@ -1,3 +1,5 @@
+// Rune Weaver Dashboard — Unit tests for MarkdownText component.
+
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import MarkdownText from "./MarkdownText";

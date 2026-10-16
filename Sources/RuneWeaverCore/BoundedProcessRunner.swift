@@ -66,13 +66,6 @@ public enum BoundedProcessRunner: Sendable {
     public static let defaultMaxErrorBytes = 64 * 1024
 
     /// Spawn environment without ssh-agent forwarding.
-    ///
-    /// No untrusted tier forwards the agent: the container CLI only forwards
-    /// when explicitly passed `--ssh`, which isolated and detonation paths
-    /// never pass, and stripping the socket keys here keeps an inherited
-    /// `SSH_AUTH_SOCK` from reaching any child even when the parent shell
-    /// carries one.
-    /// - Returns: Parent environment minus agent socket keys.
     static func sanitizedSpawnEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "SSH_AUTH_SOCK")
@@ -80,11 +73,9 @@ public enum BoundedProcessRunner: Sendable {
         return env
     }
 
-    /// Box holding the live child so cancellation can terminate it.
-    /// Single-use per invocation: `cancelled` latches once set so a reused box
-    /// would immediately terminate the next child published via `set`. Create a
-    /// fresh box for every run (`runAsync` does so internally); never reuse a
-    /// box across invocations.
+    /// Box holding the live child so cancellation can terminate it. Single-use per invocation:
+    /// `cancelled` latches once set so a reused box would immediately terminate the next child
+    /// published via `set`.
     public final class ProcessBox: Sendable {
         private let state = OSAllocatedUnfairLock(initialState: ProcessBoxState())
 
@@ -119,10 +110,8 @@ public enum BoundedProcessRunner: Sendable {
             }
         }
 
-        /// Best-effort SIGTERM matching `Process.terminate` without touching the
-        /// child off the spawning executor. A stale pid after exit reports
-        /// `ESRCH` and is ignored; the single-use bounded lifetime keeps pid
-        /// reuse outside the termination window.
+        /// Best-effort SIGTERM matching `Process.terminate` without touching the child off the
+        /// spawning executor.
         private static func signalTermination(pid: Int32) {
             guard pid > 0 else { return }
             _ = kill(pid, SIGTERM)
@@ -136,12 +125,9 @@ public enum BoundedProcessRunner: Sendable {
         }
     }
 
-    /// Lock state for `ProcessBox`, kept beside the box (not nested in it)
-    /// so type nesting stays within the one-level budget.
-    /// Isolation: only the Sendable process identifier crosses executors via the
-    /// lock. The live `Process` stays on the spawning executor for
-    /// `terminationHandler`, drains, and `waitUntilExit`; cancellation and
-    /// timeouts signal by pid so no non-Sendable state is shared.
+    /// Lock state for `ProcessBox`, kept beside the box (not nested in it) so type nesting stays
+    /// within the one-level budget. Isolation: only the Sendable process identifier crosses
+    /// executors via the lock.
     private struct ProcessBoxState: Sendable {
         /// Identifier of the spawned child, if published yet.
         var pid: Int32?
@@ -238,10 +224,9 @@ public enum BoundedProcessRunner: Sendable {
         maxOutputBytes: Int,
         maxErrorBytes: Int
     ) throws -> BoundedProcessResult {
-        // Single-threaded readiness loop replaces the prior concurrent drains
-        // plus dispatch timeout: one thread polls both pipes, enforces caps,
-        // and watches the deadline so no non-Sendable child state crosses
-        // executors and no raw GCD owns the process lifetime.
+        // Single-threaded readiness loop replaces the prior concurrent drains plus dispatch
+        // timeout: one thread polls both pipes, enforces caps, and watches the deadline so no
+        // non-Sendable child state crosses executors and no raw GCD owns the process lifetime.
         let outFD = stdoutPipe.fileHandleForReading.fileDescriptor
         let errFD = stderrPipe.fileHandleForReading.fileDescriptor
         setNonBlocking(outFD)
@@ -396,10 +381,8 @@ extension BoundedProcessRunner {
                     }
                     do {
                         try process.run()
-                        // Publish only after a successful spawn so a launch
-                        // failure never leaves a dead child for cancel to chase.
-                        // Cancellation racing the spawn still terminates via the
-                        // latched box instead of leaking until the budget fires.
+                        // Publish only after a successful spawn so a launch failure never leaves a
+                        // dead child for cancel to chase.
                         box.set(process)
                     } catch {
                         stdoutPipe.fileHandleForReading.readabilityHandler = nil

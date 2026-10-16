@@ -1,14 +1,4 @@
 // Rune Weaver Tests — Approval decision history recording and routes.
-//
-// Purpose: pin the shared decision audit trail. Every resolved decision lands
-// exactly once through the decision contract with its surface tag, while
-// unresolved decisions record nothing and a failing store never fails the
-// response.
-// Scope: REST decide and respond recording, WebSocket triage tagging, and the
-// history list plus clear routes. Scope canonicalization and tier mapping stay
-// with their own suites.
-// Architectural role: regression coverage for the audit side of the single
-// decision contract, so a transport edit cannot silently drop history.
 
 import Foundation
 import RuneWeaverCore
@@ -304,11 +294,9 @@ struct ServerApprovalHistoryTests {
                 id: hostile.id,
                 approved: true,
                 duration: .thisTime,
-                // A hostile or drifted client can send any string in the
-                // surface field; the decide entry boundary normalizes it to
-                // the closed vocabulary so the durable surface column only
-                // ever carries a documented value, without failing the
-                // decision the row tags.
+                // A hostile or drifted client can send any string in the surface field; the decide
+                // entry boundary normalizes it to the closed vocabulary so the durable surface
+                // column only ever carries a documented value, without failing the decision the row.
                 surface: "hacker"
             )
             #expect(hostileResponse.status == .ok)
@@ -400,10 +388,9 @@ struct ServerApprovalHistoryTests {
     func `history filters ride the store query beyond one page`() async throws {
         let harness = try await makeHistoryHarness()
         defer { harness.cleanUp() }
-        // A SQLite-backed log with more matching rows than one page holds:
-        // the tool/action predicates must ride the store's WHERE, so the page
-        // slices the filtered set and the count reports the filtered total —
-        // not a post-fetch slice of an unbounded window.
+        // A SQLite-backed log with more matching rows than one page holds: the tool/action
+        // predicates must ride the store's WHERE, so the page slices the filtered set and the count
+        // reports the filtered total — not a post-fetch slice of an unbounded window.
         let store = ApprovalDecisionLogStore(
             dbPath: harness.directory.appendingPathComponent("episodes.db").path
         )

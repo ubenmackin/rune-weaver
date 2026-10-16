@@ -1,19 +1,4 @@
 // Rune Weaver Core — Apple Messages indexer for the local retrieval corpus.
-//
-// The Messages chat database is TCC-protected and actively written by the
-// Messages app, so it is never opened in place. A run copies the database plus
-// its write-ahead log and shared-memory sidecars into an isolated temporary
-// snapshot and reads only that copy, which keeps the live store from ever being
-// locked or held open across a long index pass. Messages are consumed in
-// ascending ROWID order from a persisted watermark so repeated runs only touch
-// rows that arrived since the last pass. Body text is resolved from the plain
-// `text` column or, when Messages stores only a serialized attributed string,
-// from the `attributedBody` blob. Tapbacks and replies are interpreted from
-// `associated_message_type` and `thread_originator_guid`, chat and participant
-// provenance is joined from `chat`, `handle`, and `chat_message_join`, and
-// attachments are routed through the shared document text-or-vision extractor.
-// A TCC or Full Disk Access denial is surfaced as an explicit missing-permission
-// error instead of crashing the caller.
 
 import CryptoKit
 import Foundation
@@ -50,10 +35,8 @@ public enum MessagesIndexError: Error, Sendable, Equatable {
 
 /// Interprets the `associated_message_type` column into a readable reaction.
 public enum MessagesTapback: Sendable {
-    /// Human-readable description of an add or remove reaction, or nil for a
-    /// normal message (`0`) or an unrecognized code.
+    /// Human-readable reaction for add/remove, nil for normal (`0`) or unrecognized codes.
     /// - Parameter associatedMessageType: Raw `associated_message_type` value.
-    /// - Returns: Reaction copy, or nil when the row is not an interpreted tapback.
     public static func description(for associatedMessageType: Int?) -> String? {
         guard let type = associatedMessageType else { return nil }
         switch type {
@@ -77,10 +60,6 @@ public enum MessagesTapback: Sendable {
 // MARK: - Contact resolution
 
 /// Seam for resolving a handle to a friendly display name.
-///
-/// Resolution is opportunistic by design: the indexer never prompts for
-/// Contacts access, so an implementation returns only names it can already read
-/// and degrades to an empty map when consent or the address book is unavailable.
 public protocol MessagesContactResolving: Sendable {
     /// Maps a normalized handle (digits and letters only, lowercased) to a name.
     /// - Returns: Resolved display names, or an empty map when unavailable.
@@ -88,11 +67,6 @@ public protocol MessagesContactResolving: Sendable {
 }
 
 /// Address-book-backed name resolver that reads only when access is already granted.
-///
-/// The engine never asks for Contacts permission on its own: reading the address
-/// book is a side effect the operator may not expect from a background index
-/// pass. An already-authorized address book yields phone- and email-keyed names;
-/// any other authorization state yields nothing so indexing proceeds without names.
 public struct MessagesContactNameResolver: MessagesContactResolving {
     /// Creates an address-book resolver.
     public init() {}
@@ -104,12 +78,9 @@ public struct MessagesContactNameResolver: MessagesContactResolving {
             guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else {
                 return [:]
             }
-            // `CNContactFormatter` reads every name component it may render
-            // (prefix, given, middle, family, suffix, nickname, organization),
-            // so the fetch must request the formatter's required-keys
-            // descriptor. Requesting only given/family names leaves `middleName`
-            // unfetched, and the formatter raises `CNPropertyNotFetchedException`
-            // (an Objective-C exception Swift cannot catch) when it reads it.
+            // `CNContactFormatter` reads every name component it may render (prefix, given, middle,
+            // family, suffix, nickname, organization), so the fetch must request the formatter's
+            // required-keys descriptor.
             let keys: [any CNKeyDescriptor] = [
                 CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
                 CNContactPhoneNumbersKey as NSString,
@@ -148,13 +119,8 @@ public struct MessagesContactNameResolver: MessagesContactResolving {
 
 // MARK: - Attributed body decoding
 
-/// Extracts plain text from a Messages `attributedBody` blob.
-///
-/// Messages serializes its body as an `NSAttributedString` using Apple's legacy
-/// `typedstream` encoding, which `NSKeyedUnarchiver` does not read. The decoder
-/// therefore walks the stream to its `NSString` payload and reads the
-/// length-prefixed UTF-8 bytes. Every bound is checked so a truncated or
-/// malformed blob returns nil instead of reading past the buffer.
+/// Extracts plain text from a Messages `attributedBody` blob. Every bound is checked so a truncated
+/// or malformed blob returns nil instead of reading past the buffer.
 public enum AttributedBodyTextDecoder: Sendable {
     /// Decodes the first string payload found in an attributed-body blob.
     /// - Parameter data: Raw `attributedBody` bytes.
@@ -190,11 +156,8 @@ public enum AttributedBodyTextDecoder: Sendable {
         return nil
     }
 
-    /// Reads a length-prefixed UTF-8 payload starting at a length byte.
-    /// - Parameters:
-    ///   - bytes: Full blob.
-    ///   - lengthIndex: Offset of the length encoding.
-    /// - Returns: Decoded string, or nil when the prefix or payload is out of bounds.
+    /// Reads a length-prefixed UTF-8 payload starting at a length byte. bytes: Full
+    /// blob.
     private static func readPayload(_ bytes: [UInt8], lengthIndex: Int) -> String? {
         guard let (length, start) = readLength(bytes, at: lengthIndex), length > 0 else { return nil }
         let end = start + length
@@ -203,13 +166,6 @@ public enum AttributedBodyTextDecoder: Sendable {
     }
 
     /// Reads a typedstream length encoding.
-    ///
-    /// Values below `0x80` are inline; `0x81`, `0x82`, and `0x83` introduce a
-    /// little-endian 16-, 24-, or 32-bit length respectively.
-    /// - Parameters:
-    ///   - bytes: Full blob.
-    ///   - index: Offset of the length encoding.
-    /// - Returns: The decoded length plus the offset of the first payload byte.
     private static func readLength(_ bytes: [UInt8], at index: Int) -> (length: Int, start: Int)? {
         guard index < bytes.count else { return nil }
         let first = bytes[index]
@@ -246,11 +202,7 @@ public enum AttributedBodyTextDecoder: Sendable {
         return nil
     }
 
-    /// Byte offset of the first occurrence of a needle.
-    /// - Parameters:
-    ///   - needle: Bytes to find.
-    ///   - bytes: Buffer to search.
-    /// - Returns: Offset of the match, or nil when absent.
+    /// Byte offset of the first occurrence of a needle. needle: Bytes to find.
     private static func firstIndex(of needle: [UInt8], in bytes: [UInt8]) -> Int? {
         guard !needle.isEmpty, needle.count <= bytes.count else { return nil }
         let lastStart = bytes.count - needle.count
@@ -281,11 +233,6 @@ public enum AttributedBodyTextDecoder: Sendable {
 // MARK: - Index state
 
 /// Persisted incremental cursor for the Messages indexer.
-///
-/// The watermark is the highest `message.ROWID` that has been examined, which is
-/// monotonic because Messages assigns ROWIDs in insertion order. Persisting it
-/// outside the retrieval store keeps the indexer idempotent across restarts
-/// without adding a table to the shared document index schema.
 public struct MessagesIndexState: Sendable, Codable, Equatable {
     /// Highest examined message ROWID; zero for a store that has never run.
     public var lastRowID: Int64
@@ -310,13 +257,7 @@ public struct MessagesIndexResult: Sendable, Equatable {
     /// Whether the snapshot may hold more rows past the batch bound.
     public let hasMore: Bool
 
-    /// Creates an index result.
-    /// - Parameters:
-    ///   - scanned: Messages read in this pass.
-    ///   - indexed: Messages persisted.
-    ///   - vectorChunks: Chunks persisted with a vector embedding.
-    ///   - lastRowID: Highest ROWID examined.
-    ///   - hasMore: Whether more rows remain past the batch bound.
+    /// Creates an index result. scanned: Messages read in this pass.
     public init(scanned: Int, indexed: Int, vectorChunks: Int = 0, lastRowID: Int64, hasMore: Bool) {
         self.scanned = scanned
         self.indexed = indexed
@@ -329,12 +270,6 @@ public struct MessagesIndexResult: Sendable, Equatable {
 // MARK: - Indexer
 
 /// Reads Apple Messages from an isolated snapshot and persists them to the index.
-///
-/// The indexer is an actor so a scheduled pass and an on-demand pass cannot
-/// interleave their watermark reads and writes. Every dependency that touches
-/// the outside world — the document store, the attachment extractor, the contact
-/// resolver, and the state file — is injected, so the reader is exercised against
-/// fixtures without a live Messages database.
 public actor MessagesIndexer {
     /// Default location of the Messages chat database.
     public static let defaultChatDatabasePath = "~/Library/Messages/chat.db"
@@ -348,17 +283,9 @@ public actor MessagesIndexer {
     /// Upper bound on any caller-supplied batch, keeping one pass bounded.
     static let maxBatchLimit = 5000
 
-    /// Cheap read-only probe for Full Disk Access, intended for status use.
-    ///
-    /// There is no prompt API for Full Disk Access, so the first denial would
-    /// otherwise surface only after a wasted Rebuild or nightly pass. The probe
-    /// opens the live database read-only and closes it immediately, never
-    /// copying or locking the live store, so the status poll can call it on
-    /// every tick. A read-only `open` exercises the same permission gate as the
-    /// copy the run performs, while `isReadableFile` consults only the
-    /// directory entry and can disagree with `open` under TCC.
-    /// - Parameter chatDatabasePath: Live database path; `~` is expanded.
-    /// - Returns: True when the chat database file opens read-only.
+    /// Cheap read-only probe for Full Disk Access, intended for status use. There is no prompt API
+    /// for Full Disk Access, so the first denial would otherwise surface only after a wasted Rebuild
+    /// or nightly pass.
     public static func hasMessagesDatabaseAccess(chatDatabasePath: String = defaultChatDatabasePath) -> Bool {
         let expanded = (chatDatabasePath as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
@@ -374,22 +301,12 @@ public actor MessagesIndexer {
     }
 
     /// Cheap read-only probe against this indexer's configured database path.
-    ///
-    /// Callers that already hold an indexer must probe through the instance so
-    /// the warning reflects the same path the next run will copy; a custom
-    /// path probed through the static default would disagree with the run
-    /// outcome. The static variant stays primary for callers with no instance.
-    /// Nonisolated so a status poll reads it synchronously without hopping;
-    /// safe because the path never mutates after initialization.
-    /// - Returns: True when the configured chat database file opens read-only.
     public nonisolated func hasMessagesDatabaseAccess() -> Bool {
         Self.hasMessagesDatabaseAccess(chatDatabasePath: chatDatabasePath)
     }
 
-    /// Source database path, expanded on first use.
-    ///
-    /// Held nonisolated so the synchronous probe can read it without hopping;
-    /// safe because the value never mutates after initialization.
+    /// Source database path, expanded on first use. Held nonisolated so the synchronous probe can
+    /// read it without hopping; safe because the value never mutates after initialization.
     private nonisolated let chatDatabasePath: String
     /// Durable retrieval store receiving documents and chunks.
     private let store: DocIndexStore
@@ -406,16 +323,8 @@ public actor MessagesIndexer {
     /// Largest attachment handed to the extractor.
     private let maxAttachmentBytes: Int
 
-    /// Creates a Messages indexer.
-    /// - Parameters:
-    ///   - chatDatabasePath: Live chat database path; `~` is expanded.
-    ///   - store: Durable document index receiving indexed messages.
-    ///   - extractor: Text-or-vision extractor for attachment bodies.
-    ///   - contacts: Opportunistic handle-to-name resolver.
-    ///   - embedder: Optional embeddings backend for vector-eligible messages.
-    ///   - statePath: Persisted watermark file; `~` is expanded.
-    ///   - batchLimit: Maximum messages read per pass.
-    ///   - maxAttachmentBytes: Largest attachment read for text extraction.
+    /// Creates a Messages indexer. chatDatabasePath: Live chat database path; `~`
+    /// is expanded.
     public init(
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         store: DocIndexStore,
@@ -436,16 +345,9 @@ public actor MessagesIndexer {
         self.maxAttachmentBytes = max(1, maxAttachmentBytes)
     }
 
-    /// Copies the live database and its sidecars into an isolated snapshot.
-    ///
-    /// The write-ahead log and shared-memory file travel with the database so a
-    /// snapshot is internally consistent even when the live connection has not
-    /// checkpointed. The returned directory is owned by the caller and must be
-    /// removed; ``indexNewMessages(limit:)`` does so automatically.
-    /// Copies the live database and its sidecars into an isolated temporary snapshot.
-    /// - Parameter chatDatabasePath: Source path to `chat.db`.
-    /// - Returns: Temporary directory holding the copied database.
-    /// - Throws: ``MessagesIndexError`` when the source is missing or unreadable.
+    /// Copies the live database and its sidecars into an isolated snapshot. The returned directory
+    /// is owned by the caller and must be removed; ``indexNewMessages(limit:)`` does so
+    /// automatically.
     public static func snapshotDatabase(chatDatabasePath: String = defaultChatDatabasePath) throws -> URL {
         let source = (chatDatabasePath as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
@@ -473,14 +375,9 @@ public actor MessagesIndexer {
         return directory
     }
 
-    /// Copies the live database and its sidecars into an isolated snapshot.
-    ///
-    /// The write-ahead log and shared-memory file travel with the database so a
-    /// snapshot is internally consistent even when the live connection has not
-    /// checkpointed. The returned directory is owned by the caller and must be
-    /// removed; ``indexNewMessages(limit:)`` does so automatically.
-    /// - Returns: Temporary directory holding the copied database.
-    /// - Throws: ``MessagesIndexError`` when the source is missing or unreadable.
+    /// Copies the live database and its sidecars into an isolated snapshot. The returned directory
+    /// is owned by the caller and must be removed; ``indexNewMessages(limit:)`` does so
+    /// automatically.
     public func snapshotDatabase() throws -> URL {
         try Self.snapshotDatabase(chatDatabasePath: chatDatabasePath)
     }
@@ -507,15 +404,6 @@ public actor MessagesIndexer {
 
     #if canImport(SQLite3)
         /// Indexes messages newer than the persisted ROWID watermark.
-        ///
-        /// The live database is snapshotted first, then read in ascending ROWID
-        /// order up to `limit`. Each indexed message upserts its document and a
-        /// single searchable chunk; the watermark advances only across rows the
-        /// pass actually examined, so a failure mid-pass replays the unread tail
-        /// on the next run rather than skipping it.
-        /// - Parameter limit: Maximum messages to read; defaults to the batch bound.
-        /// - Returns: Counts plus the new watermark.
-        /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot failure.
         public func indexNewMessages(limit: Int? = nil) async throws -> MessagesIndexResult {
             await ensureDimensionMatch()
             let directory = try snapshotDatabase()
@@ -538,18 +426,6 @@ public actor MessagesIndexer {
         }
 
         /// Indexes every pending message by paging one snapshot to exhaustion.
-        ///
-        /// One snapshot keeps a long backlog consistent while pages advance
-        /// strictly by ROWID in batches of the configured bound, so per-batch
-        /// memory stays flat no matter how deep the backlog runs. The watermark
-        /// is persisted after every finished batch, so a run cancelled
-        /// mid-backlog resumes at the first unfinished batch instead of
-        /// replaying rows whose documents are already committed.
-        /// - Parameter reporter: Sink for advisory per-batch progress; defaults to a no-op.
-        /// - Returns: Accumulated counts plus the final watermark; `hasMore` is
-        ///   always false because the loop only returns once the snapshot is drained.
-        /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot
-        ///   failure; cancellation propagates with finished batches already committed.
         public func indexAllNewMessages(reporter: ToolProgressReporter = ToolContext.noProgress) async throws -> MessagesIndexResult {
             await ensureDimensionMatch()
             let directory = try snapshotDatabase()
@@ -582,10 +458,8 @@ public actor MessagesIndexer {
                 lastRowID = batch.lastRowID
                 watermark = batch.lastRowID
                 try writeWatermark(watermark)
-                // The batch loop owns per-batch liveness: every batch reports
-                // cumulative totals so a messages-only phase advances the top
-                // scanned and indexed on each page. Only the batch ROWID
-                // enters the frame; no body text ever does.
+                // The batch loop owns per-batch liveness: every batch reports cumulative totals so
+                // a messages-only phase advances the top scanned and indexed on each page.
                 await reporter(ToolProgress(
                     message: "Indexing messages: \(totalIndexed) indexed, \(totalScanned) scanned",
                     scanned: totalScanned,
@@ -617,17 +491,8 @@ public actor MessagesIndexer {
             )
         }
 
-        /// Indexes one ROWID-ordered batch from an already-open snapshot.
-        ///
-        /// The caller owns snapshot lifetime and watermark persistence, so the
-        /// single-batch entry and the converging loop share identical row
-        /// handling without duplicating the cancellation or upsert shape.
-        /// - Parameters:
-        ///   - handle: Open snapshot handle owned by the caller.
-        ///   - watermark: Exclusive lower bound on `message.ROWID`.
-        ///   - limit: Maximum rows read in this batch.
-        ///   - names: Resolved contact names keyed by normalized handle.
-        /// - Returns: Counts plus the highest ROWID examined in this batch.
+        /// Indexes one ROWID-ordered batch from an already-open snapshot. - watermark: Exclusive
+        /// lower bound on `message.ROWID`.
         private func indexBatch(
             handle: OpaquePointer?,
             from watermark: Int64,
@@ -710,13 +575,6 @@ public actor MessagesIndexer {
     #endif
 
     /// Opens a snapshot database handle, mapping open failures to the honest cause.
-    ///
-    /// SQLite reports both a missing file and an unreadable one as
-    /// `SQLITE_CANTOPEN`, which is the shape a TCC or Full Disk Access denial
-    /// takes, so that code is surfaced as a missing-permission state.
-    /// - Parameter snapshotPath: Snapshot database path.
-    /// - Returns: Open handle; the caller closes it.
-    /// - Throws: ``MessagesIndexError`` when the handle cannot be opened.
     public static func openHandle(snapshotPath: String) throws -> OpaquePointer {
         #if canImport(SQLite3)
             var handle: OpaquePointer?
@@ -750,9 +608,7 @@ public actor MessagesIndexer {
 
     /// Copies one snapshot member, translating permission errors into a clear denial.
     /// - Parameters:
-    ///   - source: Live sidecar path.
-    ///   - destination: Snapshot destination URL.
-    /// - Throws: ``MessagesIndexError.permissionDenied`` when the file is not readable.
+    /// - source: Live sidecar path.
     static func copySnapshotItem(atPath source: String, to destination: URL) throws {
         do {
             try FileManager.default.copyItem(atPath: source, toPath: destination.path)
@@ -801,12 +657,8 @@ extension MessagesIndexer {
         }
     }
 
-    /// Assembles the indexable payload for one message row.
-    /// - Parameters:
-    ///   - row: Message read from the snapshot.
-    ///   - attachments: Attachments joined to the message.
-    ///   - names: Resolved contact names keyed by normalized handle.
-    /// - Returns: The document and its resolved searchable text.
+    /// Assembles the indexable payload for one message row. row: Message read from
+    /// the snapshot.
     func makePayload(
         from row: MessagesDatabaseRow,
         attachments: [MessagesAttachmentRow],
@@ -868,8 +720,6 @@ extension MessagesIndexer {
 
     /// Extracts searchable text from each attachment through the shared extractor.
     /// - Parameter attachments: Attachments joined to the message.
-    /// - Returns: Display name plus extracted text per attachment (text nil when
-    ///   the file is missing, oversized, or carries no extractable text).
     func attachmentResults(for attachments: [MessagesAttachmentRow]) async -> [(name: String, text: String?)] {
         var results: [(name: String, text: String?)] = []
         for attachment in attachments {
@@ -898,14 +748,6 @@ extension MessagesIndexer {
     }
 
     /// Replaces attachment placeholders with names in attachment order.
-    ///
-    /// Messages writes one `U+FFFC` object-replacement character per attachment
-    /// directly in the body, so consuming placeholders left to right against the
-    /// `ROWID`-ordered attachment list lines them up.
-    /// - Parameters:
-    ///   - text: Message body carrying placeholders.
-    ///   - names: Attachment display names in join order.
-    /// - Returns: Body with each placeholder replaced by `[name]`.
     static func replacingPlaceholders(in text: String, with names: [String]) -> String {
         var result = text
         var index = 0
@@ -917,11 +759,8 @@ extension MessagesIndexer {
         return result
     }
 
-    /// Builds the source-scoped metadata carried on every indexed message.
-    /// - Parameters:
-    ///   - row: Message read from the snapshot.
-    ///   - names: Resolved contact names keyed by normalized handle.
-    /// - Returns: Chat, handle, Mac-epoch date, direction, and provenance keys.
+    /// Builds the source-scoped metadata carried on every indexed message. row:
+    /// Message read from the snapshot.
     static func metadata(for row: MessagesDatabaseRow, names: [String: String]) -> [String: String] {
         var metadata: [String: String] = [:]
         if let chatID = row.chatID {
@@ -951,11 +790,8 @@ extension MessagesIndexer {
         return metadata
     }
 
-    /// Chooses a display name for a message from chat, participant, and message identity.
-    /// - Parameters:
-    ///   - row: Message read from the snapshot.
-    ///   - names: Resolved contact names keyed by normalized handle.
-    /// - Returns: Best available label; never empty.
+    /// Chooses a display name for a message from chat, participant, and message identity. -
+    /// Parameters: - row: Message read from the snapshot.
     public static func displayName(for row: MessagesDatabaseRow, names: [String: String]) -> String {
         NormalizedText.value(row.chatDisplayName)
             ?? NormalizedText.value(row.chatIdentifier)
@@ -965,11 +801,8 @@ extension MessagesIndexer {
             ?? "Message \(row.rowID)"
     }
 
-    /// Resolves a handle to a friendly name when the resolver knew it.
-    /// - Parameters:
-    ///   - handle: Raw handle from the message.
-    ///   - names: Resolved contact names keyed by normalized handle.
-    /// - Returns: Friendly name, or nil when the handle is unknown.
+    /// Resolves a handle to a friendly name when the resolver knew it. handle: Raw
+    /// handle from the message.
     public static func friendlyName(for handle: String?, names: [String: String]) -> String? {
         guard let handle = NormalizedText.value(handle),
               let key = MessageRecipientNameNormalizer.handleKey(handle)
@@ -1122,13 +955,8 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
 
     /// Read-only queries against an opened Messages snapshot.
     public enum MessagesDatabaseIO {
-        /// Reads messages past a ROWID watermark in ascending order.
-        /// - Parameters:
-        ///   - handle: Open snapshot handle.
-        ///   - afterRowID: Exclusive lower bound on `message.ROWID`.
-        ///   - limit: Maximum rows returned.
-        /// - Returns: Joined message rows.
-        /// - Throws: ``MessagesIndexError`` when the statement cannot be prepared.
+        /// Reads messages past a ROWID watermark in ascending order. handle: Open
+        /// snapshot handle.
         public static func messages(handle: OpaquePointer?, afterRowID: Int64, limit: Int) throws -> [MessagesDatabaseRow] {
             guard limit > 0 else { return [] }
             let sql = """
@@ -1159,13 +987,6 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
         }
 
         /// Searches messages matching an optional query text and optional recipient handle.
-        ///
-        /// Temporal bounds filter at the SQL layer: `since` is inclusive and
-        /// `until` is exclusive, normalized through the `TemporalFilter`
-        /// seconds expression so seconds and nanosecond rows share one bound.
-        /// A NULL `m.date` never satisfies a comparison, so bounded queries
-        /// exclude undated rows while unbounded ones stay byte-identical to
-        /// the legacy shape. Ordering and the caller's pre-fetch limit are untouched.
         public static func searchMessages(
             handle: OpaquePointer?,
             query: String? = nil,
@@ -1259,12 +1080,6 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
         }
 
         /// Fetches conversation messages for a chat ID or recipient.
-        ///
-        /// Temporal bounds share the search contract: `since` inclusive,
-        /// `until` exclusive, normalized through the `TemporalFilter` seconds
-        /// expression so seconds and nanosecond rows share one bound. NULL
-        /// dates never satisfy a bound, so bounded windows exclude undated
-        /// rows while unbounded reads keep the legacy ordering and limit behavior.
         public static func conversationMessages(
             handle: OpaquePointer?,
             chatID: String? = nil,
@@ -1339,11 +1154,8 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             return rows
         }
 
-        /// Reads attachments joined to one message, in attachment order.
-        /// - Parameters:
-        ///   - handle: Open snapshot handle.
-        ///   - messageID: Owning `message.ROWID`.
-        /// - Returns: Attachment rows; empty when the statement cannot be prepared.
+        /// Reads attachments joined to one message, in attachment order. handle:
+        /// Open snapshot handle.
         public static func attachments(handle: OpaquePointer?, messageID: Int64) throws -> [MessagesAttachmentRow] {
             let sql = """
             SELECT a.filename, a.transfer_name, a.mime_type, a.total_bytes
@@ -1393,21 +1205,15 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             )
         }
 
-        /// Reads an optional integer, preserving NULL as nil.
-        /// - Parameters:
-        ///   - statement: Statement positioned on a row.
-        ///   - index: Column index.
-        /// - Returns: Integer value, or nil for NULL.
+        /// Reads an optional integer, preserving NULL as nil. statement: Statement
+        /// positioned on a row.
         private static func optionalInt(_ statement: OpaquePointer?, index: Int32) -> Int? {
             guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
             return Int(sqlite3_column_int(statement, index))
         }
 
-        /// Copies a BLOB column into `Data`.
-        /// - Parameters:
-        ///   - statement: Statement positioned on a row.
-        ///   - index: Column index.
-        /// - Returns: Blob bytes, or nil for NULL or empty columns.
+        /// Copies a BLOB column into `Data`. statement: Statement positioned on a
+        /// row.
         private static func columnBlob(_ statement: OpaquePointer?, index: Int32) -> Data? {
             guard sqlite3_column_type(statement, index) == SQLITE_BLOB,
                   let pointer = sqlite3_column_blob(statement, index)

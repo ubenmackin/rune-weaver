@@ -1,11 +1,4 @@
 // Rune Weaver Core — Strict turn registry entries plus park helpers.
-//
-// Purpose: own the session entry shape, sweep result, and parked-turn
-// verdicts so the registry actor keeps lifecycle and sweep orchestration.
-// Scope: entry and sweep result types, TTL default, plus pure parked and
-// reap-after-outcome derivations only; container execution stays elsewhere.
-// Architectural role: focused extension backing `StrictTurnRegistry` keeping
-// the actor body within the type-length budget.
 
 import Foundation
 
@@ -64,10 +57,6 @@ extension StrictTurnRegistry {
     }
 
     /// Time-to-live for registry entries plus orphan scratch.
-    ///
-    /// The hourly reclamation pass passes the `[containers]` idle window
-    /// here, so the operator-configured TTL governs entries plus scratch
-    /// alike; the default only backs unbuilt callers.
     public static let sweepTTLSeconds: TimeInterval = 24 * 60 * 60
     /// Shared registry used by live turns.
     public static let shared = StrictTurnRegistry()

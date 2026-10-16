@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Secret surrogation keeping live credentials out of agent context.
-//
-// Purpose: pins the surrogate contract where agent-visible arguments carry only
-// `rwsecret:<key>` references while the network boundary swaps in live values
-// just-in-time. Scope: surrogate issuance plus resolution in `SecretsManager`,
-// the `api.request` transport swap with dry-run and echo sweeping, and the
-// unchanged header allowlist. Architectural role: the executable guard that
-// surrogates stay references (never copies) and that previews, logs, and
-// persisted outputs never carry real secret bytes.
 
 import Foundation
 import os

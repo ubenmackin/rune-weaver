@@ -1,28 +1,4 @@
 // Rune Weaver Dashboard — Rules section of the owner access configuration surface.
-//
-// Purpose: Lists every durable access rule as one row per tool-plus-scope and
-// lets the owner revoke or edit one without touching a parked approval. A
-// plain-English header, derived from the active allow rules grouped by tool,
-// states what the agent may still do on its own; the table underneath carries
-// the durable allow and deny rules with their scope, tier, expiry, and usage
-// counters, capped so a large store stays scrollable under a sticky header.
-// Scope: Reading the rule list, the Add Rule / Edit Rule modal (effect pill
-// toggle, approval-tool dropdown with a write-in fallback, tool-wide versus
-// specific-target scope builder with adaptive hints, and the duration picker),
-// the filter toolbar, live refresh on the access_rules_changed frame plus a
-// quiet poll, and the deep-link highlight. A duration-only edit re-arms the
-// stored rule in place so its identity and usage counters survive; every other
-// edit mints its replacement first and revokes the stored original only after
-// that mint succeeds, because a rule's identity is its tool-plus-scope while a
-// failed mint must leave the stored rule — a deny above all — exactly as the
-// owner left it.
-// Whether a rule matches a call and the deny-outranks decision order stay with
-// the engine's permission gate; this section only renders and edits owner
-// intent, and never re-implements scope comparison.
-// Architectural role: the landing section of the Access pane; it reuses the
-// shared access-wording helpers so its scope lines, its grouped header, and its
-// tier labels read one vocabulary, and refetches on the same 30s cadence the
-// counters surface uses.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -60,16 +36,13 @@ const MAX_RENDERED_RULES = 200;
 // fail-closed guard, not for anything the engine registers.
 const MAX_TOOL_NAME_CHARS = 128;
 
-// Bound on a rule's reason so an unbounded paste never persists to the rule
-// store: the reason renders in every table row and rides every denial text
-// the agent reads. Shipped reasons are a sentence; the cap exists for the
-// modal's fail-closed guard, mirroring the tool and target caps.
+// Bound on a rule's reason so an unbounded paste never persists to the rule store: the reason
+// renders in every table row and rides every denial text the agent reads.
 const MAX_RULE_REASON_CHARS = 512;
 
-// The durable tiers a standing allow rule can carry: the three dated spans
-// plus forever. The ephemeral thisTime/forTask/forSession tiers mint no
-// durable rule, so the duration picker never offers them. Deny rules always
-// carry forever.
+// The durable tiers a standing allow rule can carry: the three dated spans plus forever. The
+// ephemeral thisTime/forTask/forSession tiers mint no durable rule, so the duration picker never
+// offers them.
 const ALLOW_DURATION_TIERS: TrustDuration[] = [
   "fiveMinutes",
   "oneHour",
@@ -141,30 +114,19 @@ function extractTargetValue(scope: AccessScopeDTO): string {
   return "";
 }
 
-// Effect one row renders from. Either wire spelling is read in precedence order
-// so a legacy `action` payload still renders; a payload carrying neither names
-// no trust, so it fails closed and reads Deny rather than presenting an
-// unreadable rule as auto-approved.
+// Effect one row renders from.
 function getRuleEffect(rule: AccessRule): "allow" | "deny" {
   return rule.effect ?? rule.action ?? "deny";
 }
 
-// Whether a stored scope outside the builder's own two shapes can still be
-// rewritten by it. A recipient set naming exactly one canonical handle is the
-// same trust as an exact target to that handle, so it rewrites losslessly;
-// every other stored shape (a multi-handle set, a domain with its subdomain
-// flag, a path prefix, a glob) carries meaning an exact target cannot
-// reproduce, so the builder has to refuse rather than silently drop breadth
-// the owner never chose to narrow.
+// Whether a stored scope outside the builder's own two shapes can still be rewritten by it.
 function hasSingleTargetShape(scope: AccessScopeDTO): boolean {
   if (scope.kind !== "recipientSet") return false;
   return scope.handles.filter((handle) => handle.trim().length > 0).length === 1;
 }
 
-// The one field a scope kind names, trimmed, or null when the kind names no
-// field (tool-wide) or the field is missing. Recipient sets read as a sorted
-// copy of their trimmed handles, because the engine's recipient matcher
-// normalizes member order and casing, so a reordered set is the same trust.
+// The one field a scope kind names, trimmed, or null when the kind names no field (tool-wide) or
+// the field is missing.
 function scopeNamingField(scope: AccessScopeDTO, kind: string): string | string[] | null {
   const record = scope as unknown as Record<string, unknown>;
   if (kind === "exactTarget") {
@@ -190,14 +152,9 @@ function scopeNamingField(scope: AccessScopeDTO, kind: string): string | string[
   return null;
 }
 
-// Structural scope equality: compares the kind plus only the field that kind
-// names, so a key reordered in either payload reads as the same scope instead
-// of degrading a duration-only edit into a mint-plus-revoke that loses the
-// rule's identity and usage counters. Trims each naming field the way the
-// sibling target comparison does; the engine keeps exact targets
-// byte-for-byte, so no case folding happens here. Tool-wide reads equal under
-// either wire spelling (`tool` and the legacy `toolWide`), because both name
-// every call of the tool.
+// Structural scope equality: compares the kind plus only the field that kind names, so a key
+// reordered in either payload reads as the same scope instead of degrading a duration-only edit into
+// a mint-plus-revoke that loses the rule's identity and usage counters.
 function scopesEqual(a: AccessScopeDTO, b: AccessScopeDTO): boolean {
   const kindA = (a as { kind?: unknown }).kind;
   const kindB = (b as { kind?: unknown }).kind;
@@ -225,11 +182,8 @@ const MAX_HANDLE_QUERY_CHARS = 500;
 // instead of canonicalizing to the junk.
 const EMAIL_HANDLE_SHAPE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Za-z]{2,}$/i;
 
-// Whether a trimmed value spells a phone number: one optional leading `+`,
-// then only space, dash, parens, and dot separating 7–15 ASCII digits. A `+`
-// anywhere else, a non-ASCII digit, or any other character disqualifies it, so
-// a near-miss spelling falls through to name classification rather than
-// masquerading as a handle.
+// Whether a trimmed value spells a phone number: one optional leading `+`, then only space, dash,
+// parens, and dot separating 7–15 ASCII digits.
 function isPhoneHandleShape(value: string): boolean {
   let digitCount = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -250,10 +204,8 @@ function canonicalPhoneHandle(value: string): string {
   return value.charAt(0) === "+" ? `+${digits}` : digits;
 }
 
-// Canonical handle for one typed recipient, or null when the value names a
-// person rather than a handle. Mirrors the engine's recipient classifier so the
-// form refuses a send target the engine would reject; the engine stays the
-// single owner of the rule this echoes.
+// Canonical handle for one typed recipient, or null when the value names a person rather than a
+// handle.
 function canonicalMessageHandle(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > MAX_HANDLE_QUERY_CHARS) return null;
@@ -263,11 +215,6 @@ function canonicalMessageHandle(raw: string): string | null {
 }
 
 // Whether one specific-target value may back a durable `messages.send` rule.
-// Mirrors the engine's mintable-send-scope invariant: a wildcard pattern
-// persists, and every other target must itself spell a canonical handle, so a
-// display name is refused in the form before any network write rather than
-// failing afterward against a rule the edit already touched. Validation only —
-// scope matching stays with the engine's permission gate.
 function isMintableSendTarget(target: string): boolean {
   if (target.includes("*") || target.includes("?")) return true;
   return canonicalMessageHandle(target) === target;
@@ -341,14 +288,7 @@ function getTargetFieldInfo(tool: string) {
   };
 }
 
-// Mints the replacement rule for an edit, resolving only once the engine has
-// stored it. The mint's success is the stored write rather than the echoed
-// rule — the section discards the echo because it refetches the list once the
-// edit settles — so a 2xx answer whose body the client cannot read as a rule
-// still proves the replacement landed. A rejection that proves nothing was
-// stored rethrows so the caller's catch surfaces the refusal and leaves the
-// stored rule standing: revoking behind a mint that never landed would trade a
-// live rule for one that never existed.
+// Mints the replacement rule for an edit, resolving only once the engine has stored it.
 async function mintReplacement(input: NewAccessRuleInput): Promise<void> {
   try {
     await createRule(input);
@@ -357,13 +297,8 @@ async function mintReplacement(input: NewAccessRuleInput): Promise<void> {
   }
 }
 
-// Whether a rejected mint still proves the engine stored the replacement. A
-// 2xx status carries that proof for a body the client could not normalize. The
-// bodyless-204 generation of POST /approvals/rules reaches the caller as a
-// statusless ApiError from api.ts's fail-closed response guard, so its
-// response-shape wording carries the same proof. Every other rejection — the
-// gate's non-2xx refusal, a request the client refused to send before the
-// wire, a transport failure — proves the replacement never stored.
+// Whether a rejected mint still proves the engine stored the replacement. A 2xx status carries that
+// proof for a body the client could not normalize.
 function mintStoredDespite(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false;
   if (error.status >= 200 && error.status < 300) return true;
@@ -376,20 +311,16 @@ export interface AccessRulesSectionProps {
   highlightRuleId?: string | null;
 }
 
-// Rules section of the access pane: the durable allow and deny rules with the
-// Add Rule / Edit Rule modal, the revoke confirmation, and the filter toolbar.
-// Every rail section mounts on demand, so the component is always rendered
-// against a live table rather than a stashed body.
+// Rules section of the access pane: the durable allow and deny rules with the Add Rule / Edit Rule
+// modal, the revoke confirmation, and the filter toolbar.
 export function AccessRulesSection({
   highlightRuleId = null,
 }: AccessRulesSectionProps) {
   const [rules, setRules] = useState<AccessRule[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Whether the first list read has settled, so the plain-English header never
-  // asserts a coverage the fetch has not answered yet. Once true it stays
-  // true: a later poll failure keeps the last known reading beside the error
-  // banner instead of blanking the sentence back to "no trust at all".
+  // Whether the first list read has settled, so the plain-English header never asserts a coverage
+  // the fetch has not answered yet.
   const [hasLoadedRules, setHasLoadedRules] = useState<boolean>(false);
 
   // Revoke modal state. The pending rule stays beside its own error so a
@@ -464,12 +395,9 @@ export function AccessRulesSection({
     return () => clearInterval(interval);
   }, [refresh]);
 
-  // Reveals the deep-linked rule once the fetched list renders it: the table
-  // caps at 200 rows inside a scroll wrapper, so a marked row far down the
-  // list would be invisible exactly where the link landed. The reveal fires
-  // once per linked rule so a refresh cannot steal the scroll position back;
-  // the existence guard covers a fetch still in flight, and the scrollIntoView
-  // guard covers hosts that do not implement it.
+  // Reveals the deep-linked rule once the fetched list renders it: the table caps at 200 rows
+  // inside a scroll wrapper, so a marked row far down the list would be invisible exactly where the
+  // link landed.
   useEffect(() => {
     if (!highlightRuleId || scrolledHighlightRef.current === highlightRuleId) return;
     const row = highlightedRowRef.current;
@@ -610,10 +538,9 @@ export function AccessRulesSection({
       setRuleFormError("Messages send rules must name a recipient or pattern.");
       return;
     }
-    // Send trust keys to the exact canonical handle the owner authorized, so a
-    // display-name target fails here mirroring the engine's mintable-send-scope
-    // invariant instead of reaching the wire, where it would be refused only
-    // after the edit had already touched the stored rule.
+    // Send trust keys to the exact canonical handle the owner authorized, so a display-name target
+    // fails here mirroring the engine's mintable-send-scope invariant instead of reaching the wire,
+    // where it would be refused only after the edit had already touched the stored rule.
     if (
       effectiveTool === "messages.send" &&
       scopeKind === "exactTarget" &&
@@ -663,11 +590,8 @@ export function AccessRulesSection({
         const editingKind = (editingRule.scope as { kind?: unknown }).kind;
         const prevDuration = (editingRule.duration ?? "forever") as TrustDuration;
         const prevReason = editingRule.reason ?? "";
-        // The builder writes only a tool-wide or a specific-target scope, so a
-        // stored shape it cannot reproduce keeps its own: only an allow duration
-        // change applies in place. A single-handle recipient set is the one
-        // exception, because that is the same trust as the exact target it
-        // rewrites to, so it flows through the ordinary edit path below.
+        // The builder writes only a tool-wide or a specific-target scope, so a stored shape it
+        // cannot reproduce keeps its own: only an allow duration change applies in place.
         const builderOwnsStoredScope =
           editingKind === "tool" ||
           editingKind === "toolWide" ||
@@ -694,10 +618,9 @@ export function AccessRulesSection({
           setRuleFormError("No changes to save.");
           return;
         }
-        // Structural equality instead of a serialized string: key order in
-        // either payload must not read as a scope change, or a duration-only
-        // edit silently degrades to mint-plus-revoke and loses the rule's
-        // identity and usage counters.
+        // Structural equality instead of a serialized string: key order in either payload must not
+        // read as a scope change, or a duration-only edit silently degrades to mint-plus-revoke and
+        // loses the rule's identity and usage counters.
         const scopeUnchanged = scopesEqual(scope, editingRule.scope);
         const toolUnchanged = (editingRule.toolName || "") === effectiveTool;
         const effectUnchanged = getRuleEffect(editingRule) === ruleEffect;
@@ -715,12 +638,9 @@ export function AccessRulesSection({
             return;
           }
         }
-        // Mint the replacement before retiring the stored rule: a durable deny
-        // outranks every allow and is removed only by an explicit revoke, so an
-        // edit the owner never committed must never be what deletes the old
-        // row. Only a mint the engine stored revokes the original; a mint that
-        // was refused or never landed leaves the stored rule standing for a
-        // retry.
+        // Mint the replacement before retiring the stored rule: a durable deny outranks every allow
+        // and is removed only by an explicit revoke, so an edit the owner never committed must never
+        // be what deletes the old row.
         await mintReplacement(payload);
         await revokeRule(editingRule.id);
       } else {
@@ -782,10 +702,8 @@ export function AccessRulesSection({
           {headerSentence}
         </p>
       ) : !loadError ? (
-        // The sentence asserts what the agent may do on its own, so it waits
-        // for the first read to settle instead of briefly reading as no trust
-        // at all while the list is still in flight. A failed first read shows
-        // the error banner alone, since the coverage is genuinely unknown.
+        // The sentence asserts what the agent may do on its own, so it waits for the first read to
+        // settle instead of briefly reading as no trust at all while the list is still in flight.
         <p className="muted text-sm" data-testid="access-rules-loading">
           Loading standing rules…
         </p>

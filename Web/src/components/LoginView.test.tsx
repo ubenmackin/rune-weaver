@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the in-bundle owner-token gate.
-//
-// The engine serves the dashboard bundle publicly because a browser cannot
-// attach a bearer header to a navigation or an asset fetch, so this view is the
-// real credential gate. These tests pin its contract: a candidate is probed
-// against the protected settings route, adopted only on success, and every
-// failure class renders one honest line that never echoes the typed token.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

@@ -21,25 +21,14 @@ struct StructuredCallPartition {
 }
 
 /// Minimal typed view of the desktop action envelope for takeover detection.
-///
-/// Decodes only the interruption flag so key order or whitespace reformatting
-/// never affects the verdict, and prose that merely mentions takeover never
-/// triggers it. Lives in Core (rather than reusing the Tools envelope type)
-/// so the orchestrator never imports the plugin layer it supervises.
 private struct DesktopTakeoverSignal: Decodable {
     /// True when the desktop tool paused for operator takeover.
     let operatorInterrupted: Bool?
 }
 
 extension Orchestrator {
-    /// Whether a tool result is a typed operator-takeover envelope.
-    ///
-    /// Typed decode only: the content must parse as JSON (or base64-wrapped
-    /// JSON) with `operatorInterrupted == true`. Substring matches on the key
-    /// name or the human-readable message are rejected — they miss reformatted
-    /// or transport-wrapped envelopes (fail-open) and false-positive on prose.
-    /// - Parameter result: Bus outcome to inspect.
-    /// - Returns: True only on a typed takeover envelope.
+    /// Whether a tool result is a typed operator-takeover envelope. Typed decode only: the content
+    /// must parse as JSON (or base64-wrapped JSON) with `operatorInterrupted == true`.
     private static func isOperatorTakeoverResult(_ result: ToolResult) -> Bool {
         let trimmed = result.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -102,12 +91,9 @@ extension Orchestrator {
         return true
     }
 
-    /// Resolves valid tool calls for the latest assistant turn.
-    /// Fail-closed on schema-degraded registered tools: a native call naming a tool whose
-    /// schema was omitted for this turn must not execute. Unknown or unregistered names pass
-    /// through to `ToolBus.execute`, which answers `invalid_tool` with available-tool names
-    /// for self-correction; the shared denylist keeps this identical to the CLI and to the
-    /// narration path.
+    /// Resolves valid tool calls for the latest assistant turn. Fail-closed on schema-degraded
+    /// registered tools: a native call naming a tool whose schema was omitted for this turn must not
+    /// execute.
     private func resolveCallsForTurn(
         collected: TurnDraft,
         workingMessages: [Message],
@@ -162,9 +148,6 @@ extension Orchestrator {
     }
 
     /// Records the assistant tool intent note and executes the resolved tool calls.
-    /// When structured admission parks siblings, the note covers the full round
-    /// (allowed plus needs-park) so the persisted placeholders stay paired with
-    /// their filed approvals, while execution still runs only allowed-now.
     private func recordAndExecuteCalls(
         calls: [ToolInput],
         finalText: String,
@@ -187,19 +170,8 @@ extension Orchestrator {
         )
     }
 
-    /// Splits resolved structured calls into immediately runnable, needs-park,
-    /// and refused-before-admission buckets.
-    /// Every enabled tool with a resolvable definition is evaluated through the
-    /// permission gate: a call whose verdict is requiresApproval parks when the turn
-    /// is live (inbox present, not a dry run), whether approval is demanded by the
-    /// tool level or by an unlisted egress host reported for a read-only network
-    /// tool. A tool declaring pre-admission validation is consulted before the
-    /// gate, so an invalid target (a name-shaped `messages.send`) is refused with
-    /// actionable candidates and never reaches the approvals inbox or a durable
-    /// trust grant. Everything else stays allowed-now so unknown, disabled,
-    /// denied, covering-grant, and preview paths keep their existing ToolBus
-    /// behavior.
-    /// Fail-closed: a missing gate or inbox never parks.
+    /// Splits resolved structured calls into immediately runnable, needs-park, and
+    /// refused-before-admission buckets.
     private func partitionStructuredCalls(
         _ calls: [ToolInput],
         isDryRun: Bool,
@@ -237,13 +209,9 @@ extension Orchestrator {
         return partition
     }
 
-    /// Preflights narrated calls demanding approval before admission.
-    ///
-    /// Narrated tool calls that demand approval must validate before filing:
-    /// an invalid target (e.g. name-shaped `messages.send`) is refused with
-    /// candidates directly without polluting the approvals inbox or waiting
-    /// on human review. Calls for tools without pre-admission validation, or
-    /// whose validation succeeds, pass through admitted for parking.
+    /// Preflights narrated calls demanding approval before admission: an invalid target
+    /// (e.g. name-shaped `messages.send`) is refused with candidates directly without
+    /// polluting the approvals inbox or waiting on human review.
     private func preflightNarratedGatedCalls(_ calls: [ToolInput]) async -> (admitted: [ToolInput], refused: [RefusedAdmission]) {
         var admitted: [ToolInput] = []
         var refused: [RefusedAdmission] = []
@@ -287,10 +255,8 @@ extension Orchestrator {
         )
     }
 
-    /// Estimates active window occupancy for status reporting from the working
-    /// history, registered tools, plus the pending completion. Reuses the history compaction
-    /// heuristic so the status-bar percent reflects window pressure, kept
-    /// separate from cumulative billed totals and per-round provider usage.
+    /// Estimates active window occupancy for status reporting from the working history, registered
+    /// tools, plus the pending completion.
     private static func estimatedContextTokens(
         for workingMessages: [Message],
         tools: [any Tool] = [],
@@ -307,10 +273,8 @@ extension Orchestrator {
         return tokens
     }
 
-    /// Parks the turn when gated narrations require approval.
-    ///
-    /// Dry-run previews never park: they render would-act envelopes through
-    /// the bus instead of filing approvals.
+    /// Parks the turn when gated narrations require approval. Dry-run previews never park: they
+    /// render would-act envelopes through the bus instead of filing approvals.
     private func parkTurnIfGated(
         context: ParkTurnContext,
         request: TurnLoopRequest,
@@ -320,15 +284,8 @@ extension Orchestrator {
         return await parkTurn(context, request: request, pendingEpisodic: &pendingEpisodic)
     }
 
-    /// Parks the turn if tool iterations exceed the allowed limit.
-    ///
-    /// A boundary round can also refuse calls before admission. Those refusals
-    /// must not be lost to the park: the round note and its refusal results are
-    /// persisted and folded into the park context before returning, so history,
-    /// the response actions, and the resumed model all see the actionable
-    /// candidates instead of retrying a call the tool already rejected. The
-    /// continuation call is built here so its placeholder rides the same single
-    /// round note, mirroring a non-boundary refusals round.
+    /// Parks the turn if tool iterations exceed the allowed limit. A boundary round can also refuse
+    /// calls before admission.
     private func checkLimitAndPark(
         toolRounds: Int,
         parkContext: ParkTurnContext,
@@ -363,10 +320,8 @@ extension Orchestrator {
             toolName: "engine.continue",
             argumentsJSON: "{\"rounds\":\(completedRounds)}"
         )
-        // Narration plus every recorded placeholder lands in one assistant note;
-        // narrated refusals already carry their placeholder line in the text and
-        // are not duplicated, while structured refusals and the continuation call
-        // get theirs appended, so each result below has a preceding placeholder.
+        // Narration and recorded placeholders land in one assistant note; structured refusals
+        // and continuation get theirs appended, so each result below has a preceding placeholder.
         let refusalNote = assistantNoteMessage(
             text: parkContext.narratedText,
             calls: refusedCalls.map(\.call) + [continueCall]
@@ -472,11 +427,8 @@ extension Orchestrator {
         )
     }
 
-    /// Handles an empty assistant round following tool execution, attempting a synthesis prompt
-    /// or falling back to a generic completion notice.
-    /// Reasoning is intentionally never promoted to final text so chain-of-thought
-    /// stays out of the user-visible answer, episodic memory, and audit trail.
-    /// - Returns: True if an empty-round synthesis prompt was queued and the loop should continue.
+    /// Handles an empty assistant round following tool execution, attempting a synthesis prompt or
+    /// falling back to a generic completion notice.
     private func handleEmptyRoundAfterTools(
         toolActions: [ToolAction],
         finalText: inout String,
@@ -950,10 +902,8 @@ extension Orchestrator {
         var actions: [ToolAction] = []
         var executedCallIDs = Set<String>()
         var operatorTakeover = false
-        // Forward advisory progress as a session-tagged event so the dashboard can
-        // show a slow tool still working. The bus stamps each report with the
-        // authoritative call identity before it reaches this sink, so the closure
-        // only relays; a report never affects the turn's outcome.
+        // Forward advisory progress as a session-tagged event so the dashboard can show a slow tool
+        // still working.
         let context = ToolContext(conversationID: sessionID, dryRun: isDryRun) { progress in
             await onEvent?(.toolProgress(progress))
         }
@@ -1004,10 +954,8 @@ extension Orchestrator {
                 ) {
                     pendingEpisodic.append((record, .tool))
                 }
-                // Typed takeover verdict: only a decoded envelope with
-                // `operatorInterrupted == true` parks the turn. Substring
-                // sniffing is rejected — it misses reformatted or
-                // transport-wrapped envelopes and false-positives on prose.
+                // Typed takeover verdict: only a decoded envelope with `operatorInterrupted ==
+                // true` parks the turn.
                 if Self.isOperatorTakeoverResult(result) {
                     operatorTakeover = true
                     break
@@ -1064,20 +1012,6 @@ extension Orchestrator {
     }
 
     /// Records pre-admission refusals as immediate failure results.
-    ///
-    /// A refused call never enters the approvals inbox and never executes, so
-    /// the loop answers it directly: the model receives the actionable reason
-    /// as a normal tool result and can retry with a valid target. Events mirror
-    /// a bus execution (started then completed failure) so live clients render
-    /// the call like any other terminal tool failure, and the result rides the
-    /// producing tool's declared trust level so candidate-bearing refusals stay
-    /// labeled data in model context.
-    /// - Parameters:
-    ///   - refusals: Calls refused by their tool's pre-admission verdict.
-    ///   - roundIndex: Zero-based LLM round that produced the calls.
-    ///   - request: Owning turn request carrying the event sink and session.
-    ///   - pendingEpisodic: Buffered episodic records receiving the refusal mirror.
-    /// - Returns: Recorded refusal actions in call order.
     private func recordRefusedAdmissions(
         _ refusals: [RefusedAdmission],
         roundIndex: Int,

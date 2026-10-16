@@ -1,15 +1,4 @@
 // Rune Weaver Server — Deterministic scheduled-send registry: immutable bytes, exactly-once claim, durable replay.
-//
-// Purpose: books approved email and Messages sends as immutable payloads with an
-// exact fire time, claims due sends exactly once through a queued-to-sending
-// transition, and persists rows beside scheduler jobs in episodes.db so a
-// reboot reloads them with no catch-up stacking.
-// Scope: the ScheduledSend model, the booking/claim/cancel/settle store surface,
-// and the SQLite persistence helper. The fire worker in
-// `ServerSchedulerWorkerScheduledSends.swift` replays the stored bytes with
-// re-validation and no LLM regeneration.
-// Architectural role: shares the SchedulerStore actor with job scheduling; split
-// from the actor body so both halves stay within the type-length budget.
 
 import Foundation
 import RuneWeaverCore
@@ -108,10 +97,9 @@ public struct ScheduledSend: Sendable, Codable, Equatable, Identifiable {
         self.failureReason = failureReason
     }
 
-    /// Transitions the lifecycle status, stamping the bookkeeping a terminal state needs.
-    ///
-    /// Kept on the model so every writer stores the same timestamp pair and a
-    /// settled reason never survives beside a non-terminal status.
+    /// Transitions the lifecycle status, stamping the bookkeeping a terminal state needs. Kept on
+    /// the model so every writer stores the same timestamp pair and a settled reason never survives
+    /// beside a non-terminal status.
     mutating func transition(to status: Status, at now: Date, failureReason: String? = nil) {
         self.status = status
         updatedAt = now
@@ -181,15 +169,6 @@ private enum ScheduledSendBounds {
 
 extension SchedulerStore {
     /// Books one approved scheduled send.
-    ///
-    /// The payload is validated fail-closed (recipient, subject, body, and the
-    /// fire-time bounds shared with the sending tools) and then stored
-    /// immutably: the fire worker replays these exact bytes, so anything that
-    /// would change them later books a new send instead of editing this one.
-    /// - Parameters:
-    ///   - input: Approved payload carrying the exact bytes, recipient, and fire time.
-    ///   - now: Reference instant for the fire-time bounds.
-    /// - Returns: The stored row.
     @discardableResult
     public func scheduleSend(_ input: NewScheduledSend, now: Date = Date()) async throws -> ScheduledSend {
         let row = try Self.validatedSend(input, now: now)
@@ -205,13 +184,6 @@ extension SchedulerStore {
     }
 
     /// Claims every queued send due at `now`, transitioning each to `sending` exactly once.
-    ///
-    /// The queued-to-sending transition is the exactly-once claim: a second call
-    /// while a row is `sending` never returns it, so a racing tick or a slow
-    /// fire cannot double-send. A row whose fire time passed beyond the grace
-    /// window is not claimed — the tick expires it as past due instead.
-    /// - Parameter now: Evaluation time.
-    /// - Returns: Claimed sends, earliest fire time first.
     public func claimDueSends(now: Date = Date()) async -> [ScheduledSend] {
         var claimed: [ScheduledSend] = []
         // Snapshot the candidates before mutating: the claim writes a status
@@ -230,14 +202,6 @@ extension SchedulerStore {
     }
 
     /// Settles queued sends whose fire time passed beyond the grace window to `failed`.
-    ///
-    /// A send booked before a long downtime has no useful fire once the engine
-    /// returns: firing late would deliver a stale message, and firing a backlog
-    /// would stack catch-up sends. Each row settles with a stored reason the
-    /// Runs surface shows as an inbox note, and the row never returns to
-    /// `queued` to be claimed later.
-    /// - Parameter now: Evaluation time.
-    /// - Returns: The skipped rows, earliest fire time first.
     public func expirePastDueSends(now: Date = Date()) async -> [ScheduledSend] {
         var skipped: [ScheduledSend] = []
         // Snapshot before mutating for the same reason as the claim: each
@@ -260,15 +224,6 @@ extension SchedulerStore {
     }
 
     /// Cancels one queued send so it never fires.
-    ///
-    /// Only a `queued` row can stop: a claimed (`sending`) send is already past
-    /// the exactly-once claim and its replay cannot be recalled, so a late
-    /// cancel answers nil rather than silently doing nothing. A re-book needs
-    /// fresh approval, matching the cancel contract.
-    /// - Parameters:
-    ///   - id: Scheduled-send identifier.
-    ///   - now: Cancellation instant.
-    /// - Returns: The cancelled row, or nil when nothing was cancellable.
     @discardableResult
     public func cancelScheduledSend(id: UUID, now: Date = Date()) async -> ScheduledSend? {
         guard var row = scheduledSends[id], row.status == .queued else { return nil }
@@ -279,21 +234,12 @@ extension SchedulerStore {
     }
 
     /// Marks a claimed send delivered.
-    /// - Parameters:
-    ///   - id: Scheduled-send identifier.
-    ///   - now: Settlement instant.
-    /// - Returns: The settled row, or nil when the row was not in flight.
     @discardableResult
     public func markScheduledSendSent(id: UUID, now: Date = Date()) async -> ScheduledSend? {
         await settle(id: id, to: .sent, at: now, failureReason: nil)
     }
 
     /// Marks a claimed send failed with the reason its replay reported.
-    /// - Parameters:
-    ///   - id: Scheduled-send identifier.
-    ///   - reason: Failure detail from the fire worker.
-    ///   - now: Settlement instant.
-    /// - Returns: The settled row, or nil when the row was not in flight.
     @discardableResult
     public func markScheduledSendFailed(id: UUID, reason: String, now: Date = Date()) async -> ScheduledSend? {
         let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -353,11 +299,8 @@ extension SchedulerStore {
         if recipient.contains("\0") {
             throw SchedulerStoreError.invalidField("recipient must not contain null bytes")
         }
-        // Blank bodies read as absent exactly like the sending tools treat them,
-        // so an HTML-only send never fails on an empty text companion. The
-        // messages channel replays through the plain-text send tool, so it
-        // requires plain text: an HTML-only booking would otherwise replay
-        // markup as message text.
+        // Blank bodies read as absent exactly like the sending tools treat them, so an HTML-only
+        // send never fails on an empty text companion.
         let textValue = input.bodyText.flatMap { raw -> String? in
             raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : raw
         }
@@ -417,12 +360,6 @@ extension SchedulerStore {
     }
 
     /// Reloads scheduled sends from durable state, settling claims a crash interrupted.
-    ///
-    /// A row left in `sending` by an interrupted fire settles to `failed` rather
-    /// than being re-claimed: the outcome of a replay that stopped mid-send is
-    /// unknowable, and re-firing risks delivering the message twice. Everything
-    /// else reloads as stored so queued sends survive a reboot with no catch-up
-    /// stacking.
     func bootstrapScheduledSends() async {
         guard let dbPath else { return }
         #if canImport(SQLite3)

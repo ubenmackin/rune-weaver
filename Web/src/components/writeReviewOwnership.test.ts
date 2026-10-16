@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — writeReviewOwnership helper tests.
-// Pins the shared newest-write contract both surfaces (the chat transcript and
-// run detail) rely on: the last files.write card per (path, envelope kind)
-// owns the review, the ownership predicate gates only shadowed reviewable
-// cards, and hydration targets preserve display order while deduping by call
-// identity and skipping non-write or unreviewable actions.
 
 import { describe, expect, it } from "vitest";
 import type { ToolAction, ToolResult } from "../api";

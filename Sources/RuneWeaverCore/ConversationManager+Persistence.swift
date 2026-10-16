@@ -1,13 +1,9 @@
 // Rune Weaver Core — Conversation persistence helpers for durable history.
-// Keeps SQLite writes hash-only while live turns retain full pixels in memory.
 
 import Foundation
 
 extension ConversationManager {
     /// Quantizes a timestamp to whole-millisecond precision.
-    /// Whole milliseconds survive the persisted Double round-trip exactly while finer
-    /// fractions drift, so flooring here keeps the stored instant identical on both
-    /// sides of persistence without disturbing chronological order (ties break by row order).
     static func persistedInstant(_ date: Date) -> Date {
         Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded(.down) / 1000)
     }

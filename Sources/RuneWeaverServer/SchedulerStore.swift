@@ -28,10 +28,7 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll (nil means `EmailPollRule/defaultLimit`).
     public var pollLimit: Int?
-    /// Owner-set flag marking this job as the owner of an email-report run
-    /// cursor. Set explicitly through the REST surface; prompt or name text is
-    /// never sniffed to infer it, because agent-writable text would otherwise
-    /// decide which jobs inherit a seeded cursor.
+    /// Owner-set flag marking this job as the owner of an email-report run cursor.
     public var emailReportJob: Bool
     /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
     public var maxToolIterations: Int?
@@ -311,12 +308,6 @@ public actor SchedulerStore {
     public static let maxPendingSends = 200
 
     /// Jobs indexed by identifier.
-    ///
-    /// Module-internal rather than `private` because the one-shot marker
-    /// migration lives beside its latch table in
-    /// `SchedulerStoreMarkerMigration.swift` instead of in this actor body, so
-    /// `migrateEmailReportMarkers` reads and reseeds cursors against the live
-    /// registry rather than a snapshot of it.
     var jobs: [UUID: SchedulerJob] = [:]
     /// Approved scheduled sends awaiting deterministic replay, indexed by
     /// identifier; owned by `SchedulerStoreScheduledSends.swift` beside the
@@ -324,11 +315,9 @@ public actor SchedulerStore {
     var scheduledSends: [UUID: ScheduledSend] = [:]
     /// Optional filesystem path for SQLite persistence.
     public let dbPath: String?
-    /// Process-local half of the one-shot marker-migration latch, covering
-    /// stores without a durable path. Durable stores read their flag from
-    /// `scheduler_marker_migrations` instead; see
-    /// `migrateEmailReportMarkers`. Module-internal because the migration
-    /// lives beside its latch table rather than in this actor body.
+    /// Process-local half of the one-shot marker-migration latch, covering stores without a durable
+    /// path. Durable stores read their flag from `scheduler_marker_migrations` instead; see
+    /// `migrateEmailReportMarkers`.
     var markerMigrationConsumed = false
 
     /// Creates an empty store.

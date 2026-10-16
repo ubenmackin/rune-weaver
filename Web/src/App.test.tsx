@@ -1,17 +1,5 @@
 // Rune Weaver Dashboard — Component tests for the App owner-auth gate, lazy
 // section mounting, and the mobile shell.
-//
-// The engine serves the dashboard bundle publicly, so the shell decides the
-// posture from the health shape: a full payload mounts the authenticated
-// dashboard (or the no-auth loopback surface), while the minimal liveness
-// object renders the in-bundle login gate. Child views are stubbed so these
-// tests exercise only the gate wiring, never a live socket or data poll. The
-// stubs mount behind the shell's route-level lazy boundaries exactly like the
-// real chunks do, so every assertion on a lazy surface awaits its Suspense
-// boundary through waitFor — the same way these tests already await the async
-// health-probe render — and never races a placeholder frame. The shell matrix
-// additionally pins the mobile bottom bar: it mounts alongside the content
-// with clearance on handheld widths while standalone stays chromeless.
 
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -225,10 +213,9 @@ describe("App lazy section mounting", () => {
       expect(screen.getByTestId("chat-view")).toBeInTheDocument();
     });
 
-    // Route-level splitting must not change tab-switch semantics: a hash
-    // navigation to an unvisited section mounts it when its chunk lands, the
-    // section being left unmounts, and the display-hidden chat panel survives
-    // the switch exactly as it did under static imports.
+    // Route-level splitting must not change tab-switch semantics: a hash navigation to an unvisited
+    // section mounts it when its chunk lands, the section being left unmounts, and the
+    // display-hidden chat panel survives the switch exactly as it did under static imports.
     await act(async () => {
       window.location.hash = "runs";
     });

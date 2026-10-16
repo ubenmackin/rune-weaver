@@ -38,27 +38,17 @@ extension Orchestrator {
     }
 
     /// Stable recall slot keeping the prefix identical across rounds.
-    /// Single-sources the slot through the shared memory helper so CLI and service turns
-    /// agree; recall sits after every leading system so a summary arriving mid-turn
-    /// shifts history after recall instead of shifting recall itself.
     public static func stableHistoryWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         MemoryEngine.historyWithRecall(history, recall: recall)
     }
 
-    /// Safe single-line recall observability, never content.
-    ///
-    /// Carries hit counts plus injected chars plus skip flag plus hit IDs plus
-    /// sources plus scores so each turn emits exactly one diagnostics line.
-    /// IDs, sources, and scores are safe to log; hit content and queries never
-    /// enter this line.
+    /// Safe single-line recall observability, never content. IDs, sources, and scores are safe to
+    /// log; hit content and queries never enter this line.
     public static func recallDiagnosticsLogLine(_ diagnostics: RecallDiagnostics) -> String {
         "Orchestrator: recall \(diagnostics.logLine)"
     }
 
     /// Stable two-slot history keeping the prefix identical across rounds.
-    /// Auto-recall lands first and the trusted starter pack lands directly
-    /// before the active user turn as the second system message, so the lead
-    /// system prompt plus earlier turns keep their prefix-cache tokens.
     public static func stableHistoryWithRecallAndStarter(
         _ history: [Message],
         recall: Message?,
@@ -69,12 +59,6 @@ extension Orchestrator {
     }
 
     /// Shared turn wiring for automatic recall plus starter footing.
-    ///
-    /// Single source for `process` and CLI turns: one `MemoryQueryRouter.plan`
-    /// plus `recallMessageWithDiagnostics` plus `RecallStarterPack.build` so
-    /// terminal turns honor the same budgets and placement instead of
-    /// duplicating the wiring. `Orchestrator` owns this wiring; CLI routes
-    /// through here rather than rebuilding the plan plus recall plus starter.
     public static func resolveTurnRecallAndStarter(
         engine: MemoryEngine,
         query: String,
@@ -99,13 +83,6 @@ extension Orchestrator {
     }
 
     /// Refreshes recall-augmented history after one tool round.
-    /// Reuses the turn's system string verbatim (never recomposes from the live
-    /// registry mid-loop), the turn's recall at its stable slot, and the turn's
-    /// starter pack at its stable slot. The caller passes the turn's effective
-    /// prompt plus the turn's recall and starter explicitly so mid-loop history
-    /// keeps the composed vision-aware prompt and the turn-start footing
-    /// instead of rebuilding the starter from the live engine every round,
-    /// which would shift prefix bytes when the profile or index changes mid-turn.
     func refreshedWorkingMessages(
         sessionID: UUID,
         recall: Message?,

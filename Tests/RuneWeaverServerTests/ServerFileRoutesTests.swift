@@ -329,10 +329,8 @@ struct LiveReviewManagerTests {
                 }
                 Issue.record("Expected the symlinked rollback copy to fail the decision closed")
             } catch {
-                // Any refusal shape is acceptable; the invariant is that the
-                // link's target survives and the review stays pending, which
-                // the assertions below verify. Reaching here means the
-                // decision failed closed as required.
+                // Any refusal shape is acceptable; the invariant is that the link's target survives
+                // and the review stays pending, which the assertions below verify.
                 _ = error
             }
         }
@@ -411,16 +409,6 @@ private struct FileReviewStatusHarness {
 }
 
 /// Builds a configured application sharing an isolated staged-files ledger.
-///
-/// The context carries an explicit store over a temporary database so review
-/// rows never touch the real engine data directory, and the surface under test
-/// is the same registered Vapor application the engine serves.
-/// - Parameters:
-///   - stagedFilesStore: Optional factory receiving the harness's temporary
-///     base directory, so a test can inject a deliberately unreadable ledger;
-///     nil builds the normal store over the shared episodes database.
-///   - body: Test body receiving the harness.
-/// - Returns: Whatever `body` returns.
 private func withFileRouteApp<T>(
     stagedFilesStore: (@Sendable (URL) throws -> StagedFilesStore)? = nil,
     _ body: (FileReviewStatusHarness) async throws -> T
@@ -475,13 +463,8 @@ private func withFileRouteApp<T>(
     }
 }
 
-/// Sends one request with an encoded body through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Request path.
-///   - body: Encodable request body.
-/// - Returns: Route response.
+/// Sends one request with an encoded body through the full registered surface. app:
+/// Configured application.
 private func fileRouteRequest(
     app: Application,
     method: HTTPMethod,
@@ -968,10 +951,9 @@ struct StagedReviewRouteTests {
             try FileRoutesTestSupport.write("Original Version\n", at: backupFile)
             _ = await store.beginLiveReview(path: liveFile.path, backupPath: backupFile.path)
 
-            // BACKUP_notes.txt derives the staging sibling .rune_BACKUP_notes.txt,
-            // which names the same rollback copy on the default case-folding
-            // APFS volume; both decisions must refuse the pair before any move
-            // or removal reaches the copy.
+            // BACKUP_notes.txt derives the staging sibling .rune_BACKUP_notes.txt, which names the
+            // same rollback copy on the default case-folding APFS volume; both decisions must refuse
+            // the pair before any move or removal reaches the copy.
             let collider = harness.root.appendingPathComponent("BACKUP_notes.txt").path
             for route in ["/files/accept", "/files/discard"] {
                 let response = try await fileRouteRequest(
@@ -1035,10 +1017,9 @@ struct FileSupersedeBroadcastTests {
         #expect(liveOutput.isError == false)
         #expect(await store.state(forPath: liveFile.path) == .superseded)
 
-        // Every registered socket receives the same self-describing frame:
-        // `file_superseded` naming the canonical live path and the staged
-        // row's terminal state, so a mounted review card settles without a
-        // reload and without a follow-up route call that would 404.
+        // Every registered socket receives the same self-describing frame: `file_superseded` naming
+        // the canonical live path and the staged row's terminal state, so a mounted review card
+        // settles without a reload and without a follow-up route call that would 404.
         for socket in [firstSocket, secondSocket] {
             let frames = await waitForFileActionFrames(socket)
             let decoded = try frames.map { try JSONDecoder().decode(WSFileActionEvent.self, from: Data($0.utf8)) }

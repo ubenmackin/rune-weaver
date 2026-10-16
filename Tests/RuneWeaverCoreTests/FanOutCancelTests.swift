@@ -1,27 +1,13 @@
 // Rune Weaver Core Tests — Fan-out owner cancellation surface.
-//
-// Exercises the fan-out engine's cancellation contract with a cancellable
-// orchestrator stub and a capturing run logger: a single-worker cancel that
-// leaves its siblings running, a parent cancel that stops every worker, a
-// cancel racing startup that lands before any worker registers, `.notRunning`
-// answers for settled and unknown rows, a cancelled subtask outranking a
-// failed one in the parent digest, an all-cancelled run that skips the
-// reviewer call entirely, whole-call cancellation that now yields cancelled
-// statuses instead of failures, and the Codable round-trip for the new
-// terminal states. Tests never touch the real run-log store, the live
-// orchestrator, or a real LLM provider.
 
 import Foundation
 import os
 @testable import RuneWeaverCore
 import Testing
 
-/// Cancellable orchestrator stub: each turn counts itself in flight, sleeps
-/// its per-prompt budget, and lets a cancellation end it, so owner cancels
-/// and whole-call cancellation are observable end-to-end. A prompt listed in
-/// `delays` with no `failures` entry completes with real output once its
-/// sleep elapses; state lives behind a lock so concurrent workers never race
-/// the test.
+/// Cancellable orchestrator stub: each turn counts itself in flight, sleeps its per-prompt budget,
+/// and lets a cancellation end it, so owner cancels and whole-call cancellation are observable
+/// end-to-end.
 private final class CancellableFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Guarded in-flight count.
     private struct State: Sendable {
@@ -36,10 +22,7 @@ private final class CancellableFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Error reasons thrown per prompt; a prompt with no entry succeeds.
     private let failures: [String: String]
 
-    /// Creates a cancellable stub.
-    /// - Parameters:
-    ///   - delays: Sleep budget per prompt in seconds.
-    ///   - failures: Error reasons thrown per prompt.
+    /// Creates a cancellable stub. delays: Sleep budget per prompt in seconds.
     init(delays: [String: Double] = [:], failures: [String: String] = [:]) {
         self.delays = delays
         self.failures = failures
@@ -78,10 +61,7 @@ private final class CancellableFanOutOrchestrator: OrchestratorFanOutSeam {
     }
 }
 
-/// Capturing run logger with a first-child-row observer hook. The hook fires
-/// while the engine's run entry is registered but before any worker task
-/// exists — the startup window a cancel must survive — so a test can drive
-/// that race deterministically.
+/// Capturing run logger with a first-child-row observer hook.
 private final class CancellingFanOutRunLogger: FanOutRunLogging {
     /// One recorded run row with its latest settled outcome.
     struct Row: Sendable {
@@ -208,11 +188,8 @@ private func cancelSubtask(title: String, prompt: String? = nil) -> FanOutSubtas
     FanOutSubtask(title: title, prompt: prompt ?? "Prompt for \(title)")
 }
 
-/// Polls a condition until it holds or the deadline passes, so tests order
-/// themselves against real worker state instead of racing fixed sleeps.
-/// - Parameters:
-///   - timeoutSeconds: Longest wait before the caller's assertions fire.
-///   - condition: Condition to poll.
+/// Polls a condition until it holds or the deadline passes, so tests order themselves against real
+/// worker state instead of racing fixed sleeps.
 private func waitUntil(
     timeoutSeconds: Double = 5,
     _ condition: @escaping @Sendable () async -> Bool
@@ -300,10 +277,9 @@ struct FanOutCancelTests {
             originSessionID: UUID()
         )
 
-        // The cancel landed after the run registered but before any worker
-        // task existed, so the honest count is zero — yet every subtask still
-        // settles cancelled because the mark precedes the worker start and
-        // cancels it on arrival.
+        // The cancel landed after the run registered but before any worker task existed, so the
+        // honest count is zero — yet every subtask still settles cancelled because the mark precedes
+        // the worker start and cancels it on arrival.
         #expect(outcomeBox.withLock { $0 } == .runCancelled(workerCount: 0))
         #expect(run.status == .cancelled)
         #expect(run.subtasks.allSatisfy { $0.status == .cancelled })

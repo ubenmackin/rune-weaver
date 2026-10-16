@@ -1,5 +1,4 @@
-// Hook to manage browser Notification API permissions and listen for real-time WebSocket events.
-// Triggers native browser notifications and maintains unread badge counts for Runs and Approvals.
+// Rune Weaver Dashboard — Hook to manage browser Notification API permissions and WebSocket events.
 
 import { useCallback, useRef, useState } from "react";
 import { useSharedWebSocket } from "./useSharedWebSocket";
@@ -10,20 +9,15 @@ import type {
 import { normalizeSessionID } from "../approvalsSession";
 import { isGoalNeedsInputProactive, isIdeaProposedProactive } from "../api";
 
-// Reads the filing identity from an approval prompt so rebroadcasts for the
-// same filing collapse to one badge bump. Trims defensively since the wire
-// carries UUID text; a missing id degrades to an untracked bump rather than
-// dropping a genuine filing.
+// Reads the filing identity from an approval prompt so rebroadcasts for the same filing collapse to
+// one badge bump.
 function approvalRequestID(request: Record<string, unknown>): string | undefined {
   const raw = request.id;
   if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
   return undefined;
 }
 
-// Reads the resolved identity across the decided wire shapes the engine may
-// emit. Inline, inbox, and menu-bar decisions converge through the same
-// broadcast family, so every variant must resolve identically or the badge
-// would linger for one surface while the per-surface list already evicted.
+// Reads the resolved identity across the decided wire shapes the engine may emit.
 function decidedApprovalID(frame: WSGenericFrame): string | undefined {
   const candidates: unknown[] = [frame.id, frame.approvalID, frame.approvalId];
   for (const candidate of candidates) {
@@ -85,10 +79,7 @@ export function useWebNotifications() {
   // attention. Routine successful runs ("ok") do not badge the navbar.
   const [runsBadge, setRunsBadge] = useState(0);
   const [approvalsBadge, setApprovalsBadge] = useState(0);
-  // Owner-attention count for goals parked awaiting input. Unlike runs, the
-  // nudge is a proactive push rather than a terminal turn, so it stays its own
-  // counter; the shell clears it when the goals surface opens, mirroring the
-  // runsBadge clear-on-open contract.
+  // Owner-attention count for goals parked awaiting input.
   const [goalsAttention, setGoalsAttention] = useState(0);
   // Degraded-tool notices keep their own counter instead of inflating runs
   // or approvals; the bell surfaces the count as an amber badge gated behind
@@ -100,10 +91,7 @@ export function useWebNotifications() {
   // decision. Enrichment rebroadcasts reuse the identical id, so the set is
   // what keeps a second arrival for the same filing from counting twice.
   const seenApprovalIDsRef = useRef<Set<string>>(new Set());
-  // Decided ids already applied to the badge. Approvals filed before mount,
-  // decisions from another tab, and menu-bar resolutions arrive as decided
-  // frames for ids never seen here, so they still move the count once; the
-  // set keeps a repeated broadcast for the same id from moving it again.
+  // Decided ids already applied to the badge.
   const consumedDecidedIDsRef = useRef<Set<string>>(new Set());
 
   const handleMessage = useCallback((data: WSIncomingFrame) => {
@@ -170,11 +158,9 @@ export function useWebNotifications() {
         });
       }
     } else if (frameType !== undefined && DECIDED_FRAME_TYPES.has(frameType)) {
-      // One drop per resolution across every decide surface: a seen filing
-      // leaves the pending set, while a filing from before mount (or another
-      // tab, or the menu bar) still clears one stale count. Repeats for the
-      // same id apply at most once and the count never goes negative, so the
-      // badge stays advisory with server lists remaining the truth.
+      // One drop per resolution across every decide surface: a seen filing leaves the pending set,
+      // while a filing from before mount (or another tab, or the menu bar) still clears one stale
+      // count.
       const resolvedID = decidedApprovalID(frame);
       if (resolvedID !== undefined) {
         if (consumedDecidedIDsRef.current.has(resolvedID)) return;
@@ -230,11 +216,7 @@ export function useWebNotifications() {
         });
       }
     } else if (isGoalNeedsInputProactive(frame)) {
-      // A goal parked on owner input is the one proactive nudge the goals
-      // surface badges. The counter always rises so a denied or unsupported
-      // notification API still leaves an honest visual signal; the native
-      // notification is best-effort and rides the existing permission path
-      // rather than triggering a fresh prompt mid-frame.
+      // A goal parked on owner input is the one proactive nudge the goals surface badges.
       setGoalsAttention((prev) => prev + 1);
       if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
         const title = typeof frame.title === "string" ? frame.title.trim() : "";
@@ -246,10 +228,9 @@ export function useWebNotifications() {
         );
       }
     } else if (isIdeaProposedProactive(frame)) {
-      // A freshly proposed idea is the other proactive nudge the goals surface
-      // badges: it rides the same proactive frame as a parked goal, so the
-      // counter rises on the same signal the panel reads. The native
-      // notification stays best-effort behind the existing permission path.
+      // A freshly proposed idea is the other proactive nudge the goals surface badges: it rides the
+      // same proactive frame as a parked goal, so the counter rises on the same signal the panel
+      // reads.
       setGoalsAttention((prev) => prev + 1);
       if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
         const title = typeof frame.title === "string" ? frame.title.trim() : "";
@@ -271,13 +252,7 @@ export function useWebNotifications() {
   const isNotificationSupported =
     typeof window !== "undefined" && "Notification" in window;
 
-  // Permission request owned here so every bell tap shares one fail-closed
-  // path. A denied permission never re-prompts: browsers ignore silent retries
-  // and the operator must change site settings, so return early with guidance
-  // instead of firing a no-op prompt. An absent API returns unsupported so the
-  // bell can still acknowledge the tap with honest copy. The resolved outcome
-  // is returned (not just stored) so the bell can toast granted versus denied
-  // without re-reading globals that test doubles may not have mutated.
+  // Permission request owned here so every bell tap shares one fail-closed path.
   const requestPermission = useCallback(async (): Promise<
     NotificationPermission | "unsupported"
   > => {
@@ -306,10 +281,7 @@ export function useWebNotifications() {
   }, []);
 
   const clearApprovalsBadge = useCallback(() => {
-    // Navigation acknowledgment resets the advisory count without touching
-    // server pending lists. Both identity sets clear so a fresh visit starts
-    // with no memory of already-surfaced filings; a repeated decision after
-    // the reset still floors at zero rather than going negative.
+    // Navigation acknowledgment resets the advisory count without touching server pending lists.
     seenApprovalIDsRef.current.clear();
     consumedDecidedIDsRef.current.clear();
     setApprovalsBadge(0);

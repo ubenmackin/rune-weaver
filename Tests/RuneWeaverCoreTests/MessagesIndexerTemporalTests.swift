@@ -1,15 +1,4 @@
 // Rune Weaver Core Tests — Messages temporal window tests.
-//
-// Purpose: pin the `since` / `until` window for `messages.search` and
-// `messages.read` so day slices, edge instants, and undated rows behave like
-// every other dated search surface.
-// Scope: args decoding with blank-as-omitted, tool-to-gateway date
-// forwarding, SQL bound filtering with inclusive-since and exclusive-until
-// edges, NULL-date exclusion when bounded, ordering plus limit preservation,
-// and fail-closed rejection for malformed or inverted bounds.
-// Architectural role: guards the Messages half of the shared temporal
-// contract owned by TemporalFilter; SQL stays the single filter so
-// unbounded queries remain byte-identical to the legacy shape.
 
 import Foundation
 import os
@@ -147,9 +136,6 @@ private func joinTemporalChat(into handle: OpaquePointer?, messageID: Int64) thr
 }
 
 /// Converts a resolved bound to the seconds-scale Mac-epoch tick used by fixtures.
-///
-/// Fixtures default to seconds since 2001-01-01; the reader normalizes both
-/// scales through `TemporalFilter`, so nanosecond rows share the same window.
 private func temporalMacEpochTick(for date: Date) -> Int64 {
     Int64(TemporalFilter.macEpochValue(for: date))
 }

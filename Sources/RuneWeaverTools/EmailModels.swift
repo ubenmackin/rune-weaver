@@ -20,10 +20,8 @@ public enum EmailMailboxNormalization: Sendable {
         return trimmed
     }
 
-    /// Returns the first alias that is present and non-blank after trimming.
-    /// Blank strings behave as omitted so a valid later alias still wins.
-    /// - Parameter candidates: Aliases in priority order.
-    /// - Returns: First non-blank alias, or nil when all are omitted or blank.
+    /// Returns the first alias that is present and non-blank after trimming. Blank strings behave
+    /// as omitted so a valid later alias still wins.
     public static func firstNonBlank(_ candidates: [String?]) -> String? {
         for candidate in candidates {
             guard let candidate else { continue }
@@ -46,10 +44,6 @@ public enum EmailMailboxNormalization: Sendable {
 /// Search arguments for the `email.search` tool.
 public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
-    ///
-    /// Optional because a search may target every configured account: an
-    /// omitted, blank, or `"*"` account is the multi-account selector, so the
-    /// model is never forced to know account names to ask "search everything".
     public let account: String?
     /// Free-text query matched against subject, sender, and body (`"*"`/empty means most-recent via `ALL`).
     public let query: String
@@ -97,11 +91,6 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes arguments, trimming whitespace and clamping `limit`.
-    ///
-    /// `account` is decoded optionally so an omitted key is a valid
-    /// all-accounts request rather than a decoding failure; rejecting or
-    /// resolving the selector belongs to the tool layer after validation.
-    /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let account = try container.decodeIfPresent(String.self, forKey: .account)
@@ -119,10 +108,6 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     }
 
     /// Trimmed account nickname, or nil for omitted, blank, and `"*"` inputs.
-    ///
-    /// Collapsing the all-accounts token to nil here keeps single-account
-    /// resolution from ever receiving a literal star; the tool layer branches
-    /// on `isAllAccountsRequest` first.
     public var trimmedAccount: String? {
         let trimmed = EmailMailboxNormalization.trimmed(account)
         return trimmed == Self.allAccountsToken ? nil : trimmed
@@ -296,9 +281,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         case attachments
     }
 
-    /// Decodes a hit, defaulting omitted `mailbox` to `INBOX` and omitted
-    /// `account` to empty so bridge payloads from before per-hit account
-    /// labeling still decode.
+    /// Decodes a hit, defaulting omitted `mailbox` to `INBOX` and omitted `account` to empty so
+    /// bridge payloads from before per-hit account labeling still decode.
     /// - Parameter decoder: Decoder for the hit document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -438,9 +422,6 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     /// Accounts successfully searched, in config sequence (nil on legacy payloads).
     public let accounts: [String]?
     /// Accounts skipped due to credential or gateway failure, in config sequence.
-    ///
-    /// Fail-soft multi-account searches report partial coverage here so the
-    /// agent can tell the user which mailboxes the result set does not speak for.
     public let failedAccounts: [String]?
 
     /// Creates a search envelope.
@@ -474,11 +455,8 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
         case failedAccounts
     }
 
-    /// Decodes an envelope tolerantly so legacy payloads lacking the
-    /// multi-account keys (`accounts`, `failedAccounts`) still parse.
-    /// `count` derives from `messages` rather than trusting the wire value,
-    /// keeping the count invariant true for every decoded envelope.
-    /// - Parameter decoder: Decoder for the envelope document.
+    /// Decodes an envelope tolerantly so legacy payloads lacking the multi-account keys
+    /// (`accounts`, `failedAccounts`) still parse.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
@@ -491,10 +469,8 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
         failedAccounts = try container.decodeIfPresent([String].self, forKey: .failedAccounts)
     }
 
-    /// Encodes an envelope, omitting nil multi-account keys. The search tool
-    /// always passes both keys, so its output always carries them; per-hit
-    /// account labels are always encoded.
-    /// - Parameter encoder: Encoder for the envelope document.
+    /// Encodes an envelope, omitting nil multi-account keys. The search tool always passes both
+    /// keys, so its output always carries them; per-hit account labels are always encoded.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(account, forKey: .account)
@@ -964,9 +940,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Returns whether an attachment part must detonate inside a zero-mount container.
-    /// Delegates to the single archive truth table so MIME/extension membership
-    /// cannot drift from magic-byte routing; byte-level matches layer on top
-    /// inside `AttachmentSecurity.requiresZeroMountDetonation`.
     public static func isArchive(contentType: String, filename: String) -> Bool {
         AttachmentSecurity.isArchiveFilenameOrMime(contentType: contentType, filename: filename)
     }
@@ -1145,16 +1118,9 @@ public enum EmailSearchMerge: Sendable {
 // MARK: - Agent-visible credential filtering
 
 extension EmailSearchHit {
-    /// Returns the agent-visible copy of this hit, redacting credential links and codes.
-    ///
-    /// Snippet and subject rewrite together; sender, date, mailbox, and account
-    /// stay visible so the agent knows what arrived where and can tell the
-    /// user. The account label must survive byte-identically or follow-up
-    /// `email.read`/`email.move` calls could not name the owning account. The
-    /// human inbox is untouched — this applies solely to tool output. A
-    /// disabled filter or a non-bearing verdict returns self byte-identically.
-    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
-    /// - Returns: Redacted copy, or self when no redaction applies.
+    /// Returns the agent-visible copy of this hit, redacting credential links and codes. The
+    /// account label must survive byte-identically or follow-up `email.read`/`email.move` calls
+    /// could not name the owning account.
     public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchHit {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleSnippet = EmailCredentialFilter.agentVisibleSnippet(
@@ -1185,12 +1151,6 @@ extension EmailSearchHit {
 
 extension EmailFullMessage {
     /// Returns the agent-visible copy of this message, redacting credential links and codes.
-    ///
-    /// Body and subject rewrite together; sender, recipients, and attachment
-    /// metadata stay visible. A disabled filter or a non-bearing verdict
-    /// returns self byte-identically.
-    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
-    /// - Returns: Redacted copy, or self when no redaction applies.
     public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailFullMessage {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleBody = EmailCredentialFilter.agentVisibleBody(
@@ -1220,12 +1180,6 @@ extension EmailFullMessage {
 
 extension EmailSearchEnvelope {
     /// Returns the agent-visible envelope with every hit filtered.
-    ///
-    /// Filtering maps over hits so the count and ordering stay identical and
-    /// only snippet and subject text can change; sender, mailbox, and the
-    /// account-routing fields never redact.
-    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
-    /// - Returns: Envelope whose messages are agent-visible.
     public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchEnvelope {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visible = messages.map { $0.agentVisible(credentialFilterEnabled: credentialFilterEnabled) }
@@ -1243,12 +1197,9 @@ extension EmailSearchEnvelope {
 }
 
 extension EmailReadEnvelope {
-    /// Returns the agent-visible read envelope with subject and body filtered.
-    ///
-    /// Only subject and body can change; every other header and the mailbox
-    /// label pass through so the agent keeps full routing context.
-    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
-    /// - Returns: Envelope whose subject and body are agent-visible.
+    /// Returns the agent-visible read envelope with subject and body filtered. Only subject and
+    /// body can change; every other header and the mailbox label pass through so the agent keeps
+    /// full routing context.
     public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailReadEnvelope {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleBody = EmailCredentialFilter.agentVisibleBody(

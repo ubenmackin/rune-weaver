@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
-//
-// Beyond the pane routing, the persona describes pin the [persona] contract:
-// the Persona tab renders the loaded identity, a save issues exactly one
-// partial-patch request carrying only the persona delta, a server 400 lands
-// in the shared tab-form banner, the accent picker round-trips all four
-// colorways and degrades an unknown stored key to violet, and every settings
-// read republishes the persona so identity surfaces mirror the owner's edit.
-// The Tools tab owns the workspace scratch surface in this
-// file's scope: usage bars read GET /workspace/usage and tmp pruning confirms
-// through the shared modal.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -1164,10 +1154,8 @@ describe("SettingsManager", () => {
     ) as HTMLTextAreaElement;
     expect(denyTextarea.value).toContain("custom*");
 
-    // Reset opens a shared confirmation stating counts and the form-local
-    // nature; cancelling leaves the in-progress text untouched. The Cancel is
-    // scoped to the confirmation dialog because the Security pane behind it
-    // renders its own inline save.
+    // Reset opens a shared confirmation stating counts and the form-local nature; cancelling leaves
+    // the in-progress text untouched.
     const resetDenyBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
     await user.click(resetDenyBtn);
     await waitFor(() => {
@@ -1264,11 +1252,8 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
 
-    // Ghost treatment carries the hover and alignment tokens; secondary
-    // buttons have no stylesheet entry and render misaligned, so every
-    // header action must use the shared ghost icon style. No Add actions
-    // remain: both subsections edit through the single textarea, so Reset
-    // is the only header action per subsection.
+    // Ghost treatment carries the hover and alignment tokens; secondary buttons have no stylesheet
+    // entry and render misaligned, so every header action must use the shared ghost icon style.
     expect(
       screen.queryByRole("button", { name: /Add Pattern/i })
     ).toBeNull();
@@ -2463,10 +2448,9 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Only the media row earns a header button: the server hasConfig flag is
-    // the sole authority, so email rows without a flagged tool stay clean even
-    // though their section still renders with bulk toggles. Files rows carry
-    // no category of their own anymore and land in Other Tools.
+    // Only the media row earns a header button: the server hasConfig flag is the sole authority, so
+    // email rows without a flagged tool stay clean even though their section still renders with bulk
+    // toggles.
     await waitFor(() => {
       expect(screen.getByText("Media & Streaming")).toBeDefined();
     });
@@ -3545,10 +3529,9 @@ describe("SettingsManager", () => {
   });
 });
 
-// Structured security policy (policy.toml) surface: the network plus
-// credentials editor lives on the Access tab's Network and Credentials rail
-// sections outside the shared config form, so coverage pins the tab wiring,
-// the structured fetch shape, and the absence of the retired raw-text contract.
+// Structured security policy (policy.toml) surface: the network plus credentials editor lives on
+// the Access tab's Network and Credentials rail sections outside the shared config form, so coverage
+// pins the tab wiring, the structured fetch shape, and the absence of the retired raw-text contract.
 const structuredPolicyPayload = {
   policy: {
     version: 1,
@@ -3714,21 +3697,16 @@ describe("SettingsManager access tab", () => {
 describe("secret status chunk contract", () => {
   it("pins the badge-probe chunk size to the server status cap", () => {
     // Single cross-language contract: the server owns `maxSecretStatusKeys` in
-    // `Sources/RuneWeaverServer/ServerSettingsRoutes.swift` and this mirror
-    // must stay equal at 500 so badge-probe chunks never trip the status gate;
-    // update both together.
+    // `Sources/RuneWeaverServer/ServerSettingsRoutes.swift` and this mirror must stay equal at 500
+    // so badge-probe chunks never trip the status gate; update both together.
     expect(SECRET_STATUS_CHUNK_SIZE).toBe(500);
   });
 });
 
 describe("bash defaults and bounds contract", () => {
   it("pins the bash mirrors to the engine BashConfig", () => {
-    // Single cross-language contract: the server owns the defaults in
-    // `Sources/RuneWeaverCore/Config.swift` (BashConfig) and the bounds in
-    // `Sources/RuneWeaverCore/Config+Validation.swift` plus
-    // `Sources/RuneWeaverServer/ServerBashDTOs.swift`; these mirrors must
-    // stay equal so the fresh form and the client validator never drift from
-    // the engine. Update both together.
+    // Cross-language contract: defaults mirror engine BashConfig and bounds mirror
+    // Config+Validation.swift plus ServerBashDTOs.swift so the client and server stay aligned.
     expect(DEFAULT_BASH_ENABLED).toBe(true);
     expect(DEFAULT_BASH_DEFAULT_ACTION).toBe("ask");
     expect(DEFAULT_BASH_TIMEOUT_SECONDS).toBe(30);
@@ -3769,10 +3747,9 @@ describe("bash defaults and bounds contract", () => {
   });
 
   it("pins the workspace mirrors to the engine WorkspaceConfig", () => {
-    // Single cross-language contract: the server owns the defaults and clamps
-    // in `Sources/RuneWeaverCore/Config.swift`; these mirrors must stay equal
-    // so the Tools-tab editors and the client validator never drift from the
-    // engine. Update both together.
+    // Single cross-language contract: the server owns the defaults and clamps in
+    // `Sources/RuneWeaverCore/Config.swift`; these mirrors must stay equal so the Tools-tab editors
+    // and the client validator never drift from the engine.
     expect(DEFAULT_WORKSPACE_QUOTA_MB).toBe(500);
     expect(DEFAULT_WORKSPACE_QUOTA_FILES).toBe(10000);
     expect(DEFAULT_WORKSPACE_TMP_TTL_DAYS).toBe(7);
@@ -3806,11 +3783,9 @@ describe("SettingsManager persona pane", () => {
     settings?: Record<string, unknown>;
   };
 
-  // Routes every request through one stub so the pane's reads (settings,
-  // plugins, tools, run poll, secrets) all answer with the persona-shaped
-  // snapshot, while PUT /settings is captured for the changed-only contract.
-  // A PUT without an explicit response echoes the merged persona exactly the
-  // way the engine's partial merge does, so a save repopulates from truth.
+  // Routes every request through one stub so the pane's reads (settings, plugins, tools, run poll,
+  // secrets) all answer with the persona-shaped snapshot, while PUT /settings is captured for the
+  // changed-only contract.
   function stubPersonaFetch(options: PutOptions = {}): Record<string, unknown>[] {
     const settings = options.settings ?? PERSONA_SETTINGS;
     const putBodies: Record<string, unknown>[] = [];
@@ -3990,10 +3965,8 @@ describe("SettingsManager persona pane", () => {
     expect(
       within(pane).getByTestId("persona-avatar-rose"),
     ).toHaveAttribute("aria-pressed", "false");
-    // An untouched tab never reaches the network even though the footer Save
-    // stays enabled for every pane. The pane stays mounted on Persona, so the
-    // settle wait targets the persona surface itself rather than a providers
-    // input that only exists on its own tab.
+    // An untouched tab never reaches the network even though the footer Save stays enabled for
+    // every pane.
     await user.click(tabSaveButton());
     await waitFor(() => {
       expect(screen.getByTestId("persona-pane")).toBeInTheDocument();
@@ -4135,10 +4108,7 @@ describe("SettingsManager persona pane", () => {
     expect(screen.queryByTestId("persona-pane")).toBeNull();
     expect(screen.queryByLabelText("Assistant Name")).toBeNull();
 
-    // Engine keeps only knobs plus the interruption policy. The pane is
-    // already loaded from the providers wait above, so select the Engine tab
-    // directly: waiting for a providers input while on Goals would never
-    // settle because only the active tab renders.
+    // Engine keeps only knobs plus the interruption policy.
     await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
     expect(screen.getByDisplayValue("Test Engine")).toBeDefined();
     expect(screen.getByLabelText("Proactivity Mode")).toBeDefined();
@@ -4264,10 +4234,8 @@ describe("SettingsManager persona pane", () => {
 
   it("keeps an unknown tab id on the current tab", async () => {
     stubPersonaFetch();
-    // Fail-closed predicate directly: an unknown id never narrows to the tab
-    // vocabulary, so selection keeps the current tab instead of blanking.
-    // "access" joined the vocabulary when it absorbed the Policy tab, whose id
-    // left it at the same time.
+    // Fail-closed predicate directly: an unknown id never narrows to the tab vocabulary, so
+    // selection keeps the current tab instead of blanking.
     expect(isSettingsTab("bogus-tab")).toBe(false);
     expect(isSettingsTab("providers")).toBe(true);
     expect(isSettingsTab("access")).toBe(true);
@@ -4288,12 +4256,9 @@ describe("SettingsManager persona pane", () => {
 
 describe("persona defaults and bounds contract", () => {
   it("pins the persona mirrors to the engine PersonaConfig", () => {
-    // Single cross-language contract: the server owns the bounds and defaults
-    // in `Sources/RuneWeaverCore/PersonaConfig.swift` (maxAssistantNameLength,
-    // maxStyleLength, maxUserNameLength, defaultTone, defaultAvatar) and the
-    // closed enums `PersonaTone`/`PersonaAvatar`; these mirrors must stay
-    // equal so the pane's inputs and the engine merge never drift. Update
-    // both sides together.
+    // Single cross-language contract: the server owns the bounds and defaults in
+    // `Sources/RuneWeaverCore/PersonaConfig.swift` (maxAssistantNameLength, maxStyleLength,
+    // maxUserNameLength, defaultTone, defaultAvatar) and the closed enums.
     expect(MAX_PERSONA_ASSISTANT_NAME_LENGTH).toBe(32);
     expect(MAX_PERSONA_STYLE_LENGTH).toBe(2000);
     expect(MAX_PERSONA_USER_NAME_LENGTH).toBe(64);
@@ -4411,10 +4376,8 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
     quotaFiles: 10000,
   };
 
-  // Opens the Tools tab with one stubbed fetch so settings, tools, plugins,
-  // and usage all answer without a second stub. PUT bodies are
-  // captured for the delta assertions while the response echoes the merged
-  // request the way the engine partial merge does.
+  // Opens the Tools tab with one stubbed fetch so settings, tools, plugins, and usage all answer
+  // without a second stub.
   function stubBoundFetch(settings: Record<string, unknown>, onPut?: (body: Record<string, unknown>) => Response) {
     const puts: Record<string, unknown>[] = [];
     let putCount = 0;

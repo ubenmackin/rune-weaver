@@ -1,37 +1,15 @@
 // Rune Weaver Server — Durable access rules routes and change broadcast.
-//
-// Owns the rules HTTP surface plus the lightweight change signal that keeps
-// dashboards fresh: listing every live rule newest-first with allows and denies
-// together, revoking by identifier, minting a standing allow or deny, widening
-// an allow rule to its tool-wide scope, re-arming an allow rule to a new
-// durable tier, and reading or clearing the ephemeral trust one session still
-// carries beside the egress supervisor's session and one-shot domains.
-//
-// Status discipline stays what the grants surface taught: an unknown identifier
-// (404) stays distinct from a live rule that cannot be widened (409) or
-// re-armed (400), so a listed rule is never refused as "unknown". A deny mint
-// never expires and a deny rule is never widened, because a refusal is not
-// trust to promote. Every durable write broadcasts `access_rules_changed` so
-// every open dashboard refetches without polling.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Bound on a stored rule reason so an unbounded paste never persists to the
-/// rule store or renders unbounded in every table row. Matches the cap the
-/// dashboard's Rule modal enforces, so a compliant client never trips it and
-/// a raw caller gets an honest refusal instead of a silently shortened note.
+/// Bound on a stored rule reason so an unbounded paste never persists to the rule store or renders
+/// unbounded in every table row.
 private let maxRuleReasonChars = 512
 
 extension WSHub {
     /// Broadcasts an access-rule change so dashboards refresh their rules list.
-    ///
-    /// Dashboards refetch `GET /approvals/rules` on this signal, so the
-    /// payload stays a lightweight discriminator instead of a full snapshot
-    /// that could drift from the pruned store contents. Routes through the
-    /// shared broadcast path so ordering and best-effort delivery stay
-    /// single-sourced with every other hub event.
     public func broadcastAccessRulesChanged() async {
         let text: String
         do {
@@ -83,10 +61,9 @@ private func registerAccessRulesListAndRevokeRoutes(_ app: Application) {
         guard removed else {
             throw Abort(.notFound, reason: "Unknown rule \(raw)")
         }
-        // Revocation only stops future matches; past allowed calls already
-        // happened and stay in history, so dashboards must treat the delete
-        // as future-only and not imply prior uses are undone.
-        // Notify dashboards so a revoked rule disappears without a manual refresh.
+        // Revocation only stops future matches; past allowed calls already happened and stay in
+        // history, so dashboards must treat the delete as future-only and not imply prior uses are
+        // undone.
         await context.hub.broadcastAccessRulesChanged()
         return .noContent
     }
@@ -108,10 +85,8 @@ private func registerAccessRulesCreateRoute(_ app: Application) {
         guard let scope = body.scope.accessScope() else {
             throw Abort(.badRequest, reason: "scope is not a canonical access scope")
         }
-        // Send trust is keyed to the exact canonical recipient the owner
-        // authorized: a recipient set covers the handles it names, and an exact
-        // target must itself spell a canonical handle. Any other send scope
-        // stores nothing, for allows and denies alike.
+        // Send trust is keyed to the exact canonical recipient the owner authorized: a recipient
+        // set covers the handles it names, and an exact target must itself spell a canonical handle.
         if toolName == "messages.send", !scope.isMintableSendScope {
             throw Abort(.badRequest, reason: "messages.send rules must name a recipient set or a canonical handle")
         }
@@ -257,11 +232,8 @@ private func registerAccessRulesSessionTrustRoutes(_ app: Application) {
     ) { req async throws -> HTTPStatus in
         let body = try req.content.decode(EphemeralClearRequest.self)
         let context = req.application.runeWeaver
-        // The gate's ephemeral tables and the supervisor's grant tables both
-        // key on the session, so one clear drops every grant the conversation
-        // still holds. An unknown session clears nothing and still answers
-        // 204: the caller's row is already gone, which is the convergent
-        // outcome rather than an error to surface.
+        // The gate's ephemeral tables and the supervisor's grant tables both key on the session, so
+        // one clear drops every grant the conversation still holds.
         await context.permissionGate.clearSessionGrants(for: body.sessionID)
         if let supervisor = context.egressSupervisor {
             await supervisor.clearSession(sessionID: body.sessionID)
@@ -271,16 +243,6 @@ private func registerAccessRulesSessionTrustRoutes(_ app: Application) {
 }
 
 /// Trimmed caller-facing reason for a deny mint, or nil when blank.
-///
-/// The gate renders a nil reason from the tool and scope, so a blank caller
-/// note degrades to that derived text instead of storing an empty label.
-/// A reason longer than ``maxRuleReasonChars`` is refused rather than
-/// truncated, mirroring the scope canonicalizers: a denial reason is read
-/// back to the agent, so a silently shortened note could say something the
-/// owner never wrote, and the dashboard enforces the same cap in its modal.
-/// - Parameter reason: Raw reason from the request.
-/// - Returns: Trimmed reason, or nil when absent or blank.
-/// - Throws: `Abort(.badRequest)` when the reason exceeds the stored bound.
 private func trimmedRuleReason(_ reason: String?) throws -> String? {
     guard let reason else { return nil }
     let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)

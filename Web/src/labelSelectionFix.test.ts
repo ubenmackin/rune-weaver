@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Label selection fix behavior coverage.
-//
-// Purpose: Pins the global capture-phase label interaction fix so text inputs,
-// textareas, and selects never steal focus on label click while checkboxes and
-// radios keep native toggle behavior. Guards the selection-preservation path
-// that keeps user-highlighted label text copyable instead of jumping the caret.
-//
-// Scope: Vitest + jsdom coverage for `setupLabelSelectionFix` only; exercises
-// label-to-control activation, direct-control passthrough, and selected-text
-// preservation without touching engine, WebSocket, or approval flows.
-//
-// Architectural role: Regression net for the dashboard's single global label
-// listener registered once at React entry; ensures HMR-safe attach/detach and
-// standard HTML label semantics stay intact across settings and chat surfaces.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setupLabelSelectionFix } from "./labelSelectionFix";

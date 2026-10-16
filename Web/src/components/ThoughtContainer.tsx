@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Collapsible thought process container.
-//
-// Renders assistant reasoning / thinking process with configurable default
-// expansion while preserving user manual toggles across re-renders and streaming.
 
 import { useEffect, useState } from "react";
 import MarkdownText from "./MarkdownText";

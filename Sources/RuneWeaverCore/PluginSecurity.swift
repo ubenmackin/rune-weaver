@@ -6,17 +6,6 @@ import Foundation
 /// Security and integrity services for Rune Weaver plugins.
 public enum PluginSecurity {
     /// File and directory names ignored during tree hashing and validation.
-    /// Transient caches plus source-control metadata stay out of the hash so
-    /// routine checkouts never read as tampering, while review covers
-    /// provisioned source rather than the runtime itself.
-    /// Provisioned virtual-environment directories (`.venv`/`venv`) hold
-    /// executable code and stay hashed: skipping them would let a tampered
-    /// interpreter or installed package bypass detection. Only narrow
-    /// reinstall caches inside those environments (pip HTTP subtree, wheel
-    /// downloads, `__pycache__` bytecode) stay out of the hash via
-    /// `isVenvCacheEntry`; arbitrary files such as `.cache/evil.py` keep
-    /// hashing, and dependency upgrades still change the digest and require
-    /// re-approval by design.
     public static let ignoredFileNames: Set<String> = [
         ".DS_Store",
         "__pycache__",
@@ -125,10 +114,9 @@ public enum PluginSecurity {
             guard !relative.isEmpty else {
                 continue
             }
-            // Only regenerable reinstall caches inside provisioned environments
-            // stay out of the hash; every other venv entry (executables,
-            // manifests, installed sources, plus arbitrary files such as
-            // `.cache/evil.py`) remains hashed so tamper stays visible.
+            // Only regenerable reinstall caches inside provisioned environments stay out of the
+            // hash; every other venv entry (executables, manifests, installed sources, plus
+            // arbitrary files such as `.cache/evil.py`) remains hashed so tamper stays visible.
             if isVenvCacheEntry(
                 relativePath: relative,
                 lastComponent: lastComponent,
@@ -164,15 +152,8 @@ public enum PluginSecurity {
         return entries
     }
 
-    /// Reports whether a plugin-relative path is a regenerable reinstall cache
-    /// inside a provisioned virtual environment. Only the pip HTTP cache
-    /// subtree, wheel downloads, and bytecode inside `__pycache__` qualify;
-    /// launchers, manifests, installed sources, and arbitrary files such as
-    /// `.cache/evil.py` stay hashed so executable tamper changes the digest.
-    /// Symlinks always hash so a retargeted link cannot hide behind a cache
-    /// name, and cache directory markers hash (except the pip subtree root)
-    /// so file tamper inside stays visible while pip churn alone avoids
-    /// forcing re-approval.
+    /// Reports whether a plugin-relative path is a regenerable reinstall cache inside a provisioned
+    /// virtual environment.
     private static func isVenvCacheEntry(
         relativePath: String,
         lastComponent: String,
@@ -195,30 +176,20 @@ public enum PluginSecurity {
         }
         let suffix = Array(segments[(venvIndex + 1)...])
         let loweredLast = lastComponent.lowercased()
-        // Wheel downloads are regenerable fetches, never executed in place;
-        // sibling sources such as `wheels/evil.py` keep hashing. Only files
-        // skip so a directory that happens to end in `.whl` still hashes its
-        // marker and lets its contents speak individually.
+        // Wheel downloads are regenerable fetches, never executed in place; sibling sources such as
+        // `wheels/evil.py` keep hashing.
         if !isDirectory, loweredLast.hasSuffix(".whl") {
             return true
         }
-        // Bytecode only counts inside `__pycache__` where the interpreter
-        // regenerates it; stray colocated `.pyc` files hash so planted
-        // bytecode stays visible. Top-level `__pycache__` directories already
-        // skip via the ignored names before reaching here.
+        // Bytecode only counts inside `__pycache__` where the interpreter regenerates it; stray
+        // colocated `.pyc` files hash so planted bytecode stays visible.
         if !isDirectory,
            loweredLast.hasSuffix(".pyc") || loweredLast.hasSuffix(".pyo"),
            suffix.contains("__pycache__")
         {
             return true
         }
-        // Pip HTTP cache only: a consecutive `.cache/pip` pair anywhere beneath
-        // the venv. The pair covers both the immediate `venv/.cache/pip` layout
-        // and nested managers, while a bare `.cache/evil.py` without the `pip`
-        // hop keeps hashing. Directories hash except the pip subtree root, whose
-        // marker plus descendants skip together so cache churn does not force
-        // re-approval; file tamper under a hashed parent still surfaces via the
-        // file entry itself.
+        // Pip HTTP cache only: a consecutive `.cache/pip` pair anywhere beneath the venv.
         if suffix.count >= 2 {
             for index in 0 ..< (suffix.count - 1) {
                 if suffix[index] == ".cache", suffix[index + 1] == "pip" {
@@ -310,10 +281,9 @@ public enum PluginSecurity {
         let standardTarget = normalizedPath(targetURL)
         let homeDir = normalizedPath(FileManager.default.homeDirectoryForCurrentUser)
         let defaultPlugins = (homeDir as NSString).appendingPathComponent(".runeweaver/plugins")
-        // The memory tree is the engine's private state — episodic sessions and
-        // approvals, the trust-grant ledger, and the plaintext profile plus
-        // semantic vectors — so a tool must be refused outright rather than
-        // earning write access through the ordinary approval path.
+        // The memory tree is the engine's private state — episodic sessions and approvals, the
+        // trust-grant ledger, and the plaintext profile plus semantic vectors — so a tool must be
+        // refused outright rather than earning write access through the ordinary approval path.
         let defaultMemory = (homeDir as NSString).appendingPathComponent(".runeweaver/memory")
         let defaultConfig = (homeDir as NSString).appendingPathComponent(".runeweaver/config.toml")
         // The egress policy file is the credential/network control plane, and

@@ -1,9 +1,4 @@
 // Rune Weaver Core — Goal step statements for the SQLite goal store.
-//
-// Holds the step write path plus retrieval: row decoding, step upserts,
-// plan replacement preserving finished history, status moves with audit
-// events, and the actionable-step scan. Goal rows and audit events live
-// beside it under the same namespace.
 
 import Foundation
 
@@ -15,9 +10,6 @@ import Foundation
     /// Step persistence and retrieval for the goal store.
     extension SQLiteGoalStore {
         /// Maps a step state to its audit counterpart.
-        ///
-        /// Pending and skipped restates still log a note so the trail shows
-        /// who moved the step even when the move carries no lifecycle weight.
         static func eventKind(forStep status: StepStatus) -> GoalEventKind {
             switch status {
             case .inProgress: .stepStarted

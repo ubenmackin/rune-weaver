@@ -1,17 +1,4 @@
 // Rune Weaver Tests — Fan-out run lifecycle broadcasts through the hub adapter.
-//
-// Purpose: pins the bridge that keeps fan-out audit rows live. Every parent
-// and worker row the `FanOutEngine` appends or settles must surface one
-// `run_started`/`run_completed` frame on the shared `WSHub`, exactly like the
-// chat and scheduler run kinds, so the Runs surface can patch rows live
-// instead of only on the next poll.
-// Scope: the adapter's per-row frame shape (identity, session, kind, settled
-// status/output) plus one end-to-end two-subtask swarm; the engine's own
-// concurrency and cancellation semantics stay with the core fan-out suite.
-// Architectural role: guards the single production path connecting the core
-// `FanOutRunLogging` seam to the server's run-log store and hub, so a future
-// edit cannot silently reintroduce a fan-out row that writes without a
-// broadcast.
 
 import Foundation
 import NIOWebSocket
@@ -20,10 +7,6 @@ import NIOWebSocket
 import Testing
 
 /// Decoded `run_started` / `run_completed` envelope plus its nested run row.
-///
-/// Decoding the whole payload proves the wire contract consumers rely on: the
-/// frame stays untagged at the envelope level and every consumer reads the row
-/// from the nested `run` key.
 private struct RecordedRunFrame: Decodable {
     /// Frame discriminator: `run_started` or `run_completed`.
     let type: String
@@ -45,10 +28,8 @@ private actor FanOutFrameSocket: WSConnectionSocket {
     /// Ignored; these tests never close the connection.
     func close(code _: WebSocketErrorCode) async throws {}
 
-    /// Decodes the recorded frames.
-    /// A malformed payload is dropped rather than thrown so a count assertion
-    /// names the missing frame instead of failing the whole read.
-    /// - Returns: Decoded frames in send order.
+    /// Decodes the recorded frames. A malformed payload is dropped rather than thrown so a count
+    /// assertion names the missing frame instead of failing the whole read.
     func decodedFrames() -> [RecordedRunFrame] {
         sent.compactMap { raw in
             guard let data = raw.data(using: .utf8) else { return nil }
@@ -71,14 +52,9 @@ private struct RecordingFanOutSeam: OrchestratorFanOutSeam, Sendable {
     }
 }
 
-/// Polls until the socket recorded at least `expected` frames or the budget
-/// expires, so the test orders itself against live broadcasts instead of
-/// racing fixed sleeps.
-/// - Parameters:
-///   - expected: Frame count to wait for.
-///   - socket: Recording socket receiving the broadcasts.
-///   - timeoutSeconds: Longest wait before returning the current verdict.
-/// - Returns: True when the socket holds at least `expected` frames.
+/// Polls until the socket recorded at least `expected` frames or the budget expires, so the test
+/// orders itself against live broadcasts instead of racing fixed sleeps. expected:
+/// Frame count to wait for.
 private func waitForFanOutFrames(
     _ expected: Int,
     on socket: FanOutFrameSocket,

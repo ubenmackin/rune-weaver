@@ -1,16 +1,4 @@
 // Rune Weaver App — Native macOS Owner Access Window Controller.
-//
-// Purpose: Presents the owner-token status plus generate/rotate flow from the
-// menu-bar app in a native window, without opening Terminal or the dashboard,
-// while keeping the raw secret visible exactly once through the hosted section.
-// Scope: One retained NSWindow hosting the SwiftUI OwnerTokenSettingsSection,
-// shared through the singleton and re-rooted on every show so model state
-// stays fresh; frame persistence plus centering fallback plus activation ride
-// the shared single-instance helper.
-// Architectural role: Keeps AppKit window lifecycle (creation, autosave,
-// delegate retention for fast re-opening) separate from the SwiftUI settings
-// content, so the menu model stays the sole owner of token state and the raw
-// secret never reaches logs, URLs, or any store besides the auth persistence.
 
 import AppKit
 import Foundation

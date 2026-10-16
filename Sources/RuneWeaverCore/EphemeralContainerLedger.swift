@@ -1,23 +1,10 @@
 // Rune Weaver Core — Shared ephemeral container ledger.
-//
-// Purpose: count every live ephemeral container in one place and gate new
-// container admission against the configured concurrency cap.
-// Scope: registry bookkeeping for admitted names plus admission timestamps,
-// CLI census reconciliation, and fail-closed admission denial past the cap
-// or on census failure.
-// Architectural role: single owner for the ephemeral cap beside the strict
-// runner; the machine singleton workspace container stays exempt from counts.
 
 import Foundation
 import os
 
-/// Single owner for the shared ephemeral container cap.
-///
-/// The ledger tracks containers this process admitted and reconciles them
-/// against a CLI census so orphaned strict plus detonation containers still
-/// consume cap budget while census-proven dead entries release it. Admission
-/// denies fail-closed: past the cap, or whenever the census cannot prove the
-/// live count, so an unreadable census never over-admits.
+/// Single owner for the shared ephemeral container cap. Admission denies fail-closed: past the cap,
+/// or whenever the census cannot prove the live count, so an unreadable census never over-admits.
 public actor EphemeralContainerLedger {
     /// Default cap matching the `[containers] max_concurrent` default,
     /// single-sourced with the containers config.
@@ -30,11 +17,8 @@ public actor EphemeralContainerLedger {
     /// Concurrent-admission cap; excess requests deny fail-closed.
     public private(set) var maxConcurrent: Int
 
-    /// Creates a ledger on an injected runtime, live when nil, with an
-    /// explicit or default cap.
-    /// - Parameters:
-    ///   - runtime: Host runtime behind the CLI census.
-    ///   - maxConcurrent: Concurrent-admission cap.
+    /// Creates a ledger on an injected runtime, live when nil, with an explicit or default cap. -
+    /// Parameters: - runtime: Host runtime behind the CLI census.
     public init(runtime: (any ContainerHostRuntime)? = nil, maxConcurrent: Int = EphemeralContainerLedger.defaultMaxConcurrent) {
         self.runtime = runtime ?? LiveContainerHostRuntime()
         self.maxConcurrent = StrictContainerRunner.clampedMaxConcurrent(for: ContainersConfig(maxConcurrent: maxConcurrent))
@@ -72,21 +56,13 @@ public actor EphemeralContainerLedger {
     }
 
     /// Whether a container name counts against the ephemeral cap.
-    ///
-    /// Single-sourced on the strict runner so the census and the sweep agree:
-    /// strict plus detonation containers share the strict name prefix and the
-    /// legacy detonation shapes, while the machine singleton workspace
-    /// container stays exempt from counts.
     static func isEphemeralContainerName(_ name: String) -> Bool {
         StrictContainerRunner.isEphemeralContainerName(name)
     }
 
-    /// Runs the CLI census, returning parsed name plus status rows.
-    ///
-    /// Census failure throws so admission denies fail-closed: a missing
-    /// runtime, a failed invocation, or a nonzero exit never reads as an
-    /// empty machine. Cancellation propagates so a cancelled turn stops
-    /// before any spawn.
+    /// Runs the CLI census, returning parsed name plus status rows. Census failure throws so
+    /// admission denies fail-closed: a missing runtime, a failed invocation, or a nonzero exit never
+    /// reads as an empty machine.
     private func census(timeoutSeconds: TimeInterval) async throws -> [(name: String, status: String)] {
         guard runtime.resolveRuntimeURL() != nil else {
             throw ContainerOperationError.runtimeNotFound("container")
@@ -114,17 +90,6 @@ public actor EphemeralContainerLedger {
     }
 
     /// Reconciled live ephemeral container count.
-    ///
-    /// The CLI census is ground truth for what is actually running; the
-    /// registry covers containers this process admitted that the listing may
-    /// not yet reflect. Census-proven dead entries leave the registry so
-    /// reaped containers release budget, census names never join it so
-    /// deleted remote containers cannot linger as ghosts, and names the
-    /// listing does not mention keep their registration so a census racing
-    /// an in-flight create never frees budget for a container about to run.
-    /// - Parameter timeoutSeconds: Wall-clock budget for the census.
-    /// - Returns: Live ephemeral containers, machine singleton excluded.
-    /// - Throws: Census failure, so callers deny fail-closed.
     public func liveCount(timeoutSeconds: TimeInterval = StrictContainerRunner.defaultProcessTimeoutSeconds) async throws -> Int {
         let rows = try await census(timeoutSeconds: timeoutSeconds)
         var live = Set<String>()
@@ -144,12 +109,9 @@ public actor EphemeralContainerLedger {
         return live.count + Set(registered.keys).subtracting(listed).count
     }
 
-    /// Verifies one more ephemeral container can start under the shared cap.
-    ///
-    /// Denies fail-closed: past the cap with install-style guidance naming
-    /// the limit, or on any census failure without spawning.
-    /// - Parameter timeoutSeconds: Wall-clock budget for the census.
-    /// - Throws: Cap denial or census failure.
+    /// Verifies one more ephemeral container can start under the shared cap. Denies fail-closed:
+    /// past the cap with install-style guidance naming the limit, or on any census failure without
+    /// spawning.
     public func admit(timeoutSeconds: TimeInterval = StrictContainerRunner.defaultProcessTimeoutSeconds) async throws {
         let live = try await liveCount(timeoutSeconds: timeoutSeconds)
         guard live < maxConcurrent else {

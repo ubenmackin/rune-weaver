@@ -1,6 +1,5 @@
 // Rune Weaver Dashboard — Component tests for ApprovalHistory listing,
 // filters, debounce settling, truncation, the two-step clear flow, and empty
-// plus error states.
 
 import {
   act,

@@ -1,12 +1,4 @@
 // Rune Weaver Tools — Transport abstraction for Sonarr & Radarr HTTP communication.
-//
-// Purpose: isolates one no-follow HTTP round trip so the client can validate
-// every redirect hop before dialing, with hermetic stubs for tests.
-// Scope: single-request send only; timeouts, redirect budgets, and SSRF checks
-// live with the client layer. Architectural role: the dial seam shared by the
-// read and write tools — production uses an ephemeral session, tests inject a
-// stub. Secrets never flow here directly; the session carries no persistent
-// state and never auto-forwards credentials across hops.
 
 import Foundation
 #if canImport(FoundationNetworking)

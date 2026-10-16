@@ -1,9 +1,4 @@
 // Rune Weaver Tools Tests — Reminders indexer tests.
-//
-// Purpose: verify reminder-to-document mapping, hash skip, completion-flip re-index,
-// prune of vanished identifiers, and honest denied plus disabled skip copy.
-// Scope: in-memory reminder seam plus isolated document store; no live EventKit access.
-// Architectural role: guards the reminders indexing owner while gateway tests own persistence.
 
 import CryptoKit
 import Foundation

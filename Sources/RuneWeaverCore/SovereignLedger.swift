@@ -1,14 +1,4 @@
 // Rune Weaver Core — Sovereign ledger re-verification with a signed checkpoint tiebreaker.
-//
-// Purpose: prove the primary episode ledger unedited by recomputing its hash
-// chain and cross-checking a hash-chained sovereign copy plus an
-// Enclave-signed checkpoint vote, concluding verified, empty, or mismatch,
-// and throwing on unverifiable material instead of guessing.
-// Scope: chain recomputation, strict copy and checkpoint verification, the
-// closed verdict with its tiebreak decision, and the size-bounded writers.
-// Pulse recording and re-attestation scheduling stay with their owners.
-// Architectural role: the history prover behind the sovereign contract — it
-// never rewrites recorded tips and a parked mismatch needs explicit approval.
 
 import CryptoKit
 import Foundation
@@ -20,10 +10,6 @@ import Foundation
 // MARK: - Ceremony Verdict
 
 /// Closed outcome of one sovereign verification ceremony.
-///
-/// `empty` is a passing verdict, not a missing one: a ledger with no
-/// episodes verifies as explicitly empty at the well-known empty-chain tip,
-/// so the recorder never confuses "nothing to verify" with "never verified".
 public enum SovereignOutcome: String, Sendable, Codable, Equatable {
     /// The ledger held no episodes; the chain verified as explicitly empty.
     case empty
@@ -34,10 +20,6 @@ public enum SovereignOutcome: String, Sendable, Codable, Equatable {
 }
 
 /// How the signed checkpoint vote resolved a head disagreement.
-///
-/// Only meaningful when heads disagree: the vote names one head, and the
-/// ceremony parks either way, but the record names which side the Enclave
-/// attested so an explicitly approved revert targets the right head.
 public enum SovereignDecision: String, Sendable, Codable, Equatable {
     /// Heads agree; no tiebreak was required.
     case verified
@@ -72,23 +54,12 @@ public struct SovereignVerdict: Sendable, Equatable, Codable {
     public let decision: SovereignDecision
 
     /// Whether the primary head moved past the last checkpoint attestation.
-    ///
-    /// Derived by tip compare rather than stored, so "changed" can never
-    /// disagree with the recorded heads: a missing or matching vote reads
-    /// unchanged, any other vote reads changed.
     public var changedSinceCheckpoint: Bool {
         guard let checkpointTip else { return false }
         return checkpointTip != primaryTip
     }
 
-    /// Creates a ceremony verdict.
-    /// - Parameters:
-    ///   - outcome: Closed outcome of the ceremony.
-    ///   - primaryTip: Recomputed primary ledger head.
-    ///   - sovereignTip: Sovereign head under test, nil when none existed.
-    ///   - checkpointTip: Tip of the last signed checkpoint, nil when none.
-    ///   - episodeCount: Episodes the recomputed chain covered.
-    ///   - decision: How the signed vote resolved a disagreement.
+    /// Creates a ceremony verdict. outcome: Closed outcome of the ceremony.
     public init(
         outcome: SovereignOutcome,
         primaryTip: String,
@@ -108,13 +79,9 @@ public struct SovereignVerdict: Sendable, Equatable, Codable {
 
 // MARK: - Checkpoint
 
-/// Enclave-signed checkpoint vote attesting a ledger head.
-///
-/// The signature covers the canonical payload below, so an edited tip or a
-/// backdated `signedAt` fails verification instead of reading as a valid
-/// attestation. Decoding is strict — unknown fields are rejected rather than
-/// ignored — because a field a newer writer adds must not be silently
-/// misread under today's semantics.
+/// Enclave-signed checkpoint vote attesting a ledger head. The signature covers the canonical
+/// payload below, so an edited tip or a backdated `signedAt` fails verification instead of reading
+/// as a valid attestation.
 public struct Checkpoint: Sendable, Equatable, Codable {
     /// Schema version this build writes and accepts.
     public static let currentVersion = 1
@@ -134,14 +101,8 @@ public struct Checkpoint: Sendable, Equatable, Codable {
     /// Enclave signing key identity.
     public let signer: String
 
-    /// Creates a checkpoint vote.
-    /// - Parameters:
-    ///   - version: Schema version, defaulting to ``currentVersion``.
-    ///   - tip: Ledger head the vote attests.
-    ///   - episodeCount: Episodes the attested chain covered.
-    ///   - signedAt: When the vote was signed.
-    ///   - signature: Hex HMAC over the signed payload.
-    ///   - signer: Enclave signing key identity.
+    /// Creates a checkpoint vote. version: Schema version, defaulting to
+    /// ``currentVersion``.
     public init(
         version: Int = Checkpoint.currentVersion,
         tip: String,
@@ -169,14 +130,8 @@ public struct Checkpoint: Sendable, Equatable, Codable {
         )
     }
 
-    /// Canonical payload for a vote about to be signed.
-    /// - Parameters:
-    ///   - version: Schema version being written.
-    ///   - tip: Ledger head the vote attests.
-    ///   - episodeCount: Episodes the attested chain covered.
-    ///   - signedAt: When the vote is signed.
-    ///   - signer: Enclave signing key identity.
-    /// - Returns: The bytes a signer covers.
+    /// Canonical payload for a vote about to be signed. version: Schema version
+    /// being written.
     static func signaturePayload(version: Int, tip: String, episodeCount: Int, signedAt: Date, signer: String) -> String {
         "\(version)|\(tip)|\(episodeCount)|\(signedAt.timeIntervalSince1970)|\(signer)"
     }
@@ -184,10 +139,9 @@ public struct Checkpoint: Sendable, Equatable, Codable {
 
 // MARK: - Enclave Signer
 
-/// Signs and verifies the attestation a ``Checkpoint`` carries.
-///
-/// The ceremony owns all cryptographic decisions; the health recorder only
-/// checks structure, so this seam is where signature truth lives.
+/// Signs and verifies the attestation a ``Checkpoint`` carries. The ceremony owns all cryptographic
+/// decisions; the health recorder only checks structure, so this seam is where signature truth
+/// lives.
 public protocol SovereignSigner: Sendable {
     /// Stable identity of the signing key, recorded on every vote.
     var identity: String { get }
@@ -196,23 +150,10 @@ public protocol SovereignSigner: Sendable {
     /// - Returns: Hex-encoded signature.
     func sign(challenge: String) throws -> String
     /// Whether a signature matches the challenge under this signer's key.
-    ///
-    /// An unavailable signing key reads as a non-matching signature, so a
-    /// ceremony in that state refuses rather than passing the check open.
-    /// - Parameters:
-    ///   - challenge: Canonical bytes that were signed.
-    ///   - signature: Hex signature to check.
-    /// - Returns: True when the signature verifies.
     func verify(challenge: String, signature: String) -> Bool
 }
 
 /// File-backed Enclave signer: HMAC-SHA256 under an owner-only 256-bit key.
-///
-/// The key is minted beside the other `~/.runeweaver` state at `0600` on
-/// first use. A missing key is created, while a present-but-loose,
-/// unreadable, or wrong-length key fails closed instead of re-keying,
-/// because re-keying would strand every checkpoint the previous key signed
-/// and then read as forgery.
 public struct EnclaveHMACSigner: SovereignSigner {
     /// Conventional key path beside the other durable engine state.
     public static let defaultKeyPath = "~/.runeweaver/sovereign-signing.key"
@@ -224,11 +165,7 @@ public struct EnclaveHMACSigner: SovereignSigner {
     /// Filesystem path of the signing key. `~` is expanded on use.
     public let keyPath: String
 
-    /// Creates a signer.
-    /// - Parameters:
-    ///   - identity: Signing key identity recorded on votes.
-    ///   - keyPath: Signing key path; the convention keeps it under the
-    ///     owner-only `~/.runeweaver` root.
+    /// Creates a signer. identity: Signing key identity recorded on votes.
     public init(
         identity: String = "runeweaver-enclave-hmac-sha256",
         keyPath: String = EnclaveHMACSigner.defaultKeyPath
@@ -276,12 +213,6 @@ public struct EnclaveHMACSigner: SovereignSigner {
     }
 
     /// Loads the key at a resolved path.
-    ///
-    /// A file the owner cannot prove is owner-only is refused rather than
-    /// used: a group- or world-readable key lets any local process forge a
-    /// checkpoint vote, which would make every attestation meaningless.
-    /// - Parameter url: Resolved key file URL.
-    /// - Returns: The symmetric key.
     private func loadKey(at url: URL) throws -> SymmetricKey {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let permissions = attributes?[.posixPermissions] as? NSNumber
@@ -297,12 +228,6 @@ public struct EnclaveHMACSigner: SovereignSigner {
     }
 
     /// Creates the key file exclusively at `0600` inside a `0700` directory.
-    ///
-    /// An exclusive create keeps a concurrent minter from silently replacing
-    /// a key other votes were signed under.
-    /// - Parameters:
-    ///   - data: Minted key bytes.
-    ///   - url: Resolved key file URL.
     private func writeExclusive(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
@@ -396,11 +321,6 @@ public struct EnclaveHMACSigner: SovereignSigner {
 // MARK: - Errors
 
 /// Failures raised by a sovereign verification ceremony.
-///
-/// Every case is fail-closed: an unverifiable artifact refuses the ceremony
-/// instead of degrading to a guess, and the recovery is always an explicit
-/// act — an approved re-verification, or the prune task the oversize case
-/// names.
 public enum SovereignLedgerError: Error, Sendable, Equatable {
     /// The signing key is unreadable, wrong-length, or cannot be minted.
     case signingKeyUnavailable(reason: String)
@@ -438,10 +358,6 @@ public enum SovereignLedgerError: Error, Sendable, Equatable {
 // MARK: - Sovereign Copy Line
 
 /// One decoded line of the sovereign copy.
-///
-/// A line is one episode plus the chain evidence that binds it: the tip it
-/// follows, the hash of its own canonical bytes, and the enclave HMAC over
-/// that hash. The hash proves content and order; the HMAC proves authorship.
 private struct CopyLine {
     /// Copied episode.
     let episode: Episode
@@ -456,15 +372,6 @@ private struct CopyLine {
 // MARK: - Ledger
 
 /// Actor-backed sovereign ledger verifier.
-///
-/// Primary episodes are the source of truth; the sovereign copy and the
-/// signed checkpoint exist to prove that truth has not been retroactively
-/// edited. A ceremony recomputes the chain from the primary store, verifies
-/// the copy's own linkage, and cross-checks the copy as a prefix of the
-/// recomputed chain: agreeing heads verify quiet, ledger growth re-attests,
-/// and a broken prefix parks red with nothing rewritten. An explicit
-/// re-attestation lives in ``writeCheckpoint()``; adjudication of a
-/// disagreement is the pure ``adjudicate(primaryTip:sovereignTip:checkpointTip:)``.
 public actor SovereignLedger {
     /// Default sovereign copy path beside the other durable memory state.
     public static let defaultSovereignCopyPath = "~/.runeweaver/memory/ledger.sovereign.jsonl"
@@ -490,13 +397,8 @@ public actor SovereignLedger {
     /// Clock source, injectable so staleness is exercised without sleeping.
     private let now: @Sendable () -> Date
 
-    /// Creates a sovereign ledger verifier.
-    /// - Parameters:
-    ///   - episodeStore: Primary store the chain is recomputed from.
-    ///   - sovereignCopyPath: Sovereign copy path; defaults under `~/.runeweaver/memory`.
-    ///   - checkpointPath: Checkpoint path; defaults under `~/.runeweaver`.
-    ///   - signer: Enclave signer; defaults to the file-backed HMAC signer.
-    ///   - now: Clock source for staleness and signing instants.
+    /// Creates a sovereign ledger verifier. episodeStore: Primary store the chain
+    /// is recomputed from.
     public init(
         episodeStore: EpisodeStore,
         sovereignCopyPath: String = SovereignLedger.defaultSovereignCopyPath,
@@ -514,15 +416,6 @@ public actor SovereignLedger {
     // MARK: - Ceremony
 
     /// Runs one verification ceremony over the primary ledger.
-    ///
-    /// The ceremony recomputes the canonical chain, strictly verifies the
-    /// sovereign copy's own linkage, and cross-checks the copy as a prefix
-    /// of the recomputed chain. Agreeing heads return `verified` (or
-    /// `empty`), growth extends the copy and re-attests, and a broken prefix
-    /// returns `mismatch` with nothing rewritten. Unverifiable material —
-    /// unknown fields, sequence discontinuities, chain or HMAC breaks, an
-    /// unreadable, forged, or stale checkpoint — throws instead of concluding.
-    /// - Returns: The closed ceremony verdict.
     public func verifyChain() async throws -> SovereignVerdict {
         let episodes = try await episodeStore.orderedEpisodesForVerification()
         let chain = Self.recomputeChain(episodes)
@@ -584,10 +477,7 @@ public actor SovereignLedger {
             )
         }
         guard checkpoint.tip == primaryTip else {
-            // A signed vote exists but its copy is gone. The copy is the only
-            // record of history, so a head the vote does not corroborate
-            // cannot be validated; the attested head stands as the sovereign
-            // side of the disagreement.
+            // A signed vote exists but its copy is gone.
             return mismatchVerdict(
                 primaryTip: primaryTip,
                 sovereignTip: checkpoint.tip,
@@ -609,13 +499,9 @@ public actor SovereignLedger {
         )
     }
 
-    /// Re-attests the current primary head with a fresh signed vote.
-    ///
-    /// The explicit counterpart to a failed ceremony: it signs and persists
-    /// a new checkpoint at the current head without adjudicating anything.
-    /// A re-verification that follows still cross-checks the sovereign copy,
-    /// so re-attesting alone can never launder retroactive history edits.
-    /// - Returns: The checkpoint written.
+    /// Re-attests the current primary head with a fresh signed vote. The explicit counterpart to a
+    /// failed ceremony: it signs and persists a new checkpoint at the current head without
+    /// adjudicating anything.
     public func writeCheckpoint() async throws -> Checkpoint {
         let episodes = try await episodeStore.orderedEpisodesForVerification()
         let chain = Self.recomputeChain(episodes)
@@ -628,16 +514,6 @@ public actor SovereignLedger {
     }
 
     /// Pure tiebreaker for a head disagreement.
-    ///
-    /// Agreeing heads decide themselves. With heads apart, the signed vote
-    /// names the corroborated side; a vote naming neither head, or tips that
-    /// do not normalize to digests, leaves the disagreement unadjudicated
-    /// rather than guessing.
-    /// - Parameters:
-    ///   - primaryTip: Recomputed primary ledger head.
-    ///   - sovereignTip: Sovereign head under test.
-    ///   - checkpointTip: Head the signed checkpoint attests.
-    /// - Returns: The closed decision.
     public func adjudicate(primaryTip: String, sovereignTip: String, checkpointTip: String) -> SovereignDecision {
         guard let primary = HealthSnapshotValue.normalizedTip(primaryTip),
               let sovereign = HealthSnapshotValue.normalizedTip(sovereignTip)
@@ -664,12 +540,6 @@ public actor SovereignLedger {
 
 extension SovereignLedger {
     /// Recomputes the canonical chain over ordered episodes.
-    ///
-    /// The hash of each entry covers the previous tip plus the entry's
-    /// canonical bytes, so chain position is bound into every hash: a
-    /// reordered or re-linked episode changes every hash after it.
-    /// - Parameter episodes: Episodes in canonical verification order.
-    /// - Returns: Each episode with its recomputed chain hash.
     private static func recomputeChain(_ episodes: [Episode]) -> [(episode: Episode, hash: String)] {
         var chain: [(episode: Episode, hash: String)] = []
         chain.reserveCapacity(episodes.count)
@@ -682,11 +552,8 @@ extension SovereignLedger {
         return chain
     }
 
-    /// Hashes one entry over the previous tip and its canonical bytes.
-    /// - Parameters:
-    ///   - previous: Tip the entry follows.
-    ///   - canonical: Canonical episode bytes.
-    /// - Returns: Lowercase hex digest.
+    /// Hashes one entry over the previous tip and its canonical bytes. previous:
+    /// Tip the entry follows.
     private static func chainHash(previous: String, canonical: Data) -> String {
         var bytes = Data(previous.utf8)
         bytes.append(0x1F)
@@ -695,14 +562,6 @@ extension SovereignLedger {
     }
 
     /// Canonical episode bytes: the exact payload the chain hashes.
-    ///
-    /// Every field is length-framed, so the encoding is injective — an id or
-    /// a metadata key containing a delimiter can never forge another
-    /// episode's canonical bytes — and the timestamp is formatted to
-    /// microseconds so a JSON round-trip through the copy cannot shift the
-    /// digest by a sub-microsecond remainder.
-    /// - Parameter episode: Episode to canonicalize.
-    /// - Returns: Canonical bytes.
     private static func canonicalEpisodeData(_ episode: Episode) -> Data {
         var buffer = Data()
         func frame(_ field: String) {
@@ -728,13 +587,6 @@ extension SovereignLedger {
 
 extension SovereignLedger {
     /// Reads and strictly verifies the sovereign copy.
-    ///
-    /// Every line must decode against the copy schema with no unknown fields,
-    /// carry its declared sequence position, self-verify its hash from its
-    /// declared previous tip, and carry an enclave HMAC; the lines must also
-    /// link head to tail without a gap. Any failure refuses the whole
-    /// ceremony rather than reading a partial copy as good.
-    /// - Returns: Decoded lines, or nil when the copy has never been written.
     private func readSovereignCopy() throws -> [CopyLine]? {
         let path = expanded(sovereignCopyPath)
         guard FileManager.default.fileExists(atPath: path) else { return nil }
@@ -785,12 +637,8 @@ extension SovereignLedger {
         return lines
     }
 
-    /// Decodes one copy line strictly against the copy schema.
-    /// - Parameters:
-    ///   - data: Raw line bytes.
-    ///   - path: Copy path for error reporting.
-    ///   - seq: Position the line must declare.
-    /// - Returns: The decoded line.
+    /// Decodes one copy line strictly against the copy schema. data: Raw line
+    /// bytes.
     private func decodeCopyLine(_ data: Data, path: String, seq: Int) throws -> CopyLine {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: []),
               let dict = object as? [String: Any]
@@ -826,16 +674,6 @@ extension SovereignLedger {
     }
 
     /// Decodes a line's embedded episode, rejecting unknown fields there too.
-    ///
-    /// The timestamp round-trips through the same fixed 6-decimal string the
-    /// canonical hash frames, never through Foundation's `Date` bridging:
-    /// reference-date arithmetic on epoch seconds loses the low bits, which
-    /// would make a faithfully written copy fail its own hash check.
-    /// - Parameters:
-    ///   - object: Decoded `episode` object.
-    ///   - path: Copy path for error reporting.
-    ///   - seq: Line position for error reporting.
-    /// - Returns: The decoded episode.
     private func decodeEpisode(_ object: [String: Any], path: String, seq: Int) throws -> Episode {
         if let unknown = object.keys.first(where: { !Self.episodeFields.contains($0) }) {
             throw SovereignLedgerError.unknownField(path: path, field: "episode.\(unknown)")
@@ -863,11 +701,6 @@ extension SovereignLedger {
     }
 
     /// Writes the sovereign copy atomically under the size ceiling.
-    ///
-    /// The rendered document is measured before anything lands on disk, so
-    /// an over-ceiling ledger is refused whole instead of silently truncated
-    /// into a copy that no longer matches the chain it claims to mirror.
-    /// - Parameter chain: Recomputed chain to write.
     private func writeSovereignCopy(_ chain: [(episode: Episode, hash: String)]) throws {
         let path = expanded(sovereignCopyPath)
         var previous = SovereignVerdict.emptyTip
@@ -895,14 +728,7 @@ extension SovereignLedger {
         }
     }
 
-    /// Renders one copy line as canonical JSON.
-    /// - Parameters:
-    ///   - seq: Zero-based position.
-    ///   - episode: Episode to copy.
-    ///   - previousTip: Tip the line follows.
-    ///   - hash: Recomputed chain hash.
-    ///   - hmac: Enclave HMAC over `hash`.
-    /// - Returns: Line bytes without a trailing newline.
+    /// Renders one copy line as canonical JSON. seq: Zero-based position.
     private static func copyLineData(
         seq: Int,
         episode: Episode,
@@ -921,12 +747,6 @@ extension SovereignLedger {
     }
 
     /// Projects an episode into the copy's explicit JSON shape.
-    ///
-    /// The timestamp is written as the same fixed 6-decimal string the
-    /// canonical hash frames, so a decoded line reproduces its own hash
-    /// without depending on `Date` bridging precision.
-    /// - Parameter episode: Episode to project.
-    /// - Returns: JSON-compatible episode object.
     private static func episodeObject(_ episode: Episode) -> [String: Any] {
         [
             "id": episode.id.uuidString,
@@ -939,12 +759,6 @@ extension SovereignLedger {
     }
 
     /// Early-out size gate ahead of the byte-accurate read.
-    ///
-    /// The pre-read gate keeps an over-ceiling copy from being slurped into
-    /// memory at all; the byte-accurate gate after the read is the one that
-    /// fails closed, so an unmeasurable file is still refused once its real
-    /// size is known.
-    /// - Parameter path: Copy path to measure.
     private func assertWithinCopyLimit(path: String) throws {
         let attributes = try? FileManager.default.attributesOfItem(atPath: path)
         let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
@@ -958,13 +772,6 @@ extension SovereignLedger {
 
 extension SovereignLedger {
     /// Reads, verifies, and age-checks the signed checkpoint.
-    ///
-    /// The signature is checked before the age: a forged vote is refused
-    /// before any freshness claim in it is read. A vote older than the
-    /// staleness bound cannot arbitrate, so the ceremony fails closed and
-    /// the recovery is an explicit re-attestation through
-    /// ``writeCheckpoint()``.
-    /// - Returns: The checkpoint, or nil when never written.
     private func readCheckpoint() throws -> Checkpoint? {
         let path = expanded(checkpointPath)
         guard FileManager.default.fileExists(atPath: path) else { return nil }
@@ -1013,11 +820,7 @@ extension SovereignLedger {
         return checkpoint
     }
 
-    /// Signs a fresh checkpoint for a head.
-    /// - Parameters:
-    ///   - tip: Ledger head to attest.
-    ///   - episodeCount: Episodes the attested chain covered.
-    /// - Returns: The signed checkpoint.
+    /// Signs a fresh checkpoint for a head. tip: Ledger head to attest.
     private func makeCheckpoint(tip: String, episodeCount: Int) throws -> Checkpoint {
         let signedAt = now()
         let identity = signer.identity
@@ -1038,10 +841,7 @@ extension SovereignLedger {
         )
     }
 
-    /// Signs and persists a checkpoint for a head.
-    /// - Parameters:
-    ///   - tip: Ledger head to attest.
-    ///   - episodeCount: Episodes the attested chain covered.
+    /// Signs and persists a checkpoint for a head. tip: Ledger head to attest.
     private func writeCheckpoint(tip: String, episodeCount: Int) throws {
         try persistCheckpoint(makeCheckpoint(tip: tip, episodeCount: episodeCount))
     }
@@ -1070,12 +870,7 @@ extension SovereignLedger {
 
 extension SovereignLedger {
     /// Builds a parked-mismatch verdict, labeling which side the vote backs.
-    /// - Parameters:
-    ///   - primaryTip: Recomputed primary ledger head.
-    ///   - sovereignTip: Sovereign head under test.
-    ///   - checkpointTip: Tip the last signed checkpoint attested, if any.
-    ///   - episodeCount: Episodes the recomputed chain covered.
-    /// - Returns: The fail-closed verdict.
+    /// primaryTip: Recomputed primary ledger head.
     private func mismatchVerdict(
         primaryTip: String,
         sovereignTip: String,
@@ -1095,12 +890,9 @@ extension SovereignLedger {
         )
     }
 
-    /// Writes bytes to a `0600` file inside `0700` directories via a
-    /// same-directory temp plus an atomic replace, so a crash never leaves a
-    /// half-written artifact and no window exposes it under a looser mode.
-    /// - Parameters:
-    ///   - data: Bytes to write.
-    ///   - path: Resolved destination path.
+    /// Writes bytes to a `0600` file inside `0700` directories via a same-directory temp plus an
+    /// atomic replace, so a crash never leaves a half-written artifact and no window exposes it
+    /// under a looser mode.
     private func writeRestricted(_ data: Data, to path: String) throws {
         let fileManager = FileManager.default
         let url = URL(fileURLWithPath: path)

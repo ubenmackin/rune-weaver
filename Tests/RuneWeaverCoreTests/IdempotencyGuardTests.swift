@@ -1,7 +1,4 @@
 // Rune Weaver Core — Idempotency safeguard tests.
-// Exercises the UncertainActionTracker and ToolBus idempotency guard behavior to verify
-// that unconfirmed or timed-out mutating actions block immediate identical retries until
-// state verification occurs.
 
 import Foundation
 import os

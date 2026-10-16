@@ -1,12 +1,4 @@
 // Rune Weaver Tests — Structured park admission in the turn loop.
-//
-// Verifies that natively requested (structured) tool calls requiring approval park
-// before execution instead of entering the suspending bus handler. Scope is admission
-// partitioning only: allowed-now execution, single-batch filing with narrated siblings,
-// pre-admission refusal of target-shaped calls before any approval row is filed, and
-// fail-closed preservation of denial, unknown, headless, and dry-run paths.
-// Architecturally, the turn loop remains the single admission point, reusing the
-// narrated park record and batch so structured and narrated approvals resume identically.
 
 import Foundation
 import os
@@ -648,11 +640,9 @@ extension StructuredParkTests {
 
     @Test
     func `Boundary refusal survives the continuation park and reaches the resumed model`() async throws {
-        // A round that both refuses a pre-admission call and trips the tool-round
-        // budget must still answer the model: the round note and the refusal result
-        // are persisted before the continuation park, the park context carries the
-        // refusal actions, and the resumed synthesis prompt contains the actionable
-        // candidates instead of leaving the model to retry the same name-shaped send.
+        // A round that both refuses a pre-admission call and trips the tool-round budget must still
+        // answer the model: the round note and the refusal result are persisted before the
+        // continuation park, the park context carries the refusal actions, and the resumed synthesis.
         let conversations = ConversationManager()
         let gate = PermissionGate()
         let queue = ApprovalQueue(permissionGate: gate)
@@ -737,10 +727,9 @@ extension StructuredParkTests {
 
     @Test
     func `Narrated boundary refusal keeps one placeholder and reaches the resumed model`() async throws {
-        // Narrated variant of the boundary round: the model's own narration already
-        // carries the refused call's placeholder, so the pre-park note must not
-        // duplicate it while still persisting the refusal result and carrying the
-        // refusal into the continuation park.
+        // Narrated variant of the boundary round: the model's own narration already carries the
+        // refused call's placeholder, so the pre-park note must not duplicate it while still
+        // persisting the refusal result and carrying the refusal into the continuation park.
         let conversations = ConversationManager()
         let gate = PermissionGate()
         let queue = ApprovalQueue(permissionGate: gate)
@@ -896,10 +885,8 @@ extension StructuredParkTests {
 extension StructuredParkTests {
     @Test
     func `Bus approval path refuses a name-shaped send before the handler and mints nothing`() async {
-        // The CLI REPL executes directly through `ToolBus`, so it never passes
-        // the orchestrator partition. The bus consults the same pre-admission
-        // verdict at the approval boundary: a name-shaped send is answered with
-        // the resolver's candidates and never reaches the owner's prompt.
+        // The CLI REPL executes directly through `ToolBus`, so it never passes the orchestrator
+        // partition.
         let gate = PermissionGate()
         let bus = ToolBus(permissionGate: gate)
         let selected = MessageRecipientCandidate(
@@ -934,10 +921,9 @@ extension StructuredParkTests {
 
     @Test
     func `Bus approval path lets a malformed send reach the handler but mints no grant`() async {
-        // Malformed shapes keep their existing admission path so `execute`
-        // reports the argument error, but the CLI-style durable choice stores
-        // nothing: the empty target is an invalid send descriptor, never a
-        // tool-wide scope that would cover every later recipient.
+        // Malformed shapes keep their existing admission path so `execute` reports the argument
+        // error, but the CLI-style durable choice stores nothing: the empty target is an invalid
+        // send descriptor, never a tool-wide scope that would cover every later recipient.
         let gate = PermissionGate()
         let bus = ToolBus(permissionGate: gate)
         let gateway = AdmissionMessagesGateway()
@@ -970,12 +956,8 @@ extension StructuredParkTests {
 
     @Test
     func `Bus approval path refuses a grant for an array or alias-bypassed recipient`() async {
-        // An array recipient fails the full decode, and a numeric recipient
-        // beside a handle-shaped `to` fails it too, so both shapes reach the
-        // CLI handler. The generic target path would derive a handle from the
-        // array or the `to` alias; the strict send derivation yields the empty
-        // target, so the durable choice stores nothing for a call that can
-        // never execute.
+        // An array recipient fails the full decode, and a numeric recipient beside a handle-shaped
+        // `to` fails it too, so both shapes reach the CLI handler.
         let gate = PermissionGate()
         let bus = ToolBus(permissionGate: gate)
         let gateway = AdmissionMessagesGateway()

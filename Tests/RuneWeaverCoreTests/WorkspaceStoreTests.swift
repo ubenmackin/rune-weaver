@@ -1,15 +1,4 @@
 // Rune Weaver Core Tests — Agent scratch workspace quotas, shell default, and recall exclusion.
-//
-// Purpose: pin the `[workspace]` scratch contract that shell execution and
-// recall share: documented quotas with fail-closed validation, an owner-only
-// root created on boot, bounded quota walks that never follow symlinks,
-// age-based `tmp/` pruning, a workspace-backed shell default, and
-// unconditional exclusion of scratch from the document index.
-// Scope: config decode plus round-trip plus bounds, store ensure plus usage
-// plus prune plus quota, shell default plus explicit cwd plus over-quota
-// refusal, and walker skip coverage for scratch fixtures.
-// Architectural role: regression net for the Core store beside the Tools shell
-// and the files walker, proving scratch never fills the disk or leaks into recall.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -295,10 +284,9 @@ struct WorkspaceStoreTests {
         let config = WorkspaceConfig(quotaMB: 500, quotaFiles: 100, tmpTTLDays: 7)
         let store = WorkspaceStore(config: config, rootURL: root)
         _ = try await store.ensure()
-        // Directories inflate the entry cap without counting as files: 210
-        // empty directories exceed the 200-entry cap while the file lower
-        // bound stays at zero, proving a truncated walk cannot pass on its
-        // lower bounds alone.
+        // Directories inflate the entry cap without counting as files: 210 empty directories exceed
+        // the 200-entry cap while the file lower bound stays at zero, proving a truncated walk
+        // cannot pass on its lower bounds alone.
         let holder = root.appendingPathComponent("many-dirs", isDirectory: true)
         try FileManager.default.createDirectory(at: holder, withIntermediateDirectories: true)
         for index in 0 ..< 210 {

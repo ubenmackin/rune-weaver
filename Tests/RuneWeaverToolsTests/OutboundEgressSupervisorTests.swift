@@ -1,11 +1,4 @@
 // Rune Weaver Tools Tests — Outbound Egress Supervisor and adversarial exfiltration.
-//
-// Pins the contract that the egress supervisor enforces the full security
-// pipeline: domain allowlist, SSRF guard, target-bound credential verification,
-// and response sweeping. Includes adversarial prompt-injection simulations.
-// Every test binds the canned DNS proof to its own task rather than the
-// process-global holder, so parallel suites can neither replace nor observe
-// this suite's stub.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -33,21 +26,8 @@ private struct CannedApiTransport: ApiRequestTransport, Sendable {
 
 @Suite("OutboundEgressSupervisor")
 struct OutboundEgressSupervisorTests {
-    /// Builds a supervisor over a throwaway verified policy store and runs
-    /// `body` with this test's canned DNS proof bound to its task.
-    ///
-    /// The resolver binds through `ApiSSRFGuard.$taskTestDNSResolver` rather
-    /// than the process-global holder: suites run in parallel and share that
-    /// holder, so publishing here could redirect another suite's lookups while
-    /// a concurrent clear could drop this suite's proof mid-test.
-    /// - Parameters:
-    ///   - policy: Verified policy the supervisor enforces.
-    ///   - secrets: Credential backing for injection tests; an empty in-memory
-    ///     manager when nil.
-    ///   - dnsProof: Host-to-addresses proof this test binds; the default
-    ///     answers every host with one public address, while exemption tests
-    ///     answer their homelab host with a private or link-local address.
-    ///   - body: Test body receiving the built supervisor.
+    /// Builds a supervisor over a throwaway verified policy store and runs `body` with this test's
+    /// canned DNS proof bound to its task.
     private func withTestSupervisor(
         policy: SecurityPolicy,
         secrets: SecretsManager? = nil,
@@ -397,10 +377,8 @@ struct OutboundEgressSupervisorTests {
 
     @Test
     func `Ambiguous traversal spellings refuse even without a credential claim`() async throws {
-        // The destination itself is ambiguous, so the gate refuses it rather
-        // than dialing a path whose routed resource depends on the decoder.
-        // The double-encoded spelling stays refused even when URL parsing
-        // decodes one layer, because the resolver checks every layer.
+        // The destination itself is ambiguous, so the gate refuses it rather than dialing a path
+        // whose routed resource depends on the decoder.
         let policy = SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
         try await withTestSupervisor(policy: policy) { supervisor in
             let url = try #require(URL(string: "https://api.example.com/v1/%252e%252e/admin"))
@@ -607,13 +585,8 @@ struct OutboundEgressSupervisorTests {
             let linkLocalURL = try #require(URL(string: "http://169.254.10.9/metadata"))
             let linkLocalResult = await supervisor.validateReadOnly(url: linkLocalURL)
             #expect(linkLocalResult?.contains("link-local") == true)
-            // An exemption names the host, never what it resolves to: a
-            // rebinding answer in never-dialable space refuses even for the
-            // exempted name. The canned answer is proven through the bounded
-            // resolution race, so a DNS-less harness may instead fail closed
-            // before the answer arrives — both branches refuse, and an
-            // `.allowed` outcome (nil here) is the only security failure this
-            // assertion could ever miss.
+            // An exemption names the host, never what it resolves to: a rebinding answer in
+            // never-dialable space refuses even for the exempted name.
             let exemptedURL = try #require(URL(string: "https://nas.homelab.internal/status"))
             let rebinding = await supervisor.validateReadOnly(url: exemptedURL)
             let refusedRebinding = rebinding.map {
@@ -642,12 +615,9 @@ struct OutboundEgressSupervisorTests {
             switch before {
             case .allowed: Issue.record("Expected denial before the policy carried the exemption")
             case let .denied(reason), let .unlistedDomain(_, reason):
-                // The unexempted private-resolving host must refuse either
-                // way it is proven blocked: through the canned resolution or
-                // through the fail-closed DNS timeout this environment
-                // guarantees. Only the post-write `.allowed` branch below is
-                // exemption-dependent, so the live-apply contract keeps its
-                // teeth regardless of which branch settles here.
+                // The unexempted private-resolving host must refuse either way it is proven
+                // blocked: through the canned resolution or through the fail-closed DNS timeout this
+                // environment guarantees.
                 #expect(
                     reason.contains("resolves to blocked address") || reason.contains("could not be verified"),
                     "expected the unexempted private answer to refuse or fail closed, got: \(reason)"

@@ -1,11 +1,4 @@
 // Rune Weaver Core — Cron schedule expressions, parsing, and next fire evaluation.
-//
-// Purpose: parse five-field cron expressions plus shortcuts into validated sets and
-// compute the next fire date deterministically, so scheduler due scans never reparse text.
-// Scope: expression parsing, field range validation, and next-date evaluation only;
-// persistence, polling cadence, and event matching stay with their owners.
-// Architectural role: pure schedule value type behind the scheduler due engine so every
-// cron-driven job shares one parsing and firing semantic.
 
 import Foundation
 

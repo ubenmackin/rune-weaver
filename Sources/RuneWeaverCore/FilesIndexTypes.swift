@@ -1,8 +1,4 @@
 // Rune Weaver Core — Types and policy protocols for the local files indexer.
-//
-// Encapsulates the public run report, access policy evaluation seam, and vector
-// eligibility policy. Decoupled from the indexer actor so consumers and test
-// suites can inspect reports and configure policy without importing actor internals.
 
 import Foundation
 
@@ -70,28 +66,14 @@ public struct FilesIndexAccessDecision: Sendable, Equatable {
 }
 
 /// Protocol seam over the shared file access policy.
-///
-/// The concrete guard lives in the tools layer beside the file tools; the
-/// indexer depends only on this seam so a policy change never reaches into the
-/// core, and a test can deny one path without touching the real filesystem
-/// policy. Implementations must never resolve or read a denied path.
 public protocol FilesIndexAccessGuard: Sendable {
-    /// Evaluates one candidate path.
-    /// - Parameters:
-    ///   - path: Raw candidate path.
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    /// - Returns: The policy decision for the path.
+    /// Evaluates one candidate path. path: Raw candidate path.
     func evaluate(path: String, homeDirectoryURL: URL?) -> FilesIndexAccessDecision
 }
 
 // MARK: - Vector policy
 
 /// Decides whether an extracted document's chunks are vectorized.
-///
-/// A vector is a semantic claim about the whole document, so a truncated body
-/// is keyword-only by default: surfacing half a document as a nearest neighbour
-/// would mislead recall more than it helps. The byte bound keeps a large source
-/// that is technically extractable from fanning an outsized embedding batch.
 public struct FilesVectorPolicy: Sendable, Equatable {
     /// Whether an injected embeddings backend is consulted at all.
     public var enabled: Bool
@@ -110,11 +92,8 @@ public struct FilesVectorPolicy: Sendable, Equatable {
         self.maxBytes = max(0, maxBytes)
     }
 
-    /// Reports whether a document is inside the vector policy.
-    /// - Parameters:
-    ///   - status: Extraction outcome.
-    ///   - byteCount: Bytes considered for the document.
-    /// - Returns: True when the document's chunks should be vectorized.
+    /// Reports whether a document is inside the vector policy. status: Extraction
+    /// outcome.
     public func shouldEmbed(status: ExtractStatus, byteCount: Int) -> Bool {
         guard enabled, byteCount <= maxBytes else { return false }
         switch status {
@@ -128,13 +107,6 @@ public struct FilesVectorPolicy: Sendable, Equatable {
     }
 
     /// Returns the leading chunk texts to send for embedding under a per-document cap.
-    ///
-    /// Chunks beyond the cap keep an empty embedding so they stay fully
-    /// keyword-searchable while the run skips their embedding work.
-    /// - Parameters:
-    ///   - texts: Chunk texts in extraction order.
-    ///   - cap: Maximum vectors for the document; values at or below zero mean unlimited.
-    /// - Returns: The first `cap` texts, or all texts when unlimited.
     public static func cappedEmbeddingTexts(_ texts: [String], cap: Int) -> [String] {
         guard cap > 0, texts.count > cap else { return texts }
         return Array(texts.prefix(cap))

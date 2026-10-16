@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Component tests for ChatView turns, history drawer, and status footer.
-//
-// Covers sending turns and token display plus the handheld matrix: the session
-// history drawer stays closed on narrow viewports and inline on wide ones,
-// dismissing via backdrop, Escape, or session select, while the footer
-// collapses to a glanceable line on mobile and expands to full metrics. Also
-// pins the transcript's batched write-review hydration: every rendered
-// files.write card hydrates through one review-status request per card set.
-// The persona describe pins the text-only identity header contract (muted name
-// with no avatar image when a persona exists, today's UI otherwise) and
-// ChatView's single-writer claim over the avatar activity clock and working
-// flag. The terminal-reconcile describes pin the missed-terminal settle to a
-// closed socket, the done frame's synchronous release of pending state, and
-// the history reload's refusal to evict a completed trailing assistant.
 
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -2139,10 +2126,9 @@ describe("Concurrent turn cap follows the health advertisement", () => {
   });
 
   it("refuses a new send once parked plus active turns reach the advertised cap", async () => {
-    // The dashboard refuses through the server advertisement, never a local
-    // constant: with a cap of one, a parked background turn already fills the
-    // single slot so the next send explains the busy house instead of
-    // dialing a turn the engine would immediately reject.
+    // The dashboard refuses through the server advertisement, never a local constant: with a cap of
+    // one, a parked background turn already fills the single slot so the next send explains the busy
+    // house instead of dialing a turn the engine would immediately reject.
     const user = userEvent.setup();
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
@@ -4277,10 +4263,8 @@ describe("ChatView batched write-review hydration", () => {
     };
   }
 
-  // Routes the session detail, tool-actions, review-status, and sibling reads
-  // a mounted ChatView issues, returning the fetch mock so each case can count
-  // the batch requests. Explicit input/init params keep mock.calls typed as a
-  // 2-tuple so the request-body assertion below typechecks.
+  // Routes the session detail, tool-actions, review-status, and sibling reads a mounted ChatView
+  // issues, returning the fetch mock so each case can count the batch requests.
   function installFetch() {
     const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
       if (input === "/sessions") {

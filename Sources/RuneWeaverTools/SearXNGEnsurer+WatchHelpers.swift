@@ -1,18 +1,9 @@
 // Rune Weaver Tools — SearXNG readiness watch stages.
-//
-// Splits the readiness watch into small staged helpers so the hot entry point
-// stays within the complexity and body-length budgets: sick-streak tracking,
-// staged HTTP plus terminal probes, and the ticking poll loop with its
-// backstop. The public `watchReadiness` entry point keeps the same success
-// plus fail-fast plus backstop semantics while delegating each stage here.
 
 import Foundation
 
 extension SearXNGEnsurer {
     /// Consecutive-5xx streak across watch ticks.
-    /// Proven health and definitive non-5xx answers reset the count, only a
-    /// countable 5xx extends it, and connection gaps plus empty 5xx preserve it
-    /// so the watch keeps waiting through inconclusive probes.
     public struct ReadinessSickState: Sendable, Equatable {
         /// Consecutive countable 5xx responses so far.
         var count: Int = 0
@@ -45,11 +36,9 @@ extension SearXNGEnsurer {
         }
     }
 
-    /// Probe bundle shared by every watch stage.
-    /// Carries the same four probes the entry point receives so staged helpers
-    /// stay within the parameter budget instead of repeating each closure.
-    /// Conforms to `Sendable` because the bundle crosses `async` stage
-    /// boundaries under Swift 6, alongside the other readiness value types.
+    /// Probe bundle shared by every watch stage. Carries the same four probes the entry point
+    /// receives so staged helpers stay within the parameter budget instead of repeating each
+    /// closure.
     public struct ReadinessWatchProbes: Sendable {
         /// Probe answering true once HTTP responds 2xx/3xx.
         let isReachable: @Sendable () async -> Bool
@@ -75,13 +64,6 @@ extension SearXNGEnsurer {
     }
 
     /// Advances the sick streak for one probe response.
-    /// Success and definitive non-5xx answers clear via the shared counter, a
-    /// countable 5xx extends and records its status plus tail, and gaps plus
-    /// empty 5xx preserve the streak while the watch keeps waiting.
-    /// - Parameters:
-    ///   - state: Streak entering this probe.
-    ///   - probe: Observed HTTP snapshot for this tick.
-    /// - Returns: Streak leaving this probe.
     public static func advancedSickState(_ state: ReadinessSickState, with probe: HTTPProbeSnapshot) -> ReadinessSickState {
         var next = state
         next.count = nextConsecutiveServerErrorCount(
@@ -96,11 +78,8 @@ extension SearXNGEnsurer {
         return next
     }
 
-    /// Builds the sick fail-fast outcome once the streak trips.
-    /// Shares one gate plus one detail shape so the initial, tick, and final
-    /// stages never drift on threshold or banner text.
-    /// - Parameter state: Streak after the latest probe.
-    /// - Returns: Failure outcome naming the sick status, nil while waiting.
+    /// Builds the sick fail-fast outcome once the streak trips. Shares one gate plus one detail
+    /// shape so the initial, tick, and final stages never drift on threshold or banner text.
     public static func sickFailFastOutcome(for state: ReadinessSickState) -> ReadinessWatchOutcome? {
         guard shouldFailFastOnConsecutiveServerErrors(state.count), let code = state.status else {
             return nil
@@ -115,13 +94,8 @@ extension SearXNGEnsurer {
         )
     }
 
-    /// Builds the terminal-state outcome with the logs tail.
-    /// Kept beside the tick so the loop and the tests share one failure shape
-    /// instead of duplicating the detail call.
-    /// - Parameters:
-    ///   - snapshot: Classified container snapshot for this tick.
-    ///   - tail: Capped logs tail for the failure detail.
-    /// - Returns: Failure outcome naming the terminal state.
+    /// Builds the terminal-state outcome with the logs tail. Kept beside the tick so the loop and
+    /// the tests share one failure shape instead of duplicating the detail call.
     public static func terminalWatchOutcome(snapshot: ContainerReadinessSnapshot, tail: String) -> ReadinessWatchOutcome {
         let detail = readinessFailureDetail(
             stateText: snapshot.rawState,
@@ -138,13 +112,8 @@ extension SearXNGEnsurer {
         )
     }
 
-    /// Builds the backstop outcome with the last state plus logs tail.
-    /// Timeout-only when nothing ever answered, since the tail arrives empty.
-    /// - Parameters:
-    ///   - lastState: Last legible container hint.
-    ///   - tail: Capped logs tail for the failure detail.
-    ///   - backstop: Backstop budget for the timeout note.
-    /// - Returns: Failure outcome for the stuck path.
+    /// Builds the backstop outcome with the last state plus logs tail. Timeout-only when nothing
+    /// ever answered, since the tail arrives empty.
     public static func backstopWatchOutcome(lastState: String, tail: String, backstop: Double) -> ReadinessWatchOutcome {
         let detail = readinessFailureDetail(
             stateText: "last state \(lastState)",
@@ -161,11 +130,9 @@ extension SearXNGEnsurer {
         )
     }
 
-    /// Runs the fast initial probe before the ticking loop.
-    /// An already-answering engine returns success at once; a countable sick
-    /// streak starting at zero can already trip when the threshold is one.
-    /// - Parameter probes: Shared probe bundle from the entry point.
-    /// - Returns: Early outcome plus the streak for the loop, nil to keep waiting.
+    /// Runs the fast initial probe before the ticking loop. An already-answering engine returns
+    /// success at once; a countable sick streak starting at zero can already trip when the threshold
+    /// is one.
     public static func initialWatchOutcome(probes: ReadinessWatchProbes) async -> (outcome: ReadinessWatchOutcome?, sick: ReadinessSickState) {
         if Task.isCancelled {
             return (.cancelledOutcome, ReadinessSickState())
@@ -201,14 +168,6 @@ extension SearXNGEnsurer {
     }
 
     /// Runs one tick of the HTTP plus sick stage inside the loop.
-    /// Success returns with the current hint, a tripped streak returns the sick
-    /// outcome, a definitive non-5xx clears the streak, and gaps plus empty 5xx
-    /// preserve it while the watch keeps waiting.
-    /// - Parameters:
-    ///   - probes: Shared probe bundle from the entry point.
-    ///   - lastState: Last legible container hint for the success outcome.
-    ///   - sick: Streak entering this tick.
-    /// - Returns: Settled outcome plus the streak leaving this tick, nil to continue.
     public static func tickHTTPOutcome(
         probes: ReadinessWatchProbes,
         lastState: String,
@@ -250,13 +209,9 @@ extension SearXNGEnsurer {
         return (nil, next)
     }
 
-    /// Runs one tick of the terminal-state stage inside the loop.
-    /// Fetches the logs tail only when the snapshot proves the entry will
-    /// never answer, so slow boots never pay a logs fetch per tick.
-    /// - Parameters:
-    ///   - snapshot: Classified container snapshot for this tick.
-    ///   - probes: Shared probe bundle for the logs fetch.
-    /// - Returns: Failure outcome on a terminal state, nil to keep waiting.
+    /// Runs one tick of the terminal-state stage inside the loop. Fetches the logs tail only when
+    /// the snapshot proves the entry will never answer, so slow boots never pay a logs fetch per
+    /// tick.
     public static func tickTerminalOutcome(snapshot: ContainerReadinessSnapshot, probes: ReadinessWatchProbes) async -> ReadinessWatchOutcome? {
         if Task.isCancelled {
             return .cancelledOutcome
@@ -272,15 +227,6 @@ extension SearXNGEnsurer {
     }
 
     /// Ticks the shared poll loop until the backstop elapses.
-    /// Only reachability, a terminal state, or the sick threshold settles the
-    /// loop early; unknown probes preserve the prior hint so garbage never
-    /// overwrites a real state.
-    /// - Parameters:
-    ///   - pollInterval: Sleep between ticks.
-    ///   - backstop: Clamped backstop budget driving the monotonic deadline.
-    ///   - state: Loop progress entering the loop.
-    ///   - probes: Shared probe bundle from the entry point.
-    /// - Returns: Settled outcome plus updated progress, nil outcome on backstop.
     public static func pollWatchLoop(
         pollInterval: UInt64,
         backstop: Double,

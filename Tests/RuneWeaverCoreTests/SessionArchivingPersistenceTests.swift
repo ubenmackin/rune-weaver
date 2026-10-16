@@ -1,9 +1,4 @@
 // Rune Weaver Core Tests — Session archiving persistence and migration tests.
-//
-// Covers the additive `sessions.is_archived` column end to end:
-// 1. Archiving flag survives SQLite write and read cycle.
-// 2. setSessionArchived toggles the state and persists immediately.
-// 3. Legacy databases lacking `is_archived` migrate smoothly and decode as unarchived.
 
 import Foundation
 @testable import RuneWeaverCore

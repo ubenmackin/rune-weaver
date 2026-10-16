@@ -1,9 +1,4 @@
 // Rune Weaver Core — Minimal ZIP reader for office document extraction.
-//
-// Holds the read-only ZIP layer for `DocumentTextExtractor`: central-directory
-// parsing for stored and deflate entries plus raw DEFLATE inflation and
-// little-endian byte access. ZIP64 and encrypted archives fail closed so a
-// malformed office or iWork package never misparses.
 
 import Foundation
 import zlib
@@ -22,10 +17,9 @@ struct ZipEntry: Sendable {
     let localHeaderOffset: Int
 }
 
-/// Minimal read-only ZIP reader for OOXML and iWork packages.
-///
-/// Only stored and deflate entries are supported; ZIP64 and encrypted archives
-/// are rejected so a malformed package fails closed instead of misparsing.
+/// Minimal read-only ZIP reader for OOXML and iWork packages. Only stored and deflate entries are
+/// supported; ZIP64 and encrypted archives are rejected so a malformed package fails closed instead
+/// of misparsing.
 struct ZipArchiveReader: Sendable {
     /// Parsed central directory entries in archive order.
     let entryNames: [String]
@@ -144,8 +138,6 @@ struct ZipArchiveReader: Sendable {
 
     /// Inflates a raw DEFLATE stream (no zlib header) using the system zlib.
     /// - Parameter data: Raw DEFLATE bytes.
-    /// - Parameter maxBytes: Maximum uncompressed bytes allowed before aborting.
-    /// - Returns: Inflated bytes, or nil on a malformed stream or excessive output.
     private static func inflateRawDeflate(_ data: Data, maxBytes: Int = defaultMaxUncompressedBytes) -> Data? {
         guard !data.isEmpty else { return Data() }
         var stream = z_stream()
@@ -222,11 +214,8 @@ extension Data {
         return UInt32(byte0) | (UInt32(byte1) << 8) | (UInt32(byte2) << 16) | (UInt32(byte3) << 24)
     }
 
-    /// Copies a range of bytes starting at an offset.
-    /// - Parameters:
-    ///   - offset: Byte offset from the start.
-    ///   - length: Number of bytes to copy.
-    /// - Returns: Copied bytes, or nil when out of bounds.
+    /// Copies a range of bytes starting at an offset. offset: Byte offset from the
+    /// start.
     func littleEndianSubdata(at offset: Int, length: Int) -> Data? {
         guard offset >= 0, length >= 0, offset + length <= count else { return nil }
         return subdata(in: (startIndex + offset) ..< (startIndex + offset + length))

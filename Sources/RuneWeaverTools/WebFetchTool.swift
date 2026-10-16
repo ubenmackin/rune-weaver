@@ -1,19 +1,4 @@
 // Rune Weaver Tools — Bounded web page fetch with per-hop safety and typed outcomes.
-//
-// `web.fetch` is the approval-free single-page read: at most 5 manual redirects
-// with the shared URL allowlist re-checked on every hop, a 1 MB download cap,
-// and 20,000 returned characters bounding model context. The envelope stays
-// typed (`ok` with extracted text, `auth_required` with a `browser.navigate`
-// hint, `unsupported` with a reason) so the turn can suggest the next step
-// instead of failing blind.
-//
-// Approval-free fetching must not dial loopback, link-local, metadata, or
-// private ranges from prompt-injected content: only the exact configured
-// `searxng_url` origin is exempt. Redirect surfacing, text classification, and
-// the sensitive-range table are single-sourced with `api.request` so the two
-// web guards cannot diverge on obfuscated spellings. Blank checks in browser
-// validation and other modules stay with their owners; this file shares the
-// single blank agreement for its own guards so its verdicts cannot drift.
 
 import Foundation
 import RuneWeaverCore
@@ -51,10 +36,8 @@ public enum WebURLSafety: Sendable {
         guard scheme == "http" || scheme == "https" else {
             return false
         }
-        // Userinfo (`http://user:pass@host`) would smuggle credentials into
-        // logs, envelopes, and redirect chains, so any authority carrying a
-        // user or password fails closed. Checking `url.user`/`password`
-        // (not a raw `@` scan) keeps `@` in paths and queries allowed.
+        // Userinfo (`http://user:pass@host`) would smuggle credentials into logs, envelopes, and
+        // redirect chains, so any authority carrying a user or password fails closed.
         if url.user != nil || url.password != nil {
             return false
         }
@@ -67,16 +50,6 @@ public enum WebURLSafety: Sendable {
 }
 
 /// SSRF guard for read-only fetch hops.
-///
-/// Pure delegation over `ApiSSRFGuard`: the canonical IPv4 parser
-/// (`canonicalIPv4Octets` across decimal, hex, octal, and short forms), the
-/// sensitive-range table (`isSensitiveIPv4Value` covering loopback,
-/// link-local, private RFC 1918, shared address space, other special-purpose
-/// reserved blocks, and `0.0.0.0/8`), the IPv6 checks, and the
-/// metadata-host set all live single-source in `ApiSSRFGuard`. Fetch passes no
-/// LLM origins so only the exact configured `searxng_url` origin is exempt;
-/// no second range pass lives here, so obfuscated spellings cannot drift
-/// between the web and API guards.
 public enum WebFetchSSRFGuard: Sendable {
     /// Refusal reason for a URL, or nil when the URL may be dialed.
     public static func denyReason(
@@ -101,9 +74,6 @@ public enum WebFetchSSRFGuard: Sendable {
     }
 
     /// Async refusal reason that keeps blocking DNS off the cooperative pool.
-    /// Literal spellings still resolve inline; only hostnames needing the
-    /// resolver hop to the bounded pool with a fail-closed timeout, preserving
-    /// the configured exemptions of the synchronous shape.
     public static func denyReasonAsync(
         for rawURL: String,
         browserConfig: BrowserConfig,
@@ -184,10 +154,8 @@ public struct WebFetchArgs: Sendable, Equatable, Decodable {
         case url
     }
 
-    /// Decodes canonical fetch arguments.
-    /// Strict wire carries only `url` so retired `uri`/`link` spellings fail
-    /// closed under additionalProperties false and wire plus decoder agree.
-    /// - Parameter decoder: Decoder for the arguments document.
+    /// Decodes canonical fetch arguments. Strict wire carries only `url` so retired `uri`/`link`
+    /// spellings fail closed under additionalProperties false and wire plus decoder agree.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let url = try container.decodeIfPresent(String.self, forKey: .url)
@@ -392,17 +360,8 @@ public struct WebFetchTool: Tool, Sendable {
                 callID: input.callID
             )
         }
-        // Declarative policy enforcement runs per hop inside `fetchChain`
-        // (including this initial URL as its first hop) under the live
-        // session, so no stateful pre-check runs here. The stateless SSRF
-        // pre-check still runs with the merged origins so an internal URL
-        // covered by a local exemption is not rejected before the supervised
-        // hop gate runs.
-        // Approval-free fetch must not dial loopback, link-local, metadata, or private ranges:
-        // prompt-injected content could otherwise exfiltrate the loopback-only no-auth service into
-        // tool output. Configured search, media, allowed, and local-exemption origins are exempt.
-        // DNS blocks its thread, so the verdict hops to the bounded pool instead
-        // of stalling shared tasks.
+        // Declarative policy enforcement runs per hop inside `fetchChain` (including this initial
+        // URL as its first hop) under the live session, so no stateful pre-check runs here.
         if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
             for: rawURL,
             browserConfig: browserConfig,
@@ -443,10 +402,6 @@ public struct WebFetchTool: Tool, Sendable {
 
 extension WebFetchTool {
     /// Validates hop safety against scheme, egress supervisor, and SSRF guard.
-    ///
-    /// Hosts already granted earlier in the chain skip the stateful
-    /// supervisor charge while every hop still vets SSRF, so a one-shot
-    /// grant covers same-host redirects without being consumed twice.
     private func validateHopSafety(url: URL, sessionID: UUID?, vettedHosts: inout Set<String>) async -> String? {
         guard WebURLSafety.isSafeUrl(url.absoluteString) else {
             return "Unsafe redirect target: refusing to dereference \(url.absoluteString)."
@@ -622,10 +577,6 @@ extension WebFetchTool {
     }
 
     /// Maps a missing or unsafe redirect `Location` to a fail-closed detail.
-    /// `redirectTarget` stays single-source nil for both a missing `Location`
-    /// and a present-but-unsafe target that `resolveRedirect` refused, so this
-    /// helper distinguishes them: an unsafe hop fails closed with its raw value
-    /// preserved instead of a plain unsupported success.
     private static func redirectFailure(http: HTTPURLResponse, statusCode: Int, currentURL: URL) -> (finalURL: String, reason: String) {
         // Shares the single blank agreement so whitespace-only locations read as missing everywhere.
         if let rawLocation = NormalizedText.value(http.value(forHTTPHeaderField: "Location")) {
@@ -732,9 +683,6 @@ extension WebFetchTool {
     }
 
     /// Whether a MIME type carries readable text.
-    /// Single-sourced through `ApiRequestValidation.isTextContentType` so the
-    /// fetch download-vs-ok classification cannot drift from the API guard's
-    /// file-vs-text allowlist (text/*, json, xml, xhtml+xml/javascript).
     public static func isSupportedContentType(_ mimeType: String) -> Bool {
         ApiRequestValidation.isTextContentType(mimeType)
     }

@@ -1,9 +1,4 @@
 // Rune Weaver Core Tests — Message reasoning persistence and migration tests.
-//
-// Covers:
-// 1. Message reasoning persists and reloads correctly via ConversationManager.
-// 2. Legacy databases lacking `reasoning` column migrate automatically on open.
-// 3. Messages in migrated databases store and reload reasoning successfully.
 
 import Foundation
 @testable import RuneWeaverCore

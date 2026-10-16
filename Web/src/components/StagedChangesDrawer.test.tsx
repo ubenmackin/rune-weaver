@@ -1,12 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the staged changes drawer.
-//
-// Pins the single-column review contract: one card per staged file with every
-// diff collapsed on mount, per-card expansion that reveals only that file's
-// diff, the batch Expand all / Collapse all toggle with its label flip, the
-// exact per-file Accept target, the empty-state copy, and the count callback
-// the nav badge consumes. The shared socket is stubbed so the drawer's live
-// refetch wiring is exercised with a real connection stand-in rather than a
-// missing WebSocket global.
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,10 +15,8 @@ import {
   resetSharedSocket,
 } from "../test-utils/mockWebSocket";
 
-// Partial mock: spread the real module so the shared WebSocket singleton keeps
-// its auth/token helpers, overriding only the staged-file network calls this
-// suite drives directly. Asserting on the mocked functions (rather than a
-// fetch double) pins the exact arguments the drawer hands the API layer.
+// Partial mock: spread the real module so the shared WebSocket singleton keeps its auth/token
+// helpers, overriding only the staged-file network calls this suite drives directly.
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {

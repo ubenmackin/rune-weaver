@@ -1,15 +1,4 @@
 // Rune Weaver Dashboard — Approvals inbox for pending gated tool requests.
-//
-// Purpose: render every pending approval as its own decidable card, grouped by
-// the owning chat session so a parked turn reads beside the conversation that
-// filed it. Standing rules live in Settings → Access; this surface decides
-// pending requests only and manages no grants.
-// Scope: session grouping with sticky headers titled from GET /sessions,
-// severity-ordered groups and cards, the unified decide payload
-// ({approved, duration, scope}) on every card, the shared question picker
-// card, and the dedicated behavior-brake branch.
-// Architectural role: the Approvals tab surface, sharing the ApprovalQueue
-// wire contract with the chat inline banner and the dashboard quick actions.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -79,10 +68,9 @@ function requestSeverity(request: PermissionRequest): ImpactSeverity {
   return request.assessment?.severity ?? "moderate";
 }
 
-// Editor shape a custom scope takes, keyed to what the wire scope vocabulary
-// can carry for the tool: a recipient set for the send tools, one host for an
-// egress-parked request, and a single exact-target string for path, pattern,
-// and generic calls.
+// Editor shape a custom scope takes, keyed to what the wire scope vocabulary can carry for the
+// tool: a recipient set for the send tools, one host for an egress-parked request, and a single
+// exact-target string for path, pattern, and generic calls.
 type ScopeEditorKind = "recipients" | "hosts" | "paths" | "pattern";
 
 const SCOPE_EDITOR_COPY: Record<
@@ -145,10 +133,7 @@ function splitScopeEntries(text: string): string[] {
   return entries;
 }
 
-// Builds the wire scope from editor text. The recipient set travels whole;
-// every single-value kind names its first entry, because one decision carries
-// one scope and the wire vocabulary holds one host or one target per rule.
-// Returns null for an all-blank editor so the caller refuses the save.
+// Builds the wire scope from editor text.
 function buildCustomScope(
   kind: ScopeEditorKind,
   text: string,
@@ -196,11 +181,7 @@ function describeScope(scope: AccessScopeDTO): string {
 
 type ScopeChoice = "thisTarget" | "allTargets" | "custom";
 
-// Resolves the scope one decision carries. "All targets" names the tool-wide
-// scope, "custom" ships the staged editor scope, and "this target" derives
-// the domain scope for an egress-parked request — otherwise the scope stays
-// omitted so the engine resolves the request's own target instead of the
-// dashboard second-guessing it.
+// Resolves the scope one decision carries.
 function decisionScopeFor(
   request: PermissionRequest,
   choice: ScopeChoice,
@@ -228,11 +209,8 @@ function groupKeyFor(request: PermissionRequest): string {
   return normalizeSessionID(approvalSessionID(request)) || UNATTRIBUTED_KEY;
 }
 
-// The wire carries no filing timestamp, so payload position is the filing
-// signal: the engine lists pending entries oldest-first, which makes a later
-// position the more recent filing. Cards order by severity descending then by
-// that position descending; groups order by their maximum card severity with
-// the same newest-filing tiebreak, so the ordering is total and stable.
+// The wire carries no filing timestamp, so payload position is the filing signal: the engine lists
+// pending entries oldest-first, which makes a later position the more recent filing.
 function buildGroups(
   approvals: PermissionRequest[],
   titles: Map<string, string>,
@@ -396,12 +374,8 @@ export default function ApprovalsInbox({
     };
   }, [refreshSessions]);
 
-  // Live approval prompts arrive over the shared socket; same-id frames merge
-  // in place so enrichment swaps the pending badge for the valued one without
-  // remounting the card. Decision frames evict promptly so a cross-tab or
-  // menu-bar decision disappears immediately. The rules-change frame drops
-  // here: standing rules live in Settings → Access, so nothing
-  // grants-related remains for this surface to refresh.
+  // Live approval prompts arrive over the shared socket; same-id frames merge in place so
+  // enrichment swaps the pending badge for the valued one without remounting the card.
   const handleWSApproval = useCallback((data: unknown) => {
     if (isRecord(data)) {
       const frame = data as Record<string, unknown>;
@@ -452,10 +426,9 @@ export default function ApprovalsInbox({
       : "thisTime";
   }
 
-  // Single decision path: every card, including the brake, leaves through
-  // POST /approvals/:id/decide with the unified {approved, duration, scope}
-  // payload plus the "inbox" surface tag naming this card as the deciding
-  // origin for the audit trail.
+  // Single decision path: every card, including the brake, leaves through POST
+  // /approvals/:id/decide with the unified {approved, duration, scope} payload plus the "inbox"
+  // surface tag naming this card as the deciding origin for the audit trail.
   async function submitDecision(
     id: string,
     approved: boolean,
@@ -811,10 +784,9 @@ export default function ApprovalsInbox({
                   disabled={isDeciding}
                   onChange={() => selectScopeChoice(request, "custom")}
                   onClick={() => {
-                    // Re-clicking the already-checked Custom radio fires no
-                    // onChange, so the click itself reopens the editor while
-                    // custom is selected with nothing staged — the radio is
-                    // the sole custom-scope entry point.
+                    // Re-clicking the already-checked Custom radio fires no onChange, so the click
+                    // itself reopens the editor while custom is selected with nothing staged — the
+                    // radio is the sole custom-scope entry point.
                     if (choice === "custom" && !customScopes[id]) {
                       openScopeDraft(request);
                     }

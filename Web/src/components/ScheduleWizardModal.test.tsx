@@ -1,5 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the schedule wizard check interval and per-job tool budget.
-// Covers custom positive-integer seconds, blank-inherits budget, numeric plus park, out-of-range rejection, and edit prefill.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";

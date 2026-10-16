@@ -1,29 +1,4 @@
 // Rune Weaver Server — Settings read/persist routes and live-reload helpers.
-//
-// Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
-// config, then push the saved values into the live engine so orchestrator
-// budgets, LLM providers, media/browser/web/API tools, desktop, bash/files/workspace policies,
-// containers policy, fan-out policy, and index policy take effect without a
-// restart. `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
-// same partial-patch merge but take effect on restart: the pursuit engine,
-// the scheduler worker, the ideas engine, and the prompt composer's identity
-// hold their policy from boot with no live-reload path. `[server]` bind keys persist
-// to the file but never live-reload the socket or the middleware set: they
-// return `requiresRestart` so the dashboard shows a pending-vs-live restart
-// banner instead of pretending the new bind is live. `[files]` saves apply
-// live the same way and never claim a restart.
-//
-// The `/settings/policy` routes read and write the network-plus-credentials
-// policy through the context's shared `PolicyStore`, the same instance
-// backing the mandatory egress supervisor, so an HTTP policy write applies
-// live in-process with no restart plus no watcher. The dashboard edits the
-// structured DTO while serialization runs through the store-owned reparse
-// round-trip proof, so file and supervisor cannot disagree on quoting; every
-// candidate is validated against the two owned invariants — credential
-// confinement plus rule-shadow prevention — with Abort 400 naming gate plus
-// field, and a rejected candidate leaves file plus memory unchanged. Legacy
-// filesystem and tool tables are ignored on load and never persisted, and the
-// pane never shows a restart banner for policy.
 
 import Foundation
 import RuneWeaverCore
@@ -70,10 +45,8 @@ private func handlePutSettings(req: Request) async throws -> Response {
     } catch {
         throw Abort(.internalServerError, reason: error.localizedDescription)
     }
-    // Snapshot the stored bind before the merge so the response advertises
-    // a restart only when the file values actually move. A save that
-    // resends unchanged bind keys (for example a full-form PUT) leaves the
-    // flag false instead of crying restart on every edit.
+    // Snapshot the stored bind before the merge so the response advertises a restart only when the
+    // file values actually move.
     let oldServerHostname = config.server.hostname
     let oldServerPort = config.server.port
     let oldServerAllowedHosts = config.server.allowedHosts
@@ -94,16 +67,8 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // resending identical bounds skips the ledger update plus tool
         // rebuild instead of churning them on every full-form save.
         let containersChanged = config.containers != containersBefore
-        // The bind and the Host gate stay on the boot values, so only a
-        // real hostname/port/allowed_hosts change needs a restart. The
-        // `carriesServerPatch` gate short-circuits saves without bind keys
-        // so unrelated edits skip the compare entirely. Hostname
-        // compares trimmed plus lowercased plus bracket-canonicalized and
-        // allowed hosts compare as sets of their bracket-canonicalized
-        // normalized Host forms so casing, `:port` spellings, bracketed
-        // versus bare IPv6 spellings, or reorderings that the gate treats
-        // identically do not trip a spurious restart, matching the
-        // dashboard normalized dirty-check.
+        // The bind and the Host gate stay on the boot values, so only a real
+        // hostname/port/allowed_hosts change needs a restart.
         let normalizedHostname = canonicalRestartHost(config.server.hostname)
         let normalizedOldHostname = canonicalRestartHost(oldServerHostname)
         let normalizedAllowedHosts = config.server.allowedHosts.map {
@@ -117,24 +82,17 @@ private func handlePutSettings(req: Request) async throws -> Response {
                 || config.server.port != oldServerPort
                 || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
         let llmChanged = config.llm != oldLLMConfig
-        // `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the
-        // file through the same partial-patch merge but take effect on restart:
-        // the pursuit engine, the scheduler worker, the ideas engine, and the
-        // prompt composer's owner-authored identity hold their policy from boot
-        // with no live-reload path. Any patch carrying those keys must advertise
-        // a restart instead of silently claiming live.
+        // `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the same
+        // partial-patch merge but take effect on restart: the pursuit engine, the scheduler worker,
+        // the ideas engine, and the prompt composer's owner-authored identity hold their policy from.
         let bootHeldSectionPatchPresent =
             body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
         // LLM providers, budgets, tools, bash, containers, and network apply live
         // through the shared context and never join the restart set.
         let needsRestart = serverChanged || bootHeldSectionPatchPresent
         let liveContext = req.application.runeWeaver
-        // Fail-closed bind guard: a changed non-loopback hostname persists
-        // only when an owner token resolves. Without one the save is
-        // refused with a Generate CTA instead of silently downgrading to an
-        // unauthenticated LAN bind or pretending loopback still applies.
-        // Unchanged binds (including an already-stored LAN value resent by
-        // a full-form save) skip the gate so unrelated edits stay saveable.
+        // Fail-closed bind guard: a changed non-loopback hostname persists only when an owner token
+        // resolves.
         if serverChanged, !UpdateSettingsRequest.isLoopbackHostname(config.server.hostname) {
             let hasToken = await serverBindHasOwnerToken(config: config)
             guard hasToken else {
@@ -146,11 +104,9 @@ private func handlePutSettings(req: Request) async throws -> Response {
                 )
             }
         }
-        // Fail-closed pre-save probe: a rejected `db_path` throws before
-        // the file is persisted and before any live tool state mutates,
-        // so the durable file and live desktop/index state never diverge.
-        // The probed components ride along into the reconcile below so an
-        // enable or `db_path` change builds and probes the new store once.
+        // Fail-closed pre-save probe: a rejected `db_path` throws before the file is persisted and
+        // before any live tool state mutates, so the durable file and live desktop/index state never
+        // diverge.
         let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
         if bashChanged {
             // Prove the rendered bytes reparse to the merged bash before touching
@@ -201,51 +157,19 @@ private func handlePutSettings(req: Request) async throws -> Response {
 }
 
 /// Seeds the configured-service egress candidates into the shared policy store.
-///
-/// The settings save path consumes the shared
-/// `RuneWeaverConfig.serviceEgressCandidates` derivation, so boot and saves
-/// pre-authorize the same hosts. The store's `ensureServiceDomainsAllowed`
-/// keeps the write fail-closed, so a present-but-rejected `policy.toml` is
-/// never overwritten to manufacture a verified posture.
-/// Exposed internally so the live-reload regression can drive the same
-/// application path the save uses.
-/// - Parameters:
-///   - config: Merged config carrying the configured services.
-///   - store: The one policy store this process's supervisor reads.
 func ensureConfiguredServiceEgressCandidates(config: RuneWeaverConfig, store: PolicyStore) async {
     await store.ensureServiceDomainsAllowed(urlsOrHosts: config.serviceEgressCandidates)
 }
 
-/// Maximum secret value bytes accepted by the store route.
-///
-/// Bounds the Keychain write so an unbounded body cannot pressure the
-/// Keychain or memory. Measured in UTF-8 bytes, matching the transport size.
+/// Maximum secret value bytes accepted by the store route. Bounds the Keychain write so an
+/// unbounded body cannot pressure the Keychain or memory.
 private let maxSecretStoreBytes = 16 * 1024
 
 /// Maximum keys accepted per status lookup.
-///
-/// Single contract owner for the secret-status bound: the dashboard mirror
-/// `SECRET_STATUS_CHUNK_SIZE` in `Web/src/components/SettingsManager.tsx` must
-/// stay equal so badge-probe chunks never trip this gate. Both sides pin 500
-/// (see `SettingsRouteTests` plus the dashboard contract test); update both
-/// together.
-///
-/// Bounds the retrieve loop so one request cannot fan out unbounded Keychain
-/// reads. Sized at 500 distinct keys to cover the dashboard badge probe,
-/// which unions email password envs, provider `api_key_env` names, and the
-/// Sonarr/Radarr names, without turning the probe into a 400.
 let maxSecretStatusKeys = 500
 
-/// Validates a raw secret key for the secrets routes.
-///
-/// Delegates the shape rule to the core single owner so store, status, and
-/// delete agree without duplicating the alphabet or the length bound. Key
-/// names never carry secret bytes, so the failure reason names only the
-/// shape rule.
-/// - Parameter rawKey: Untrimmed key from the request body or path.
-/// - Returns: Trimmed key safe for the Keychain lookup.
-/// - Throws: `Abort(.badRequest)` when the key is empty, holds non-name
-///   characters, or exceeds the length bound.
+/// Validates a raw secret key for the secrets routes. Delegates the shape rule to the core single
+/// owner so store, status, and delete agree without duplicating the alphabet or the length bound.
 private func validateSecretKey(_ rawKey: String) throws -> String {
     let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
     guard SecretsManager.isValidSurrogateKey(rawKey) else {
@@ -259,10 +183,6 @@ private func validateSecretKey(_ rawKey: String) throws -> String {
 
 private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
     // Keychain secret management routes.
-    // Responses never cache and never carry secret bytes: store and delete
-    // answer `204 No Content` with no body — the same bodyless-success shape
-    // every other side-effect route uses — while status returns only an
-    // existence map and list returns only sorted names.
     let secretsGroup = settings.grouped(PathComponent.constant(ServerPaths.secrets))
 
     secretsGroup.get { req async throws -> Response in
@@ -335,19 +255,9 @@ private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
     }
 }
 
-/// Canonicalizes one hostname for the restart compare.
-///
-/// Trims plus lowercases, then strips a single outer bracket pair only when the
-/// inner text carries a colon so `::1` and `[::1]` (or `::` and `[::]`) compare
-/// equal. A non-colon bracketed value (for example `[example.com]`) keeps its
-/// brackets so it never collides with the bare form. The Host gate stores both
-/// spellings for IPv6 literals, so without this the compare would report a
-/// spurious restart when only the bracket spelling moves.
-///
-/// Exposed internally so the host-parity contract can pin it against the
-/// dashboard mirror instead of drifting on bracket or case spellings.
-/// - Parameter value: Raw or normalized hostname.
-/// - Returns: Bracket-canonicalized hostname.
+/// Canonicalizes one hostname for the restart compare. Trims plus lowercases, then strips a single
+/// outer bracket pair only when the inner text carries a colon so `::1` and `[::1]` (or `::` and
+/// `[::]`) compare equal.
 func canonicalRestartHost(_ value: String) -> String {
     var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if candidate.hasPrefix("["), candidate.hasSuffix("]"), candidate.count >= 2 {
@@ -361,15 +271,9 @@ func canonicalRestartHost(_ value: String) -> String {
     return candidate
 }
 
-/// Whether an owner token guards the pending `[server]` bind.
-///
-/// Always resolves the merged `[auth]` section fresh so a token removed after
-/// boot cannot strand the file behind a stale live verifier, while a token
-/// provisioned after boot still authorizes the save. Any resolution failure
-/// reads as no token so the caller fails closed with the Generate CTA instead
-/// of persisting an unauthenticated LAN bind.
-/// - Parameter config: Merged config about to be persisted.
-/// - Returns: True when a token resolves from any configured source.
+/// Whether an owner token guards the pending `[server]` bind. Any resolution failure reads as no
+/// token so the caller fails closed with the Generate CTA instead of persisting an unauthenticated
+/// LAN bind.
 private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
     do {
         return try await ServerAuth.resolve(authConfig: config.auth) != nil
@@ -378,15 +282,8 @@ private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
     }
 }
 
-/// Live-reloads the active LLM provider into the live orchestrator, goal engine, fanout, and context without a restart.
-///
-/// Fails closed when the persisted `[llm]` section selects no provider, so a save that disables
-/// every entry reports a bad request instead of success with stale engines.
-/// - Parameters:
-///   - config: Persisted config carrying the `[llm]` section.
-///   - context: Live server context receiving the swap.
-/// - Throws: `Abort(.badRequest)` when no enabled provider can be selected.
-/// Exposed internally so the live-reload regression can drive the same path the save uses.
+/// Live-reloads the active LLM provider into the live orchestrator, goal engine, fanout, and
+/// context without a restart.
 func reloadLiveLLM(config: RuneWeaverConfig, context: ServerContext) async throws {
     var keysByEntry: [String: String] = [:]
     for (entryName, entry) in config.llm.providers {
@@ -430,24 +327,14 @@ private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: S
     }
 }
 
-/// Pushes persisted recall budgets into the live orchestrator so saved values take effect without a restart.
-/// A save without recall keys is a no-op, so unrelated edits never touch the
-/// live budgets; the merged config carries the clamped values so the live
-/// engine and the persisted file agree even on edge inputs.
+/// Pushes persisted recall budgets into the live orchestrator so saved values take effect without a
+/// restart.
 private func applyLiveRecallBudgets(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     guard body.carriesRecallPatch else { return }
     await context.orchestrator.updateRecallBudgets(config.memory.recallBudgets)
 }
 
 /// Re-registers one tool while keeping its live enablement.
-///
-/// Live reload swaps the tool implementation for fresh config without
-/// disturbing operator intent: the persisted tool-state toggle stays the sole
-/// authority for enablement, so the fresh definition inherits the current
-/// bus state instead of resetting to enabled.
-/// - Parameters:
-///   - tool: Freshly built tool replacing the live registration.
-///   - context: Live server context owning the tool bus.
 private func reregisterPreservingToggle(_ tool: any Tool, on context: ServerContext) async {
     let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
     await context.toolBus.register(tool: tool, isEnabled: isEnabled)
@@ -464,12 +351,8 @@ private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeave
     }
 }
 
-/// Rebuilds the Playwright bridge with fresh origins while preserving injected doubles.
-/// A managed subprocess gateway keeps its executable and budgets; a test double survives as-is.
-/// The live egress supervisor rides into the rebuilt gateway, so a settings
-/// save never degrades browser entry or redirect-hop validation to SSRF-only.
-/// Exposed internally so the live-reload regression can pin the rebuilt
-/// gateway through the same builder the save path uses.
+/// Rebuilds the Playwright bridge with fresh origins while preserving injected doubles. A managed
+/// subprocess gateway keeps its executable and budgets; a test double survives as-is.
 func gatewayForLiveReload(
     stored: (any BrowserPlaywrightGateway)?,
     busGateway: (any BrowserPlaywrightGateway)?,
@@ -495,14 +378,9 @@ func gatewayForLiveReload(
     return baseGateway
 }
 
-/// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply immediately.
-/// The stored gateway and transports ride along so a settings PUT refreshes origins without dropping the bridge.
-/// The rebuilt gateway keeps the live egress supervisor and the API
-/// supervisor reads the shared policy store, so an origin refresh keeps the
-/// same declarative policy as the boot-time choke-point.
-/// Exposed internally so the live-reload regression can drive the same
-/// rebuild path the settings save uses and pin the `api.request` supervisor
-/// identity against the triage/gate/browser instance.
+/// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply
+/// immediately. The stored gateway and transports ride along so a settings PUT refreshes origins
+/// without dropping the bridge.
 func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async throws {
     guard body.media != nil || body.browserSearxngURL != nil
         || body.searchSearxngURL != nil || body.providers != nil || body.defaultProvider != nil
@@ -546,16 +424,8 @@ func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfi
     )
 }
 
-/// Rebuilds browser, web, and API tools after a committed policy write so a
-/// `local_exemptions` edit applies live with no restart.
-///
-/// Reads the live config for browser, media, and LLM origins directly from `ServerContext`,
-/// unions them with the store snapshot's `local_exemptions`, rebuilds the gateway through
-/// `gatewayForLiveReload`, and reregisters browser, web, and API tools preserving toggles.
-/// Because both the live supervisor and tool initial guards derive from the context's live
-/// configs and the shared store, supervisor SSRF checks and tool guards stay unified with
-/// zero divergence across custom `--config` files and dynamic policy writes.
-/// - Parameter context: Live server context owning the tool bus and transports.
+/// Rebuilds browser, web, and API tools after a committed policy write so a `local_exemptions` edit
+/// applies live with no restart.
 func refreshNetworkToolsAfterPolicySave(context: ServerContext) async {
     let browserConfig = context.browserConfig
     let mediaConfig = context.mediaConfig
@@ -592,13 +462,8 @@ func refreshNetworkToolsAfterPolicySave(context: ServerContext) async {
     )
 }
 
-/// Reconciles live desktop tools with the persisted `[desktop]` policy so saved values take effect without a restart.
-/// Follows the media reload pattern: a nil desktop patch is a no-op, stored
-/// bridges ride along so hermetic doubles survive a settings PUT, and each
-/// re-registered tool keeps its live enabled state. Both tools stay
-/// registered (never absent from `GET /tools`); the fresh capture policy is
-/// pushed into the context, and the tool-state toggle remains the sole
-/// authority for enablement.
+/// Reconciles live desktop tools with the persisted `[desktop]` policy so saved values take effect
+/// without a restart.
 private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     guard body.desktop != nil else { return }
     context.desktopConfig = config.desktop
@@ -612,34 +477,8 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
     }
 }
 
-/// Reconciles the live bash and files tools with the persisted policies so saved values take effect without a restart.
-/// Follows the desktop reload pattern: a save without any bash, files,
-/// workspace, or containers key is a no-op, and each re-registered tool keeps
-/// its live enabled state. All three policies swap into the context atomically
-/// so concurrent turns never see a fresh shell beside a stale workspace guard,
-/// then the file tools refresh first and the bash tool registers exactly once
-/// against the fresh pair for its working-directory guard. Email tools follow on a
-/// files or containers patch when mail accounts are configured and already on
-/// the bus, carrying the fresh `[containers]` admission policy so the rebuilt
-/// generation observes the new bounds on the next admission while in-flight
-/// runs finish under the prior bounds.
-///
-/// Workspace quotas apply live to every consumer: the save pushes the merged
-/// quotas into the context store in place (usage, prune, and quota checks all
-/// derive limits per call), so the next `GET /workspace/usage`, manual prune,
-/// and `bash.exec` enforce the new bounds with no restart. The rebuilt
-/// `BashTool` carries a fresh store with the same hermetic overrides, so an
-/// isolated root keeps enforcing against the same tree. An all-nil bash,
-/// workspace, or containers object is a no-op patch, so an empty object never rebuilds tools.
-/// - Parameters:
-///   - body: Decoded settings patch selecting which policies move.
-///   - config: Persisted config carrying the fresh policies.
-///   - context: Live server context receiving the swap.
-///   - bashChanged: Deep-compared bash movement around the single merge, so
-///     resending identical values skips the rebuild instead of churning tools.
-///   - containersChanged: Deep-compared containers movement around the single
-///     merge, so resending identical bounds skips the ledger update plus tool
-///     rebuild instead of churning them on every full-form save.
+/// Reconciles the live bash and files tools with the persisted policies so saved values take effect
+/// without a restart.
 private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, bashChanged: Bool, containersChanged: Bool) async {
     let hasBashPatch = bashChanged
     let hasFilesPatch = body.carriesFilesPatch
@@ -720,52 +559,28 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     }
 }
 
-/// Applies the saved `[fanout]` policy to the live engine so the next swarm uses new values without a restart.
-/// Follows the recall-budget pattern: a nil fanout patch is a no-op so
-/// unrelated edits never touch the live swarm, while a present patch pushes
-/// the validated persisted snapshot. The engine clamps defensively on write,
-/// so the live value and the durable file agree even on edge inputs.
+/// Applies the saved `[fanout]` policy to the live engine so the next swarm uses new values without
+/// a restart.
 private func reloadLiveFanOut(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     guard body.fanout != nil else { return }
     await context.fanOut.updateConfig(config.fanOut)
 }
 
-/// Applies the saved `[index]` policy to the live engine so the next run uses new values without a restart.
-/// When no coordinator is wired and the saved policy enables the index, the
-/// store and coordinator are constructed live through the shared boot path and
-/// swapped into the context; a changed `db_path` rebuilds against the new path
-/// the same way. Disabling cancels any in-flight run and joins its
-/// termination first, then tears down.
-/// Construction is fail-closed: a bad `db_path` throws before the live context
-/// is touched so the previous index keeps serving.
-/// Status already reads the file live; run/cancel/prune/reset keep failing
-/// closed only when genuinely unwired.
+/// Applies the saved `[index]` policy to the live engine so the next run uses new values without a
+/// restart.
 private func reloadLiveIndexPolicy(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents? = nil) async throws {
     guard body.index != nil else { return }
     try await reconcileLiveIndexPolicy(savedConfig: config, context: context, prebuilt: prebuilt)
 }
 
-/// Reconciles the live document index with the persisted config.
-///
-/// Shared by the settings route and tests so enable-from-disabled, `db_path`
-/// swaps, disable-teardown, and fail-closed construction follow one path.
-/// - Parameters:
-///   - savedConfig: Persisted config carrying the `[index]` policy plus the
-///     source policies the boot path binds into its stages.
-///   - context: Live server context receiving the swap.
-///   - prebuilt: Store plus coordinator probed by the pre-save preflight for
-///     this same `savedConfig`. Reused when its `db_path` still matches so one
-///     PUT probes a new path once instead of probing in preflight and again
-///     here. Direct callers pass nil and probe inline.
-/// - Throws: `Abort(.badRequest)` when a newly enabled `db_path` cannot back
-///   a store, before the live context is mutated.
+/// Reconciles the live document index with the persisted config. Shared by the settings route and
+/// tests so enable-from-disabled, `db_path` swaps, disable-teardown, and fail-closed construction
+/// follow one path.
 func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents? = nil) async throws {
     let saved = savedConfig.index
-    // Disabling tears down: cancel the in-flight run and join its termination
-    // first so its terminal summary is preserved and no old-generation run
-    // overlaps the teardown, then clear the pair so controls fail closed.
-    // The pair is read as one atomic snapshot so concurrent PUTs never mix
-    // generations.
+    // Disabling tears down: cancel the in-flight run and join its termination first so its terminal
+    // summary is preserved and no old-generation run overlaps the teardown, then clear the pair so
+    // controls fail closed.
     guard saved.enabled else {
         let live = context.liveIndexSnapshot()
         if let coordinator = live.coordinator, await coordinator.isRunning {
@@ -774,10 +589,8 @@ func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerCont
         context.setLiveIndex(store: nil, coordinator: nil)
         return
     }
-    // Enabled with a wired coordinator on the same path is a policy refresh:
-    // the next run gates on the new values without rebuilding stages.
-    // The pair is read as one atomic snapshot so concurrent PUTs never mix
-    // generations when classifying same-path vs `db_path`-change.
+    // Enabled with a wired coordinator on the same path is a policy refresh: the next run gates on
+    // the new values without rebuilding stages.
     let live = context.liveIndexSnapshot()
     if let coordinator = live.coordinator, let store = live.store {
         let liveDBPath = await store.dbPath
@@ -785,12 +598,7 @@ func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerCont
             await coordinator.updateConfig(saved)
             return
         }
-        // A changed `db_path` rebuilds against the new path. Construct and
-        // probe before touching the live pair so a bad path leaves the old
-        // index serving; then cancel the old generation's run and join its
-        // termination before swapping so only one generation runs at a time.
-        // The pre-save preflight already probed this path for the same save,
-        // so reuse its components instead of building a second time.
+        // A changed `db_path` rebuilds against the new path.
         let fresh = try await reusedOrProbedIndexComponents(savedConfig: savedConfig, context: context, prebuilt: prebuilt)
         if await coordinator.isRunning {
             try await cancelAndJoinIndexRun(coordinator)
@@ -805,21 +613,9 @@ func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerCont
     context.setLiveIndex(store: fresh.store, coordinator: fresh.coordinator)
 }
 
-/// Pre-save fail-closed probe for a pending `[index]` patch.
-///
-/// Runs before the config file is persisted and before any live tool state
-/// mutates, so a rejected `db_path` never becomes durable and file/live
-/// never diverge. Mirrors `reconcileLiveIndexPolicy` without mutating: a
-/// disabled policy or a same-path policy refresh needs no probe (nil), while
-/// an enable-from-unwired or a changed `db_path` builds boot-parity
-/// components and probes the new store first. The returned components ride
-/// along into the reconcile so the PUT probes a new path once.
-/// - Parameters:
-///   - savedConfig: Merged config about to be persisted.
-///   - context: Live server context supplying the shared embedder.
-///   - patchPresent: Whether the request carries an `index` patch.
-/// - Returns: Probed components for a new path, or nil when no probe ran.
-/// - Throws: `Abort(.badRequest)` when the new `db_path` cannot back a store.
+/// Pre-save fail-closed probe for a pending `[index]` patch. Runs before the config file is
+/// persisted and before any live tool state mutates, so a rejected `db_path` never becomes durable
+/// and file/live never diverge.
 private func preflightLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerContext, patchPresent: Bool) async throws -> ServerIndexComponents? {
     guard patchPresent, savedConfig.index.enabled else { return nil }
     // Read the pair as one atomic snapshot so a concurrent PUT swapping
@@ -836,17 +632,6 @@ private func preflightLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: Se
 }
 
 /// Reuses preflight-probed components when they already cover this save.
-///
-/// The pre-save preflight probes the same `savedConfig` the reconcile then
-/// swaps in, so rebuilding here would construct the store and run the stats
-/// probe a second time per PUT. A stale or mismatched carryover (different
-/// `db_path`, e.g. a direct test call passing an unrelated value) falls back
-/// to a fresh inline probe.
-/// - Parameters:
-///   - savedConfig: Persisted config to build from.
-///   - context: Live context supplying the shared embedder.
-///   - prebuilt: Components probed by the pre-save preflight, if any.
-/// - Returns: The prebuilt components when their path matches, else freshly probed ones.
 private func reusedOrProbedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents?) async throws -> ServerIndexComponents {
     if let prebuilt, prebuilt.docIndexDBPath == savedConfig.index.dbPath {
         return prebuilt
@@ -854,16 +639,8 @@ private func reusedOrProbedIndexComponents(savedConfig: RuneWeaverConfig, contex
     return try await probedIndexComponents(savedConfig: savedConfig, context: context)
 }
 
-/// Signals cancellation on an old-generation coordinator and joins its run
-/// task before the live pair is swapped or cleared, so the previous
-/// generation cannot overlap the fresh one. `IndexCoordinator.cancel()` only
-/// signals cooperative cancellation; without the join the old run would keep
-/// executing between batches after `setLiveIndex` moved on.
-/// The join is bounded: a stalled old generation stops blocking the PUT after
-/// the grace window and the swap proceeds, while caller cancellation aborts
-/// the wait instead of hanging the settings save.
-/// - Parameter coordinator: Old-generation coordinator to stop and join.
-/// - Throws: `CancellationError` when the awaiting PUT is cancelled.
+/// Signals cancellation on an old-generation coordinator and joins its run task before the live
+/// pair is swapped or cleared, so the previous generation cannot overlap the fresh one.
 private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws {
     await coordinator.cancel()
     // Long enough for a cooperative stage to notice the flag between batches,
@@ -878,15 +655,8 @@ private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws
     }
 }
 
-/// Builds boot-parity index components for the saved config and probes the new
-/// store so an unwritable `db_path` fails before the live context is touched.
-/// The rebuilt coordinator reports through the live run store plus hub so a
-/// settings-enabled run lands where the status probe reads it.
-/// - Parameters:
-///   - savedConfig: Persisted config to build from.
-///   - context: Live context supplying the shared embedder.
-/// - Returns: Probed store plus coordinator.
-/// - Throws: `Abort(.badRequest)` when the new store cannot serve stats.
+/// Builds boot-parity index components for the saved config and probes the new store so an
+/// unwritable `db_path` fails before the live context is touched.
 private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext) async throws -> ServerIndexComponents {
     guard let components = ServerIndexBoot.makeComponents(
         config: savedConfig,
@@ -906,10 +676,8 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
 
 // MARK: - Network Tools Reload Helpers
 
-/// Merges config-derived origins with stored local exemptions.
-/// The config side is the auto service origins only (`searxng_url`, enabled
-/// media LAN URLs, configured LLM server URLs). The effective set is auto
-/// origins UNION the store snapshot's `local_exemptions`.
+/// Merges config-derived origins with stored local exemptions. The config side is the auto service
+/// origins only (`searxng_url`, enabled media LAN URLs, configured LLM server URLs).
 private func mergedNetworkOrigins(browserConfig: BrowserConfig, mediaConfig: MediaConfig?, llmServerURLs: [String], store: PolicyStore) async -> Set<String> {
     let base = ApiSSRFGuard.allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
     let exemptions: Set<String>

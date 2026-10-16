@@ -1,6 +1,4 @@
 // Rune Weaver Tests — Steering queue memory bounds.
-// Covers per-session and total caps so a fast steering producer or leaked stream
-// registration stays bounded instead of growing the queue without limit.
 
 import Foundation
 import os

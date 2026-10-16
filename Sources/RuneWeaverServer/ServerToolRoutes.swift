@@ -35,17 +35,9 @@ func buildToolInfo(
         }
     }
 
-    // The server owns which tools expose settings so the dashboard never
-    // keeps a name allowlist: media tools share the Sonarr/Radarr patch,
-    // browser/web/API tools configure timeouts plus the allowed homelab
-    // origins SSRF exemption, desktop tools configure capture dimensions,
-    // quality, and the control blocklist, and fanout.run configures the worker
-    // cap, timeout, and tool-subset widening. The bash shell policy and the
-    // files write policy moved to the Access surface, so their tool rows keep
-    // only the enablement toggle rather than pointing at an editor that no
-    // longer lives behind Configure. Provenance gates the flag alongside the
-    // name so an external rune reusing a `bash.` or `files.` prefix never
-    // gains a Configure action.
+    // The server owns which tools expose settings so the dashboard never keeps a name allowlist:
+    // media tools share the Sonarr/Radarr patch, browser/web/API tools configure timeouts plus the
+    // allowed homelab origins SSRF exemption, desktop tools configure capture dimensions, quality.
     let configurableName = tool.name == "media.arr"
         || tool.name == "media.arr.read"
         || tool.name == "browser.navigate"
@@ -77,10 +69,8 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     guard let tool = await context.toolBus.tool(named: name) else {
         throw Abort(.notFound, reason: "Unknown tool '\(name)'")
     }
-    // Single-gate contract: the persisted tool-state toggle is the sole
-    // authority for desktop tools, so no config gate refines the enable here.
-    // Persist before toggling: the durable row is the restart source of
-    // truth, so the bus must never run ahead of what a fresh boot would see.
+    // Single-gate contract: the persisted tool-state toggle is the sole authority for desktop
+    // tools, so no config gate refines the enable here.
     await context.toolStates.setEnabled(toolName: name, enabled: enabled)
     if enabled {
         await context.toolBus.enableTool(named: name)
@@ -93,19 +83,8 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     return buildToolInfo(for: tool, isEnabled: isEnabled, recordByPluginID: recordByPluginID)
 }
 
-/// Cancels one in-flight tool call owned by a session.
-///
-/// Per-tool cancellation is a tool concern even though clients trigger it from
-/// the chat surface, so the shared validation and bus call live beside the other
-/// tool routes. REST and WebSocket paths both go through here, keeping the blank
-/// call-ID rejection and the session-scoped lookup in one place.
-/// - Parameters:
-///   - callID: Call identifier supplied by the client.
-///   - sessionID: Session expected to own the running call.
-///   - reason: Optional user reason forwarded to the model.
-///   - context: Server context owning the tool bus.
-/// - Returns: True when a running call was cancelled.
-/// - Throws: `Abort(.badRequest)` when the call identifier is blank.
+/// Cancels one in-flight tool call owned by a session. REST and WebSocket paths both go through
+/// here, keeping the blank call-ID rejection and the session-scoped lookup in one place.
 func cancelInFlightToolCall(callID: String, sessionID: UUID, reason: String?, context: ServerContext) async throws -> Bool {
     let trimmed = callID.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {

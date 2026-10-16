@@ -8,15 +8,8 @@ import Foundation
 
 /// Lightweight Unix Domain Socket HTTP client for communicating with local services like `llama-server`.
 public enum UnixSocketHTTPClient {
-    /// Sends an HTTP request over a Unix domain socket and returns the response body Data.
-    /// - Parameters:
-    ///   - socketPath: Path to the AF_UNIX socket.
-    ///   - method: HTTP method (e.g. "POST" or "GET").
-    ///   - path: Request path (e.g. "/v1/embeddings", "/embedding", or "/health").
-    ///   - body: Optional body data.
-    ///   - contentType: Optional Content-Type header. Defaults to "application/json" when body is present.
-    ///   - timeoutSeconds: Socket send/receive timeout in seconds (default: 15).
-    /// - Returns: The response body as Data.
+    /// Sends an HTTP request over a Unix domain socket and returns the response body Data. -
+    /// Parameters: - socketPath: Path to the AF_UNIX socket.
     public static func send(
         socketPath: String,
         method: String = "POST",

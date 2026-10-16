@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Stillness tests for the shared run-log poller.
-// Identical payloads keep the cached snapshot with no notify so idle views
-// never re-render, while any content change swaps and notifies once.
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";

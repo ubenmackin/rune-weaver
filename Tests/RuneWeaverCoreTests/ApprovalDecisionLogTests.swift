@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Approval decision log persistence and cap.
-//
-// Pins the durable audit contract: appends round-trip through episodes.db,
-// reads return newest first, the 10,000-row cap evicts oldest in the same
-// write, clearAll empties the table, scope renderings cover every AccessScope
-// kind, and an unreadable store degrades to empty reads without throwing.
-// The in-memory log pins the same matrix without a database.
 
 import Foundation
 @testable import RuneWeaverCore

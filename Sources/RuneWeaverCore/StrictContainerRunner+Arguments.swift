@@ -1,11 +1,4 @@
 // Rune Weaver Core — Strict container argument builders.
-//
-// Purpose: own per-turn container naming plus create and exec shapes so the
-// strict runner keeps one builder for every runtime invocation.
-// Scope: naming, create with labels, exec, and lifecycle argument vectors
-// only; resolution, inspection parsing, and live execution stay elsewhere.
-// Architectural role: focused extension backing `StrictContainerRunner`
-// keeping the enum body within the type-length budget.
 
 import Foundation
 
@@ -20,15 +13,8 @@ extension StrictContainerRunner {
         return strictNamePrefix + hex
     }
 
-    /// Builds `container create` arguments for one strict container.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - hostPath: Fresh scratch leaf on the host.
-    ///   - guestPath: Mount point inside the guest.
-    ///   - workdir: Working directory inside the guest.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    /// - Returns: Exact argument sequence for the runtime.
+    /// Builds `container create` arguments for one strict container. name:
+    /// Container name.
     public static func containerCreateArguments(
         name: String,
         hostPath: String,
@@ -49,15 +35,7 @@ extension StrictContainerRunner {
     }
 
     /// Builds `container create` arguments with labels placed before the image.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - hostPath: Fresh scratch leaf on the host.
-    ///   - guestPath: Mount point inside the guest.
-    ///   - workdir: Working directory inside the guest.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    ///   - labels: Label pairs stored as `--label key=value` before the image.
-    /// - Returns: Exact argument sequence with labels preceding the image.
+    /// name: Container name.
     public static func containerCreateArguments(
         name: String,
         hostPath: String,
@@ -88,18 +66,9 @@ extension StrictContainerRunner {
         return args
     }
 
-    /// Builds `container create` arguments for one zero-mount ephemeral container.
-    ///
-    /// Forced zero-volume runs mount nothing, so an untrusted payload never
-    /// touches a host path; the guest keeps only its tmpfs `tmp` for scratch.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - image: Pinned OCI image for the guest.
-    ///   - workdir: Working directory inside the guest.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    ///   - labels: Label pairs stored as `--label key=value` before the image.
-    /// - Returns: Exact argument sequence with labels preceding the image.
+    /// Builds `container create` arguments for one zero-mount ephemeral container. Forced
+    /// zero-volume runs mount nothing, so an untrusted payload never touches a host path; the guest
+    /// keeps only its tmpfs `tmp` for scratch.
     public static func containerCreateArguments(
         name: String,
         image: String,
@@ -128,12 +97,8 @@ extension StrictContainerRunner {
         return args
     }
 
-    /// Builds `container exec` arguments for one strict container.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - workdir: Working directory inside the guest.
-    ///   - command: Already resource-limited shell command.
-    /// - Returns: Exact argument sequence for the runtime.
+    /// Builds `container exec` arguments for one strict container. name: Container
+    /// name.
     public static func containerExecArguments(name: String, workdir: String, command: String) -> [String] {
         ["exec", "-w", workdir, name, "/bin/bash", "-c", command]
     }

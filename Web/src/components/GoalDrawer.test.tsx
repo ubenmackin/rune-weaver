@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the chat goal drawer.
-//
-// Drives the drawer's single-goal detail render, the plan checklist moves, the
-// manual-advance contention path, and the Escape dismissal with focus return so
-// the panel's keyboard contract stays pinned alongside its data flow.
 
 import { createRef } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";

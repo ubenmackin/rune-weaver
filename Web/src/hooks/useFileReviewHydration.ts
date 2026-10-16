@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Batched review-ledger hydration for rendered write cards.
-//
-// Purpose: one surface (the chat transcript or a run detail view) collects every
-// files.write card it renders and reads their durable review posture in a single
-// POST /files/review-status batch, so a transcript with N write cards no longer
-// performs N round trips.
-// Scope: read-only ledger hydration for one rendered card set at a time. The
-// hook only reports states for the batch matching the current card set, so a
-// newly mounted card never inherits a stale terminal posture from an earlier
-// write to the same path while its own batch is still in flight.
-// Architectural role: consumed by ChatView and RunDetailModal, which pass the
-// resolved maps down through ToolActionRow to DiffCard. Cards without a
-// surface-provided batch fall back to their own single-path read, keeping
-// standalone cards self-contained.
 
 import { useEffect, useState } from "react";
 import { getFileReviewStates, type FileReviewStates } from "../api";
@@ -50,10 +37,9 @@ export function useFileReviewHydration(
     key: string;
     states: FileReviewStates;
   } | null>(null);
-  // Adjusts the tracked key during render (before children commit) so a card
-  // set that changes -- including one that flips away and later returns --
-  // never serves its previous key's states: the old map drops in the same
-  // render, and the changed set reads pending until its own batch settles.
+  // Adjusts the tracked key during render (before children commit) so a card set that changes --
+  // including one that flips away and later returns -- never serves its previous key's states: the
+  // old map drops in the same render, and the changed set reads pending until its own batch settles.
   const [trackedKey, setTrackedKey] = useState(requestKey);
   if (trackedKey !== requestKey) {
     setTrackedKey(requestKey);
@@ -99,16 +85,13 @@ export function useFileReviewHydration(
       cancelled = true;
       controller.abort();
     };
-    // `targets` is intentionally not a dependency: `requestKey` is its
-    // canonical projection, so a re-render that merely rebuilds the array
-    // (streaming text, unrelated state) never re-requests while the rendered
-    // card set itself is unchanged.
+    // `targets` is intentionally not a dependency: `requestKey` is its canonical projection, so a
+    // re-render that merely rebuilds the array (streaming text, unrelated state) never re-requests
+    // while the rendered card set itself is unchanged.
   }, [requestKey]);
 
-  // Report states only for the batch matching the rendered card set: a stale
-  // resolved map from an earlier set must never hydrate a newly mounted card
-  // while its own batch is in flight or failed. The tracked-key comparison also
-  // guards the transitional render before the re-render above lands.
+  // Report states only for the batch matching the rendered card set: a stale resolved map from an
+  // earlier set must never hydrate a newly mounted card while its own batch is in flight or failed.
   return resolved && resolved.key === requestKey && trackedKey === requestKey
     ? resolved.states
     : null;

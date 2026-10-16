@@ -93,11 +93,7 @@ public struct EmailSearchTool: Tool, Sendable {
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         // Smart raw pre-check plus decoded CR/LF validation before ANY account lookup or credential
         // resolution so invalid input reports "Invalid search query" even when the password is
-        // missing. The encoded pre-check uses the same validation case and copy as the decoded
-        // path below so one condition never surfaces as two distinct errors. Gateway validation
-        // may still surface as either the current validation case or a legacy bridge case with
-        // identical copy, so the chat path below surfaces gateway failures by localized copy
-        // rather than matching on case and stays compatible with both without branching.
+        // missing.
         if EmailIMAPValidation.containsEncodedCRLF(in: input.argumentsJSON) {
             return .failure(
                 EmailIMAPError.validationFailed("Invalid search query: query must not contain CR or LF").localizedDescription,
@@ -152,10 +148,8 @@ public struct EmailSearchTool: Tool, Sendable {
         // messages instead of sending a literal TEXT "*" that matches nothing on iCloud
         // (imap.mail.me.com:993).
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
-        // Account selection happens only after every argument-validation gate has
-        // passed, so invalid input never triggers an account lookup or a credential
-        // read. An omitted/blank/"*" selector fans out over the stored config
-        // sequence; any other name resolves through the single tolerant matcher.
+        // Account selection happens only after every argument-validation gate has passed, so
+        // invalid input never triggers an account lookup or a credential read.
         let resolvedAccounts: [EmailAccount]
         if args.isAllAccountsRequest {
             resolvedAccounts = emailConfig.accounts
@@ -216,12 +210,8 @@ extension EmailSearchTool {
         return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
     }
 
-    /// Applies the local attachment plus temporal re-filters and stamps the
-    /// owning account and canonical mailbox onto one mailbox's raw hits.
-    ///
-    /// Every searched hit must carry a non-empty `account` so merged
-    /// multi-account results stay routable back to the account for follow-up
-    /// `email.read`/`email.move` calls.
+    /// Applies the local attachment plus temporal re-filters and stamps the owning account and
+    /// canonical mailbox onto one mailbox's raw hits.
     private func labeledHits(
         _ hits: [EmailSearchHit],
         accountName: String,
@@ -246,11 +236,9 @@ extension EmailSearchTool {
         }
     }
 
-    /// Runs the single-account branch of a search: resolve credentials up
-    /// front so credential failures surface as the whole-call failure rather
-    /// than a partially-covered envelope, then route to the explicit-mailbox
-    /// or every-mailbox output. The envelope always carries the account in
-    /// `accounts` and an empty `failedAccounts`.
+    /// Runs the single-account branch of a search: resolve credentials up front so credential
+    /// failures surface as the whole-call failure rather than a partially-covered envelope, then
+    /// route to the explicit-mailbox or every-mailbox output.
     private func singleAccountOutput(
         account: EmailAccount,
         requestedMailbox: String?,
@@ -427,21 +415,10 @@ extension EmailSearchTool {
     }
 
     /// What one multi-account fan-out child learned about its account.
-    ///
-    /// Carries both the classification (searched / silently skipped / failed)
-    /// and the evidence the parent needs for honest envelope reporting: the
-    /// folders it searched, the folders it saw while listing, and the failure
-    /// text when the account could not be searched. The parent correlates
-    /// outcomes by config-sequence index rather than nickname so duplicate
-    /// account names never merge two accounts into one outcome.
     private struct AccountSearchOutcome: Sendable {
         /// Agent-visible hit groups from folders the account actually searched.
         let groups: [[EmailSearchHit]]
         /// Folders actually searched, in search order (empty when nothing was searched).
-        ///
-        /// Carries the canonical resolved spelling for a requested folder, so
-        /// the parent can report the name the server actually holds rather
-        /// than the caller's requested spelling.
         let searchedFolders: [String]
         /// Selectable folders discovered during listing (empty when listing never succeeded).
         let availableFolders: [String]
@@ -487,14 +464,9 @@ extension EmailSearchTool {
         let firstFailure: String?
     }
 
-    /// Runs one account's share of a multi-account search: credentials, listing,
-    /// then either the resolved requested folder or a sequential fan-out across
-    /// every selectable folder — the same per-mailbox pipeline the
-    /// single-account path uses, with hits stamped with the owning account.
-    ///
-    /// Credential and gateway failures are reported inside the outcome rather
-    /// than thrown so the parent stays fail-soft; only `CancellationError`
-    /// escapes, because user cancellation outranks partial coverage.
+    /// Runs one account's share of a multi-account search: credentials, listing, then either the
+    /// resolved requested folder or a sequential fan-out across every selectable folder — the same
+    /// per-mailbox pipeline the single-account path uses, with hits stamped with the owning account.
     private func accountSearchOutcome(
         _ account: EmailAccount,
         effectiveQuery: String,
@@ -586,10 +558,8 @@ extension EmailSearchTool {
         )
     }
 
-    /// Runs the every-mailbox fan-out share of one account's search: a
-    /// sequential walk over every selectable folder whose per-folder failure
-    /// only degrades coverage, reported as an outcome. A server listing no
-    /// selectable folder mirrors the single-account fan-out failure copy.
+    /// Runs the every-mailbox fan-out share of one account's search: a sequential walk over every
+    /// selectable folder whose per-folder failure only degrades coverage, reported as an outcome.
     private func fanOutAccountOutcome(
         accountName: String,
         credentials: ResolvedEmailCredentials,
@@ -649,23 +619,9 @@ extension EmailSearchTool {
         return AccountSearchOutcome(groups: groups, searchedFolders: searchedFolders, availableFolders: available, failureText: nil)
     }
 
-    /// Stitches hits across multiple accounts: one concurrent child per
-    /// account inside a throwing task group, then one merged newest-first
-    /// envelope capped to `limit` — `limit` is the global total, so every
-    /// mailbox in every account may return up to `limit` hits and the merge
-    /// is what enforces the bound.
-    ///
-    /// Outcomes are correlated by config-sequence index rather than nickname:
-    /// duplicate names in `[email.accounts]` are two distinct accounts, and
-    /// keying by name would merge them into one outcome and double-report the
-    /// survivor.
-    ///
-    /// Fail-soft: the call succeeds when at least one account succeeds and
-    /// reports credential/gateway failures honestly in `failedAccounts`,
-    /// while accounts missing the requested folder stay silent. The call
-    /// fails only when no account contributes: the fully-enumerated
-    /// missing-folder rule outranks failure copy so the user learns what to
-    /// retry.
+    /// Stitches hits across multiple accounts: one concurrent child per account inside a throwing
+    /// task group, then one merged newest-first envelope capped to `limit` — `limit` is the global
+    /// total, so every mailbox may return up to `limit` hits and the merge enforces the cap.
     private func multiAccountOutput(
         accounts: [EmailAccount],
         effectiveQuery: String,
@@ -701,11 +657,8 @@ extension EmailSearchTool {
         let classified = classifyAccountOutcomes(outcomes, accounts: accounts)
         if classified.succeeded.isEmpty {
             if let requested = requestedMailbox, classified.skippedCount > 0, classified.failed.isEmpty {
-                // Every account answered the listing and none carries the
-                // requested folder, so the set is fully enumerated and naming
-                // real folders is the honest retry hint. When an account
-                // failed before listing, its contents stay unknown and the
-                // first failure copy is the truthful surface instead.
+                // Every account answered the listing and none carries the requested folder, so the
+                // set is fully enumerated and naming real folders is the honest retry hint.
                 throw EmailBridgeParsing.unknownMailboxError(requested: requested, available: classified.listedFolders)
             }
             if let firstFailure = classified.firstFailure {
@@ -717,13 +670,9 @@ extension EmailSearchTool {
             throw EmailIMAPError.bridgeFailed("No email accounts configured. Add an [[email.accounts]] entry to config.toml.")
         }
         let merged = EmailSearchMerge.mergedNewestFirst(classified.groups, limit: limit)
-        // Report the canonical resolved folder, not the caller's spelling:
-        // every succeeding account resolved its requested folder to one the
-        // server actually holds, so its first searched folder is the same
-        // name the per-hit labels and the `mailboxes` union already carry
-        // (mirroring what a single-account envelope reports). Where accounts
-        // hold different canonical spellings of the same request, the union
-        // in `mailboxes` stays the complete record.
+        // Report the canonical resolved folder, not the caller's spelling: every succeeding account
+        // resolved its requested folder to one the server actually holds, so its first searched
+        // folder is the same name the per-hit labels and the `mailboxes` union already carry.
         let canonicalMailbox = requestedMailbox.flatMap { _ in classified.searchedFolders.first }
         let content = try EmailBridgeParsing.encodeSearchEnvelope(
             account: "all",
@@ -737,12 +686,8 @@ extension EmailSearchTool {
         return .success(content, callID: callID)
     }
 
-    /// Walks the config sequence over index-keyed child outcomes and
-    /// classifies every account into searched / silently skipped / failed,
-    /// deduplicating the searched- and listed-folder unions. Walking in
-    /// config order keeps reporting deterministic despite the task group's
-    /// nondeterministic completion order, and index-based correlation keeps
-    /// duplicate account names counted as the distinct accounts they are.
+    /// Walks the config sequence over index-keyed child outcomes and classifies every account into
+    /// searched / silently skipped / failed, deduplicating the searched- and listed-folder unions.
     private func classifyAccountOutcomes(
         _ outcomes: [IndexedAccountSearchOutcome],
         accounts: [EmailAccount]
@@ -798,9 +743,6 @@ public struct EmailReadTool: Tool, Sendable {
             + "Pass the mailbox labeled on the email.search hit. "
             + "Returns headers plus the text body; attachments are listed with filename, MIME type, and byte size (use email.attachment to download)."
     /// Function-calling contract for `account`, `id`, and mandatory `mailbox`.
-    /// Schema advertises only canonical keys; decoder tolerance for retired
-    /// spellings stays out of the schema as intentional compatibility so strict
-    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
             rawValue: """

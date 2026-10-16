@@ -1,39 +1,8 @@
 // Rune Weaver Core — Actor-backed store for ~/.runeweaver/policy.toml.
-//
-// Manages loading, parsing, validating, and persisting the network-plus-
-// credentials declarative policy. The store owns network plus credentials
-// only: legacy `[filesystem]` and `[tools.*]` tables are tolerated on load
-// and ignored, and never serialized back, so older files keep booting while
-// a resaved file sheds retired sections. Every load and update runs the two
-// owned invariants — credential confinement plus rule-shadow prevention —
-// before acceptance; parse errors or violations fall back to the immutable
-// safe factory posture and record diagnostics for the caller, so the engine
-// never runs unprotected. A legacy `deny_by_default` mode parses as
-// `allowlist_only`, preserving its fail-closed intent.
-//
-// Serialization is store-owned with a reparse round-trip proof: the bytes
-// must reload to the verified object, otherwise quoting or control bytes
-// would persist differently than they verified. The dashboard therefore edits
-// the structured shape and never raw TOML, keeping file and supervisor in
-// agreement on every edge.
-//
-// `current` always holds a usable posture for display paths, while
-// `snapshot()` is the security-critical accessor: it exposes only a policy
-// the store actually accepted, so a corrupt file leaves the supervisor
-// factory throwing instead of running with an implicit fallback. Writes apply
-// live through this shared instance with no restart plus no watcher: an
-// accepted write is immediately visible to the egress supervisor, with
-// file-first commits so a throwing disk write never diverges memory from
-// file.
 
 import Foundation
 
 /// Errors raised when a verified policy snapshot is demanded but unavailable.
-///
-/// The egress supervisor factory is the primary thrower: it refuses to build
-/// a choke-point from a store that never accepted a policy, so a corrupt
-/// `policy.toml` fails boot rather than silently degrading to a permissive
-/// posture.
 public enum PolicyInvariantError: Error, Sendable, Equatable {
     /// No policy has been accepted yet (never loaded, or the last load failed).
     case notVerified(reason: String)
@@ -57,10 +26,8 @@ extension PolicyInvariantError: LocalizedError {
     }
 }
 
-/// Atomically read view of the externally visible policy state.
-///
-/// Bundles the live policy with its file path, load flag, and live
-/// invariant status so one isolation covers the whole read.
+/// Atomically read view of the externally visible policy state. Bundles the live policy with its
+/// file path, load flag, and live invariant status so one isolation covers the whole read.
 public struct PolicySnapshot: Sendable, Equatable {
     /// Live policy held by the store.
     public let policy: SecurityPolicy
@@ -73,13 +40,7 @@ public struct PolicySnapshot: Sendable, Equatable {
     /// Monotonic mutation generation counter.
     public let generation: UInt64
 
-    /// Creates a snapshot.
-    /// - Parameters:
-    ///   - policy: Live policy held by the store.
-    ///   - fileURL: Path to `policy.toml` on disk.
-    ///   - loadedFromDisk: Whether the policy was loaded from disk.
-    ///   - violations: Live invariant violations for the returned policy.
-    ///   - generation: Monotonic mutation generation counter.
+    /// Creates a snapshot. policy: Live policy held by the store.
     public init(policy: SecurityPolicy, fileURL: URL, loadedFromDisk: Bool, violations: [String], generation: UInt64 = 0) {
         self.policy = policy
         self.fileURL = fileURL
@@ -89,13 +50,8 @@ public struct PolicySnapshot: Sendable, Equatable {
     }
 }
 
-/// Actor-backed store managing `~/.runeweaver/policy.toml`.
-///
-/// Thread-safe singleton holding the active security policy. Callers
-/// read `current` for the live snapshot; mutations go through `update`
-/// which re-validates invariants before committing. Security-critical
-/// consumers (the egress supervisor factory) read `snapshot()` instead so
-/// a fallback posture is never mistaken for an accepted policy.
+/// Actor-backed store managing `~/.runeweaver/policy.toml`. Thread-safe singleton holding the
+/// active security policy.
 public actor PolicyStore {
     /// The active security policy. Always valid — parse or invariant
     /// failures fall back to `SecurityPolicy.safeDefault`.
@@ -110,10 +66,8 @@ public actor PolicyStore {
     /// Whether the current policy was loaded from disk (vs. factory default).
     public private(set) var loadedFromDisk: Bool = false
 
-    /// Policy the store accepted through `load()` or `update()`, or nil when
-    /// the last attempt failed. Held separately from `current` because
-    /// `current` must stay displayable after a rejection while
-    /// `snapshot()` must refuse to present the fallback as authoritative.
+    /// Policy the store accepted through `load()` or `update()`, or nil when the last attempt
+    /// failed.
     private var verifiedPolicy: SecurityPolicy?
 
     /// Monotonic mutation generation counter tracking state revisions.
@@ -154,16 +108,6 @@ public actor PolicyStore {
     }
 
     /// Resolves the one policy store for this process.
-    ///
-    /// An injected store stays authoritative so a caller that already built
-    /// tools keeps sharing it with the settings routes; a nil store
-    /// constructs and loads the factory default, letting a missing file seed
-    /// the deny-by-default posture while corruption leaves the snapshot
-    /// unverified for the supervisor factory to refuse.
-    /// - Parameters:
-    ///   - injected: Shared store when the caller already owns one.
-    ///   - fileURL: Path to `policy.toml`. Defaults to `nil` (`~/.runeweaver/policy.toml`).
-    /// - Returns: The single store every supervisor in this process reads.
     public static func makeLoaded(
         injected: PolicyStore?,
         fileURL: URL? = nil
@@ -177,16 +121,6 @@ public actor PolicyStore {
     }
 
     /// Loads the policy from disk, falling back to safe defaults on error.
-    ///
-    /// If the file does not exist, creates a default policy file and uses that
-    /// seeded posture. If the file exists but is malformed, records the reason in
-    /// `lastLoadDiagnostics` (surfaced verbatim by `snapshot()` rejections)
-    /// and falls back to the safe default. A missing file still counts as a
-    /// successful (deny-by-default) load so a stock install boots; an
-    /// unreadable, unparseable, or invariant-violating file does not, so
-    /// `snapshot()` keeps throwing until a later `load()` or `update()`
-    /// accepts a policy.
-    /// - Returns: The accepted policy held by the store.
     @discardableResult
     public func load() -> SecurityPolicy {
         var diagnostics: [String] = []
@@ -242,13 +176,8 @@ public actor PolicyStore {
         }
     }
 
-    /// Updates the active policy, validating invariants before committing.
-    ///
-    /// If the new policy violates any invariant, the update is rejected and
-    /// the current policy remains unchanged. A committed update becomes the
-    /// verified snapshot, mirroring a successful load.
-    /// - Parameter policy: Proposed new policy.
-    /// - Returns: Empty array on success, or invariant violation descriptions on failure.
+    /// Updates the active policy, validating invariants before committing. If the new policy
+    /// violates any invariant, the update is rejected and the current policy remains unchanged.
     @discardableResult
     public func update(_ policy: SecurityPolicy) async -> [String] {
         let violations = PolicyInvariantVerifier.verify(policy)
@@ -266,14 +195,6 @@ public actor PolicyStore {
     }
 
     /// Returns the accepted, invariant-clean policy snapshot.
-    ///
-    /// Security-critical consumers read the store through this accessor
-    /// rather than `current`: a corrupt or unverifiable file must never be
-    /// laundered into an authoritative policy. A missing file still counts
-    /// as loaded because the store seeds the factory-safe default posture.
-    /// - Returns: The accepted policy, re-verified on read.
-    /// - Throws: `PolicyInvariantError` when no policy was ever accepted or
-    ///   the accepted snapshot no longer satisfies the formal invariants.
     public func snapshot() throws -> SecurityPolicy {
         guard let verifiedPolicy else {
             let diagnostics = lastLoadDiagnostics.isEmpty
@@ -291,14 +212,6 @@ public actor PolicyStore {
     }
 
     /// Atomically reads the externally visible policy state.
-    ///
-    /// One isolation holds `current`, the file path, the load flag, and the
-    /// invariant status together, so a concurrent write cannot slip between
-    /// separate reads and mix a pre-write policy with post-write violations
-    /// in a single response. The violation branch mirrors the diagnostics
-    /// rule: a present-but-rejected file reports the load diagnostics instead
-    /// of laundering the fallback as healthy.
-    /// - Returns: Snapshot holding policy, file URL, load flag, and live invariant violations.
     public func readSnapshot() -> PolicySnapshot {
         let policy = current
         let url = fileURL
@@ -317,12 +230,8 @@ public actor PolicyStore {
         return PolicySnapshot(policy: policy, fileURL: url, loadedFromDisk: loaded, violations: violations, generation: generation)
     }
 
-    /// Persists the current policy to disk as TOML.
-    ///
-    /// Re-verifies the held posture at the storage boundary so a violating
-    /// policy can never reach disk, mirroring the `load`/`update` gates.
-    /// A held violation throws instead of persisting, keeping the file as
-    /// the source of truth for invariant-clean postures only.
+    /// Persists the current policy to disk as TOML. Re-verifies the held posture at the storage
+    /// boundary so a violating policy can never reach disk, mirroring the `load`/`update` gates.
     public func save() throws {
         let violations = PolicyInvariantVerifier.verify(current)
         guard violations.isEmpty else {
@@ -335,18 +244,6 @@ public actor PolicyStore {
     }
 
     /// Replaces the active policy with a validated candidate.
-    ///
-    /// Verifies the formal invariants, proves the bytes reparse through
-    /// the store-owned round-trip, writes the file first, then commits to
-    /// memory, so a throwing disk write never leaves memory ahead of the
-    /// file. Every step stays inside actor isolation, keeping the
-    /// encapsulation a route-side write plus reload cannot provide.
-    /// - Parameters:
-    ///   - policy: Candidate to persist.
-    ///   - expectedGeneration: Optional expected mutation generation for optimistic concurrency.
-    /// - Returns: The committed policy.
-    /// - Throws: `PolicyInvariantError` when invariants fail, concurrency conflict occurs,
-    ///   or the bytes do not round-trip; filesystem errors propagate unchanged.
     @discardableResult
     public func replace(_ policy: SecurityPolicy, expectedGeneration: UInt64? = nil) async throws -> SecurityPolicy {
         if let expected = expectedGeneration, expected != generation {
@@ -371,12 +268,8 @@ public actor PolicyStore {
         return policy
     }
 
-    /// Appends an allowed domain to the policy, verifying invariants, updating state, and saving to disk.
-    ///
-    /// Fail-closed and atomic: the candidate verifies before any file write,
-    /// the file writes before any in-memory commit, so a disk-write throw
-    /// leaves memory and file agreeing instead of diverging with memory
-    /// mutated while the file stayed behind.
+    /// Appends an allowed domain to the policy, verifying invariants, updating state, and saving to
+    /// disk.
     @discardableResult
     public func appendAllowedDomain(_ domain: String) async throws -> SecurityPolicy {
         try Self.validateDomainEntry(domain)
@@ -396,11 +289,8 @@ public actor PolicyStore {
         return updated
     }
 
-    /// Appends a blocked domain to the policy, verifying invariants, updating state, and saving to disk.
-    ///
-    /// Fail-closed and atomic like `appendAllowedDomain`: file-first commit
-    /// keeps a throwing write from leaving an unpersisted policy masquerading
-    /// as applied.
+    /// Appends a blocked domain to the policy, verifying invariants, updating state, and saving to
+    /// disk.
     @discardableResult
     public func appendBlockedDomain(_ domain: String) async throws -> SecurityPolicy {
         try Self.validateDomainEntry(domain)
@@ -420,21 +310,12 @@ public actor PolicyStore {
         return updated
     }
 
-    /// Ensures candidate URLs or hostnames (such as configured services and mail accounts)
-    /// are present in the allowed domains list, appending any missing entries atomically.
-    ///
-    /// Fail-closed on a present-but-rejected file: auto-population may extend
-    /// only a posture the store actually accepted, or seed a missing file, so a
-    /// corrupt `policy.toml` is never overwritten with safe-default plus service
-    /// hosts and laundered into a verified snapshot.
+    /// Ensures candidate URLs or hostnames (such as configured services and mail accounts) are
+    /// present in the allowed domains list, appending any missing entries atomically.
     @discardableResult
     public func ensureServiceDomainsAllowed(urlsOrHosts: [String]) async -> SecurityPolicy {
-        // `load()` leaves `verifiedPolicy` nil when the operator's file is
-        // unreadable, unparseable, or invariant-violating. Writing here would
-        // manufacture an accepted posture from an unaccepted file, void the
-        // fail-closed boot contract, and destroy the operator's content. A
-        // missing file still seeds (the store either loaded its factory posture
-        // or never ran), so first-run auto-population is unchanged.
+        // `load()` leaves `verifiedPolicy` nil when the operator's file is unreadable, unparseable,
+        // or invariant-violating.
         let filePresent = FileManager.default.fileExists(atPath: fileURL.path)
         guard verifiedPolicy != nil || !filePresent else { return current }
         var missing: [String] = []
@@ -485,22 +366,11 @@ public actor PolicyStore {
 
 // MARK: - Static TOML and Seeding Helpers
 
-/// Parsing, serialization, and seeding helpers split from the actor body:
-/// they operate on values plus the file URL only, so keeping them together
-/// here leaves the isolated policy state and mutation paths scannable in one
-/// place. Members stay on `PolicyStore` itself, so no caller changes.
+/// Parsing, serialization, and seeding helpers split from the actor body: they operate on values
+/// plus the file URL only, so keeping them together here leaves the isolated policy state and
+/// mutation paths scannable in one place.
 extension PolicyStore {
     /// Extracts a comparable host from a bare service entry without a scheme.
-    ///
-    /// Bracketed literals strip to their inner address (ignoring an optional
-    /// numeric `:port` after `]`), mirroring the
-    /// `SensitiveAddressNormalization` bracket handling; an unbracketed value
-    /// with more than one colon is a bare IPv6 literal and keeps its colons,
-    /// while a single colon marks a `host:port` suffix that strips. A lone
-    /// `::1` therefore survives instead of truncating to an empty host, and
-    /// `2001:db8::1` survives instead of truncating to `2001`.
-    /// - Parameter trimmed: Whitespace-trimmed entry without a scheme.
-    /// - Returns: Host text for the shared canonicalizer.
     private static func serviceHostFromBareEntry(_ trimmed: String) -> String {
         if trimmed.hasPrefix("[") {
             guard let closing = trimmed.firstIndex(of: "]") else {
@@ -521,12 +391,7 @@ extension PolicyStore {
 
     // MARK: - Storage-Boundary Guards
 
-    /// Rejects a domain entry that TOML cannot represent safely.
-    ///
-    /// Domain text reaches the store from model-influenced approval decisions,
-    /// and Foundation percent-decodes `URL.host`, so a crafted host can carry
-    /// a quote or control character that would otherwise close the array
-    /// element and inject real policy content. Blank input stays a no-op so
+    /// Rejects a domain entry that TOML cannot represent safely. Blank input stays a no-op so
     /// appenders keep discarding entries that could only match an empty host.
     private static func validateDomainEntry(_ domain: String) throws {
         let canonical = NetworkEgressPolicy.canonicalEntry(domain)
@@ -535,29 +400,14 @@ extension PolicyStore {
         }
     }
 
-    /// Whether policy text carries scalars a TOML basic string must escape:
-    /// the double quote, C0 controls, and DEL. These never survive the
-    /// serializer/parser pair intact, so callers reject rather than write.
-    /// Shared by the settings REST boundary so both layers refuse the same
-    /// bytes instead of keeping parallel copies that could drift.
+    /// Whether policy text carries scalars a TOML basic string must escape: the double quote, C0
+    /// controls, and DEL. These never survive the serializer/parser pair intact, so callers reject
+    /// rather than write.
     public static func containsTOMLBreakingScalar(_ value: String) -> Bool {
         value.unicodeScalars.contains { $0 == "\"" || $0.value < 0x20 || $0.value == 0x7F }
     }
 
     /// Serializes a policy and proves the bytes reparse to the same policy.
-    ///
-    /// The store-owned round-trip proof every write boundary shares: `save()`,
-    /// the domain appenders, default seeding, and the settings REST PUT all
-    /// serialize here, so no caller can drift onto a weaker private copy.
-    /// Escaping keeps hostile text inside its string; reparsing the whole
-    /// document then proves it survives a load, so a candidate that would read
-    /// back as different content (or fail to parse) is refused before it can
-    /// replace the operator's file. Together the two steps turn "the object
-    /// verified" into "the bytes on disk verify", closing the gap between the
-    /// pre-serialization invariant check and what a later load reads.
-    /// - Parameter policy: Invariant-clean candidate to render.
-    /// - Returns: TOML bytes that reparse to `policy`.
-    /// - Throws: `PolicyInvariantError.serializationFailed` when the bytes do not read back identically.
     public static func verifiedTOML(for policy: SecurityPolicy) throws -> String {
         let toml = serialize(policy)
         guard let reparsed = try? parse(toml), reparsed == policy else {
@@ -568,12 +418,8 @@ extension PolicyStore {
 
     // MARK: - TOML Parsing
 
-    /// Parses a TOML string into a `SecurityPolicy`.
-    ///
-    /// The policy file owns network plus credentials only. Legacy
-    /// `[filesystem]` and `[tools.*]` tables are tolerated on load and
-    /// ignored without error so older files keep booting; they never
-    /// contribute to the resulting posture and are dropped on the next save.
+    /// Parses a TOML string into a `SecurityPolicy`. The policy file owns network plus credentials
+    /// only.
     public static func parse(_ text: String) throws -> SecurityPolicy {
         let root = try TOMLParser.parse(text)
 
@@ -595,27 +441,13 @@ extension PolicyStore {
     }
 
     /// Whether policy text carries a `[network].local_exemptions` key.
-    ///
-    /// Distinguishes a pre-exemption file that must be seeded (key missing)
-    /// from one the owner already edited (key present, even as an empty array),
-    /// so the migration path rewrites exactly once. Unparseable text reports
-    /// false because it cannot carry a readable key.
-    /// - Parameter text: Candidate `policy.toml` contents.
-    /// - Returns: True when `[network].local_exemptions` exists in the parsed document.
     public static func containsLocalExemptionsKey(in text: String) -> Bool {
         guard let root = try? TOMLParser.parse(text) else { return false }
         return root.tables["network"]?.values["local_exemptions"] != nil
     }
 
-    /// Parses the `[network]` table, defaulting a missing file or table to
-    /// the deny-by-default posture.
-    ///
-    /// A missing `mode` stays allowlist-only, the legacy `deny_by_default`
-    /// spelling maps to the same posture, and any unknown string fails
-    /// closed to allowlist-only rather than opening egress. Domain lists
-    /// trim surrounding whitespace and drop blanks so an empty entry can
-    /// never authorize an empty host. `local_exemptions` follows the same
-    /// trim-and-drop rule, and a missing key yields an empty set.
+    /// Parses the `[network]` table, defaulting a missing file or table to the deny-by-default
+    /// posture.
     private static func parseNetworkPolicy(from node: TOMLNode?) -> NetworkEgressPolicy {
         guard let node else { return .safeDefault }
 
@@ -656,13 +488,6 @@ extension PolicyStore {
     }
 
     /// Parses one `[credentials.<key>]` table into its host/method/prefix binding.
-    ///
-    /// One binding pairs one key with every host it may reach: the secret
-    /// rides only when the request host matches, the method matches (or the
-    /// binding leaves methods empty for Any), and the effective path matches
-    /// a prefix (or prefixes stay empty for Any). Hosts trim, methods trim
-    /// and uppercase, prefixes trim, and blanks drop so empty entries stay
-    /// unusable instead of matching broadly.
     private static func parseCredentials(from node: TOMLNode?) -> [String: CredentialBinding] {
         guard let node else { return [:] }
         var result: [String: CredentialBinding] = [:]
@@ -696,19 +521,8 @@ extension PolicyStore {
 
     // MARK: - TOML Serialization
 
-    /// Serializes a `SecurityPolicy` to TOML text.
-    ///
-    /// Emits `version` plus `[network]` plus one `[credentials.<key>]`
-    /// block per binding only. Legacy filesystem and tool sections are
-    /// never written, so a resaved file sheds them while round-tripping
-    /// the network-plus-credentials posture intact. `local_exemptions`
-    /// renders directly after `blocked_domains` with the same sorted,
-    /// escaped string-array shape, so the round-trip proof covers grants
-    /// on equal footing with the other network lists. Every string and table
-    /// key renders through `RuneWeaverConfig.tomlQuoted` so policy values
-    /// can never terminate their own quoting and inject document structure.
-    /// `verifiedTOML(for:)` proves the result reparses to the same policy
-    /// before any caller replaces the on-disk file.
+    /// Serializes a `SecurityPolicy` to TOML text. Emits `version` plus `[network]` plus one
+    /// `[credentials.<key>]` block per binding only.
     public static func serialize(_ policy: SecurityPolicy) -> String {
         var lines: [String] = []
         lines.append("# Rune Weaver Security Policy")
@@ -728,12 +542,8 @@ extension PolicyStore {
         lines.append("local_exemptions = [\(serializeStringArray(Array(policy.network.localExemptions.sorted())))]")
         lines.append("")
 
-        // [credentials.*]
-        // A surrogate key may legally contain `.`, and an unquoted dotted
-        // key would parse as nested tables, so the file written here could
-        // not be reloaded. Quoting through `tomlQuoted` also escapes quotes
-        // and control characters, so a hostile key can never close its
-        // header and inject table content.
+        // [credentials.*] A surrogate key may legally contain `.`, and an unquoted dotted key would
+        // parse as nested tables, so the file written here could not be reloaded.
         for key in policy.credentials.keys.sorted() {
             guard let binding = policy.credentials[key] else { continue }
             lines.append("[credentials.\(RuneWeaverConfig.tomlQuoted(key))]")
@@ -750,10 +560,8 @@ extension PolicyStore {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// Renders one inline string array with each element escaped through the
-    /// shared `tomlQuoted` helper. Policy entries can carry percent-decoded
-    /// host text from model-influenced approvals, so raw interpolation would
-    /// let a quote or newline close the array and inject policy content.
+    /// Renders one inline string array with each element escaped through the shared `tomlQuoted`
+    /// helper.
     private static func serializeStringArray(_ values: [String]) -> String {
         values.map { RuneWeaverConfig.tomlQuoted($0) }.joined(separator: ", ")
     }
@@ -761,13 +569,6 @@ extension PolicyStore {
     // MARK: - Default Seeding
 
     /// Writes a policy.toml if none exists.
-    ///
-    /// The seeded posture is the factory-safe default extended with any
-    /// accepted legacy origins, so a first run persists the same grants it
-    /// holds in memory instead of dropping them on the next boot.
-    /// - Parameters:
-    ///   - policy: Posture to seed.
-    ///   - diagnostics: Load diagnostics collecting seed results.
     private func seedDefaultPolicyFile(_ policy: SecurityPolicy, diagnostics: inout [String]) {
         let directory = fileURL.deletingLastPathComponent()
         do {

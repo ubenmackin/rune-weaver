@@ -1,34 +1,4 @@
 // Rune Weaver Tools — Playwright bridge for browser automation.
-//
-// `browser.navigate` (read-only open returning distilled text plus snapshot
-// refs) and `browser.act` (approval-gated single validated action against one
-// ref plus its snapshot URL) share one subprocess gateway and one persistent
-// Chromium profile (`~/.runeweaver/browser_profiles/default`), so login
-// sessions survive across calls while refs never cross pages: act re-navigates
-// to the snapshot URL and re-resolves the ref, and every call closes its
-// context before returning. Chromium's profile admits one live process at a
-// time, so helper spawns serialize on a process-wide queue. Downloads stay
-// manifest-only and never reach the host.
-//
-// The configured `browser.timeout_seconds` rides the request document as
-// `timeoutMs`, so navigation and per-action waits honor it rather than the
-// helper's legacy literals; headless runs use it directly as the kill budget, while headed runs add the
-// wait cap plus cleanup headroom so the navigation plus the login wait both fit before the kill.
-//
-// The helper source lives single-source in `BrowserPlaywrightScript.swift`
-// (ordered segments concatenating atomically) alongside the subprocess I/O
-// and payload parsing here, so the screenshot budget and envelope shapes
-// cannot drift across files; deny behavior is pinned single-source by the
-// shared web-safety fixture. Fail-closed validation rejects non-web schemes
-// and SSRF targets through the canonical guard before the helper spawns,
-// and every bridge-reported redirect or post-action URL re-vets the same way
-// so a public start cannot bounce into sensitive ranges; screenshots are
-// opt-in per navigate call, downscaled to a 1280px longest edge and
-// re-encoded to bounded JPEG under 500KB held in memory for the turn only
-// (never written to disk), persisting just a content hash in the audit trail.
-// Refs keep the `eNN`
-// shape numbering from e1, and redirect chains collapse to a final URL plus
-// count so the UI never sees a dead count.
 
 import Foundation
 import os
@@ -262,10 +232,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async URL validation keeping blocking DNS off the cooperative pool.
-    /// Suspendable tool and gateway paths prefer this over the synchronous
-    /// shape so a wedged resolver cannot stall shared tasks; the verdict stays
-    /// point-in-time, so callers pin the address at dial time. The synchronous
-    /// shape stays for callers that cannot suspend.
     public static func validateURLAsync(_ url: String, allowlistedOrigins: Set<String> = []) async throws -> String {
         let trimmed = try validatedURLLiteral(url)
         if let refusal = await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: allowlistedOrigins) {
@@ -275,9 +241,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Configured exemption set for one browser egress check.
-    /// Bundles the four-part seam so the six public validators share one
-    /// origins computation and one deny core instead of threading four params
-    /// through near-identical literal-guard-DNS bodies.
     private struct EgressPolicy: Sendable {
         let browserConfig: BrowserConfig
         let mediaConfig: MediaConfig?
@@ -388,14 +351,8 @@ public enum BrowserValidation: Sendable {
         return trimmed
     }
 
-    /// Validates a navigation or act URL against the configured exemption set.
-    /// Synchronous SSRF-only check: never consults the declarative egress
-    /// policy. Callers needing policy enforcement must use
-    /// `validateURLAsync`, which remains the sole policy path.
-    /// Delegates to the canonical guard so loopback stays dialable only for the
-    /// configured search, media, and model origins while metadata, link-local,
-    /// and private ranges stay denied; any refusal fails closed before the
-    /// bridge spawns.
+    /// Validates a navigation or act URL against the configured exemption set. Synchronous
+    /// SSRF-only check: never consults the declarative egress policy.
     public static func validateURL(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -412,10 +369,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async URL validation against the configured exemption set.
-    /// A supervised call enters the egress supervisor first, so policy
-    /// denial precedes any resolver hop; the canonical guard then re-vets
-    /// addresses against this call's exemptions, since the supervisor's
-    /// SSRF stage judges its own. Unverified hosts deny rather than dial.
     public static func validateURLAsync(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -435,14 +388,8 @@ public enum BrowserValidation: Sendable {
         ).validateURLAsync(url)
     }
 
-    /// Re-validates one bridge-reported URL before it enters tool output.
-    /// Synchronous SSRF-only check: never consults the declarative egress
-    /// policy. Callers needing policy enforcement must use
-    /// `validateEgressURLAsync`, which remains the sole policy path.
-    /// Mirrors the fetch redirect chain: the shared allowlist rejects smuggled
-    /// schemes first, then the canonical guard re-vets the hop so a public
-    /// start cannot bounce into loopback, link-local, metadata, or private
-    /// ranges through a redirect or a post-action navigation.
+    /// Re-validates one bridge-reported URL before it enters tool output. Synchronous SSRF-only
+    /// check: never consults the declarative egress policy.
     public static func validateEgressURL(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -459,9 +406,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async re-validation for one bridge-reported URL.
-    /// Supervised hops take the same supervisor-first order as the entry
-    /// check; DNS vetting hops to the bounded pool so redirect re-checks
-    /// cannot stall shared tasks, and an unverified hop fails closed.
     public static func validateEgressURLAsync(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -481,12 +425,8 @@ public enum BrowserValidation: Sendable {
         ).validateEgressURLAsync(url)
     }
 
-    /// Re-validates a full bridge-reported redirect chain plus its final URL.
-    /// Synchronous SSRF-only check: never consults the declarative egress
-    /// policy. Callers needing policy enforcement must use
-    /// `validateRedirectChainAsync`, which remains the sole policy path.
-    /// Every hop re-enters the allowlist plus the canonical guard, so a safe
-    /// start cannot launder an unsafe hop through the helper's chain surfacing.
+    /// Re-validates a full bridge-reported redirect chain plus its final URL. Synchronous SSRF-only
+    /// check: never consults the declarative egress policy.
     public static func validateRedirectChain(
         _ chain: [BrowserRedirectStep],
         finalURL: String,
@@ -508,10 +448,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async re-validation for a bridge-reported redirect chain plus its final URL.
-    /// Hop checks share the bounded-pool DNS path with the entry check, keeping
-    /// a wedged resolver from stalling shared tasks while staying fail-closed.
-    /// Single charge per host within the chain: every hop re-vets SSRF, while
-    /// the stateful policy gate runs once per fresh host.
     public static func validateRedirectChainAsync(
         _ chain: [BrowserRedirectStep],
         finalURL: String,
@@ -560,9 +496,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Shared literal URL checks without any resolver use.
-    /// Centralized so the synchronous and async SSRF stages cannot drift on
-    /// length, control-byte, or scheme policy; each caller adds only its own
-    /// DNS stage after this returns the trimmed candidate.
     private static func validatedURLLiteral(_ url: String) throws -> String {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -585,9 +518,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Canonical host for per-call redirect dedupe, nil when unparseable.
-    /// Single owner for browser redirect host normalization: the gateway
-    /// reuses this instead of keeping its own copy, so hop vetting shares one
-    /// normalization. Unparseable hops stay deny-by-default at the egress re-check.
     static func normalizedURLHost(_ urlString: String) -> String? {
         guard let host = URL(string: urlString)?.host, !host.isEmpty else { return nil }
         let canonical = SensitiveAddressNormalization.normalizedHost(host)
@@ -621,11 +551,6 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Normalizes a bare numeric ref to snapshot shape (`e` plus digits).
-    /// Single-sourced by the act decoder and the validator so string and
-    /// integer aliases cannot diverge: all-digit input maps to `eNN`,
-    /// everything else passes through unchanged for strict shape checking.
-    /// - Parameter ref: Trimmed candidate ref.
-    /// - Returns: `eNN` for all-digit input, else the input unchanged.
     public static func normalizedRef(_ ref: String) -> String {
         guard !ref.isEmpty, ref.allSatisfy(\.isNumber) else { return ref }
         return "e\(ref)"
@@ -713,9 +638,6 @@ public protocol BrowserPlaywrightGateway: Sendable {
     func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot
 
     /// Session-aware navigate threading the egress session grant.
-    /// Declared as a requirement (not an extension default) so the live
-    /// gateway's grant-aware implementation dispatches dynamically; stubs
-    /// inherit the session-less fallback below.
     func navigate(
         url: String,
         includeScreenshot: Bool,
@@ -732,9 +654,8 @@ public protocol BrowserPlaywrightGateway: Sendable {
         sessionID: UUID?
     ) async throws -> BrowserSnapshot
 
-    /// Session-aware act threading the egress session grant.
-    /// Declared as a requirement so the live gateway's grant-aware
-    /// implementation dispatches dynamically; stubs inherit the session-less
+    /// Session-aware act threading the egress session grant. Declared as a requirement so the live
+    /// gateway's grant-aware implementation dispatches dynamically; stubs inherit the session-less
     /// fallback below.
     func act(
         action: BrowserActAction,
@@ -853,9 +774,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Creates a subprocess gateway.
-    /// Delegates to the designated config-bound init with a neutral policy so
-    /// the precomputed explicit set stays the sole exemption source instead of
-    /// gaining a default search origin the caller never configured.
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval? = nil,
@@ -877,9 +795,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Creates a subprocess gateway bound to the configured exemption set.
-    /// Entry URLs vet through the canonical guard with search, media, and
-    /// model origins exempted, and every bridge-reported hop re-vets the same
-    /// way so a public start cannot bounce into sensitive ranges.
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval? = nil,
@@ -906,11 +821,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Navigates resolving the interpreter from the fast path only when dry-running.
-    ///
-    /// Carries the calling session into every supervisor check so an
-    /// interactive grant applies to the entry URL and each fresh redirect
-    /// host exactly once; hosts already granted for this call never
-    /// re-consume a one-shot grant when the chain echoes them.
     public func navigate(
         url: String,
         includeScreenshot: Bool,
@@ -952,12 +862,9 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         let effectiveTimeout: TimeInterval = headed ? Self.headedEffectiveTimeout(for: timeoutSeconds) : timeoutSeconds
         let data = try await run(payload: payload, timeoutOverride: effectiveTimeout, dryRun: dryRun)
         let snapshot = try BrowserBridgeParsing.parseSnapshotPayload(data, fallbackURL: validated)
-        // The helper surfaces its redirect chain, so every reported hop
-        // re-enters the allowlist plus the canonical guard before the
-        // snapshot leaves the gateway; a public start cannot launder a
-        // sensitive hop through the bridge. The entry host validated above
-        // is excluded from the fresh-host pass so a one-shot grant is
-        // consumed once per call, not once per echoed chain entry.
+        // The helper surfaces its redirect chain, so every reported hop re-enters the allowlist
+        // plus the canonical guard before the snapshot leaves the gateway; a public start cannot
+        // launder a sensitive hop through the bridge.
         try await validateFreshRedirectChain(
             snapshot.redirectChain,
             finalURL: snapshot.url,
@@ -968,12 +875,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Validates bridge-reported hops beyond the already-granted entry host.
-    ///
-    /// Single stateful pass for this navigation: every hop re-vets SSRF, and
-    /// every fresh host additionally vets the declarative policy with the
-    /// calling session. Hops back on the entry host reuse the pre-dial policy
-    /// verdict (SSRF-only) instead of charging a one-shot grant again, so the
-    /// chain still re-validates each hop without double-spending the grant.
     private func validateFreshRedirectChain(
         _ chain: [BrowserRedirectStep],
         finalURL: String,
@@ -1039,17 +940,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Re-navigates in a fresh isolated context and performs one action.
-    /// Act previews never reach this gateway: the tool returns its would-act
-    /// envelope locally under `context.dryRun`, so no dry-run overload exists
-    /// here and every call below touches the browser. Navigate keeps its
-    /// dry-run path because read-only opens still validate through the fast
-    /// interpreter without provisioning.
-    ///
-    /// The calling session threads into the entry and landing checks so one
-    /// interactive grant covers the call; a landing back on the entry host
-    /// reuses the entry verdict instead of charging a one-shot grant twice.
-    /// Session-free entry satisfying the gateway protocol without a policy
-    /// grant; scoped callers use the session-threaded overload below.
     public func act(
         action: BrowserActAction,
         ref: String,
@@ -1087,11 +977,9 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         )
         let data = try await run(payload: payload, dryRun: false)
         let result = try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
-        // Post-action navigation can land elsewhere (click-through or
-        // meta-refresh), so the reported URL re-vets before the result leaves
-        // the gateway rather than trusting the helper's landing page. A
-        // landing back on the granted entry host re-vets SSRF-only without a
-        // second policy charge; a fresh host vets fully with the session.
+        // Post-action navigation can land elsewhere (click-through or meta-refresh), so the
+        // reported URL re-vets before the result leaves the gateway rather than trusting the
+        // helper's landing page.
         let entryHost = BrowserValidation.normalizedURLHost(validatedURL)
         let landingHost = BrowserValidation.normalizedURLHost(result.url)
         if entryHost != nil, landingHost == entryHost {
@@ -1126,14 +1014,9 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
             throw BrowserError.bridgeFailed("Could not encode browser request: \(error.localizedDescription)")
         }
         let effectiveTimeout = timeoutOverride ?? timeoutSeconds
-        // First navigate or act provisions the managed venv inline so Homebrew
-        // system pythons never hit externally-managed-environment: the ensurer
-        // collapses concurrent callers onto one flight and publishes staged
-        // progress for health polls, while explicit and env overrides skip
-        // provisioning entirely. Dry-run previews resolve from the fast path
-        // only so validation never pays the venv, pip, or browser budgets.
-        // Timeout plus output caps stay on the bridge call below, never on
-        // provisioning budgets above.
+        // First navigate or act provisions the managed venv inline so Homebrew system pythons never
+        // hit externally-managed-environment: the ensurer collapses concurrent callers onto one
+        // flight and publishes staged progress for health polls, while explicit and env overrides.
         if dryRun {
             try Task.checkCancellation()
             let effectivePython = PlaywrightPythonEnsurer.resolveDryRunPythonBin(explicit: pythonExecutable)
@@ -1168,19 +1051,9 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
 /// Runs blocking Playwright subprocess I/O off the async executor.
 enum BrowserSubprocessIO {
     /// Process-wide serial queue for helper spawns.
-    /// Chromium's persistent profile admits one live process per user-data
-    /// directory, so two helpers launched together would collide on the
-    /// profile's SingletonLock and fail a legitimate call. Serializing the
-    /// whole blocking run — not just validation — keeps concurrent
-    /// navigate/act calls safe; queued callers hold no thread until their
-    /// turn, and a task-scoped process box still terminates a live run on
-    /// cancellation.
     private static let bridgeRunQueue = DispatchQueue(label: "com.runeweaver.browser.playwright-bridge", qos: .utility)
 
     /// Runs one blocking bridge operation on the serial profile queue.
-    /// Interior seam so the non-overlap contract stays testable without
-    /// spawning Playwright, and so every bridge run — live or dry-run —
-    /// shares the one queue the profile lock requires.
     static func runSerialized<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             bridgeRunQueue.async {
@@ -1200,10 +1073,9 @@ enum BrowserSubprocessIO {
         max(1, Int((seconds * 1000).rounded()))
     }
 
-    /// Builds the navigate request document sent to the helper.
-    /// `timeoutMs` carries the configured budget so `page.goto` honors it
-    /// instead of the helper's legacy 30s literal; every navigate key stays
-    /// assembled in one place.
+    /// Builds the navigate request document sent to the helper. `timeoutMs` carries the configured
+    /// budget so `page.goto` honors it instead of the helper's legacy 30s literal; every navigate
+    /// key stays assembled in one place.
     static func navigatePayload(
         url: String,
         includeScreenshot: Bool,
@@ -1252,11 +1124,9 @@ enum BrowserSubprocessIO {
         maxOutputBytes: Int
     ) async throws -> Data {
         try Task.checkCancellation()
-        // Shared box lets cancellation terminate the live helper instead of
-        // leaking it: the blocking wait publishes the child before waiting
-        // so a cancel racing the spawn still finds and kills it. The latch
-        // also covers a cancel landing while this run waits its turn in the
-        // serial queue, so a doomed helper never grabs the profile lock.
+        // Shared box lets cancellation terminate the live helper instead of leaking it: the
+        // blocking wait publishes the child before waiting so a cancel racing the spawn still finds
+        // and kills it.
         let box = BoundedProcessRunner.ProcessBox()
         let cancelled = OSAllocatedUnfairLock(initialState: false)
         return try await withTaskCancellationHandler {
@@ -1324,10 +1194,9 @@ enum BrowserSubprocessIO {
                     "Browser output exceeded the \(stdoutLimit)-byte limit and was terminated."
                 )
             case let .launchFailed(detail):
-                // Launch failures stay in the missing classification so the
-                // dashboard renders the venv path plus manual fallback instead
-                // of a bare spawn error; timeout plus output caps above stay
-                // on the bridge call, never on provisioning budgets.
+                // Launch failures stay in the missing classification so the dashboard renders the
+                // venv path plus manual fallback instead of a bare spawn error; timeout plus output
+                // caps above stay on the bridge call, never on provisioning budgets.
                 let launchDetail = "Could not launch python3 for browser automation: \(detail)"
                 throw BrowserError.playwrightMissing(
                     PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: launchDetail, pythonPath: pythonExecutable)

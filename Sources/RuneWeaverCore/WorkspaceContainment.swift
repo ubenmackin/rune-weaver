@@ -1,15 +1,4 @@
 // Rune Weaver Core — Single-sourced workspace containment plus immutable staging.
-//
-// Purpose: own the `lstat` symlink probe, slash-boundary prefix check, and
-// canonical containment used by the scratch workspace, so a swapped `workspace -> /` or `tmp -> /` refuses
-// identically on every path and verified bytes never observe a writable window.
-// Scope: symlink probing without following links, boundary-aware prefix
-// checks, canonical resolution, eligible-directory containment, and atomic owner-execute-only staging writes
-// only; quotas, SQLite persistence, and HTTP routing live with the owning
-// stores and server layers.
-// Architectural role: shared Core helper beside the goal and policy stores,
-// called by `WorkspaceStore` instead of triplicated
-// private helpers, so containment agrees byte-for-byte.
 
 import Foundation
 #if canImport(Darwin)
@@ -18,23 +7,10 @@ import Foundation
     import Glibc
 #endif
 
-/// Single source for workspace boundary checks used by the scratch store.
-///
-/// The scratch store guards the same adversary: a sandboxed writer swapping
-/// `workspace -> /` or `tmp -> /` between turns. The probe never follows the
-/// final component, the prefix check never lets `workspace-evil/` match the
-/// root, and both sides of every containment test resolve symlinks first so
-/// a symlinked parent inside the tree cannot hide an outside target behind
-/// an inside spelling.
+/// Single source for workspace boundary checks used by the scratch store. The scratch store guards
+/// the same adversary: a sandboxed writer swapping `workspace -> /` or `tmp -> /` between turns.
 public enum WorkspaceContainment {
     /// Whether the final path component is a symlink without following it.
-    ///
-    /// Uses `lstat` semantics (`isSymbolicLinkKey` plus a
-    /// `destinationOfSymbolicLink` fallback for dangling links) so a swapped
-    /// root or temp directory refuses before any create, walk, prune, or
-    /// staged write follows it outside the workspace.
-    /// - Parameter url: Path to probe.
-    /// - Returns: True when the final component is a symlink.
     public static func isSymlink(at url: URL) -> Bool {
         if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
             return true
@@ -42,40 +18,18 @@ public enum WorkspaceContainment {
         return (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
     }
 
-    /// Whether a canonical path sits inside a canonical root with a boundary.
-    ///
-    /// The trailing-slash form keeps `workspace-evil/` from prefix-matching
-    /// the root. Callers pass already-canonical paths; see `canonical(_:)`
-    /// and `isContained(path:inside:)` for the resolving variants.
-    /// - Parameters:
-    ///   - target: Canonical path under test.
-    ///   - root: Canonical root boundary.
-    /// - Returns: True when the target equals the root or sits beneath it.
+    /// Whether a canonical path sits inside a canonical root with a boundary. - root: Canonical
+    /// root boundary.
     public static func isInsidePath(_ target: String, root: String) -> Bool {
         target == root || target.hasPrefix(root + "/")
     }
 
     /// Resolves symlinks and standardizes a path for containment checks.
-    ///
-    /// Both sides of every boundary test resolve together so benign system
-    /// links (`/var` -> `/private/var` under test temp roots) stay usable
-    /// while a swapped link diverges outside the root and refuses.
-    /// - Parameter url: Path to canonicalize.
-    /// - Returns: Symlink-resolved standardized URL.
     public static func canonical(_ url: URL) -> URL {
         url.resolvingSymlinksInPath().standardizedFileURL
     }
 
     /// Whether a path resolves inside a directory with symlink safety.
-    ///
-    /// Both sides resolve before the boundary check, so a symlinked parent
-    /// (`tools/evil -> /tmp` plus `tools/evil/pwn.sh`) cannot hide an outside
-    /// target behind an inside spelling, and a moved workspace root still
-    /// refuses at dispatch.
-    /// - Parameters:
-    ///   - path: Candidate path (absolute string form).
-    ///   - directory: Eligible directory (unresolved is fine; resolved here).
-    /// - Returns: True when the resolved candidate sits inside the resolved directory.
     public static func isContained(path: String, inside directory: URL) -> Bool {
         let candidate = canonical(URL(fileURLWithPath: path))
         let resolvedDir = canonical(directory)
@@ -83,27 +37,11 @@ public enum WorkspaceContainment {
     }
 
     /// Whether a symlink-resolved path escapes an expected root.
-    ///
-    /// Point-in-time check alongside later symlink-skipping walks, not a
-    /// substitute for them: an intermediate swap (`~/.runeweaver -> /`)
-    /// passes the final-component `lstat` refusal while resolving outside,
-    /// so every entry point verifies the canonical view stays under the
-    /// expected root and fails closed otherwise.
-    /// - Parameters:
-    ///   - canonical: Symlink-resolved path under test.
-    ///   - expectedRoot: Expected canonical root boundary.
-    /// - Returns: True when the canonical path escapes and must refuse.
     public static func escapesRoot(canonical: URL, expectedRoot: URL) -> Bool {
         !isInsidePath(canonical.path, root: expectedRoot.path)
     }
 
     /// Finds the first symlinked URL in a probe list without following links.
-    ///
-    /// Lets each store refuse its own root plus temp plus tools pair through
-    /// one probe while keeping its own typed error and copy: a non-nil return
-    /// means the caller must fail closed before touching disk.
-    /// - Parameter urls: Paths to probe in refusal order.
-    /// - Returns: First symlinked URL, or nil when none are links.
     public static func firstSymlink(in urls: [URL]) -> URL? {
         for url in urls where isSymlink(at: url) {
             return url
@@ -112,18 +50,6 @@ public enum WorkspaceContainment {
     }
 
     /// Writes bytes to a fresh file that is never writable.
-    ///
-    /// Reserves the destination exclusively (`O_CREAT|O_EXCL`) with
-    /// owner-read plus execute bits (`0500`) before writing a single byte,
-    /// so verified bytes never observe the writable window a create-then-chmod
-    /// sequence leaves open. The random leaf name keeps a concurrent workspace
-    /// writer from targeting a copy it cannot enumerate, and `O_NOFOLLOW`
-    /// refuses a link planted at the destination instead of writing through
-    /// it. Failures remove the partial copy so a torn write never survives.
-    /// - Parameters:
-    ///   - bytes: Exact bytes to stage.
-    ///   - url: Fresh destination URL (must not exist).
-    /// - Throws: An `NSError` in the `RuneWeaverCore` domain when reservation or the write fails.
     public static func writeImmutableBytes(_ bytes: Data, to url: URL) throws {
         let fd: Int32 = url.path.withCString { cString in
             open(cString, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o500))

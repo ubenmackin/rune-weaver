@@ -1,15 +1,4 @@
 // Rune Weaver Dashboard — Local index status dashboard and policy form.
-//
-// The status dashboard (Memory → Index Status) owns Run/Cancel/Prune/Reclaim/
-// Reset, the honest on-disk size with its storage breakdown, the last-run
-// strip with retired and truncated counts, and frontend-only SVG/CSS charts computed from
-// the GET /index/status fields; the policy form (Settings → Indexing) owns
-// the enable/sources/excludes/caps/effort fields with its own Save, so
-// neither surface duplicates the other's control set. Status freshness comes
-// from the shared WebSocket run broadcasts — there is no manual Refresh
-// button — and live progress renders one grep-style block from the polled
-// status live snapshot, so the panel never invents a completion fraction the
-// engine cannot supply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -97,10 +86,8 @@ function sourceLabel(kind: string): string {
   return INDEX_SOURCES.find((source) => source.kind === kind)?.label ?? kind;
 }
 
-// Pill tone for one index source as a pure function of enablement plus
-// access: disabled reads grey, enabled plus granted reads green, enabled
-// plus anything else reads amber. Recomputed from the status row on every
-// render so color tracks poll truth, never cached UI state.
+// Pill tone for one index source as a pure function of enablement plus access: disabled reads grey,
+// enabled plus granted reads green, enabled plus anything else reads amber.
 export type IndexSourcePillTone = "ok" | "skipped" | "awaiting_approval";
 
 export function indexSourcePillTone(
@@ -176,10 +163,8 @@ export function indexAccessDeniedGuidance(kind: string): string {
   return `Access denied — open System Settings > Privacy & Security > ${pane} to grant access.`;
 }
 
-// Deep link into the Full Disk Access pane. There is no prompt API for this
-// grant, so the dashboard can only open Settings and show copy-paste steps
-// alongside it. The link must navigate the top frame (anchor or location
-// assignment): the system scheme reads as a blocked popup under window.open.
+// Deep link into the Full Disk Access pane. There is no prompt API for this grant, so the dashboard
+// can only open Settings and show copy-paste steps alongside it.
 export const FULL_DISK_ACCESS_SETTINGS_URL =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
@@ -191,11 +176,8 @@ export function isFullDiskAccessError(detail: string | null | undefined): boolea
   return /full disk access/i.test(detail);
 }
 
-// Whether any status error needs the Full Disk Access guided onboarding.
-// Checked over lastErrors so the dashboard surfaces guidance before the next
-// wasted run instead of only after one fails. The element narrows by typeof
-// so malformed payload entries degrade to no-match instead of relying on a
-// cast that would hide non-string values from the type checker.
+// Whether any status error needs the Full Disk Access guided onboarding. Checked over lastErrors so
+// the dashboard surfaces guidance before the next wasted run instead of only after one fails.
 export function hasFullDiskAccessError(errors: unknown): boolean {
   if (!Array.isArray(errors)) return false;
   return errors.some((detail) => typeof detail === "string" && isFullDiskAccessError(detail));
@@ -222,11 +204,9 @@ export function dedupeIndexErrors(errors: unknown): string[] {
   return deduped;
 }
 
-// Display list for the last-errors card: deduped lines with the raw Full Disk
-// Access bullet suppressed whenever the guided onboarding renders, since the
-// guidance is the formatted form of that same failure and keeping both would
-// read as a duplicate. No backend shape change — the engine still sends
-// string[] and this stays a frontend-only projection.
+// Display list for the last-errors card: deduped lines with the raw Full Disk Access bullet
+// suppressed whenever the guided onboarding renders, since the guidance is the formatted form of
+// that same failure and keeping both would read as a duplicate.
 export function resolveDisplayIndexErrors(errors: unknown): string[] {
   const deduped = dedupeIndexErrors(errors);
   if (hasFullDiskAccessError(deduped)) {
@@ -249,10 +229,8 @@ export function isLongIndexError(detail: string): boolean {
   return typeof detail === "string" && detail.length > INDEX_LAST_ERROR_PREVIEW_CHARS;
 }
 
-// Short stable digest for one error line, used for React keys so a
-// kilobyte-long failure never becomes a full-text key. Collisions only reuse
-// a row element, never drop an entry, because the visible position joins the
-// key at the call site.
+// Short stable digest for one error line, used for React keys so a kilobyte-long failure never
+// becomes a full-text key.
 export function hashIndexError(detail: string): string {
   let hash = 5381;
   for (let i = 0; i < detail.length; i += 1) {
@@ -265,10 +243,9 @@ export function hashIndexError(detail: string): string {
 // adopted while a run is in flight and carrying this name.
 export const INDEX_PROGRESS_TOOL_NAME = "index";
 
-// Elapsed floor before the live rate reads honestly: under half a second one
-// document over a few milliseconds renders a triple-digit spike, so the line
-// omits the rate until the window is wide enough to mean something. Mirrors
-// the engine liveTotals floor that reports 0 below this window.
+// Elapsed floor before the live rate reads honestly: under half a second one document over a few
+// milliseconds renders a triple-digit spike, so the line omits the rate until the window is wide
+// enough to mean something.
 export const INDEX_MIN_HONEST_RATE_ELAPSED_MS = 500;
 
 // Ceiling above which a rate cannot be real work: guards a handcrafted or
@@ -276,11 +253,8 @@ export const INDEX_MIN_HONEST_RATE_ELAPSED_MS = 500;
 // the rate instead of rendering an absurd figure.
 export const INDEX_MAX_HONEST_RATE = 1000000;
 
-// Documents-per-second for the live block: the engine `live.rate` (indexed
-// documents over elapsed time), labeled explicitly as docs work. Returns null
-// when the rate cannot read honestly — absent, non-finite, non-positive,
-// absurdly huge, or measured under the honest elapsed floor — so the line
-// omits it instead of rendering a jittering zero or an early-run spike.
+// Documents-per-second for the live block: the engine `live.rate` (indexed documents over elapsed
+// time), labeled explicitly as docs work.
 export function formatIndexRate(
   rate: number | null | undefined,
   elapsedMs?: number | null,
@@ -372,14 +346,7 @@ export function floorPositive(value: unknown): number {
     : 0;
 }
 
-// On-disk storage breakdown for the honest size figure. The primary figure
-// sums the database file plus the write-ahead log so it reads within ~1% of
-// `du`; the text/vector/FTS/free rows explain where those bytes live, and the
-// content total stays as a secondary detail. Every field degrades to zero so
-// a drifted payload never renders NaN, and older engines without the file
-// sizes fall back to the content total instead of failing. `hasStorage`
-// tracks slow arrival explicitly so an honest empty index hides sizing once
-// slow lands instead of gating solely on non-zero breakdown.
+// On-disk storage breakdown for the honest size figure.
 export interface IndexStorageBreakdown {
   onDisk: number;
   dbFile: number;
@@ -412,12 +379,8 @@ export function resolveIndexOnDiskBytes(
   return floorPositive(status.bytes);
 }
 
-// Full breakdown for the size card: on-disk primary plus the four storage
-// rows and the content secondary. `hasOnDisk` reports whether the file sizes
-// were present; `hasBreakdown` reports whether any storage row was non-zero,
-// so the card omits the breakdown row for older engines instead of rendering
-// a row of zeros. `hasStorage` reports whether the slow phase landed, so the
-// sizing copy shows only until slow fields land even for an honest empty index.
+// Full breakdown for the size card: on-disk primary plus the four storage rows and the content
+// secondary.
 export function resolveIndexStorageBreakdown(
   status: Pick<
     IndexStatusResponse,
@@ -535,13 +498,8 @@ export const INDEX_EFFORT_OPTIONS: Array<{ id: string; label: string }> = [
   { id: "custom", label: INDEX_EFFORT_PRESET_LABELS.custom ?? "Custom" },
 ];
 
-// Normalizes a stored effort token to the canonical preset id, mirroring
-// IndexConfig.allowedEfforts (`light`, `balanced`, `performance`, `custom`).
-// Legacy tokens from older dashboards and example files (`eco`/`low` for
-// light, `standard` for balanced, `fast`/`high`/`max` for performance) map
-// onto their canonical successor so an upgraded install keeps its intent
-// instead of falling back; unknown, blank, or non-string payloads degrade to
-// the balanced default so the control never renders blank.
+// Normalizes a stored effort token to the canonical preset id, mirroring IndexConfig.allowedEfforts
+// (`light`, `balanced`, `performance`, `custom`).
 export function normalizeIndexEffortPreset(value: unknown): string {
   if (typeof value !== "string") return DEFAULT_INDEX_EFFORT;
   const token = value.trim().toLowerCase();
@@ -567,10 +525,9 @@ export function indexEffortLabel(preset: string): string {
   return INDEX_EFFORT_PRESET_LABELS[token] ?? preset;
 }
 
-// Machine core count for the effort mapping: the engine `coreCount` when it
-// carries a positive finite value, otherwise the browser
-// `hardwareConcurrency`, otherwise null so callers omit the of-N-cores suffix
-// instead of guessing.
+// Machine core count for the effort mapping: the engine `coreCount` when it carries a positive
+// finite value, otherwise the browser `hardwareConcurrency`, otherwise null so callers omit the
+// of-N-cores suffix instead of guessing.
 export function resolveMachineCores(
   statusCores?: number | null | undefined,
 ): number | null {
@@ -590,13 +547,9 @@ export function resolveMachineCores(
   return null;
 }
 
-// Resolved worker count for one effort preset against a core count, mirroring
-// IndexConfig.resolvedWorkerCount: `light` pins one worker, `balanced` takes
-// half the cores up to four, `performance` takes all but one core, and
-// `custom` clamps the stepper value into 1..64 and then to the available
-// cores. Unknown core counts mirror safeCores=max(1,cores) so every preset
-// resolves to 1 instead of guessing, and an invalid custom value falls back
-// to the balanced mapping so the line never blanks.
+// Resolves effort preset worker counts mirroring IndexConfig.resolvedWorkerCount: light pins 1,
+// balanced takes half cores (max 4), performance takes all but 1, and custom clamps to 1..64
+// and available cores; unknown core counts default to 1.
 export function resolveEffortWorkers(
   preset: string | null | undefined,
   coreCount: number | null | undefined,
@@ -666,10 +619,8 @@ export function resolveIndexVectorCapValue(
   return Math.floor(candidate);
 }
 
-// Resolved effort signal from a status payload, reading the canonical nested
-// `effort` block (`preset`/`resolvedWorkers`/`activeProcessors`). Null fields
-// mean the engine predates the signal so the pane omits the line instead of
-// inventing a preset.
+// Resolved effort signal from a status payload, reading the canonical nested `effort` block
+// (`preset`/`resolvedWorkers`/`activeProcessors`).
 export function resolveStatusEffort(status: unknown): {
   preset: string | null;
   resolvedWorkers: number | null;
@@ -734,10 +685,8 @@ export function resolveStatusEffort(status: unknown): {
   };
 }
 
-// Resolved-reality copy for the effort control: preset label plus the worker
-// resolution against the machine (`Balanced - using 4 of 10 cores`). Without
-// a core count the line names the worker count alone so it never invents a
-// denominator the machine did not report.
+// Resolved-reality copy for the effort control: preset label plus the worker resolution against the
+// machine (`Balanced - using 4 of 10 cores`).
 export function describeEffortReality(
   preset: string | null | undefined,
   resolvedWorkers: number | null | undefined,
@@ -767,11 +716,9 @@ export function describeEffortReality(
   return label;
 }
 
-// Display string for the configured file roots: the home shorthand gains its
-// parenthetical so a stock `~` reads as the home directory instead of a bare
-// sigil, while custom roots join verbatim so the subtitle names exactly what
-// the walker covers. Non-array or empty payloads degrade to honest fallbacks
-// instead of rendering a blank scope.
+// Display string for the configured file roots: the home shorthand gains its parenthetical so a
+// stock `~` reads as the home directory instead of a bare sigil, while custom roots join verbatim so
+// the subtitle names exactly what the walker covers.
 export function formatIndexScopeRoots(roots: unknown): string {
   if (!Array.isArray(roots)) return "~ (your home directory)";
   const cleaned = roots
@@ -791,30 +738,25 @@ export function describeIndexScope(roots: unknown): string {
   return `Builds a local search index of ${formatIndexScopeRoots(roots)}. Nothing outside the configured roots is ever scanned.`;
 }
 
-// Parses the index-roots textarea into the wire shape: one root per line,
-// trimmed, with blank lines dropped so an emptied editor reads as an explicit
-// empty list instead of persisting whitespace rows. Null input degrades to
-// empty so callers apply the empty-reject rule instead of guessing. Delegates
-// to the shared line-list codec so index roots stay symmetric with allow roots.
+// Parses the index-roots textarea into the wire shape: one root per line, trimmed, with blank lines
+// dropped so an emptied editor reads as an explicit empty list instead of persisting whitespace
+// rows.
 export function parseIndexRootsText(text: string | undefined | null): string[] {
   if (typeof text !== "string") return [];
   return parseLinesToList(text ?? "", []);
 }
 
-// Formats an index-roots array for the multiline editor, joining one root per
-// line so the textarea and the stored array stay symmetric. Non-array payloads
-// degrade to empty so older engines without the field never seed stale text.
-// Delegates to the shared formatter so index roots stay symmetric with allow roots.
+// Formats an index-roots array for the multiline editor, joining one root per line so the textarea
+// and the stored array stay symmetric.
 export function formatIndexRootsText(
   roots: string[] | undefined | null,
 ): string {
   return formatListToText(roots, "");
 }
 
-// Validates the index-roots textarea before any network write: blank lines
-// collapse on save, an emptied editor is rejected, and `..` escapes are
-// rejected with line numbers so a traversal escape points at its editor row.
-// Returns the error copy or null when valid.
+// Validates the index-roots textarea before any network write: blank lines collapse on save, an
+// emptied editor is rejected, and `..` escapes are rejected with line numbers so a traversal escape
+// points at its editor row.
 export function validateIndexRootsText(
   text: string | undefined | null,
 ): string | null {
@@ -842,11 +784,9 @@ function normalizeIndexRootForCompare(value: string): string {
   return trimmed.replace(/\/+$/, "");
 }
 
-// Reports whether one index root sits inside one files allow root: an exact
-// match or a child path under the allow root counts as inside, so
-// `~/Docs/Sub` stays inside `~/Docs` and `~` contains every `~/...` entry.
-// Absolute paths never match `~` without the sigil prefix, so an
-// outside-filesystem root reads as outside instead of guessing home expansion.
+// Reports whether one index root sits inside one files allow root: an exact match or a child path
+// under the allow root counts as inside, so `~/Docs/Sub` stays inside `~/Docs` and `~` contains
+// every `~/...` entry.
 export function isIndexRootInsideAllowRoot(
   indexRoot: string,
   allowRoot: string,
@@ -861,10 +801,8 @@ export function isIndexRootInsideAllowRoot(
   return index.startsWith(allow.endsWith("/") ? allow : `${allow}/`);
 }
 
-// Lists the index roots sitting outside every loaded files allow root, so the
-// policy form can warn that recalled content from there may not be readable
-// by live file tools. An absent allow list degrades to no warning instead of
-// guessing, and blank entries never count as outside.
+// Lists the index roots sitting outside every loaded files allow root, so the policy form can warn
+// that recalled content from there may not be readable by live file tools.
 export function findOutsideIndexRoots(
   indexRoots: unknown,
   allowRoots: unknown,
@@ -884,11 +822,8 @@ export function findOutsideIndexRoots(
   );
 }
 
-// Always-skipped names from the index settings payload: the engine's
-// `alwaysSkipped` array populated from the walker's prune list. Non-string
-// entries degrade to skipped so a drifted payload never renders a blank row,
-// and a missing field degrades to empty so older engines without the field
-// render generic copy without inventing names.
+// Always-skipped names from the index settings payload: the engine's `alwaysSkipped` array
+// populated from the walker's prune list.
 export function resolveAlwaysSkipped(index: unknown): string[] {
   if (!index || typeof index !== "object") return [];
   const raw = (index as { alwaysSkipped?: unknown }).alwaysSkipped;
@@ -918,11 +853,8 @@ export function formatIndexReclaimResult(
   return `Reclaimed ${formatIndexBytes(reclaimed)} (before ${formatIndexBytes(before)} → after ${formatIndexBytes(after)})`;
 }
 
-// Per-source content row joining enablement with real totals: enablement comes
-// from the status sources list while documents/chunks/bytes come from the
-// additive bySource aggregates. A source missing from either side degrades to
-// disabled or zero rather than disappearing, so older engines without the
-// aggregates still render the canonical Files/Mail/Messages/Calendars/Reminders rows.
+// Per-source content row joining enablement with real totals: enablement comes from the status
+// sources list while documents/chunks/bytes come from the additive bySource aggregates.
 export interface IndexSourceContentRow {
   kind: string;
   enabled: boolean;
@@ -954,11 +886,9 @@ export function resolveIndexSourceContent(
   });
 }
 
-// Sanitized share of the total index for one chart row: the true
-// documents/total fraction capped to 0..1, degrading malformed, negative, or
-// zero inputs to zero so bars and labels never render NaN or Infinity.
-// Shared by the width and percent helpers below, whose guard rule is
-// identical and must stay in one place.
+// Sanitized share of the total index for one chart row: the true documents/total fraction capped to
+// 0..1, degrading malformed, negative, or zero inputs to zero so bars and labels never render NaN or
+// Infinity.
 export function indexShare(documents: number, totalDocuments: number): number {
   const docs = Number.isFinite(documents) && documents > 0 ? documents : 0;
   const total =
@@ -967,22 +897,16 @@ export function indexShare(documents: number, totalDocuments: number): number {
   return Math.min(1, docs / total);
 }
 
-// Visual track width for one chart row scaled by its document share of the
-// total index, so every bar reads as its honest fraction of the displayed
-// rows instead of competing for the longest slot. Shared by the per-source
-// and extraction-outcome charts, whose scaling rule is identical. No
-// visibility floor remains: the width equals the rounded percent below, so a
-// tiny bucket paints as a sliver while its label stays truthful.
+// Visual track width for one chart row scaled by its document share of the total index, so every
+// bar reads as its honest fraction of the displayed rows instead of competing for the longest slot.
 export function indexSourceBarWidth(documents: number, totalDocuments: number): string {
   const share = indexShare(documents, totalDocuments);
   if (share <= 0) return "0%";
   return `${Math.min(100, Math.round(share * 100))}%`;
 }
 
-// Honest share-of-index percent label for one chart row: the true rounded
-// share of the displayed total, so the label and the track width above always
-// agree. Shared by the per-source and extraction-outcome charts alongside
-// indexSourceBarWidth.
+// Honest share-of-index percent label for one chart row: the true rounded share of the displayed
+// total, so the label and the track width above always agree.
 export function indexSourceBarPercent(documents: number, totalDocuments: number): string {
   const share = indexShare(documents, totalDocuments);
   if (share <= 0) return "0%";
@@ -995,11 +919,9 @@ export function extractStatusLabel(status: string): string {
   return status && status.trim() ? status.trim() : "unknown";
 }
 
-// Last-run strip copy with the never-empty history contract: a fresh store
-// with no run ever recorded reads as an honest empty state, a first pass in
-// flight names itself instead of reading as empty history, and any completed
-// or cancelled run always renders its entry. The active flag covers every
-// in-flight signal so the two empty copies can never contradict each other.
+// Last-run strip copy with the never-empty history contract: a fresh store with no run ever
+// recorded reads as an honest empty state, a first pass in flight names itself instead of reading as
+// empty history, and any completed or cancelled run always renders its entry.
 export function resolveIndexLastRunText(
   lastRun: IndexLastRunStatus | null | undefined,
   isActive: boolean,
@@ -1008,10 +930,7 @@ export function resolveIndexLastRunText(
   return describeIndexRun(lastRun);
 }
 
-// Stage-aware header copy for the live progress line. Embedding vectorizes,
-// extracting reads the named corpus, and the phase-only snapshots keep their
-// plain copy; anything unrecognized degrades to the generic running copy so
-// the header never sticks on a wire token.
+// Stage-aware header copy for the live progress line.
 export function resolveIndexLiveTitle(
   phase: string | null | undefined,
   stage: string | null | undefined,
@@ -1035,10 +954,7 @@ export function resolveIndexLiveTitle(
   return "Running…";
 }
 
-// Reports whether a live progress frame belongs to an index run. The frame is
-// adopted only while a run is in flight and carrying the index tool name, so
-// a delayed frame after the run settles never resurrects cleared progress and
-// a concurrent tool with an omitted name never triggers a poll storm.
+// Reports whether a live progress frame belongs to an index run.
 export function isIndexProgressFrame(
   frame: Pick<WSToolProgressFrame, "toolName">,
   runActive: boolean,
@@ -1062,13 +978,8 @@ export function resolveIndexLiveStageTitle(
   return title === "Running…" ? "Indexing…" : title;
 }
 
-// One-line header for the polled live snapshot: trigger label plus stage title
-// with cumulative counts, skipped/errors when non-zero, engine rate, and
-// elapsed. The trigger label already carries its Run noun, so the em dash
-// separates it from the stage without repeating the word. Rate reads the wire
-// `live.rate` (docs/s) with the honest elapsed floor and omits itself when
-// absent so the line never jitters on zero or spikes early. Returns null
-// without live so callers render nothing.
+// One-line header for the polled live snapshot: trigger label plus stage title with cumulative
+// counts, skipped/errors when non-zero, engine rate, and elapsed.
 export function formatIndexLiveHeader(
   live: IndexLiveStatus | null | undefined,
 ): string | null {
@@ -1113,13 +1024,9 @@ export interface IndexingPanelProps {
   hideHeader?: boolean;
 }
 
-// Status dashboard for the Memory → Index Status tab: run controls first, stat
-// cards and per-source pills second, frontend-only charts last. Policy editing
-// lives in IndexPolicyPanel so this surface owns no Save path.
-// Module-scoped last-good status shared across mounts in this tab lifetime.
-// Written only by loadStatus on success and read only by the state initializer,
-// so a tab switch paints instantly and a failing refresh keeps the last panel.
-// The slow content total rides alongside so phase 2 owns slow byte totals.
+// Status dashboard for the Memory → Index Status tab: run controls first, stat cards and per-source
+// pills second, frontend-only charts last. Policy editing lives in IndexPolicyPanel so this surface
+// owns no Save path.
 let cachedIndexStatus: (IndexStatusResponse & IndexStorageResponse) | null = null;
 // Module-scoped slow arrival flag mirroring the cached status. Set on the
 // successful storage merge and cleared with the cache, so a remount paints
@@ -1144,10 +1051,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [hasStorage, setHasStorage] = useState(() => cachedHasStorage);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay
-  // mutually exclusive while a request is pending. Cancel rides a separate
-  // flag so it can run concurrent with Run: a local run holds `action="run"`
-  // for the whole pass, and Cancel must still reach the engine during it.
+  // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay mutually exclusive
+  // while a request is pending.
   const [action, setAction] = useState<"run" | "prune" | "reset" | "reclaim" | null>(null);
   const actionBusy = action !== null;
   const [cancelBusy, setCancelBusy] = useState(false);
@@ -1160,10 +1065,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // immediately and the state mirrors it for rendering.
   const runActiveRef = useRef(false);
   const [runActive, setRunActive] = useState(false);
-  // Cancelling window after a successful cancel request: the engine has been
-  // asked to stop but the run has not settled yet. The ref flips immediately
-  // so broadcast handlers observe it without waiting for a re-render, while
-  // the state drives the Cancelling pill, header, and disabled buttons.
+  // Cancelling window after a successful cancel request: the engine has been asked to stop but the
+  // run has not settled yet.
   const cancellingRef = useRef(false);
   const [cancelling, setCancelling] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -1182,29 +1085,20 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // error slot so a confirm blocked by an in-flight run explains itself
   // instead of landing as a dead click.
   const [resetError, setResetError] = useState<string | null>(null);
-  // Last-errors display state: the block stays collapsed behind its header
-  // toggle so a noisy pass never pushes surrounding content, plus per-row
-  // expansion for long lines. The expanded set is pruned to the
-  // current display list on every status change so stale full-text entries
-  // cannot accumulate unbounded across polls.
+  // Last-errors display state: the block stays collapsed behind its header toggle so a noisy pass
+  // never pushes surrounding content, plus per-row expansion for long lines.
   const [errorsExpanded, setErrorsExpanded] = useState(false);
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(
     () => new Set<string>(),
   );
-  // Freeze-then-jump: committed stat cards hold the last settled snapshot
-  // mid-run and jump atomically at completion, so there is no committed-growth
-  // flash. Only the live block stays live via the polled liveTotals snapshot.
-  // Generation counter for two-phase loads so overlapping polls keep only the
-  // newest storage merge. Phase 1 paints fast unconditionally while phase 2
-  // checks this before merging, so a slow storage answer never overwrites a
-  // newer fast snapshot.
+  // Freeze-then-jump: committed stat cards hold the last settled snapshot mid-run and jump
+  // atomically at completion, so there is no committed-growth flash. Only the live block stays live
+  // via the polled liveTotals snapshot.
   const loadGenerationRef = useRef(0);
   const [accessBusy, setAccessBusy] = useState<Record<string, boolean>>({});
 
-  // True whenever the engine reports a run in flight or this panel started one,
-  // so the in-run poll stays active and Run stays disabled during a real run.
-  // The Status pill below stays the authoritative running source; this flag
-  // only gates polling and buttons, never the live block.
+  // True whenever the engine reports a run in flight or this panel started one, so the in-run poll
+  // stays active and Run stays disabled during a real run.
   const progressActive = runActive || status?.running === true;
   const indexingEnabled = status?.enabled === true;
   // Mirrors the engine running flag for the broadcast consumer without
@@ -1236,29 +1130,19 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Displayed-total denominator for the source chart: every visible row shares
   // this sum so each bar reads as its honest fraction of the index.
   const sourceTotalDocuments = sourceContent.reduce((sum, row) => sum + row.documents, 0);
-  // Extraction-outcome breakdown for the second chart, largest bucket first so
-  // the dominant outcome leads the list while every bar still scales by the
-  // displayed total. Document counts are sanitized through floorPositive
-  // before sort, matching resolveIndexSourceContent, so
-  // malformed/negative/NaN payloads degrade to zero instead of misordering
-  // the rows or yielding NaN.
+  // Extraction-outcome breakdown for the second chart, largest bucket first so the dominant outcome
+  // leads the list while every bar still scales by the displayed total.
   const extractRows: IndexExtractStatusCounts[] = [...(status?.byExtractStatus ?? [])]
     .map((row) => ({ ...row, documents: floorPositive(row.documents) }))
     .sort((left, right) => right.documents - left.documents);
   // Displayed-total denominator for the extraction chart: the sum across the
   // outcome rows above, so labels and widths agree with the source chart rule.
   const extractTotalDocuments = extractRows.reduce((sum, row) => sum + row.documents, 0);
-  // Honest on-disk storage: the database file plus the write-ahead log as the
-  // primary figure, the text/vector/FTS/free rows as the breakdown, and the
-  // content total as the secondary detail. Older engines without the file
-  // sizes fall back to the content total with no breakdown row. The explicit
-  // arrival flag keeps sizing honest for an empty index whose breakdown stays
-  // all zeros after slow lands.
+  // Honest on-disk storage: the database file plus the write-ahead log as the primary figure, the
+  // text/vector/FTS/free rows as the breakdown, and the content total as the secondary detail.
   const storage = resolveIndexStorageBreakdown(status, hasStorage);
-  // Resolved effort reality for the status pane: the canonical nested `effort`
-  // block when present, otherwise the local mapping against the machine cores so the
-  // line still reflects the hardware. Hidden for older engines without any
-  // effort signal so the pane never invents a preset.
+  // Resolved effort reality for the status pane: the canonical nested `effort` block when present,
+  // otherwise the local mapping against the machine cores so the line still reflects the hardware.
   const statusEffort = resolveStatusEffort(status);
   const statusEffortPreset = statusEffort.preset;
   const statusCoreCount = resolveMachineCores(statusEffort.coreCount);
@@ -1290,13 +1174,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     loadGenerationRef.current = generation;
     setError(null);
     let fast: IndexStatusResponse | null = null;
-    // Freeze-then-jump gate for this load: while the fresh snapshot reports
-    // a run in flight over an existing panel, committed cards hold the last
-    // settled snapshot and only liveness (running plus live) is adopted, so
-    // a reconnect, a post-start probe, or any overlapping poll can never
-    // overwrite frozen totals mid-run. A null baseline still adopts fully so
-    // a mid-run mount paints instead of sticking on the skeleton, and a
-    // settled snapshot always adopts fully for the atomic jump.
+    // Freeze-then-jump gate: while a fresh snapshot reports a run in flight, committed cards hold
+    // the last settled snapshot and only liveness is adopted, preventing reconnects, post-start
+    // probes, or overlapping polls from overwriting frozen totals mid-run.
     let frozeCommitted = false;
     try {
       const response = await getIndexStatus();
@@ -1330,11 +1210,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       );
       return null;
     }
-    // Phase 2 fires without awaiting paint so the cold mount paints counts,
-    // pills, and the last-run strip immediately. The generation guard keeps
-    // only the newest storage answer when polls overlap. A frozen phase 1
-    // skips the slow merge because its byte totals are committed state too:
-    // they ride the settle jump instead of moving the size card mid-run.
+    // Phase 2 fires without awaiting paint so the cold mount paints counts, pills, and the last-run
+    // strip immediately. The generation guard keeps only the newest storage answer when polls
+    // overlap.
     void (async () => {
       if (frozeCommitted) return;
       try {
@@ -1370,10 +1248,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     return fast;
   }, []);
 
-  // Live-only poll while a run is in flight: fetches status but adopts only
-  // the live snapshot plus the running flag, holding every committed card
-  // frozen on the last settled snapshot. The cards jump atomically on the
-  // run_completed reload below, never mid-run.
+  // Live-only poll while a run is in flight: fetches status but adopts only the live snapshot plus
+  // the running flag, holding every committed card frozen on the last settled snapshot.
   const loadLiveOnly = useCallback(async () => {
     try {
       const fresh = await getIndexStatus();
@@ -1400,12 +1276,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     void loadStatus();
   }, [loadStatus]);
 
-  // Live broadcast consumer: run_completed jumps the frozen cards atomically
-  // via a full reload with no manual Refresh control, while `tool_progress`
-  // and run_started only refresh the live snapshot — numbers always come from
-  // the polled status live snapshot, never from frame parsing. A
-  // launch-triggered nightly or catch-up pass this panel did not start also
-  // raises an auto-start notice naming the trigger display label explicitly.
+  // Live broadcast consumer: run_completed jumps the frozen cards atomically via a full reload with
+  // no manual Refresh control, while `tool_progress` and run_started only refresh the live snapshot
+  // — numbers always come from the polled status live snapshot, never from frame parsing.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as WSGenericFrame).type;
@@ -1489,14 +1362,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     retryConnection();
   }, [retryConnection]);
 
-  // Clears the local run flight once the engine reports no run in flight, so a
-  // run started from another tab still settles the panel's busy state. The
-  // cancelling window settles the same way when the broadcast is missed: the
-  // status probe is authoritative, so a remote cancel still reaches its shared
-  // kept-work notice from the strip entry and re-enables Run without a
-  // separate Stopped variant. The live block unmounts through the cleared
-  // status live snapshot, so a missed broadcast never strands stale content
-  // on screen.
+  // Clears the local run flight once the engine reports no run in flight, so a run started from
+  // another tab still settles the panel's busy state.
   useEffect(() => {
     if (status?.running !== false) return;
     // Capture locality before clearing: a run this panel started resolves
@@ -1521,13 +1388,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     setCancelling(false);
   }, [status?.running, status?.lastRun]);
 
-  // Freeze-then-jump live poll while a run is in flight: polls only the live
-  // snapshot about every two seconds while progress is active or the
-  // cancelling window is open, so the live block stays live while the
-  // committed cards hold the last settled snapshot frozen with no reload and
-  // no flash. Pauses while the tab is hidden and clears on settle through the
-  // effect deps. Mount, broadcast run_completed, and after-action loads perform
-  // the atomic jump, and a missed broadcast still settles promptly.
+  // Polls only the live snapshot every ~2s while progress is active or cancelling is open,
+  // keeping the live block updated while committed cards hold the last settled snapshot frozen
+  // with no reload and no flash.
   useEffect(() => {
     if (!progressActive && !cancelling) return;
     const timer = setInterval(() => {
@@ -1537,10 +1400,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     return () => clearInterval(timer);
   }, [progressActive, cancelling, loadLiveOnly]);
 
-  // Starts an on-demand run asynchronously. The start request returns immediately
-  // (~5ms) without holding an idle HTTP socket open over long-running passes. The
-  // live progress block tracks live activity via WebSocket and status polling, and
-  // the run_completed broadcast settles the panel with the terminal summary.
+  // Starts an on-demand run asynchronously. The start request returns immediately (~5ms) without
+  // holding an idle HTTP socket open over long-running passes.
   const handleRun = async () => {
     if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     runActiveRef.current = true;
@@ -1576,11 +1437,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // Asks the engine to stop an in-flight run, then holds the cancelling window
-  // until the terminal broadcast or the status probe reports a settled run.
-  // Committed work survives, so a cancelled run simply resumes from the first
-  // unfinished item on the next run. Cancel rides its own busy flag so it can
-  // run concurrent with Run instead of multiplexing one shared action slot.
+  // Asks the engine to stop an in-flight run, then holds the cancelling window until the terminal
+  // broadcast or the status probe reports a settled run.
   const handleCancel = async () => {
     if (cancelBusy || cancellingRef.current) return;
     if (action === "prune" || action === "reset" || action === "reclaim") return;
@@ -1607,10 +1465,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // Compacts the index database, then shows the before and after on-disk
-  // figures so the reclaimed delta reads without reopening the size card.
-  // Blocked while a run is in flight like prune and reset, since compaction
-  // races the writer.
+  // Compacts the index database, then shows the before and after on-disk figures so the reclaimed
+  // delta reads without reopening the size card.
   const handleGrantAccess = async (kind: string) => {
     if (accessBusy[kind]) return;
     setAccessBusy((prev) => ({ ...prev, [kind]: true }));
@@ -1721,16 +1577,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // The grep-style live block mounts only from the polled live snapshot — or
-  // during the cancelling window — and unmounts fully on settle with no
-  // persistence. Without live data it renders nothing; the Status pill below
-  // owns the Running indicator so the block never duplicates it.
+  // The grep-style live block mounts only from the polled live snapshot — or during the cancelling
+  // window — and unmounts fully on settle with no persistence.
   const showLiveBlock = live != null || cancelling;
-  // Line 1 without any pill: trigger label plus stage-aware title with counts,
-  // rate, and elapsed while the snapshot is present, and Cancelling… during
-  // the stop window. Never renders a Running fallback.
-  // Honest rate for the cancelling branch, shared with the live header so both
-  // surfaces omit early-run spikes and absurd wire values identically.
+  // Line 1 without any pill: trigger label plus stage-aware title with counts, rate, and elapsed
+  // while the snapshot is present, and Cancelling… during the stop window. Never renders a Running
+  // fallback.
   const cancellingRate = live
     ? formatIndexRate(
         typeof live.rate === "number" ? live.rate : null,
@@ -1743,21 +1595,15 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       ? `Cancelling… ${formatIndexCount(live.scanned)} scanned · ${formatIndexCount(live.indexed)} indexed${cancellingRatePart} · ${formatToolProgressElapsedMs(typeof live.elapsedMs === "number" ? live.elapsedMs : 0)}`
       : "Cancelling…"
     : (formatIndexLiveHeader(live) ?? "");
-  // Fresh stores have no last run yet: while the first pass is in flight the
-  // live block already proves liveness, so the last-run line names it instead
-  // of reading as an empty history. The shared resolver keeps the two empty
-  // copies from ever contradicting each other.
+  // Fresh stores have no last run yet: while the first pass is in flight the live block already
+  // proves liveness, so the last-run line names it instead of reading as an empty history.
   const lastRunText = resolveIndexLastRunText(
     status?.lastRun ?? null,
     progressActive || showLiveBlock || cancelling,
   );
-  // Last-errors card projection: deduped lines with the raw Full Disk Access
-  // bullet suppressed whenever the guided onboarding renders, since the
-  // guidance is the formatted form of that failure. The guidance flag reads
-  // the raw payload so it still fires when every line is a denial and the
-  // visible list collapses to guidance-only. The header count stays
-  // guidance-inclusive over the deduped raw payload so a guidance-only denial
-  // still reads as Last errors (1) instead of (0).
+  // Last-errors card projection: deduped lines with the raw Full Disk Access bullet suppressed
+  // whenever the guided onboarding renders, since the guidance is the formatted form of that
+  // failure.
   const displayErrors = resolveDisplayIndexErrors(status?.lastErrors);
   const showFdaGuidance = hasFullDiskAccessError(status?.lastErrors);
   const totalErrorCount = dedupeIndexErrors(status?.lastErrors).length;
@@ -2328,10 +2174,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 Documents by source — share of index
               </h4>
               {sourceContent.map((source) => {
-                // Width equals the rounded share with no visibility floor, so a
-                // tiny bucket paints as a sliver while its label stays
-                // truthful. Zero-document rows skip the track entirely so an
-                // empty bar never reads as missing paint.
+                // Width equals the rounded share with no visibility floor, so a tiny bucket paints
+                // as a sliver while its label stays truthful.
                 const barWidth = indexSourceBarWidth(
                   source.documents,
                   sourceTotalDocuments,
@@ -2341,12 +2185,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   sourceTotalDocuments,
                 );
                 const isEmpty = source.documents <= 0;
-                // Stacked row keeps every track on its own full-width line so
-                // label length and trailing counts can never shift the bar
-                // origin: line one pairs the name with its share, line two
-                // paints the full-width track, line three carries the totals.
-                // A skipped source adds a muted fourth line with its verbatim
-                // reason so it never renders as healthy silence.
+                // Stacked row keeps every track on its own full-width line so label length and
+                // trailing counts can never shift the bar origin: line one pairs the name with its
+                // share, line two paints the full-width track, line three carries the totals.
                 const skippedReason = resolveIndexSourceSkippedReason(
                   status?.lastRun ?? null,
                   source.kind,
@@ -2564,18 +2405,15 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       read as raw rows when scoped by test id or assistive tech. */}
                   <ul data-testid="index-error-list" className="muted text-xs">
                     {displayErrors.map((detail, index) => {
-                      // Per-row expansion looks up the full error text so the
-                      // toggle survives status polls, while the React key stays
-                      // a short hash plus position so kilobyte-long failures
-                      // never become full-text keys. The test id uses the
-                      // visible position so it stays O(1) and stable.
+                      // Per-row expansion looks up the full error text so the toggle survives
+                      // status polls, while the React key stays a short hash plus position so
+                      // kilobyte-long failures never become full-text keys.
                       const expanded = expandedErrors.has(detail);
                       const long = isLongIndexError(detail);
                       const visibleText = expanded ? detail : truncateIndexError(detail);
-                      // Truncated previews render as plain text: slicing raw
-                      // markdown at the preview budget can split emphasis,
-                      // code, or link syntax and misrender through MarkdownText,
-                      // so only the expanded full text keeps markdown.
+                      // Truncated previews render as plain text: slicing raw markdown at the
+                      // preview budget can split emphasis, code, or link syntax and misrender
+                      // through MarkdownText, so only the expanded full text keeps markdown.
                       const showPlainPreview = long && !expanded;
                       return (
                         <li
@@ -2758,11 +2596,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   );
 }
 
-// Index policy form for the Settings → Indexing tab: master enablement,
-// per-source toggles, exclude globs, caps, effort presets with thermal and
-// power toggles, persisted only through this
-// form's own Save. Status cards, charts, and run controls stay on the Memory
-// tab so one surface never duplicates the other's control set.
+// Index policy form for the Settings → Indexing tab: master enablement, per-source toggles, exclude
+// globs, caps, effort presets with thermal and power toggles, persisted only through this form's own
+// Save.
 export function IndexPolicyPanel() {
   const [config, setConfig] = useState<IndexConfigData>(DEFAULT_INDEX_CONFIG);
   const [excludeText, setExcludeText] = useState<string>(
@@ -2771,10 +2607,8 @@ export function IndexPolicyPanel() {
   const [mailboxDenyText, setMailboxDenyText] = useState<string>(
     DEFAULT_INDEX_MAILBOX_DENY_TEXT,
   );
-  // Index roots textarea state, seeded from the loaded `config.roots` so the
-  // walk boundary edits without TOML hand-edits. One root per line, trimmed
-  // with blanks dropped on save; validation rejects empties and `..` before
-  // any network write.
+  // Index roots textarea state, seeded from the loaded `config.roots` so the walk boundary edits
+  // without TOML hand-edits.
   const [rootsText, setRootsText] = useState<string>(
     DEFAULT_INDEX_CONFIG.roots.join("\n"),
   );
@@ -2789,28 +2623,16 @@ export function IndexPolicyPanel() {
   // Null until the status fetch settles so resolveMachineCores falls back to
   // the browser hardwareConcurrency instead of guessing.
   const [policyCoreCount, setPolicyCoreCount] = useState<number | null>(null);
-  // Transient save feedback in a top-right stack so the confirmation never
-  // blocks the form. Distinct notices stack with independent timers; an
-  // identical copy replaces its sibling so repeat saves refresh one notice
-  // instead of duplicating, matching the Settings save pattern.
+  // Transient save feedback in a top-right stack so the confirmation never blocks the form.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
     useToastStack();
-  // Save-and-restart inputs come from the fresh post-PUT status read in
-  // handleSave, never from a cached flag, so a run started between boot and
-  // save still counts and a disable-then-save never restarts. No running refs
-  // are kept here (the dead runActiveRef was removed): the dashboard owns its
-  // runActive/statusRunning guards for live polling, while this form only
-  // needs the effort core count plus the fresh decision read. The loadStatus
-  // and notice duplication with the dashboard stays local — different owners
-  // with different lifecycles — to avoid a shared-hook refactor risk.
-  // Restart outcome line rendered under the toast stack: the shared run
-  // formatter keeps it identical to the status strip so the fresh run reads
-  // the same in both places.
+  // Save-and-restart inputs come from the fresh post-PUT status read in handleSave, never from a
+  // cached flag, so a run started between boot and save still counts and a disable-then-save never
+  // restarts.
   const [notice, setNotice] = useState<string | null>(null);
-  // Mounted guard for the save-and-restart chain: persist, status reads, the
-  // cancel/poll/run sequence, and the toasts all settle after awaits, so an
-  // unmount mid-save must skip every state update instead of writing into a
-  // retired tree.
+  // Mounted guard for the save-and-restart chain: persist, status reads, the cancel/poll/run
+  // sequence, and the toasts all settle after awaits, so an unmount mid-save must skip every state
+  // update instead of writing into a retired tree.
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -2820,11 +2642,9 @@ export function IndexPolicyPanel() {
   }, []);
   const lastSavedSourcesRef = useRef<{ calendars: boolean; reminders: boolean } | null>(null);
 
-  // Fresh status read shared by the boot load and the save-and-restart flow:
-  // the saved policy stays enabled-aware while the running flag settles, so
-  // the restart decision always observes the engine rather than a stale flag.
-  // Only the effort core count is cached; running/enabled come from the fresh
-  // response in handleSave.
+  // Fresh status read shared by the boot load and the save-and-restart flow: the saved policy stays
+  // enabled-aware while the running flag settles, so the restart decision always observes the engine
+  // rather than a stale flag.
   const loadStatus = useCallback(async () => {
     try {
       const response = await getIndexStatus();
@@ -2836,11 +2656,9 @@ export function IndexPolicyPanel() {
     }
   }, []);
 
-  // Loads the [index] section through the shared settings read so the editable
-  // form starts from the stored policy. An older engine without the section
-  // leaves the local defaults in place instead of blanking the form. Effort
-  // knobs degrade to their defaults when the engine predates them so the
-  // control never renders blank.
+  // Loads the [index] section through the shared settings read so the editable form starts from the
+  // stored policy. An older engine without the section leaves the local defaults in place instead of
+  // blanking the form.
   const loadConfig = useCallback(async () => {
     try {
       const settings = await getSettings();
@@ -2931,10 +2749,9 @@ export function IndexPolicyPanel() {
     void loadConfig();
   }, [loadConfig]);
 
-  // Persists the [index] patch and returns the saved enabled flag from the
-  // PUT response (falling back to the pre-save closure only when the engine
-  // omits the section), so handleSave restarts solely from post-save truth.
-  // Throws on transport failure; the caller surfaces it as a save error.
+  // Persists the [index] patch and returns the saved enabled flag from the PUT response (falling
+  // back to the pre-save closure only when the engine omits the section), so handleSave restarts
+  // solely from post-save truth.
   const persistConfig = useCallback(async (): Promise<boolean> => {
     const exclude = excludeText
       .split("\n")
@@ -2944,16 +2761,12 @@ export function IndexPolicyPanel() {
     // trimmed, blanks dropped so an emptied editor opts every mailbox back
     // in instead of persisting whitespace rows.
     const mailboxDeny = parseMailboxDenyText(mailboxDenyText);
-    // Index roots mirror the excludes editor: one root per line, trimmed with
-    // blanks dropped, saved through the existing `roots` key with no API
-    // shape change. Validation rejects empties and `..` in handleSave before
-    // this runs, so this stays a pure parse.
+    // Index roots mirror the excludes editor: one root per line, trimmed with blanks dropped, saved
+    // through the existing `roots` key with no API shape change.
     const roots = parseIndexRootsText(rootsText);
     const effort = normalizeIndexEffortPreset(config.effort);
-    // Presets derive workers on the engine so they must save 0; only custom
-    // carries an explicit 1..64 count. The stepper fallback stays
-    // DEFAULT_INDEX_WORKERS (not the 0 wire default) so a custom preset with
-    // no stored value still saves a valid count.
+    // Presets derive workers on the engine so they must save 0; only custom carries an explicit
+    // 1..64 count.
     const customWorkers =
       resolveIndexWorkersValue(config) ?? DEFAULT_INDEX_WORKERS;
     const workers = effort === "custom" ? customWorkers : 0;
@@ -3020,17 +2833,8 @@ export function IndexPolicyPanel() {
     return typeof index?.enabled === "boolean" ? index.enabled : config.enabled;
   }, [config, excludeText, mailboxDenyText, rootsText]);
 
-  // Sole owner of save-and-restart: the settings patch never auto-starts a
-  // run, so a policy saved mid-scan must stop the old generation and start a
-  // fresh one with the new roots/excludes/caps. An idle save or a save with
-  // the master switch off keeps the save-only path and starts nothing, while
-  // a restart failure still leaves the saved policy in place. Order stays
-  // persist -> cancel -> poll -> run -> load; both decision inputs come from
-  // post-PUT truth (saved enabled plus the fresh status read) so a run that
-  // started between boot and save is not missed and a disable never restarts.
-  // The restart line clears at save start and on every idle/error path so a
-  // stale outcome never lingers under a fresh toast; every post-await update
-  // bails when the panel unmounts mid-save.
+  // Sole owner of save-and-restart: the settings patch never auto-starts a run, so a policy saved
+  // mid-scan must stop the old generation and start a fresh one with the new roots/excludes/caps.
   const handleSave = async () => {
     if (saving) return;
     setSaving(true);
@@ -3123,13 +2927,9 @@ export function IndexPolicyPanel() {
             );
             return;
           }
-          // The start request only answers `running` or `skipped`, so no
-          // notice derives from the start response: the terminal outcome
-          // settles through the post-restart status probe, which renders the
-          // fresh last-run summary on the restart outcome line — the same
-          // probe-driven settle every other run path uses. Without this
-          // re-probe render the outcome line would stay blank until an
-          // unrelated poll tick or broadcast.
+          // Because the start request only answers `running` or `skipped`, terminal outcome settles
+          // through the post-restart status probe, rendering the fresh last-run summary on the restart
+          // outcome line using the same probe-driven settle every other run path uses.
           await runIndex();
           const restarted = await loadStatus();
           if (!mountedRef.current) return;
@@ -3168,13 +2968,7 @@ export function IndexPolicyPanel() {
     setConfig((previous) => ({ ...previous, ...patch }));
   };
 
-  // Effort control state: the preset plus the custom stepper and the two
-  // thermal/power toggles. The resolved reality below maps the preset onto
-  // the machine's core count so the same preset scales from a laptop to a
-  // studio machine without inventing a worker count the hardware cannot meet.
-  // The engine core count from GET /index/status wins when present so a
-  // remote dashboard (phone browser vs Mac engine) resolves against the
-  // engine hardware; otherwise the browser hardwareConcurrency applies.
+  // Effort control state: the preset plus the custom stepper and the two thermal/power toggles.
   const effortPreset = normalizeIndexEffortPreset(config.effort);
   const machineCores = resolveMachineCores(policyCoreCount);
   // Stepper fallback stays DEFAULT_INDEX_WORKERS (not the 0 wire default)
@@ -3198,26 +2992,20 @@ export function IndexPolicyPanel() {
     machineCores != null && machineCores > 0
       ? Math.min(machineCores, INDEX_MAX_CUSTOM_WORKERS)
       : INDEX_MAX_CUSTOM_WORKERS;
-  // Per-document vector chunk cap: bounds embedding work so one text-dense
-  // document cannot fan an outsized batch; chunks beyond the cap stay
-  // keyword-only. Clamped into the engine 1..4096 range so a hand-typed value
-  // never fails the save.
+  // Per-document vector chunk cap: bounds embedding work so one text-dense document cannot fan an
+  // outsized batch; chunks beyond the cap stay keyword-only.
   const vectorCap =
     resolveIndexVectorCapValue(config) ??
     (DEFAULT_INDEX_CONFIG.maxVectorChunksPerDocument as number);
   const vectorCapMax = 4096;
-  // Root-scoped coverage plus the walker prune list: the subtitle reads the
-  // live roots textarea so it names exactly what the next run will cover with
-  // no hardcoded home names, while the prune list stays read from the loaded
-  // [index] payload. The credential deny list stays out of the rendered names
-  // and is described generically in the detail block.
+  // Root-scoped coverage plus the walker prune list: the subtitle reads the live roots textarea so
+  // it names exactly what the next run will cover with no hardcoded home names, while the prune list
+  // stays read from the loaded [index] payload.
   const liveRoots = parseIndexRootsText(rootsText);
   const scopeSubtitle = describeIndexScope(liveRoots);
   const alwaysSkipped = resolveAlwaysSkipped(config);
-  // Informational outside-allow-roots warning: any live index root outside the
-  // loaded files allow roots means recalled content from there may not be
-  // readable by live file tools. Null allow roots (not yet loaded or older
-  // engines) degrade to no warning instead of guessing.
+  // Informational outside-allow-roots warning: any live index root outside the loaded files allow
+  // roots means recalled content from there may not be readable by live file tools.
   const outsideRoots = findOutsideIndexRoots(liveRoots, filesAllowRoots);
 
   return (
@@ -3618,10 +3406,9 @@ export function IndexPolicyPanel() {
   );
 }
 
-// Auto-start notice for a run broadcast that this panel did not initiate:
-// a launch-triggered nightly or catch-up pass announces itself by display
-// label so a missed nightly window names the catch-up explicitly instead of
-// reading as a generic index run.
+// Auto-start notice for a run broadcast that this panel did not initiate: a launch-triggered
+// nightly or catch-up pass announces itself by display label so a missed nightly window names the
+// catch-up explicitly instead of reading as a generic index run.
 export function describeAutoStartNotice(
   run: { message?: unknown; response?: unknown } | null | undefined,
 ): string | null {

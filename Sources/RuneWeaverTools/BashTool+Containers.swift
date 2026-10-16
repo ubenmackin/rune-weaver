@@ -1,22 +1,10 @@
 // Rune Weaver Tools — Container backends for sandboxed bash execution.
-//
-// Purpose: route validated turns to session and workspace containers with
-// per-tier working directories, keeping host paths denied while getcwd succeeds.
-// Scope: strict per-turn exec plus machine-scoped exec, missing-runtime denial,
-// and container result mapping; screening, quota, and reap live elsewhere.
-// Architectural role: execution branch of BashTool beside the Seatbelt spawn;
-// the turn loop owns lifecycle and reaps only terminal outcomes.
 
 import Foundation
 import RuneWeaverCore
 
 extension BashTool {
     /// Runs one command in the session strict container.
-    ///
-    /// Ensures the per-turn container then execs with cwd set to its fresh
-    /// scratch mount, so host paths stay denied while getcwd succeeds.
-    /// A workspace-relative cwd resolves inside the scratch leaf with a
-    /// containment check; outside-mount requests deny instead of widening.
     func runStrictContainer(
         command: String,
         timeoutSeconds: TimeInterval,
@@ -100,12 +88,8 @@ extension BashTool {
         }
     }
 
-    /// Runs one command in the long-lived workspace container.
-    ///
-    /// Ensures the machine container then execs with cwd set to the
-    /// workspace root, which is the only mount.
-    /// A workspace-relative cwd resolves inside the root with a containment
-    /// check; outside-mount requests deny instead of widening.
+    /// Runs one command in the long-lived workspace container. Ensures the machine container then
+    /// execs with cwd set to the workspace root, which is the only mount.
     func runMachineScoped(
         command: String,
         timeoutSeconds: TimeInterval,
@@ -190,11 +174,6 @@ extension BashTool {
     }
 
     /// Resolves the strict guest workdir inside the scratch mount.
-    ///
-    /// The requested host cwd must sit inside the workspace root; its relative
-    /// tail re-roots under the session scratch guest path so `subdir` runs at
-    /// `/workspace/subdir` instead of the tier root. Outside-mount requests
-    /// deny instead of widening the mount.
     private func strictGuestWorkdir(
         requestedCwd: URL?,
         workspaceRoot: URL,
@@ -225,10 +204,7 @@ extension BashTool {
         return StrictGuestWorkdirResolution(workdir: guest, relative: relative, failure: nil)
     }
 
-    /// Best-effort scratch subdir creation so a relative cwd exists in the guest.
-    ///
-    /// The scratch leaf starts empty; creating the relative tail on the host
-    /// gives `exec -w /workspace/subdir` a directory to land in. Failures fall
+    /// Best-effort scratch subdir creation so a relative cwd exists in the guest. Failures fall
     /// through to the exec, which surfaces the honest missing-directory error.
     private func ensureStrictGuestSubdir(relative: String?, scratchURL: URL) {
         guard let relative, !relative.isEmpty else { return }
@@ -237,9 +213,6 @@ extension BashTool {
     }
 
     /// Resolves the machine guest workdir inside the workspace root mount.
-    ///
-    /// Host and guest share the same absolute path, so an inside-root cwd maps
-    /// directly; outside-mount requests deny instead of widening the mount.
     private func machineGuestWorkdir(
         requestedCwd: URL?,
         workspaceRoot: URL,
@@ -266,10 +239,6 @@ extension BashTool {
     }
 
     /// Relative tail of a path inside a root, nil when outside.
-    ///
-    /// Both sides standardize plus resolve symlinks before the prefix check so
-    /// a symlinked parent cannot hide an outside target behind an inside
-    /// spelling; the trailing-slash form keeps sibling prefixes from matching.
     private static func relativePathInsideRoot(_ path: URL, root: URL) -> String? {
         let resolvedRoot = root.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL.path
         let resolvedPath = path.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL.path

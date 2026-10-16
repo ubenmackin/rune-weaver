@@ -1,66 +1,17 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
-//
-// Single-sources the full built-in suite (Email, Messages, Calendar, Reminders, Files, Bash, Memory,
-// Goals, Fan-out, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
-// `AppModel`, and `ServerContext.make` all build through this helper so the
-// registry cannot drift between entry points. Web, browser, and API tools run
-// under one `[browser]` policy; `api.request` additionally exempts the
-// configured LLM origins from the SSRF loopback deny. Goal tools register only
-// when both the engine and store arrive (nil means unregistered); a disabled
-// `[goals]` section still registers and fails closed inside each tool so the
-// surface stays visible instead of shape-shifting.
-// Fan-out tools follow the
-// ships-disabled invariant: registration rides the optional fan-out engine
-// (nil means unregistered), and the tool registers disabled behind the
-// tool-state toggle like the desktop tools, so a stock install never puts
-// parallel worker fan-out in front of the model until the operator enables it.
-//
-// `api.request` is the one exception to silent-nil defaults: the factory takes
-// `policyStore:` (nil builds and loads the factory default) and fails the
-// whole build closed when no verified policy is available, so no entry point
-// can register an unsupervised egress tool.
 
 import RuneWeaverCore
 
 /// Shared built-in tool suites registered on every `ToolBus` by CLI, app, and serve.
 public enum BuiltinToolPlugins {
-    /// Tool names that ship disabled on every fresh registration.
-    ///
-    /// The tool-state toggle is the sole authority for these capabilities: boot
-    /// paths register them with `isEnabled: false`, persisted rows restore
-    /// operator intent right after, and no config gate overrides that state. A
-    /// stock install therefore never puts these tools in front of the model
-    /// until the operator enables them. Every fresh-registration site consumes
-    /// this set so the boot paths cannot drift.
+    /// Tool names that ship disabled on every fresh registration. A stock install therefore never
+    /// puts these tools in front of the model until the operator enables them.
     public static let shipsDisabledToolNames: Set<String> = Set(
         DesktopTools.allToolNames + FanOutTools.toolNames
     )
 
-    /// Builds the full built-in tool suite (Email, Messages, Calendar, Reminders, Files, Bash, Memory, Goals, Web, Browser, API, Media, Desktop, Fan-out)
-    /// from component configurations.
-    ///
-    /// Goal tools join only when both the engine and store arrive; nil keeps them
-    /// unregistered so callers without pursuit wiring see no shape change. A disabled
-    /// `[goals]` section still registers through the same path and fails closed inside
-    /// each tool, keeping `GET /tools` stable instead of shape-shifting with config.
-    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
-    /// the fan-out engine arrives (nil keeps it unregistered), and it registers
-    /// disabled behind the tool-state toggle (see `shipsDisabledToolNames`) with
-    /// no config gate overriding that state. The read-only subset the workers get derives from
-    /// the built registry snapshot at this point, so the fan-out tool is appended
-    /// after every other suite and the subset covers everything this install ships.
-    /// - Parameter policyStore: Shared security policy store; nil builds and
-    ///   loads the factory default. Either way exactly one store instance and
-    ///   one egress supervisor back the `api.request` registration.
-    /// - Parameter supersededReviewNotifier: Optional propagation hook the
-    ///   serving process hands to `files.write` so a live write that
-    ///   supersedes a staged review reaches connected dashboards; nil keeps
-    ///   direct-core writers silent.
-    /// - Parameter recipientAliasStore: Durable alias store the send tool
-    ///   learns from after a resolved-name send; nil keeps alias learning off.
-    /// - Parameter scheduledSendBooking: Seam booking approved scheduled sends
-    ///   for the send tools; nil keeps scheduleAt failing closed with guidance.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available.
+    /// Builds the full built-in tool suite (Email, Messages, Calendar, Reminders, Files, Bash,
+    /// Memory, Goals, Web, Browser, API, Media, Desktop, Fan-out) from component configurations.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -143,14 +94,8 @@ public enum BuiltinToolPlugins {
             scheduledSendBooking: scheduledSendBooking,
             supersededReviewNotifier: supersededReviewNotifier
         )
-        // Bash always registers so GET /tools stays stable; a disabled
-        // config fails closed inside BashTool.execute via its enabled guard.
-        // The workspace scratch quotas travel with the shell so the default
-        // cwd and the pre-exec quota gate observe file config. One shared workspace backs
-        // bash so staged-copy reads, cwd pinning, quota gating, plus tier
-        // mount scoping agree on the same root. The supervisor is mandatory
-        // here, so every screened dial honors declared hosts plus policy plus
-        // the SSRF guard with no unsupervised fallback path.
+        // Bash always registers so GET /tools stays stable; a disabled config fails closed inside
+        // BashTool.execute via its enabled guard.
         let sharedWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         let bashTool = BashTool(
             bashConfig: bashConfig,
@@ -198,10 +143,9 @@ public enum BuiltinToolPlugins {
             egressSupervisor: supervisor
         )
         if let fanOutEngine {
-            // The fan-out tool appends last so the read-only subset derives
-            // from the complete built registry; external plugins discovered
-            // later join workers only when the fanout policy widens to the
-            // full live registry.
+            // The fan-out tool appends last so the read-only subset derives from the complete built
+            // registry; external plugins discovered later join workers only when the fanout policy
+            // widens to the full live registry.
             tools += FanOutTools.makeTools(
                 engine: fanOutEngine,
                 conversations: goalConversations,
@@ -212,11 +156,7 @@ public enum BuiltinToolPlugins {
     }
 
     /// Convenience overload building all tools from a unified `RuneWeaverConfig`.
-    /// - Parameter policyStore: Shared security policy store; nil builds and
-    ///   loads the factory default.
-    /// - Parameter recipientAliasStore: Durable alias store the send tool
-    ///   learns from after a resolved-name send; nil keeps alias learning off.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available.
+    /// - Parameter policyStore: Shared security policy store; nil builds and loads the factory default.
     public static func makeAllTools(
         config: RuneWeaverConfig,
         memoryEngine: MemoryEngine? = nil,
@@ -278,26 +218,9 @@ public enum BuiltinToolPlugins {
         )
     }
 
-    /// Registers the full built-in tool suite on the provided ToolBus.
-    /// The single registration surface for built-in tools; callers that need a
-    /// custom subset build from `makeTools`/`makeAllTools` and register directly.
-    ///
-    /// Capabilities in `shipsDisabledToolNames` always register but arrive
-    /// disabled: persisted tool-state rows re-apply via `restoreToolStates`, so a
-    /// stock install never puts screen capture or parallel worker fan-out in
-    /// front of the model at boot until the operator enables the tool-state
-    /// toggle. Goal
-    /// tools register only when both the engine and store arrive, and they arrive
-    /// enabled even when `[goals]` is off so the honest disabled copy (not a
-    /// bus-disabled line) answers. Fan-out tools follow the same ships-disabled
-    /// posture: they register only when the fan-out engine arrives, and they arrive
-    /// disabled with the tool-state toggle as the sole authority — no second gate.
-    /// - Parameter policyStore: Shared security policy store; nil builds and
-    ///   loads the factory default before any tool registers, so a boot can
-    ///   never leave an unsupervised `api.request` on the bus.
-    /// - Parameter recipientAliasStore: Durable alias store the send tool
-    ///   learns from after a resolved-name send; nil keeps alias learning off.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available.
+    /// Registers the full built-in tool suite on the provided ToolBus. The single registration
+    /// surface for built-in tools; callers that need a custom subset build from
+    /// `makeTools`/`makeAllTools` and register directly.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
@@ -382,10 +305,9 @@ public enum BuiltinToolPlugins {
             workspaceConfig: workspaceConfig,
             workspaceStore: workspaceStore
         ) {
-            // Every other builtin keeps the enabled-by-default registration;
-            // capabilities in `shipsDisabledToolNames` ship disabled so only an
-            // operator-enabled tool goes live (stored rows restore right after
-            // registration).
+            // Every other builtin keeps the enabled-by-default registration; capabilities in
+            // `shipsDisabledToolNames` ship disabled so only an operator-enabled tool goes live
+            // (stored rows restore right after registration).
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
     }
@@ -394,24 +316,8 @@ public enum BuiltinToolPlugins {
 // MARK: - Web / Browser Tool Suite
 
 extension BuiltinToolPlugins {
-    /// Builds the shared five-tool set for one `[browser]` policy.
-    /// - Parameters:
-    ///   - browserConfig: `[browser]` policy feeding search, fetch, and API tools.
-    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
-    ///   - llmServerURLs: Configured LLM `server_url` values exempted from the SSRF loopback deny.
-    ///   - gateway: Playwright gateway shared by the browser tools.
-    ///   - searchTransport: Hermetic SearXNG transport for tests; live session when nil.
-    ///   - fetchTransport: Hermetic fetch transport for tests; live session when nil.
-    ///   - apiTransport: Hermetic API transport for tests; live session when nil.
-    ///   - ensurer: Lifecycle ensurer for tests; shared actor when nil.
-    ///   - secrets: Shared secrets backing surrogate resolution; fresh instance when nil.
-    ///   - policyStore: Shared security policy store. Nil constructs and loads
-    ///     the factory default, which reads `~/.runeweaver/policy.toml`, seeds
-    ///     safe deny-by-default defaults on first run, and fails closed when
-    ///     the file cannot be verified.
-    /// - Returns: Tools in registration order.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available;
-    ///   an unsupervised `api.request` is never registered.
+    /// Builds the shared five-tool set for one `[browser]` policy. browserConfig:
+    /// `[browser]` policy feeding search, fetch, and API tools.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -540,16 +446,11 @@ extension BuiltinToolPlugins {
             recipientAliasStore: recipientAliasStore,
             booking: scheduledSendBooking
         )
-        // Calendar and reminders resolve nil to the shared production default:
-        // a single live EventKit store on EventKit platforms, fail-closed
-        // unavailable elsewhere. Sharing one instance keeps calendar and
-        // reminders on one EKEventStore object; callers inject a gateway to
-        // override (for example hermetic tests).
+        // Calendar and reminders resolve nil to the shared production default: a single live
+        // EventKit store on EventKit platforms, fail-closed unavailable elsewhere.
         #if canImport(EventKit)
-            // One shared instance backs both gateways so calendar and reminders
-            // never mint separate system stores. Creating it unconditionally is
-            // cheap (no prompt; authorization stays observed fail-closed) and
-            // keeps the two nil-defaults on the same object.
+            // One shared instance backs both gateways so calendar and reminders never mint separate
+            // system stores.
             let sharedLiveStore = LiveEventKitStore()
             let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: sharedLiveStore)
             let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: sharedLiveStore)
@@ -567,13 +468,8 @@ extension BuiltinToolPlugins {
         return tools
     }
 
-    /// Builds the mandatory egress supervisor from the already-resolved store.
-    ///
-    /// Callers resolve the one store first via `PolicyStore.makeLoaded` so the
-    /// supervisor and the merged origins read the same verified snapshot and
-    /// exactly one store instance backs the build. The supervisor factory
-    /// re-verifies the snapshot, so no unsupervised registry is built.
-    /// - Throws: `PolicyInvariantError` when the store holds no verified policy.
+    /// Builds the mandatory egress supervisor from the already-resolved store. - Throws:
+    /// `PolicyInvariantError` when the store holds no verified policy.
     private static func makeEgressSupervisor(
         resolvedStore: PolicyStore,
         secrets: SecretsManager?,

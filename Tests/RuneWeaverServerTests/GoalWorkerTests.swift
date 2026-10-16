@@ -1,12 +1,4 @@
 // Rune Weaver Server Tests — Goal advancement firing in the scheduler worker.
-//
-// Exercises the background goal turn source end to end with stub language
-// providers: due goals fire exactly one linked turn, future goals stay
-// silent, contended goal locks skip without running, parked goal turns
-// resume in their original session, and achievement-born suggestions are
-// announced on the proactive frame (and suppressed when the interruption gate
-// is off). The suite owns the worker plus goal store pairing so scheduler job
-// firing and goal firing stay isolated on their dedicated single-flight locks.
 
 import Foundation
 import NIOWebSocket

@@ -1,13 +1,4 @@
 // Rune Weaver Core Tests — Session origin metadata: title, source, parent link.
-//
-// Exercises the session-origin contract through ConversationManager and the
-// orchestrator turn path: fill-if-nil on ensureSession, overwrite semantics for
-// the parent link, listing-payload propagation, and the worker-shaped
-// UserInput that stamps a fan-out session with its subtask title, the
-// "fanout_worker" source, and the origin session as parent. The harness mirrors
-// the server lifecycle fixture: ConversationManager + ToolBus(PermissionGate)
-// + MemoryEngine + a stub provider yielding one finished chunk. Tests never
-// touch the live LLM stack or the real engine data directory.
 
 import Foundation
 @testable import RuneWeaverCore

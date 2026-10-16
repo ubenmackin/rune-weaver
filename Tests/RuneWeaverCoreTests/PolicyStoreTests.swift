@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — PolicyStore lifecycle, parsing, and serialization.
-//
-// Pins the contract that policy.toml owns network plus credentials only:
-// parsed, validated, serialized, and round-tripped correctly. Legacy
-// filesystem and tool tables are tolerated on load and ignored without
-// error so older files keep booting. Malformed or invariant-violating
-// policies fall back to the safe factory default.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -201,10 +195,9 @@ struct PolicyStoreTests {
 
     @Test
     func `Store-owned round-trip proof returns bytes that reparse identically`() throws {
-        // The settings PUT route serializes through this shared proof, so a
-        // clean candidate must come back as bytes the parser reads as the
-        // exact accepted policy, while a document that would change meaning on
-        // reload must throw instead of reaching disk.
+        // The settings PUT route serializes through this shared proof, so a clean candidate must
+        // come back as bytes the parser reads as the exact accepted policy, while a document that
+        // would change meaning on reload must throw instead of reaching disk.
         let policy = SecurityPolicy(
             network: NetworkEgressPolicy(
                 mode: .allowlistOnly,
@@ -658,11 +651,9 @@ struct PolicyStoreTests {
 
     @Test
     func `Ensure service domains never overwrites a present-but-rejected policy file`() async throws {
-        // A rejected file leaves the store without an accepted posture;
-        // auto-population must refuse instead of writing safe-default plus
-        // service hosts over the operator's content and then claiming the
-        // result as verified. The snapshot must keep throwing so the egress
-        // supervisor factory still refuses boot for the same file.
+        // A rejected file leaves the store without an accepted posture; auto-population must refuse
+        // instead of writing safe-default plus service hosts over the operator's content and then
+        // claiming the result as verified.
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rw-policy-rejected-ensure-\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: url) }

@@ -1,8 +1,4 @@
 // Rune Weaver Tools Tests — Calendar tool contract and mock round-trip tests.
-//
-// Purpose: pin calendar tool names, levels, arg validation, and gateway delegation.
-// Scope: hermetic mock gateway only; no live EventKit access.
-// Architectural role: guards the ToolBus surface while gateway tests own persistence.
 
 import Foundation
 import os

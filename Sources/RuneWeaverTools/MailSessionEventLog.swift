@@ -1,44 +1,22 @@
 // Rune Weaver Tools — Mail session JSONL event log for IMAP session diagnostics.
-//
-// Purpose: records one JSON line per mail session lifecycle step into
-// `~/.runeweaver/logs/mail-session.jsonl` so operators can trace spawns,
-// opens, commands, and closes without ever capturing secrets. Scope: session
-// layer only; pool layers may add a mailbox field through the generic emit.
-// Architectural role: single owner for event shapes; session actors own the
-// emission points and pass only sizes, latencies, and outcomes.
 
 import Foundation
 import RuneWeaverCore
 
-/// JSONL event log for persistent mail sessions.
-///
-/// Every event carries fractional-second ISO8601 `ts`, the `event` name, the
-/// owning `account`, and the helper `pid` when known. Callers add only sizes,
-/// latencies, and outcomes; passwords, bodies, subjects, and request payloads
-/// never enter any field. The live sink appends open-append-close per line and
-/// swallows failures so diagnostics never fail a turn.
+/// JSONL event log for persistent mail sessions. Callers add only sizes, latencies, and outcomes;
+/// passwords, bodies, subjects, and request payloads never enter any field.
 public struct MailSessionEventLog: Sendable {
     /// Receives one JSON line without a trailing newline.
-    ///
-    /// The live sink appends the line plus a newline under a serial queue;
-    /// tests inject a collector to assert ordering and redaction hermetically.
     public typealias LineSink = @Sendable (String) -> Void
 
-    /// Maximum stderr bytes carried in a dump event.
-    ///
-    /// Bounds the retained helper output so a chatty helper cannot inflate the
-    /// log while still preserving the last words needed for diagnosis.
+    /// Maximum stderr bytes carried in a dump event. Bounds the retained helper output so a chatty
+    /// helper cannot inflate the log while still preserving the last words needed for diagnosis.
     public static let maxStderrDumpBytes = 8 * 1024
 
     /// Serial queue ordering live appends.
     private static let liveQueue = DispatchQueue(label: "com.runeweaver.mail.session-event", qos: .utility)
 
     /// Sendable format style for fractional-second ISO8601 timestamps.
-    ///
-    /// Uses the value-type `Date.ISO8601FormatStyle` instead of the
-    /// reference-type `ISO8601DateFormatter`, so no locking or `@unchecked
-    /// Sendable` wrapper is needed. The style is a `Sendable` struct that
-    /// produces identical output to the former locked formatter.
     private static let timestampStyle = Date.ISO8601FormatStyle(
         includingFractionalSeconds: true
     )
@@ -82,12 +60,8 @@ public struct MailSessionEventLog: Sendable {
         return false
     }
 
-    /// Live log appending to the default file.
-    ///
-    /// Always on with no configuration knob in production; failures are swallowed
-    /// so event logging never fails a session turn. When running under unit tests,
-    /// this automatically returns `.silent` so test suites never pollute the
-    /// production log file with test accounts or dummy queries.
+    /// Live log appending to the default file. Always on with no configuration knob in production;
+    /// failures are swallowed so event logging never fails a session turn.
     public static var live: MailSessionEventLog {
         guard !isRunningInTestEnvironment else {
             return .silent
@@ -124,16 +98,9 @@ public struct MailSessionEventLog: Sendable {
         return URL(fileURLWithPath: expanded).appendingPathComponent("mail-session.jsonl")
     }
 
-    /// Emits one event with the shared envelope plus caller fields.
-    ///
-    /// The envelope owns `ts`, `event`, `account`, and `pid`; `fields` carries
-    /// only sizes, latencies, and outcomes so secrets cannot enter the log.
-    /// Unencodable field values are dropped rather than failing the caller.
-    /// - Parameters:
-    ///   - event: Event name such as `session.spawn`.
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known, nil for hermetic fakes.
-    ///   - fields: Extra outcome fields without any secret content.
+    /// Emits one event with the shared envelope plus caller fields. The envelope owns `ts`,
+    /// `event`, `account`, and `pid`; `fields` carries only sizes, latencies, and outcomes so
+    /// secrets cannot enter the log.
     public func emit(event: String, account: String, pid: Int32?, fields: [String: Any] = [:]) {
         let timestamp = Date().formatted(Self.timestampStyle)
         var object: [String: Any] = [
@@ -159,18 +126,6 @@ public struct MailSessionEventLog: Sendable {
     }
 
     /// Records helper spawn with the exact executable plus an argv summary.
-    ///
-    /// Emitted after transport creation so the pid is known; the executable is
-    /// the exact string handed to exec while the argv summary names only the
-    /// leading flags without the script body. Only paths, counts, and sizes
-    /// ride the event so arguments plus secrets stay out of the log.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - executable: Exact executable string handed to exec.
-    ///   - argvCount: Number of argv entries handed to exec.
-    ///   - argvPreview: Leading flags without the script body.
-    ///   - scriptBytes: UTF-8 bytes of the script carried as the last arg.
     public func logSpawn(
         account: String,
         pid: Int32?,
@@ -193,12 +148,6 @@ public struct MailSessionEventLog: Sendable {
     }
 
     /// Shape of the open request for the sent event without values.
-    ///
-    /// Carries only sizes plus credential field presence so the request line
-    /// itself stays out of the log and host, username, and password values
-    /// never enter any field. All sizes count UTF-8 bytes so multibyte
-    /// spellings stay comparable with the wire `byteCount`. Grouping keeps
-    /// the emit entry point within the parameter budget.
     public struct OpenSentShape: Sendable {
         /// UTF-8 bytes written for the open line.
         public let byteCount: Int
@@ -217,13 +166,8 @@ public struct MailSessionEventLog: Sendable {
         /// Whether the password field is non-empty.
         public let hasPassword: Bool
 
-        /// Builds the shape with UTF-8 sizes and presence, never values.
-        /// - Parameters:
-        ///   - byteCount: UTF-8 bytes written for the open line.
-        ///   - host: Host field whose UTF-8 size and presence ride the event.
-        ///   - port: Port number carried on the open line.
-        ///   - username: Username field whose UTF-8 size and presence ride the event.
-        ///   - password: Password field whose UTF-8 size and presence ride the event.
+        /// Builds the shape with UTF-8 sizes and presence, never values. byteCount:
+        /// UTF-8 bytes written for the open line.
         public init(byteCount: Int, host: String, port: Int, username: String, password: String) {
             self.byteCount = byteCount
             self.hostChars = host.utf8.count
@@ -236,15 +180,9 @@ public struct MailSessionEventLog: Sendable {
         }
     }
 
-    /// Records the open request shape after the write.
-    ///
-    /// Only sizes plus credential field presence ride the event; the request
-    /// line itself stays out so host, username, and password values never
-    /// enter the log.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - shape: Byte count plus credential presence and lengths.
+    /// Records the open request shape after the write. Only sizes plus credential field presence
+    /// ride the event; the request line itself stays out so host, username, and password values
+    /// never enter the log.
     public func logOpenSent(
         account: String,
         pid: Int32?,
@@ -267,21 +205,9 @@ public struct MailSessionEventLog: Sendable {
         )
     }
 
-    /// Records one transport read with its outcome plus wait.
-    ///
-    /// Emitted for every open and command read; only the op name, outcome
-    /// token, wait, and byte size ride the event while response bodies stay
-    /// out. Outcomes are `first-byte` for a received line, `eof` for a closed
-    /// pipe, and `timeout` for an expired budget. Cancellation never logs a
-    /// read: callers propagate `CancellationError` before classifying so a
-    /// cancelled wait stays absent instead of masquerading as closure.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - op: Session operation owning the read such as `open` or `search`.
-    ///   - outcome: Typed outcome token mapped to its string at emit.
-    ///   - waitMs: Milliseconds spent waiting for the line.
-    ///   - bytes: UTF-8 bytes of the received line, or nil when none arrived.
+    /// Records one transport read with its outcome plus wait. Emitted for every open and command
+    /// read; only the op name, outcome token, wait, and byte size ride the event while response
+    /// bodies stay out.
     public func logRead(
         account: String,
         pid: Int32?,
@@ -297,28 +223,13 @@ public struct MailSessionEventLog: Sendable {
         emit(event: "session.read", account: account, pid: pid, fields: fields)
     }
 
-    /// Records one pool claim with its wait.
-    ///
-    /// Emitted once per open bracket before the handshake starts; only the
-    /// mailbox plus the claim wait ride the event so credentials stay out.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Pooled helper pid when already known, nil for a fresh handle.
-    ///   - mailbox: Mailbox the bracket will read.
-    ///   - waitMs: Milliseconds spent claiming the pooled handle.
+    /// Records one pool claim with its wait. Emitted once per open bracket before the handshake
+    /// starts; only the mailbox plus the claim wait ride the event so credentials stay out.
     public func logClaim(account: String, pid: Int32?, mailbox: String, waitMs: Double) {
         emit(event: "pool.claim", account: account, pid: pid, fields: ["mailbox": mailbox, "waitMs": waitMs])
     }
 
     /// Redacts email-shaped identity from an error detail before logging.
-    ///
-    /// The helper contract keeps identity out of failure envelopes, but older
-    /// envelopes or transport wording can still carry `user@host`; scrubbing
-    /// here keeps host and username values out of every field even when a
-    /// caller forwards verbatim detail. Session actors additionally strip
-    /// their exact credential values before calling.
-    /// - Parameter error: Raw failure detail.
-    /// - Returns: Detail with email addresses replaced by a placeholder.
     static func redactedErrorDetail(_ error: String) -> String {
         guard let pattern = try? NSRegularExpression(
             pattern: "[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}",
@@ -330,18 +241,9 @@ public struct MailSessionEventLog: Sendable {
         return pattern.stringByReplacingMatches(in: error, options: [], range: range, withTemplate: "[redacted]")
     }
 
-    /// Records the open outcome with write-to-line latency.
-    ///
-    /// Success carries `ok` true; failure carries the sanitized helper detail
-    /// so stalled servers stay honest without adding payload content or
-    /// identity. Email-shaped tokens are redacted at emit so host and
-    /// username values never enter any field.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - ok: Whether the open handshake succeeded.
-    ///   - error: Sanitized helper detail when `ok` is false.
-    ///   - latencyMs: Milliseconds from write to response line.
+    /// Records the open outcome with write-to-line latency. Success carries `ok` true; failure
+    /// carries the sanitized helper detail so stalled servers stay honest without adding payload
+    /// content or identity.
     public func logOpenResult(account: String, pid: Int32?, ok: Bool, error: String?, latencyMs: Double) {
         var fields: [String: Any] = ["ok": ok, "latencyMs": latencyMs]
         if let error, !ok {
@@ -350,36 +252,17 @@ public struct MailSessionEventLog: Sendable {
         emit(event: "session.open.result", account: account, pid: pid, fields: fields)
     }
 
-    /// Records the full retained stderr dump for a failed open.
-    ///
-    /// Carries up to 8KB of newest helper bytes; callers pass the transport's
-    /// retained dump which already caps at the bound. The helper script
-    /// contract keeps secrets out of stderr, and only sizes plus diagnostics
-    /// ride this event.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - stderr: Retained helper stderr, newest bytes first-capped.
+    /// Records the full retained stderr dump for a failed open. Carries up to 8KB of newest helper
+    /// bytes; callers pass the transport's retained dump which already caps at the bound.
     public func logStderr(account: String, pid: Int32?, stderr: String) {
         let capped = Self.cappedDump(stderr)
         guard !capped.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         emit(event: "session.stderr", account: account, pid: pid, fields: ["stderr": capped])
     }
 
-    /// Records one command exchange with latency and outcome.
-    ///
-    /// Emitted for every send that reaches the wire; only the op name, timing,
-    /// and outcome ride the event while query text and payloads stay out.
-    /// Failure details are sanitized like open results so identity never
-    /// enters the log. Cancellation never logs a command: callers propagate
-    /// `CancellationError` before reaching this failure path.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - op: Session operation such as `status`, `search`, or `fetch`.
-    ///   - latencyMs: Milliseconds from write to response line.
-    ///   - ok: Whether the exchange succeeded.
-    ///   - error: Sanitized helper detail when `ok` is false.
+    /// Records one command exchange with latency and outcome. Emitted for every send that reaches
+    /// the wire; only the op name, timing, and outcome ride the event while query text and payloads
+    /// stay out.
     public func logCommand(account: String, pid: Int32?, op: String, latencyMs: Double, ok: Bool, error: String? = nil) {
         var fields: [String: Any] = ["op": op, "latencyMs": latencyMs, "ok": ok]
         if let error, !ok {
@@ -389,22 +272,11 @@ public struct MailSessionEventLog: Sendable {
     }
 
     /// Records session close with a clean or terminate outcome.
-    ///
-    /// Clean means the close handshake wrote and read without throwing;
-    /// terminate covers every other teardown including a missing transport.
-    /// - Parameters:
-    ///   - account: Owning account nickname.
-    ///   - pid: Helper child pid when known.
-    ///   - outcome: `clean` or `terminate`.
     public func logClose(account: String, pid: Int32?, outcome: String) {
         emit(event: "session.close", account: account, pid: pid, fields: ["outcome": outcome])
     }
 
     /// Outcome tokens for transport reads.
-    ///
-    /// Single owner for the read outcome vocabulary so session and pool layers
-    /// share one wording: a received line is `first-byte`, a closed pipe is
-    /// `eof`, and an expired budget is `timeout`.
     public enum SessionReadOutcome: String, Sendable {
         /// One response line arrived within budget.
         case firstByte = "first-byte"
@@ -415,14 +287,6 @@ public struct MailSessionEventLog: Sendable {
     }
 
     /// Classifies a read failure into a read outcome token.
-    ///
-    /// Timeout wording maps to `timeout` while every other transport failure
-    /// maps to `eof` so closed pipes plus unknown details stay in one bucket
-    /// without carrying payload text. Cancellation is never classified:
-    /// callers must propagate `CancellationError` before calling so a
-    /// cancelled wait never masquerades as a transport closure.
-    /// - Parameter error: Read failure under test, never `CancellationError`.
-    /// - Returns: Typed outcome token for `session.read` events.
     public static func readOutcome(for error: Error) -> SessionReadOutcome {
         if let sessionError = error as? EmailIMAPError, case let .bridgeFailed(detail) = sessionError {
             if detail.range(of: "timed out", options: .caseInsensitive) != nil {
@@ -438,15 +302,6 @@ public struct MailSessionEventLog: Sendable {
     }
 
     /// Caps a dump to the newest retained bytes aligned to a UTF-8 boundary.
-    ///
-    /// Single owner for the stderr dump shape: the live transport sizes its
-    /// retained dump with `maxStderrDumpBytes` and the hermetic fake caps
-    /// through this helper so the bound cannot drift between paths. A raw
-    /// byte suffix can start mid-scalar, so leading continuation bytes are
-    /// walked past until the remainder decodes strictly; the result stays
-    /// within the bound and never emits a replacement character for the cut.
-    /// - Parameter text: Full retained stderr text.
-    /// - Returns: Newest bytes up to the dump bound as text.
     static func cappedDump(_ text: String) -> String {
         let bytes = Data(text.utf8)
         guard bytes.count > maxStderrDumpBytes else { return text }

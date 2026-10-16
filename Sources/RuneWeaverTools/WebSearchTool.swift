@@ -1,59 +1,4 @@
 // Rune Weaver Tools — Static web search over self-hosted SearXNG plus its lifecycle.
-//
-// `web.search` keeps queries on operator infrastructure: a bounded static read
-// over the self-hosted SearXNG JSON endpoint (`GET <searxng_url>/search` with
-// `format=json`), capped by the smaller of the caller limit and `[browser]`
-// `max_results` so the model cannot fan out unbounded context. The envelope
-// carries titles, URLs, and snippets tolerating SearXNG key drift (`content`
-// vs `snippet`, `url` vs `link`); strict wire arguments stay canonical
-// (`query`/`limit`) so retired spellings fail closed.
-//
-// `SearXNGEnsurer` keeps the local engine warm for both serve boot and first
-// search. Concurrent callers for one normalized base URL collapse onto a single
-// in-flight attempt following the runtime, daemon, start, pull, run, watch
-// cascade (cached-image heals plus a readiness watch with a minutes-scale
-// backstop ticking on short sleeps; a first-run image pull adds its own
-// minutes budget on top) while racing processes serialize on the shared
-// container name. The owner flight
-// publishes a live user-visible stage plus Start time on the actor, so health
-// polls and single-flight joiners watch resolving, daemon, pulling, starting,
-// waiting instead of one static label; the snapshot clears on settle or cancel.
-// A missing runtime
-// fails with install guidance (Apple Container link, Docker unsupported); a
-// down system service heals via a fast probe plus bounded `system start`
-// before any container start. Overrides carry a template-version marker
-// comment; an existing file missing the marker or holding an older value is
-// regenerated with a fresh secret at `0600` and the container is recreated
-// with `rm`-first plus a fresh `run` so the new settings and sizing actually
-// boot instead of lingering behind a `start` of the old entry. The container
-// step is existence-aware, mirroring
-// the escape-hatch script `rm`-first: a present entry tries `start`, polls
-// briefly, and returns on reachable, while a refused start removes the wedged
-// entry with `rm` before a fresh `run`; an absent entry goes straight to the
-// fresh `run`. The fresh path then pulls the tracked `:latest` image once
-// (skipped when already cached so retries resume downloaded layers) before a
-// short-timeout run with a loopback-only publish plus a per-install secret
-// (`0600` file, `0700` directory; the bundled placeholder is never mounted).
-// `rm`-first makes a `run` name conflict impossible except for cross-process
-// races recreating the name mid-flight; that residual wedge still revives via
-// `start` instead of failing the fresh `run`.
-// Fresh runs track `:latest` by design so new installs follow upstream without
-// a version bump; pin via `SEARXNG_IMAGE` when reproducibility matters. After
-// the heal the readiness watch ticks on short sleeps: HTTP reachable (2xx/3xx)
-// wins, terminal container states (exited, errored, missing) fail fast with
-// the capped logs tail, persistent HTTP 5xx with a readable body fails fast
-// with the capped body tail once the consecutive threshold trips, definitive
-// non-5xx such as 4xx resets the streak while gaps plus empty-bodied or
-// unparseable states keep waiting until the backstop, which
-// fails with the last state plus logs tail (timeout-only when nothing ever
-// answered). Banners name the failing stage (start refusal, crash logs, sick
-// body, stuck wait) instead of a timeout note.
-// Failures report a trimmed banner (terminal cause plus one `scripts/searxng-up.sh`
-// remediation, retry-aware: pull timeout names cached-layer retry, pull
-// failure names Hub reachability, run failure names the exit plus tail, watch
-// crash or missing names the exit plus logs) while per-stage detail (stage,
-// exit, capped tail, timeout) moves to server warn logs plus collapsed
-// diagnostics. The container is auto-stopped when Rune Weaver.app quits.
 
 import Foundation
 import RuneWeaverCore
@@ -83,22 +28,8 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Container name shared by boot, search, and the escape-hatch script.
     public static let containerName = "runeweaver-searxng"
     /// Tracked OCI image for fresh runs when no container exists yet.
-    /// Deliberately tracks `:latest` so fresh installs follow upstream without a
-    /// version bump; pin via `SEARXNG_IMAGE` (script) or this constant when
-    /// reproducibility matters. Keep in sync with `scripts/searxng-up.sh`.
     public static let containerImage = "searxng/searxng:latest"
     /// Backstop for the readiness watch after the heal.
-    /// The server settles first at 165s while the dashboard client cap holds longer at 360s
-    /// (suspending while the stage reports pulling), so a slow boot reports its terminal state
-    /// before the client stops the stage line.
-    /// The watch ticks on short sleeps: reachable (2xx/3xx) wins, terminal container states
-    /// fail fast with logs, persistent 5xx with a readable body fails fast with the capped
-    /// body tail once the consecutive threshold trips, definitive non-5xx resets the
-    /// streak while gaps plus empty-bodied or unparseable states keep waiting until
-    /// this backstop, which fails with the last state plus logs
-    /// tail (timeout-only when nothing ever answered). Heals above it carry their own
-    /// timeouts; a first-run pull adds its minutes budget on top. Single source for the
-    /// minutes-scale backstop.
     public static let readinessWatchTimeoutSeconds: Double = 165
 
     /// Delay between readiness watch ticks while waiting for boot.
@@ -107,9 +38,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Fast reachability probe timeout so a down engine fails fast.
     public static let probeTimeoutSeconds: Double = 2
     /// Long budget for the explicit image pull when the local image is absent.
-    /// First pulls download ~150 MB, so the run stays short by paying the
-    /// download here once; retries resume already-cached layers instead of
-    /// restarting from zero.
     public static let containerImagePullTimeoutSeconds: Double = 300
     /// Short probe for image presence so a cached image never pays the pull budget.
     public static let containerImageInspectTimeoutSeconds: Double = 8
@@ -120,31 +48,16 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Short budget for starting (or reviving a wedged) existing container.
     public static let containerStartTimeoutSeconds: Double = 5
     /// Brief settle window after `start` before declaring refusal.
-    /// Lets a slow start answer one extra probe so a present entry that needs
-    /// an extra second never churns via needless `rm` plus fresh `run`; short
-    /// enough that the cached-image cascade stays responsive.
     public static let containerStartSettleSeconds: Double = 2
     /// Consecutive countable HTTP 5xx probe responses that trip the sick fail-fast.
-    /// Small enough that a wedged engine fails in seconds instead of burning the
-    /// minutes-scale backstop, large enough that one transient 500 never poses as
-    /// persistent sickness. Only 5xx with a readable non-empty body counts; 2xx/3xx
-    /// and definitive non-5xx such as 4xx reset the streak while gaps plus empty
-    /// or unparseable 5xx preserve it and keep waiting. Single source for the sick threshold.
     public static let consecutiveServerErrorThreshold: Int = 3
 
-    /// In-flight ensure tasks keyed by normalized base URL so concurrent
-    /// callers for the same origin collapse while different origins run
-    /// independently instead of reporting cross-config reachability. The
-    /// Boolean carries whether the flight actually started a local container,
-    /// so `ensureReport` can return the real start outcome instead of a
-    /// precomputed guess.
+    /// In-flight ensure tasks keyed by normalized base URL so concurrent callers for the same
+    /// origin collapse while different origins run independently instead of reporting cross-config
+    /// reachability.
     private var inFlight: [String: Task<Bool, Error>] = [:]
 
     /// User-visible Start stage reported while one ensure flight runs.
-    /// Coarser than the diagnostics cascade (`EnsureStage` keeps the per-stage
-    /// failure detail): one flight moves resolving, daemon, pulling, starting,
-    /// waiting so the dashboard can render a single live line plus elapsed time
-    /// instead of one static Starting label across the minutes-scale watch.
     public enum StartStage: String, Sendable, CaseIterable, Codable {
         case resolving
         case daemon
@@ -190,9 +103,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     public typealias StartStageReporter = @Sendable (StartStage) async -> Void
 
     /// Live Start snapshots keyed by normalized base URL, mirroring `inFlight`.
-    /// Stored on the actor (not in the Task) so single-flight joiners polling
-    /// health see the owner's stage while the flight runs, and so completion,
-    /// failure, or cancellation clears it instead of sticking the UI on Starting.
     private var startProgressByKey: [String: StartProgress] = [:]
 
     /// Returns the live Start snapshot for a base URL, if a flight is running.
@@ -228,9 +138,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Single-flight handle collapsing concurrent ensure callers onto one task.
-    /// Carries the normalized key plus whether this caller owns the flight;
-    /// only the owner clears the entry, so joiners never reap a flight they
-    /// did not start.
     private struct EnsureFlight {
         let key: String
         let task: Task<Bool, Error>
@@ -249,9 +156,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Collapses concurrent callers for one base URL onto a single flight.
-    /// Returns the in-flight task plus whether this caller owns it; only the
-    /// owner clears the entry via `awaitOwnedFlight`, so joiners never reap
-    /// a flight they did not start.
     private func acquireFlight(browser: BrowserConfig) -> EnsureFlight {
         let key = Self.inFlightKey(for: browser.searxngURL)
         if let existing = inFlight[key] {
@@ -270,11 +174,9 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         return EnsureFlight(key: key, task: task, isOwner: true)
     }
 
-    /// Awaits an owned flight, cancelling it when the waiter cancels.
-    /// Cancelling the waiter cancels the owned flight so the container start
-    /// plus watch does not keep running detached after the turn.
-    /// Completion, failure, and cancellation all clear the stage snapshot, so
-    /// no terminal or cancelled flight leaves a stale Starting display behind.
+    /// Awaits an owned flight, cancelling it when the waiter cancels. Cancelling the waiter cancels
+    /// the owned flight so the container start plus watch does not keep running detached after the
+    /// turn.
     private func awaitOwnedFlight(key: String, task: Task<Bool, Error>) async throws -> Bool {
         defer {
             inFlight[key] = nil
@@ -346,16 +248,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Non-throwing ensure for HTTP lifecycle routes sharing the single-flight path.
-    /// Fresh callers own one `ensureImpl` flight and report its real start
-    /// outcome; joiners collapsing onto an existing flight never claim a
-    /// start. A cancelled turn reports unreachable without claiming, so the
-    /// route never marks a cancelled turn reachable. Failures carry a trimmed
-    /// banner in `message` (terminal cause plus one hatch command) with the
-    /// full per-stage detail (stage, exit, capped tail, timeout) in
-    /// `diagnostics` for warn logs plus collapsed UI, so the banner renders
-    /// once instead of chaining every stage.
-    /// - Parameter browser: `[browser]` policy carrying the base URL.
-    /// - Returns: Reachability plus whether this caller actually started a container plus banner and diagnostics.
     public func ensureReport(browser: BrowserConfig) async -> EnsureReport {
         if Task.isCancelled {
             return EnsureReport(reachable: false, started: false, message: nil)
@@ -416,10 +308,8 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             if Task.isCancelled {
                 return EnsureReport(reachable: false, started: false, message: nil)
             }
-            // Failed flight: probe honestly without claiming a start the
-            // flight could not prove, so cross-process races never double-claim.
-            // The trimmed banner threads through for the inline slot while the
-            // chained diagnostics thread through for warn logs plus collapsed UI.
+            // Failed flight: probe honestly without claiming a start the flight could not prove, so
+            // cross-process races never double-claim.
             let detail = error.localizedDescription
             let diagnostics = Self.diagnostics(from: error)
             let reachable = await Self.isReachable(baseURL: browser.searxngURL)
@@ -434,37 +324,15 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Runs one self-healing attempt through the ordered cascade.
-    /// Follows runtime, daemon, start, pull, run, watch (heals plus a readiness
-    /// watch with a minutes-scale backstop ticking on short sleeps, while a
-    /// first-run pull adds its minutes budget once and retries resume cached layers):
-    /// each stage records its own fragment for diagnostics, while the thrown
-    /// banner holds only the retry-aware terminal cause plus one hatch command
-    /// so install, daemon, pull timeout, pull failure, run, and watch crash or
-    /// missing each render once. An existing override missing the current
-    /// template marker (or holding an older value) is regenerated with a fresh
-    /// secret before the container step, then recreated with `rm`-first plus a
-    /// fresh `run` so the new settings and sizing boot. The start step itself
-    /// is existence-aware (`inspect` with a
-    /// `list --all` cross-check, then `start` plus brief settle on present,
-    /// `rm`-first then fresh `run` on refusal, straight to `run` on absent,
-    /// with the residual race wedge still revived). User-visible progress
-    /// reports through `onStage` at each phase boundary (the pull step itself
-    /// reports from inside the container heal only when it actually
-    /// downloads); nil keeps the attempt silent for callers with no display.
-    /// - Returns: Whether this attempt actually started a local container or the system service.
     private static func ensureImpl(browser: BrowserConfig, onStage: StartStageReporter? = nil) async throws -> Bool {
         try Task.checkCancellation()
         if await isReachable(baseURL: browser.searxngURL) {
             try Task.checkCancellation()
             return false
         }
-        // Stage order matters: a missing runtime short-circuits before any
-        // daemon probe, and a down daemon heals before container start/run so
-        // later stages never misreport a service outage as a container miss.
-        // A missing runtime fails with the install guidance alone: wrapping
-        // the unreachable-engine text around it would bury the one actionable
-        // cause under a second message, so the single error propagates as-is
-        // through the web.search failure path.
+        // Stage order matters: a missing runtime short-circuits before any daemon probe, and a down
+        // daemon heals before container start/run so later stages never misreport a service outage
+        // as a container miss.
         await onStage?(.resolving)
         guard let runtime = resolveRuntimeURL() else {
             throw runtimeNotFoundError()
@@ -499,20 +367,9 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             lastFailure = daemonFailure
         }
         try Task.checkCancellation()
-        // Best-effort container heal: the existence-aware start checks for the
-        // entry first (present tries `start` plus brief settle, refused
-        // removes with `rm`-first before fresh `run`, absent goes straight to
-        // `run`, residual race wedges still revive), then falls through to
-        // the watch and the guidance error, so a container-less host fails
-        // closed instead of crashing boot. A stale override (existing file
-        // missing the current template marker or holding an older value)
-        // skips the `start` fast path entirely: it is regenerated with a
-        // fresh secret first, the entry is dropped with `rm`-first, and a
-        // fresh `run` boots the new document plus current sizing, so the
-        // remove always precedes the run. The real start outcome flows
-        // back to `ensureReport` so it never reports a precomputed guess.
-        // The heal reports `pulling` itself only while actually downloading;
-        // every other container step reads as `starting` here.
+        // Best-effort container heal: existence-aware start checks the entry first, then falls
+        // through to the watch and guidance error, so a container-less host fails closed
+        // instead of crashing boot.
         await onStage?(.starting)
         let containerOutcome: SearXNGEnsurer.ContainerOutcome
         if isStaleOverridePresent() {
@@ -566,13 +423,9 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         }
         try Task.checkCancellation()
         await onStage?(.waiting)
-        // Readiness watch replaces the fixed short poll: reachable (2xx/3xx) wins,
-        // terminal container states fail fast with the capped logs tail, persistent
-        // 5xx with a readable body fails fast with the capped body tail, definitive
-        // non-5xx resets the streak while gaps plus empty-bodied or unparseable
-        // states keep waiting until the backstop, which
-        // fails with the last state plus logs tail. Cancellation stays cooperative so
-        // the single-flight joiner contract never mistakes a cancel for a crash.
+        // Readiness watch replaces fixed short poll: reachable (2xx/3xx) wins, terminal states
+        // fail fast with capped logs, while gaps plus empty-bodied or unparseable states keep
+        // waiting until the backstop, which fails with the last state plus logs tail.
         let watchOutcome = await watchEngineReadiness(baseURL: browser.searxngURL, runtime: runtime)
         if watchOutcome.cancelled {
             throw CancellationError()
@@ -592,19 +445,8 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
 }
 
 /// Best-effort container start plus cascade stage names for `SearXNGEnsurer`.
-///
-/// Holds the non-throwing start helpers and the ordered cascade stage names
-/// outside the actor body so the single-flight lifecycle stays within the
-/// type-length budget. Behavior is unchanged: the start path still heals the
-/// daemon first, then the existence-aware container step, then the shared
-/// readiness watch, claiming a start only when this call started the daemon
-/// or container and the engine answers before the backstop.
 extension SearXNGEnsurer {
     /// Ordered cascade stages for one ensure attempt.
-    /// Kept explicit so the heal order stays reviewable: runtime must resolve
-    /// before any daemon probe, the daemon must answer before container
-    /// start, the image pull sits ahead of the fresh run only (skipped when
-    /// cached), and the readiness watch always comes last under its waiting detail.
     public enum EnsureStage: String, CaseIterable, Sendable {
         case runtime
         case daemon
@@ -614,20 +456,9 @@ extension SearXNGEnsurer {
         case waiting
     }
 
-    /// Starts or runs the container without throwing.
-    /// Shared by the tool path and the server lifecycle routes so boot logic
-    /// cannot drift between loopback bind and settings-mount handling.
-    /// Heals the system daemon first, then the existence-aware container step
-    /// (present tries `start` plus brief settle, refused removes with
-    /// `rm`-first before fresh `run`, absent goes straight to `run`), then holds
-    /// the shared readiness watch so a slow boot still counts as started once HTTP
-    /// answers instead of reporting false on the first dark probe.
-    /// Returns true only when this call actually started a local container
-    /// or the system service (exit 0) and the engine answers before the backstop: a
-    /// missing runtime, a cancelled task, an external (non-loopback) base
-    /// URL, a missing settings document, a failed spawn, or an engine that
-    /// stays unreachable through the watch reports false instead of claiming a start, so
-    /// cross-process races never double-claim.
+    /// Starts or runs the container without throwing. Shared by the tool path and the server
+    /// lifecycle routes so boot logic cannot drift between loopback bind and settings-mount
+    /// handling.
     @discardableResult
     public static func bestEffortStart(browser: BrowserConfig) async -> Bool {
         guard isManagedBaseURL(browser.searxngURL) else { return false }
@@ -694,10 +525,9 @@ public struct WebSearchArgs: Sendable, Equatable, Decodable {
         case limit
     }
 
-    /// Decodes canonical search arguments.
-    /// Strict wire carries only `query`/`limit` so retired `q`/`count` spellings
-    /// fail closed under additionalProperties false and wire plus decoder agree.
-    /// - Parameter decoder: Decoder for the arguments document.
+    /// Decodes canonical search arguments. Strict wire carries only `query`/`limit` so retired
+    /// `q`/`count` spellings fail closed under additionalProperties false and wire plus decoder
+    /// agree.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let query = try container.decodeIfPresent(String.self, forKey: .query)
@@ -760,12 +590,9 @@ public struct URLSessionWebSearchTransport: WebSearchTransport, Sendable {
     /// Creates a live transport.
     public init() {}
 
-    /// Sends one request, surfacing 3xx instead of following.
-    /// Shares the single-source no-follow policy with the fetch and API
-    /// transports so a safe search start cannot launder an unsafe hop
+    /// Sends one request, surfacing 3xx instead of following. Shares the single-source no-follow
+    /// policy with the fetch and API transports so a safe search start cannot launder an unsafe hop
     /// through the session follower.
-    /// - Parameter request: Request to send.
-    /// - Returns: Body plus response.
     public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         let delegate = NoRedirectDelegate()
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
@@ -881,12 +708,8 @@ public struct WebSearchTool: Tool, Sendable {
         // Bound N up front so every path below (live or stubbed) honors the
         // same ceiling: caller limit, config cap, and the hard 50 cap.
         let effectiveLimit = Self.effectiveLimit(requested: args.limit, browserConfig: browserConfig)
-        // Fail fast on a misconfigured base URL before burning the ensure
-        // budget or attempting a container start for a request that can never
-        // build. This is an environment failure, not a caller argument-shape
-        // failure, so it carries an explicit execution kind: the wording is
-        // deliberately not "Invalid ...", which the bus's legacy content sniff
-        // would otherwise mask as invalid_syntax.
+        // Fail fast on a misconfigured base URL before burning the ensure budget or attempting a
+        // container start for a request that can never build.
         guard let request = Self.searchRequest(baseURL: browserConfig.searxngURL, query: query, timeout: browserConfig.searchTimeoutSeconds) else {
             return .failure(
                 "web.search configuration error: browser.searxng_url '\(browserConfig.searxngURL)' must be an absolute URL.",
@@ -897,11 +720,9 @@ public struct WebSearchTool: Tool, Sendable {
         do {
             try await ensurer.ensure(browser: browserConfig)
         } catch {
-            // Single guidance: the ensurer error already carries the one
-            // actionable cause (install guidance for a missing runtime, or the
-            // last cascade detail otherwise), so surface it verbatim instead
-            // of nesting it inside a second unreachable message. The engine
-            // being down is a runtime failure, never an argument-shape one.
+            // Single guidance: the ensurer error already carries the one actionable cause (install
+            // guidance for a missing runtime, or the last cascade detail otherwise), so surface it
+            // verbatim instead of nesting it inside a second unreachable message.
             return .failure(error.localizedDescription, callID: input.callID, errorKind: .executionError)
         }
         do {
@@ -938,9 +759,6 @@ public struct WebSearchTool: Tool, Sendable {
     }
 
     /// Builds the SearXNG JSON request, percent-encoding the query.
-    /// Strips a trailing `/search` (case-insensitive, with or without slash)
-    /// from the configured base URL before appending, so a base already
-    /// ending in `/search` never becomes `/search/search` and fails closed.
     public static func searchRequest(baseURL: String, query: String, timeout: Int) -> URLRequest? {
         var normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         // Strip trailing `/search` segments when the operator configured

@@ -4,10 +4,6 @@ import Foundation
 import os
 
 /// Thread-safe registry coordinating immediate cancellation of in-flight LLM HTTP connections.
-///
-/// Bridges cancellation requests across server routes, turn trackers, orchestrator loops,
-/// and low-level `URLSessionTask` handles so cancelling a turn immediately tears down
-/// the upstream LLM TCP socket.
 public final class LLMCancelRegistry: Sendable {
     /// Shared singleton instance.
     public static let shared = LLMCancelRegistry()
@@ -21,11 +17,6 @@ public final class LLMCancelRegistry: Sendable {
     public init() {}
 
     /// Registers a cancellation callback for a given session.
-    ///
-    /// - Parameters:
-    ///   - sessionID: The session identifier to associate with the callback.
-    ///   - cancel: The closure to invoke upon cancellation.
-    /// - Returns: A teardown closure that unregisters the callback when invoked.
     @discardableResult
     public func register(sessionID: UUID, cancel: @Sendable @escaping () -> Void) -> (@Sendable () -> Void) {
         let registrationID = UUID()

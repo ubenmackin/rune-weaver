@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Grapheme-safe live text buffer for streaming Markdown.
-//
-// Single owner for the live grapheme hold: deltas arrive in arbitrary UTF-16
-// splits, so the trailing incomplete cluster stays in `held` while only
-// complete clusters advance `committed`. The live bubble renders `committed`
-// through MarkdownText while the full turn text stays lossless as
-// `committed + held`.
 
 type SegmenterConstructor = new (
   locales?: string | string[],
@@ -43,11 +37,8 @@ function isSingleRegionalIndicator(cluster: string): boolean {
   );
 }
 
-// True when the trailing cluster may still grow with the next delta, so it
-// must stay held instead of rendering. Complete prose, standalone emoji, and
-// paired flags commit immediately; only provably splittable tails hold: a
-// dangling high surrogate, any lone surrogate cluster, a trailing joiner, a
-// lone regional indicator, or a dangling carriage return awaiting line feed.
+// True when the trailing cluster may still grow with the next delta, so it must stay held instead
+// of rendering.
 function isHoldableTail(tail: string, lastCluster: string): boolean {
   if (!tail) return false;
   const tailLast = tail.charCodeAt(tail.length - 1);
@@ -65,11 +56,8 @@ function isHoldableTail(tail: string, lastCluster: string): boolean {
   return false;
 }
 
-// Buffers one streamed delta by grapheme cluster. The tail under review is
-// always `held + delta`; complete clusters join `committed` while at most one
-// trailing incomplete cluster stays in `held`. Zero loss holds on every path:
-// `committed + held` after the call always equals `committed + held + delta`
-// from before, so the terminal frame converges by construction.
+// Buffers one streamed delta by grapheme cluster. The tail under review is always `held + delta`;
+// complete clusters join `committed` while at most one trailing incomplete cluster stays in `held`.
 export function appendLiveDelta(
   committed: string,
   held: string,

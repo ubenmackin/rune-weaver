@@ -1,11 +1,4 @@
-// Shared mobile viewport hook for the dashboard shell.
-//
-// The breakpoint truth lives in `components/navigationConfig.ts` alongside the
-// tab contract so styles and components agree on which widths count as
-// handheld. This module imports that single definition (never redefines it)
-// and owns the viewport probe plus the live hook, letting owners render a
-// fixed drawer on small screens and a static sidebar on wide screens without
-// duplicating the media query string.
+// Rune Weaver Dashboard — Shared mobile viewport hook for the dashboard shell.
 
 import { useEffect, useState } from "react";
 import { MOBILE_BREAKPOINT_PX } from "../components/navigationConfig";
@@ -20,10 +13,8 @@ function resolveBreakpoint(breakpoint: number): number {
   return breakpoint;
 }
 
-// Synchronous viewport probe shared by the hook and by mount initializers
-// (such as the chat sidebar default) so exactly one matchMedia string exists.
-// Returns false during server rendering where no viewport exists so hydration
-// starts detached and reconciles on mount instead of throwing.
+// Synchronous viewport probe shared by the hook and by mount initializers (such as the chat sidebar
+// default) so exactly one matchMedia string exists.
 export function isMobileViewport(
   breakpoint: number = MOBILE_BREAKPOINT_PX,
 ): boolean {
@@ -41,10 +32,6 @@ export function isMobileViewport(
 }
 
 // Reports whether the viewport currently falls within the handheld range.
-// The optional override exists for callers that need a different ceiling in
-// tests or experiments; production callers omit it to stay on the shared
-// breakpoint. Returns false during server rendering where no viewport exists
-// so hydration starts detached and reconciles on mount instead of throwing.
 export function useIsMobile(breakpoint: number = MOBILE_BREAKPOINT_PX): boolean {
   // Validate once so NaN, Infinity, zero, and negatives all fail closed to
   // the shared ceiling instead of subscribing to an unmatchable query.

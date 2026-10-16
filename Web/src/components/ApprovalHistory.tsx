@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Resolved approval decision history.
-// Purpose: read the durable audit trail of every resolved approval decision
-// (allowed and denied alike) so the owner can answer what was chosen without
-// re-asking, with tool and decision filters that settle before refetching
-// plus a two-step clear.
-// Scope: the GET /approvals/history list with its tool/action query params,
-// the newest-first table (decided, tool, target, scope, decision, duration,
-// surface, session), and the DELETE /approvals/history clear behind a
-// confirmation modal. Pending approvals stay on the inbox view.
-// Architectural role: the History pane behind the Inbox segmented control,
-// sharing the listApprovalHistory wire contract with the engine log.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -26,11 +16,7 @@ import { CloseIcon, RefreshIcon } from "./icons";
 
 type ActionFilter = "all" | ApprovalHistoryAction;
 
-// One-line reading of a recorded scope split into kind plus data. A tool-wide
-// scope names every target for the tool, a recipient set collapses to its
-// member count like the pending card summary, and every other single-value
-// kind reads its stored data verbatim. A row with no resolved scope reads as
-// an em dash rather than an empty cell.
+// One-line reading of a recorded scope split into kind plus data.
 function describeHistoryScope(
   scopeKind: string | null | undefined,
   scopeData: string | null | undefined,
@@ -80,10 +66,9 @@ export default function ApprovalHistory() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  // Monotonic request token so the debounced commit, the Refresh bump, and
-  // the post-clear refetch all race through the same gate: a slower earlier
-  // response can never overwrite the view with rows that disagree with the
-  // committed filters, and a response outliving the pane is discarded too.
+  // Monotonic request token so the debounced commit, the Refresh bump, and the post-clear refetch
+  // all race through the same gate: a slower earlier response can never overwrite the view with rows
+  // that disagree with the committed filters, and a response outliving the pane is discarded too.
   const requestSeq = useRef(0);
 
   // Invalidate every in-flight read on unmount so a late response cannot
@@ -94,11 +79,9 @@ export default function ApprovalHistory() {
     };
   }, []);
 
-  // Filters commit on a 300ms settle: a burst of keystrokes into the tool
-  // input (or a select flip) collapses into one filtered read instead of
-  // refetching per character, because every change resets the pending timer.
-  // The cleanup also covers unmount so a late commit cannot fire after the
-  // pane is gone.
+  // Filters commit on a 300ms settle: a burst of keystrokes into the tool input (or a select flip)
+  // collapses into one filtered read instead of refetching per character, because every change
+  // resets the pending timer.
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setAppliedTool(toolFilter);
@@ -107,10 +90,9 @@ export default function ApprovalHistory() {
     return () => window.clearTimeout(timer);
   }, [toolFilter, actionFilter]);
 
-  // Every read carries the committed filters as query params: a blank tool
-  // stays omitted so the default call reads the recent window, and the All
-  // decision omits the action rather than sending a pseudo-tier the engine
-  // would reject.
+  // Every read carries the committed filters as query params: a blank tool stays omitted so the
+  // default call reads the recent window, and the All decision omits the action rather than sending
+  // a pseudo-tier the engine would reject.
   const fetchHistory = useCallback(async (tool: string, action: ActionFilter) => {
     const seq = ++requestSeq.current;
     setLoading(true);
@@ -144,10 +126,9 @@ export default function ApprovalHistory() {
     void fetchHistory(appliedTool, appliedAction);
   }, [fetchHistory, appliedTool, appliedAction, refreshKey]);
 
-  // Refresh bypasses the settle window: it commits the inputs' current
-  // values and bumps the key so the read fires immediately — even when the
-  // committed filters already match — while a pending debounce becomes a
-  // no-op because it would commit the same values.
+  // Refresh bypasses the settle window: it commits the inputs' current values and bumps the key so
+  // the read fires immediately — even when the committed filters already match — while a pending
+  // debounce becomes a no-op because it would commit the same values.
   function refreshNow() {
     setAppliedTool(toolFilter);
     setAppliedAction(actionFilter);

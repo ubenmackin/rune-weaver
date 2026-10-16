@@ -1,27 +1,11 @@
 // Rune Weaver Server — Security Policy REST DTOs.
-//
-// Purpose: carries structured security policy models for `/settings/policy*`
-// endpoints, keeping policy payloads decoupled from settings representation.
-// Scope: REST request and response bodies only; file I/O, verification, and
-// persistence stay with the policy store and routes.
-// Architectural role: keeps policy Codable contracts version-tolerant and
-// decoupled from the broader settings surface so policy edits never fork settings.
 
 import Foundation
 import Vapor
 
 // MARK: - Policy Settings DTOs
 
-/// DTO mirroring NetworkEgressPolicy.
-///
-/// Only `allowlist_only` and `unrestricted` persist. The retired
-/// `deny_by_default` name maps to the fail-closed posture on load and at the
-/// REST boundary so older callers keep their intent without storing ambiguity.
-/// `localExemptions` is server-owned: the pane renders it display-only and PUT
-/// ignores any client-supplied value, deriving the stored set from server-side
-/// classification instead. The wire emits camelCase `localExemptions` sorted;
-/// snake_case `local_exemptions` decodes tolerantly for older callers but is
-/// never emitted.
+/// DTO mirroring NetworkEgressPolicy. Only `allowlist_only` and `unrestricted` persist.
 public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
     public let mode: String
     public let allowedDomains: [String]
@@ -60,13 +44,6 @@ public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
 }
 
 /// DTO mirroring CredentialBinding.
-///
-/// One binding pairs one key with its hosts, methods, and path prefixes. The
-/// secret rides only when the request host matches, the method matches (or
-/// the binding leaves methods empty for Any), and the effective route path
-/// matches a prefix (or prefixes stay empty for Any). Prefixes apply to every
-/// host in the same binding, so scoping is per-key rather than per-host. An
-/// empty host list authorizes nothing and is rejected as unusable.
 public struct CredentialBindingDTO: Content, Sendable, Equatable {
     public let allowedHosts: [String]
     public let allowedMethods: [String]
@@ -79,12 +56,7 @@ public struct CredentialBindingDTO: Content, Sendable, Equatable {
     }
 }
 
-/// DTO mirroring SecurityPolicy.
-///
-/// The policy file owns network plus credentials only. Filesystem and tool
-/// sections no longer exist as declarative policy; older files may still
-/// carry them but the store ignores those tables on load and never writes
-/// them back, so the DTO carries exactly what the file can persist.
+/// DTO mirroring SecurityPolicy. The policy file owns network plus credentials only.
 public struct SecurityPolicyDTO: Content, Sendable, Equatable {
     public let version: Int
     public let network: NetworkEgressPolicyDTO
@@ -101,13 +73,8 @@ public struct SecurityPolicyDTO: Content, Sendable, Equatable {
     }
 }
 
-/// Local-access report returned by `PUT /settings/policy` and `POST /settings/policy/recheck-local/apply`.
-///
-/// `granted` names the exemptions added by this write, `removed` names the
-/// exemptions dropped by it (derived from allowlist deletions on PUT and from
-/// re-classification on re-check apply), and `neverDialable` names added
-/// entries that persist name-only with no grant. `GET /settings/policy`
-/// sends no report.
+/// Local-access report returned by `PUT /settings/policy` and `POST
+/// /settings/policy/recheck-local/apply`.
 public struct PolicyLocalAccessReport: Content, Sendable, Equatable {
     public let granted: [String]
     public let removed: [String]
@@ -140,14 +107,8 @@ public struct PolicyLocalAccessReport: Content, Sendable, Equatable {
     }
 }
 
-/// Response returned by GET /settings/policy.
-///
-/// Carries the structured policy plus where it came from and its live
-/// invariant status. There is no raw TOML on the wire: the dashboard edits
-/// the structured shape and the server owns serialization, so the file and
-/// the supervisor can never disagree on quoting. Writes apply live through
-/// the shared store, so the response never advertises a restart for policy.
-/// `localAccess` carries the PUT classification report and stays nil on GET.
+/// Response returned by GET /settings/policy. Carries the structured policy plus where it came from
+/// and its live invariant status.
 public struct PolicyResponse: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
     public let path: String
@@ -197,10 +158,6 @@ public struct PolicyResponse: Content, Sendable, Equatable {
 }
 
 /// Request for PUT /settings/policy.
-///
-/// Carries the structured candidate the caller wants persisted. The legacy
-/// raw-TOML shape is rejected with a 400 naming the field so an old editor
-/// learns the new contract instead of silently persisting unvalidated text.
 public struct UpdatePolicyRequest: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
 
@@ -235,10 +192,6 @@ public struct UpdatePolicyRequest: Content, Sendable, Equatable {
 }
 
 /// Request for POST /settings/policy/verify.
-///
-/// Carries a structured candidate for a pure check with no persistence. The
-/// retired raw-TOML shape is rejected the same way as PUT so editors get one
-/// consistent migration signal.
 public struct VerifyPolicyRequest: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
 
@@ -282,11 +235,6 @@ public struct VerifyPolicyResponse: Content, Sendable, Equatable {
 }
 
 /// Request for POST /settings/policy/recheck-local and its apply sibling.
-///
-/// Carries the structured candidate the caller wants re-checked. Any
-/// client-supplied `localExemptions` is ignored (server-owned): the pane
-/// renders the field display-only and both endpoints derive the grant set
-/// from server-side classification instead.
 public struct RecheckLocalExemptionsRequest: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
 
@@ -320,12 +268,7 @@ public struct RecheckLocalExemptionsRequest: Content, Sendable, Equatable {
     }
 }
 
-/// Preview diff returned by POST /settings/policy/recheck-local.
-///
-/// `added` names grants the apply would create, `removed` names grants it
-/// would drop, `unchanged` names grants it would keep, and `unresolved`
-/// names entries that could not be proven without aborting. Every list is
-/// sorted so the pane renders a stable diff. Preview never writes.
+/// Preview diff returned by POST /settings/policy/recheck-local. Preview never writes.
 public struct RecheckLocalExemptionsResponse: Content, Sendable, Equatable {
     public let added: [String]
     public let removed: [String]

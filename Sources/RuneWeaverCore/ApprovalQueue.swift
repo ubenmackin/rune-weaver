@@ -20,12 +20,6 @@ public struct ApprovalQueueDecision: Sendable, Equatable {
 }
 
 /// Pending approvals filed by headless scheduler turns.
-///
-/// Two-phase filing: `fileRequest` without an explicit assessment enqueues
-/// immediately with a nil assessment and enriches in the background, so the
-/// inbox renders instantly while the model (or heuristics on timeout) lands on
-/// the same identifier shortly after. Late enrichment after a decision is
-/// dropped without rebroadcast and without trust side effects.
 public actor ApprovalQueue {
     /// Pending requests indexed by identifier.
     private var pending: [UUID: PermissionRequest] = [:]
@@ -40,15 +34,8 @@ public actor ApprovalQueue {
     /// Requests whose waiter timed out but whose inbox entry is retained.
     private var timedOutIDs: Set<UUID> = []
     /// Background enrichment tasks keyed by the request they will enrich.
-    ///
-    /// One entry per nil-assessment filing. Cancelled on `decide` and `clear`
-    /// so a decision racing the model cannot be resurrected by a late result.
     private var enrichmentTasks: [UUID: Task<Void, Never>] = [:]
     /// Rebroadcast hook invoked with the enriched request on identical id.
-    ///
-    /// The pipeline installs the same `broadcastApproval` plus `onEvent`
-    /// approval path used for the initial filing here, so enriched updates
-    /// travel the identical channel without the queue knowing the transport.
     private var enrichmentBroadcast: (@Sendable (PermissionRequest) async -> Void)?
     /// Graduated-trust gate receiving approved durations.
     private let permissionGate: PermissionGate?
@@ -74,12 +61,8 @@ public actor ApprovalQueue {
 
     // MARK: - Enrichment broadcast hook
 
-    /// Rebroadcast hook for enriched assessments on identical id.
-    ///
-    /// The pipeline installs the same broadcast plus event path used for the
-    /// initial filing here, so enriched updates travel the identical channel
-    /// without the queue knowing the transport. Nil until installed; late
-    /// results for decided ids never reach it.
+    /// Rebroadcast hook for enriched assessments on identical id. Nil until installed; late results
+    /// for decided ids never reach it.
     public var onEnriched: (@Sendable (PermissionRequest) async -> Void)? {
         get { enrichmentBroadcast }
         set { enrichmentBroadcast = newValue }
@@ -132,20 +115,6 @@ public actor ApprovalQueue {
     }
 
     /// Files a gated tool call into the queue.
-    ///
-    /// Immediate enqueue: when no explicit assessment is supplied the pending
-    /// request is built with a nil assessment, stored, and returned without
-    /// awaiting the model. A background child task then evaluates (model with
-    /// a 2.5-second budget, heuristics on timeout, refusal, parse failure, or
-    /// unavailable model) and enriches the same identifier in place. When an
-    /// explicit assessment is supplied the request enqueues directly with that
-    /// value and no child task spawns. Filing always succeeds even when
-    /// enrichment later fails; the assessment always resolves through
-    /// heuristics as the fail-closed floor. The per-request hook, when
-    /// supplied, fires once with the enriched request on identical id
-    /// alongside the queue-wide rebroadcast; explicit assessments never invoke
-    /// it, and late results after decide never invoke it so a racing decision
-    /// wins.
     @discardableResult
     public func fileRequest(
         tool: any Tool,
@@ -221,10 +190,6 @@ public actor ApprovalQueue {
     }
 
     /// Applies one enriched assessment and rebroadcasts on identical id.
-    ///
-    /// Single actor hop after the model resolves: a pending-existence check
-    /// drops late results for already-decided ids without rebroadcast and
-    /// without trust-grant side effects, so a decision racing the model wins.
     private func finishEnrichment(
         id: UUID,
         assessment: ImpactAssessment,
@@ -254,11 +219,8 @@ public actor ApprovalQueue {
         }
     }
 
-    /// Applies an assessment in place for one pending request.
-    /// - Parameters:
-    ///   - id: Request identifier to enrich.
-    ///   - assessment: Assessment to set.
-    /// - Returns: Updated request, or nil when the id is already decided and removed.
+    /// Applies an assessment in place for one pending request. id: Request
+    /// identifier to enrich.
     private func applyAssessment(id: UUID, assessment: ImpactAssessment) -> PermissionRequest? {
         guard let existing = pending[id] else { return nil }
         let updated = PermissionRequest(
@@ -278,15 +240,6 @@ public actor ApprovalQueue {
     }
 
     /// Sets the assessment for one pending request in place.
-    ///
-    /// Preserves the filing identity while refreshing its safety grading, so
-    /// live views can replace the pending card without re-parking. A decided
-    /// id stays decided: the call no-ops without side effects. A successful
-    /// update rebroadcasts on the identical channel as background enrichment.
-    /// - Parameters:
-    ///   - id: Request identifier to enrich.
-    ///   - assessment: Assessment to set.
-    /// - Returns: Updated request, or nil when unknown or already decided.
     @discardableResult
     public func updateAssessment(id: UUID, assessment: ImpactAssessment) async -> PermissionRequest? {
         guard let updated = applyAssessment(id: id, assessment: assessment) else { return nil }
@@ -325,16 +278,7 @@ public actor ApprovalQueue {
         pending[id]
     }
 
-    /// Resolves one pending request.
-    /// - Parameters:
-    ///   - id: Request identifier.
-    ///   - approved: Whether the request was approved.
-    ///   - duration: Trust duration tier. Defaults to `.thisTime`.
-    ///   - scope: How wide a durable decision reaches. Nil derives the
-    ///     request's own scope: an egress-shaped request resolves to the
-    ///     host it parked on, every other request to the descriptor
-    ///     target the gate derives for the next identical call.
-    /// - Returns: True when the request was pending and resolved.
+    /// Resolves one pending request. id: Request identifier.
     @discardableResult
     public func decide(
         id: UUID,
@@ -349,14 +293,9 @@ public actor ApprovalQueue {
             return false
         }
         let wasTimedOut = timedOutIDs.remove(id) != nil
-        // Continuation, question, desktop resume, and brake approvals resolve a
-        // single parked batch rather than gating a repeatable call, so they stay
-        // one-shot: coerce any durable tier back to thisTime so a direct decide
-        // call cannot mint a dead row. `behavior.brake` is not an executable
-        // tool, so a durable vote on it would only store a rule no call can hit.
-        // A send carrying a wire-valid fire time is booked through the schedule
-        // store rather than trusted for repeats, so its approval coerces the
-        // same way while a durable denial still mints the recipient deny below.
+        // Continuation, question, desktop resume, and brake approvals resolve a single parked batch
+        // rather than gating a repeatable call, so they stay one-shot: coerce any durable tier back
+        // to thisTime so a direct decide call cannot mint a dead row.
         let isOneShotTool = Self.oneShotToolNames.contains(request.toolName)
         let isScheduledSend = Self.isScheduledSend(toolName: request.toolName, argumentsJSON: request.input.argumentsJSON)
         let effectiveDuration: TrustDuration = (isOneShotTool || isScheduledSend) ? .thisTime : duration
@@ -369,22 +308,15 @@ public actor ApprovalQueue {
         }
         if approved, effectiveDuration != .thisTime {
             let resolvedScope = scope ?? Self.derivedScope(for: request)
-            // A durable `messages.send` grant must key on the canonical handle
-            // or recipient set the owner is authorizing, so approving a request
-            // whose recipient is a display name can never mint trust, and there
-            // is no tool-wide send scope. Admission refuses name-shaped sends
-            // before filing on the orchestrator path; this guard keeps the
-            // invariant for every other filing path (headless bus handlers,
-            // direct enqueue), and the gate refuses invalid send scopes
-            // defensively beneath it. The approved call still fails closed at
-            // execution when the arguments are malformed.
+            // A durable `messages.send` grant must key on the canonical handle or recipient set the
+            // owner is authorizing, so approving a request whose recipient is a display name can
+            // never mint trust, and there is no tool-wide send scope.
             if request.toolName == "messages.send", !resolvedScope.isMintableSendScope {
                 return true
             }
-            // The durable mint routes through the shared grant boundary with
-            // the resolved scope, so the never-shorten invariant and scope
-            // canonicalization apply exactly as they do on every other mint
-            // entry point.
+            // The durable mint routes through the shared grant boundary with the resolved scope, so
+            // the never-shorten invariant and scope canonicalization apply exactly as they do on
+            // every other mint entry point.
             await permissionGate?.grant(
                 resolvedScope,
                 toolName: request.toolName,
@@ -392,11 +324,9 @@ public actor ApprovalQueue {
                 sessionID: request.sessionID
             )
         } else if !approved, duration == .forever, !isOneShotTool {
-            // An explicit durable denial is the only owner decision that mints
-            // a deny rule: it outranks every allow decision and never expires,
-            // so the denied call fails closed on every later repeat. One-shot
-            // tools stay exempt (their tier coerced above); a scheduled send
-            // keeps the standing deny contract.
+            // An explicit durable denial is the only owner decision that mints a deny rule: it
+            // outranks every allow decision and never expires, so the denied call fails closed on
+            // every later repeat.
             let resolvedScope = scope ?? Self.derivedScope(for: request)
             await permissionGate?.denyRule(
                 resolvedScope,
@@ -493,10 +423,6 @@ public actor ApprovalQueue {
     }
 
     /// Removes every pending request and parks denials for waiters.
-    ///
-    /// Cancels all background enrichment children alongside the timeout
-    /// sleepers, so a clear racing the model leaves no late rebroadcast and
-    /// no resurrected entry.
     public func clear() {
         for (_, task) in timeoutTasks {
             task.cancel()
@@ -537,15 +463,6 @@ public actor ApprovalQueue {
 
 extension ApprovalQueue {
     /// Scope a decision resolves to when the caller supplies none.
-    ///
-    /// Egress-shaped requests (a parked unlisted host) resolve to that host, so
-    /// a durable egress decision reaches exactly the domain the call dialed.
-    /// Every other request resolves to the descriptor target the gate derives
-    /// for the next identical call, which keeps a narrow grant covering the
-    /// repeat instead of re-prompting; an empty target is the malformed-call
-    /// signature and stores nothing rather than widening to tool-wide.
-    /// - Parameter request: Pending request the decision resolves.
-    /// - Returns: Scope the decision reaches.
     private static func derivedScope(for request: PermissionRequest) -> AccessScope {
         if let egressHost = request.egressHost {
             return .domain(host: egressHost, subdomains: false)
@@ -553,10 +470,8 @@ extension ApprovalQueue {
         return .exactTarget(ActionDescriptor.descriptor(for: request.input, toolName: request.toolName).target)
     }
 
-    /// Tools whose decision resolves one parked batch instead of gating a
-    /// repeatable call, so a durable tier on them is meaningless: the tier
-    /// coerces to thisTime and no rule is minted. `behavior.brake` is not an
-    /// executable tool at all, so a durable vote would only store a dead row.
+    /// Tools whose decision resolves one parked batch instead of gating a repeatable call, so a
+    /// durable tier on them is meaningless: the tier coerces to thisTime and no rule is minted.
     private static let oneShotToolNames: Set<String> = [
         "engine.continue",
         "question.ask",
@@ -570,24 +485,15 @@ extension ApprovalQueue {
         "messages.send"
     ]
 
-    /// Whether one send approval carries a wire-valid fire time, so the booking
-    /// is the sole effect and no repeat trust is minted.
-    /// - Parameters:
-    ///   - toolName: Tool the pending request filed.
-    ///   - argumentsJSON: Raw tool arguments document.
-    /// - Returns: True for a send tool with a decodable fire time.
+    /// Whether one send approval carries a wire-valid fire time, so the booking is the sole effect
+    /// and no repeat trust is minted. toolName: Tool the pending request filed.
     private static func isScheduledSend(toolName: String, argumentsJSON: String) -> Bool {
         guard scheduledSendToolNames.contains(toolName) else { return false }
         return hasValidScheduleAt(argumentsJSON)
     }
 
-    /// Wire-shape validity for a scheduleAt fire time: an epoch-seconds number
-    /// or an ISO-8601 datetime, mirroring the send-tool wire contract. A blank
-    /// string reads as omitted and any other shape reads as malformed, so only
-    /// a decodable fire time coerces; lead and horizon bounds live at booking
-    /// and execution, not at the trust decision.
-    /// - Parameter argumentsJSON: Raw tool arguments document.
-    /// - Returns: True when scheduleAt decodes to a fire time.
+    /// Wire-shape validity for a scheduleAt fire time: an epoch-seconds number or an ISO-8601
+    /// datetime, mirroring the send-tool wire contract.
     private static func hasValidScheduleAt(_ argumentsJSON: String) -> Bool {
         guard let data = argumentsJSON.data(using: .utf8),
               let probe = try? JSONDecoder().decode(ScheduleAtProbe.self, from: data),
@@ -644,15 +550,6 @@ extension ApprovalQueue {
     }
 
     /// Canonical triage badge for bash requests, single-sourced on the copy owner.
-    ///
-    /// Nil for non-bash tools so badges stay bash-scoped. The summary carries
-    /// only the resolved tier plus network flag with no command, path, or host
-    /// interpolation, so inbox and dashboard render identical bytes.
-    /// - Parameters:
-    ///   - toolName: Tool name gating badge scope.
-    ///   - sandboxMode: Resolved sandbox tier for the command.
-    ///   - networkAllowed: Whether network egress is allowed for the tier.
-    /// - Returns: Shared summary for bash tools, or nil otherwise.
     public static func bashSandboxBadge(
         toolName: String,
         sandboxMode: BashSandboxMode,
@@ -663,16 +560,6 @@ extension ApprovalQueue {
     }
 
     /// Approval-card plus dashboard summary for one filed bash request.
-    ///
-    /// Resolves the tier from the request command against the live bash policy
-    /// and derives the network flag from the policy plus the request flag, then
-    /// routes through the canonical badge so cards, inbox, and the
-    /// dashboard DTO cannot drift. Nil for non-bash tools or missing commands.
-    /// - Parameters:
-    ///   - request: Filed approval request carrying bash arguments.
-    ///   - bashConfig: Live bash policy owning tier plus network defaults.
-    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
-    /// - Returns: Shared summary for bash requests, or nil otherwise.
     public static func bashSandboxSummary(
         for request: PermissionRequest,
         bashConfig: BashConfig,
@@ -687,17 +574,6 @@ extension ApprovalQueue {
     }
 
     /// File-time sandbox summary for one tool call.
-    ///
-    /// Hermetic scratch roots and relative system-temp working directories only
-    /// resolve against a concrete root, so callers pass the root execution will
-    /// use; a nil root falls back to the production root so the sync stamping
-    /// path still applies the identical host fallback execution runs.
-    /// - Parameters:
-    ///   - toolName: Tool name gating badge scope.
-    ///   - argumentsJSON: Raw tool arguments document.
-    ///   - bashConfig: Live bash policy, or nil when unavailable.
-    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
-    /// - Returns: Shared summary for bash calls, or nil otherwise.
     static func stampedSandboxSummary(
         toolName: String,
         argumentsJSON: String,
@@ -715,11 +591,6 @@ extension ApprovalQueue {
     }
 
     /// Extracts the shell command from bash arguments without a Tools dependency.
-    ///
-    /// JSONSerialization keeps Core free of the Tools Codable so tier resolution
-    /// cannot drift from the gate decode while staying dependency-free.
-    /// - Parameter argumentsJSON: Raw tool arguments document.
-    /// - Returns: Trimmed non-empty command, or nil when absent.
     private static func bashCommand(from argumentsJSON: String) -> String? {
         guard let data = argumentsJSON.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -729,12 +600,8 @@ extension ApprovalQueue {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Reads the network request flag from bash arguments.
-    ///
-    /// Missing or malformed flags fail closed to false so the summary never
-    /// advertises internet access the policy did not grant.
-    /// - Parameter argumentsJSON: Raw tool arguments document.
-    /// - Returns: True when the caller requested network access.
+    /// Reads the network request flag from bash arguments. Missing or malformed flags fail closed
+    /// to false so the summary never advertises internet access the policy did not grant.
     private static func bashRequestNetwork(from argumentsJSON: String) -> Bool {
         guard let data = argumentsJSON.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

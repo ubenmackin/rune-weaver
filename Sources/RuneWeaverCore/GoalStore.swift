@@ -1,13 +1,4 @@
 // Rune Weaver Core — SQLite-backed durable store for long-horizon goals.
-//
-// Persists goals, their ordered steps, and the append-only audit events in
-// the shared `episodes.db` file alongside sessions, episodes, trust grants,
-// and run logs. Tables are created additively (`CREATE TABLE IF NOT EXISTS`)
-// so opening a database that already carries conversations never disturbs
-// existing rows. Blocking SQLite work runs off the actor executor through
-// the shared serial store queue, mirroring the episodic store, and every
-// multi-row mutation commits in one transaction so a crash can never leave
-// a goal without its steps or its audit trail.
 
 import Foundation
 
@@ -26,9 +17,6 @@ public enum GoalStoreError: Error, Sendable, Equatable {
 }
 
 /// Protocol seam for goal persistence, so engines can substitute fakes.
-///
-/// The actor below is the production implementation; the protocol exists so
-/// schedulers and future engines depend on behavior rather than SQLite.
 public protocol GoalStoring: Sendable {
     /// Persists a goal plus its ordered steps and a creation audit event.
     func create(goal: Goal, steps: [GoalStep]) async throws
@@ -79,12 +67,6 @@ public protocol GoalStoring: Sendable {
     /// Removes every trigger armed on a goal.
     func removeTriggers(goalID: UUID) async throws
     /// Replaces a goal's entire trigger set in one transaction.
-    ///
-    /// The delete and the inserts commit together, so a mid-replacement failure
-    /// never leaves the goal with zero or partial triggers the way a separate
-    /// remove-then-add sequence would. The set is capped at the absolute
-    /// per-goal bound so direct store callers stay within the same ceiling the
-    /// route layer enforces.
     func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft]) async throws
     /// Reads a goal's triggers, oldest first.
     func triggers(for goalID: UUID) async throws -> [GoalTrigger]
@@ -112,10 +94,6 @@ extension GoalStoring {
 /// Actor-isolated SQLite store for goals, steps, and audit events.
 public actor GoalStore: GoalStoring {
     /// Filesystem path of the shared SQLite database.
-    ///
-    /// Held `nonisolated` so paired stores over the same file can be built
-    /// synchronously without an actor hop for an immutable path; the value
-    /// never mutates after initialization, so no isolation protects it.
     public nonisolated let dbPath: String
     /// Maximum rows returned per bounded read.
     private static let maxResults = 1000
@@ -155,10 +133,9 @@ public actor GoalStore: GoalStoring {
         }
     }
 
-    /// Swaps the unstarted pending rows for a fresh step list.
-    ///
-    /// Started and finished work is never rewritten: only `pending` rows are
-    /// removed, so in-flight and completed history survives a replan.
+    /// Swaps the unstarted pending rows for a fresh step list. Started and finished work is never
+    /// rewritten: only `pending` rows are removed, so in-flight and completed history survives a
+    /// replan.
     public func replacePlan(goalID: UUID, steps: [GoalStep]) async throws {
         let dbPath = self.dbPath
         try await SQLiteSerialIO.run {
@@ -187,10 +164,9 @@ public actor GoalStore: GoalStoring {
         }
     }
 
-    /// Returns active goals whose due time is at or before `now`.
-    ///
-    /// The comparison is inclusive so a goal due exactly now fires instead of
-    /// slipping a full interval when the scheduler ticks on the boundary.
+    /// Returns active goals whose due time is at or before `now`. The comparison is inclusive so a
+    /// goal due exactly now fires instead of slipping a full interval when the scheduler ticks on
+    /// the boundary.
     public func advanceDue(now: Date) async throws -> [Goal] {
         let dbPath = self.dbPath
         return try await SQLiteSerialIO.run {
@@ -214,19 +190,9 @@ public actor GoalStore: GoalStoring {
         }
     }
 
-    /// Edits a goal's title, statement, and cadence in place.
-    ///
-    /// Nil leaves its column untouched so partial patches never wipe a field
-    /// with an absent key; the stamp always refreshes so list ordering observes
-    /// the edit. Unknown goals throw `notFound` instead of silently inserting.
-    /// A present cadence outside the steady range fails instead of truncating
-    /// so direct store callers get the same bound the routes enforce.
-    /// - Parameters:
-    ///   - goalID: Goal to edit.
-    ///   - title: New title, or nil to keep the stored one.
-    ///   - statement: New statement, or nil to keep the stored one.
-    ///   - stepIntervalMinutes: New cadence hint, or nil to keep the stored one.
-    /// - Returns: Updated goal snapshot.
+    /// Edits a goal's title, statement, and cadence in place. Nil leaves its column untouched so
+    /// partial patches never wipe a field with an absent key; the stamp always refreshes so list
+    /// ordering observes the edit.
     public func updateDetails(
         goalID: UUID,
         title: String?,
@@ -301,10 +267,6 @@ public actor GoalStore: GoalStoring {
     }
 
     /// Returns the lowest-ordinal pending or in-progress step.
-    ///
-    /// Blocked, done, and skipped rows are looked past so one stalled step
-    /// never wedges the whole goal; nil means nothing remains actionable, and
-    /// the engine derives achievement from that emptiness.
     public func nextActionableStep(goalID: UUID) async throws -> GoalStep? {
         let dbPath = self.dbPath
         return try await SQLiteSerialIO.run {
@@ -313,9 +275,6 @@ public actor GoalStore: GoalStoring {
     }
 
     /// Arms one event trigger on a goal, rejecting unknown or blank targets.
-    ///
-    /// The cooldown floors at the configured minimum so a direct store caller
-    /// cannot arm a tight re-fire loop the engine and route layers would refuse.
     public func addTrigger(goalID: UUID, eventKind: String, pattern: String?, cooldownMinutes: Int) async throws -> GoalTrigger {
         let trimmedKind = eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKind.isEmpty else {
@@ -342,14 +301,6 @@ public actor GoalStore: GoalStoring {
     }
 
     /// Replaces a goal's entire trigger set atomically.
-    ///
-    /// Blank kinds drop and nil cooldowns inherit the configured default before
-    /// the single transaction runs, so the store never arms an unmatchable or
-    /// immediately-repeating trigger; every cooldown floors at the configured
-    /// minimum so a direct store caller cannot bypass the re-fire guard the
-    /// engine and route layers enforce. The surviving set is capped at the
-    /// absolute per-goal bound so direct store callers cannot arm more triggers
-    /// than any route would send.
     public func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft]) async throws {
         let normalized = drafts.compactMap { draft -> GoalTriggerDraft? in
             let kind = draft.eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -403,12 +354,6 @@ public actor GoalStore: GoalStoring {
     /// Blocking SQLite implementation behind ``GoalStore``.
     enum SQLiteGoalStore {
         /// Opens (creating parent directories) and migrates the database.
-        ///
-        /// Tables are additive only: existing session, message, episode,
-        /// trust-grant, scheduler, and run-log tables are never altered or
-        /// dropped, so a shared `episodes.db` keeps its history intact.
-        /// - Parameter dbPath: SQLite file path. `~` is expanded.
-        /// - Returns: Open database handle. Caller must close it.
         static func open(dbPath: String) throws -> OpaquePointer? {
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: GoalStoreError.storeUnavailable)
@@ -732,12 +677,6 @@ public actor GoalStore: GoalStoring {
         }
 
         /// Edits title, statement, and cadence columns in place.
-        ///
-        /// Nil preserves its column via `COALESCE` so partial patches never wipe
-        /// a field; at least one non-nil column is expected from the route layer,
-        /// which validates blanks before reaching storage. A present cadence
-        /// outside the steady range throws instead of truncating through the
-        /// integer bind so the store boundary enforces the same bound as routes.
         static func updateDetails(
             goalID: UUID,
             title: String?,
@@ -817,10 +756,6 @@ public actor GoalStore: GoalStoring {
         }
 
         /// Deletes a goal plus its steps and events in one transaction.
-        ///
-        /// Each table gets its own prepared statement because finalizers bound
-        /// to a loop iteration would otherwise live until the function returns
-        /// and hold three statements open across the commit.
         static func delete(goalID: UUID, dbPath: String) throws {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return }
@@ -929,9 +864,6 @@ public actor GoalStore: GoalStoring {
         }
 
         /// Arms one trigger, rejecting orphan rows for unknown goals.
-        ///
-        /// The cooldown floors at the configured minimum so even a caller that
-        /// reaches this layer directly cannot persist a tight re-fire loop.
         static func addTrigger(
             goalID: UUID,
             eventKind: String,
@@ -958,13 +890,6 @@ public actor GoalStore: GoalStoring {
         }
 
         /// Replaces a goal's entire trigger set in one transaction.
-        ///
-        /// The goal existence check, the delete, and every insert share one
-        /// `BEGIN IMMEDIATE` transaction, so a failure or crash can never leave
-        /// the goal with a partial set while the caller sees an error. Unknown
-        /// goals throw before any row is touched. The inserts stop at the
-        /// absolute per-goal bound so a caller that bypasses the actor wrapper
-        /// still cannot arm an unbounded set.
         static func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft], dbPath: String) throws {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
@@ -1042,10 +967,9 @@ public actor GoalStore: GoalStoring {
             return results
         }
 
-        /// Reads every trigger belonging to an active goal.
-        ///
-        /// Only active goals are eligible for a wake-up: a paused or parked goal
-        /// must not silently acquire a due date while it is not running.
+        /// Reads every trigger belonging to an active goal. Only active goals are eligible for a
+        /// wake-up: a paused or parked goal must not silently acquire a due date while it is not
+        /// running.
         static func activeTriggers(handle: OpaquePointer?) throws -> [GoalTrigger] {
             let sql = "SELECT t.id, t.goal_id, t.event_kind, t.pattern, t.cooldown_minutes, t.last_fired_at, t.created_at "
                 + "FROM goal_triggers t JOIN goals g ON g.id = t.goal_id "
@@ -1066,11 +990,6 @@ public actor GoalStore: GoalStoring {
         }
 
         /// Settles observed events against active triggers in one transaction.
-        ///
-        /// Each trigger settles at most once per call: the first matching event
-        /// wins and the debounce stamp moves immediately, so a burst of matching
-        /// events inside one poll cannot stack repeat firings. Pulling the due
-        /// date to `now` leaves the ordinary due scan to fire the goal next tick.
         static func fireMatchingTriggers(events: [GoalObservedEvent], now: Date, dbPath: String) throws -> [GoalTriggerFire] {
             guard !events.isEmpty else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath

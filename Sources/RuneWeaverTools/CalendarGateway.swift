@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Calendar EventKit gateway and persistence owner.
-//
-// Purpose: EventKit-backed calendar persistence with fail-closed validation and verbatim ID lookup.
-// Scope: CalendarGateway plus CalendarStore seam plus live EKEventStore wrapper; no ToolBus surface.
-// Architectural role: single persistence owner behind CalendarGateway, mirroring MessagesGateway per-domain seam.
 
 import Foundation
 import RuneWeaverCore
@@ -120,13 +116,6 @@ public enum CalendarToolError: Error, Sendable, Equatable, LocalizedError {
 // MARK: - Shared gateway temporal and text validation
 
 /// Shared calendar/reminders gateway text validation owned by the TemporalFilter contract.
-///
-/// The fetch window lives in RuneWeaverCore as `TemporalFilter.effectiveWindow`
-/// over `defaultPastDays`/`defaultFutureDays`; gateways call it directly and map
-/// the inverted-range failure to their domain error so messages stay identical
-/// while error types stay per-domain. Title/notes length plus null-byte checks
-/// stay centralized here so owner-facing copy and fail-closed rejection have
-/// one owner.
 extension TemporalFilter {
     /// Owner-facing title bound shared by both gateways and their tools.
     static let gatewayMaxTitleChars = 300
@@ -171,10 +160,6 @@ extension TemporalFilter {
     }
 
     /// Rejects null bytes in a free-form name field before trimming.
-    ///
-    /// Nulls truncate the underlying store string, so calendar, list, and
-    /// location names fail closed with a field-named message rather than
-    /// matching or persisting a truncated value.
     @discardableResult
     static func gatewayCheckedName(
         _ raw: String,
@@ -266,21 +251,10 @@ public enum CalendarSpan: Sendable, Equatable {
 }
 
 /// Per-domain calendar view of the system event store so tests inject a mock.
-///
-/// The gateway seam stays per domain (CalendarGateway versus RemindersGateway,
-/// mirroring MessagesGateway). The store seam is split the same way:
-/// CalendarStore covers calendar access only while ReminderStore (owned by
-/// RemindersGateway.swift) covers reminders. EventKitStore composes both so one
-/// live EKEventStore object can back both gateways without a second abstraction.
-/// Implementations read calendars live per call, never cached.
 public protocol CalendarStore: Sendable {
     func authorizationStatus() -> CalendarAuthorizationStatus
-    /// Explicit consent prompt reserved for the owner-driven enable path.
-    ///
-    /// Gateways never call this; they only read `authorizationStatus()` and fail
-    /// closed. The method stays so the live store retains the prompting
-    /// capability behind `PermissionProbes.request`, and so mocks can stand in
-    /// for that path in tests without involving EventKit prompts.
+    /// Explicit consent prompt reserved for the owner-driven enable path. Gateways never call this;
+    /// they only read `authorizationStatus()` and fail closed.
     func requestAccess() async throws -> Bool
     func calendars() throws -> [StoreCalendar]
     func predicateForEvents(start: Date, end: Date, calendars: [StoreCalendar]) -> CalendarFetchPredicate
@@ -290,19 +264,13 @@ public protocol CalendarStore: Sendable {
     func remove(_ event: StoreEvent, span: CalendarSpan) throws
 }
 
-/// Shared composition over both per-domain store seams.
-///
-/// Exists only so a single live EKEventStore (see LiveEventKitStore) backs both
-/// gateways. New code depends on CalendarStore or ReminderStore directly; this
-/// composition stays for backward-compatible injection of one object into both.
+/// Shared composition over both per-domain store seams. Exists only so a single live EKEventStore
+/// (see LiveEventKitStore) backs both gateways.
 public protocol EventKitStore: CalendarStore & ReminderStore {}
 
 // MARK: - Create options and update patch (keep create/update within the 6-parameter lint budget)
 
 /// Bundled optional fields for one calendar creation.
-///
-/// Mirrors `ReminderUpdatePatch`: groups the six optional creation fields so
-/// `create(title:options:)` stays at two parameters without a lint suppression.
 public struct CalendarCreateOptions: Sendable, Equatable {
     public var notes: String?
     public var start: Date?
@@ -329,9 +297,6 @@ public struct CalendarCreateOptions: Sendable, Equatable {
 }
 
 /// Bundled editable fields for one calendar update.
-///
-/// Nil means preserve the stored value; a non-nil value replaces it after
-/// validation, matching the pre-existing per-field semantics.
 public struct CalendarUpdatePatch: Sendable, Equatable {
     public var title: String?
     public var notes: String?
@@ -872,16 +837,8 @@ extension ProductionCalendarGateway {
 
     // MARK: - Live EventKit Store
 
-    /// Live EventKit backing for both gateways, and the only store access path.
-    ///
-    /// Provides EventKit backing so calendar and reminder persistence share
-    /// access to the system store. Reads calendars live per call, never cached,
-    /// and maps EK values onto the Store/Reminder seams. Authorization is observed,
-    /// never prompted: gateways fail closed and only PermissionProbes.request prompts.
-    ///
-    /// The wrapped EKEventStore is non-Sendable, so operations allocate an
-    /// isolated EKEventStore per invocation to avoid cross-thread races and
-    /// satisfy Swift 6 Sendable requirements without unchecked escapes.
+    /// Live EventKit backing for both gateways, and the only store access path. Reads calendars
+    /// live per call, never cached, and maps EK values onto the Store/Reminder seams.
     public final class LiveEventKitStore: EventKitStore, Sendable {
         public init() {}
 
@@ -1070,10 +1027,9 @@ extension ProductionCalendarGateway {
                     completion(nil)
                     return
                 }
-                // In-memory date narrowing mirrors TemporalRange.contains:
-                // inclusive lower, exclusive upper, nil side unbounded.
-                // Undated rows pass through here; the gateway decides
-                // whether the query keeps them.
+                // In-memory date narrowing mirrors TemporalRange.contains: inclusive lower,
+                // exclusive upper, nil side unbounded. Undated rows pass through here; the gateway
+                // decides whether the query keeps them.
                 let range = TemporalRange(since: predicate.start, until: predicate.end)
                 let mapped = ekReminders
                     .filter { $0.isCompleted == predicate.fetchCompleted }

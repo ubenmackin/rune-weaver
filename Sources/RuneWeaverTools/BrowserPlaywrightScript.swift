@@ -1,26 +1,4 @@
 // Rune Weaver Tools — Embedded Python Playwright helper source.
-//
-// Carries the isolated browser program backing `browser.navigate` and
-// `browser.act`: fail-closed SSRF gating, ref collection, text distillation,
-// login-wall detection, redirect-chain surfacing, opt-in bounded screenshots,
-// and the JSON envelope. The Swift side vets every entry URL through the
-// canonical guard with the configured search, media, and model exemptions
-// before this program spawns and re-vets every reported redirect and landing
-// URL afterwards, so this embedded gate stays a second layer for callers that
-// reach the bridge directly: it fails closed on loopback, link-local,
-// metadata, and private ranges without its own exemption plumbing. The program is split into two ordered segments that
-// concatenate atomically (`head` then `tail`); keep them adjacent and edit
-// them together so the deny set, capture budget, and envelope shape update as
-// one. The capture budget and viewport interpolate `BrowserScreenshotPolicy`,
-// and the headed human-login wait interpolates `SubprocessPlaywrightGateway.headedWaitSeconds`
-// (the kill budget minus cleanup headroom), so a Swift budget change updates the helper without a
-// second literal to drift; the headed kill budget itself covers the navigation budget plus the wait
-// cap plus headroom so `finally: context.close()` runs before the kill; deny behavior
-// stays pinned by the shared web-safety fixture
-// (`Tests/RuneWeaverToolsTests/WebToolsTests.swift` allowlist suite). The
-// configured browser timeout arrives as `timeoutMs`, bounding the initial
-// navigation and every per-action wait so the Swift setting governs in-page
-// waits instead of a hardcoded literal.
 
 import Foundation
 import RuneWeaverCore
@@ -490,10 +468,6 @@ enum BrowserPlaywrightScriptTail: Sendable {
 }
 
 /// Embedded Python Playwright helper source.
-///
-/// Single entry point concatenating the ordered head and tail segments above
-/// so the deny set, capture budget, and envelope shape still update
-/// atomically; the segments stay adjacent in this file in execution order.
 public enum BrowserPlaywrightScript: Sendable {
     /// Python source executed via `python3 -c`.
     public static let source = BrowserPlaywrightScriptHead.part + BrowserPlaywrightScriptTail.part

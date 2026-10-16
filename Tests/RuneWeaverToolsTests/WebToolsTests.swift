@@ -91,9 +91,6 @@ private enum WebTestSupport {
     }
 
     /// Runs `body` with canned public proof bound to the current task.
-    /// Task-scoped so parallel suites can neither replace nor clear this
-    /// suite's proof mid-chain; matches `OutboundEgressSupervisorTests`
-    /// and `ApiRequestPinnedDialTests` which bind per-task for the same reason.
     static func withPublicDNS<T>(_ body: () async throws -> T) async throws -> T {
         let proof: @Sendable (String) -> [String] = { _ in ["93.184.216.34"] }
         return try await ApiSSRFGuard.$taskTestDNSResolver.withValue(proof) {
@@ -298,10 +295,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Auth statuses return auth_required with browser hint`() async throws {
-        // Public literals need no DNS proof, so no stub is required: the
-        // literal stage alone decides while unverified hostnames still fail
-        // closed elsewhere, keeping the auth classification hermetic without
-        // a bypass in DNS-less environments.
+        // Public literals need no DNS proof, so no stub is required: the literal stage alone
+        // decides while unverified hostnames still fail closed elsewhere, keeping the auth
+        // classification hermetic without a bypass in DNS-less environments.
         for code in [401, 403] {
             let page = try #require(URL(string: "https://93.184.216.34/private"))
             let transport = WebTestSupport.RoutingFetchTransport { _ in
@@ -574,10 +570,9 @@ struct SearXNGEnsurerRuntimeTests {
 
     @Test
     func `Unreachable banner holds terminal cause plus one remediation`() {
-        // Full cascade chains stay in diagnostics for warn logs plus collapsed
-        // UI; the banner holds one generic cause plus one hatch command so each
-        // failure renders once without nesting stage fragments. The trailing
-        // watch fragment mirrors the live readiness backstop.
+        // Full cascade chains stay in diagnostics for warn logs plus collapsed UI; the banner holds
+        // one generic cause plus one hatch command so each failure renders once without nesting
+        // stage fragments.
         let waitingTail = SearXNGEnsurer.failureMessage(stage: "waiting", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: SearXNGEnsurer.readinessWatchTimeoutSeconds)
         let chained = "stage: daemon, exit: 1, detail: xpc down; stage: run, exit: 1, detail: pull failed; \(waitingTail)"
         let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: chained)
@@ -649,10 +644,9 @@ struct SearXNGEnsurerRuntimeTests {
 
     @Test
     func `Allowlisted origins extracts auto service origins`() {
-        // The runtime exemption set carries the auto service
-        // origins (`searxng_url`, enabled media LAN URLs, LLM server URLs).
-        // Owner grants arrive via the snapshot's `local_exemptions`, unioned
-        // by callers.
+        // The runtime exemption set carries the auto service origins (`searxng_url`, enabled media
+        // LAN URLs, LLM server URLs). Owner grants arrive via the snapshot's `local_exemptions`,
+        // unioned by callers.
         let browser = BrowserConfig(searxngURL: "http://127.0.0.1:8888")
         let media = MediaConfig(
             sonarr: ArrInstanceConfig(url: "http://sonarr.local:8989"),
@@ -695,10 +689,9 @@ struct SearXNGEnsurerRuntimeTests {
     @Test
     func `CGNAT metadata and special-purpose literals are refused so the runtime table matches the verifier`() {
         let browser = BrowserConfig()
-        // Alibaba's metadata service answers in CGNAT shared space
-        // (`100.100.100.200`), which the policy verifier already lists as a
-        // forbidden credential target; the runtime guard must reach the same
-        // verdict for the literal and for every obfuscated spelling of it.
+        // Alibaba's metadata service answers in CGNAT shared space (`100.100.100.200`), which the
+        // policy verifier already lists as a forbidden credential target; the runtime guard must
+        // reach the same verdict for the literal and for every obfuscated spelling of it.
         let denied = [
             "http://100.100.100.200/latest/meta-data",
             "http://100.64.0.1/",
@@ -795,11 +788,8 @@ struct SSRFEmbeddedIPv4SpellingTests {
 
     @Test
     func `Dotted and hextet spellings of an embedded address decide alike`() {
-        // Regression: `[64:ff9b::169.254.169.254]` was denied while the
-        // equivalent hextet spelling was waved through as a public literal.
-        // Metadata and link-local targets are never exempt, so those spellings
-        // must refuse together, and like the direct dotted twin they decode to,
-        // under any browser config.
+        // Regression: `[64:ff9b::169.254.169.254]` was denied while the equivalent hextet spelling
+        // was waved through as a public literal.
         let browser = BrowserConfig()
         let neverExemptPairs = [
             ("http://[64:ff9b::169.254.169.254]/", "http://[64:ff9b::a9fe:a9fe]/", "http://169.254.169.254/"),
@@ -1110,13 +1100,9 @@ struct LocalAccessClassificationTests {
             ("blocked.example.com", "http://blocked.example.com/"),
             ("empty.example.com", "http://empty.example.com/")
         ]
-        // Address literals settle with no resolver at all, and an empty
-        // answer produces the same fail-closed wording whether the stub or
-        // the DNS timeout settled the lookup, so those pairs can compare the
-        // classifier and the guard directly. A proven non-empty answer is
-        // different: each lookup races the bounded fail-closed timeout, and a
-        // DNS-less harness can legitimately land either branch, so the pair
-        // is held apart from the cross-call equality rather than weakened.
+        // Address literals settle with no resolver at all, and an empty answer produces the same
+        // fail-closed wording whether the stub or the DNS timeout settled the lookup, so those pairs
+        // can compare the classifier and the guard directly.
         let answeredPairs = pairs.filter { pair in !(answers[pair.host] ?? []).isEmpty }
         let settledPairs = pairs.filter { pair in (answers[pair.host] ?? []).isEmpty }
         await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
@@ -1133,11 +1119,8 @@ struct LocalAccessClassificationTests {
                 #expect(Self.reason(verdict) != nil, "expected a refusal-shaped verdict for '\(pair.host)', got \(verdict)")
                 #expect(denial != nil, "expected the guard to refuse '\(pair.host)'")
                 if !Self.isUnresolved(verdict) {
-                    // With the answer proven, the classifier must reuse the
-                    // guard's resolved-range vetting wording by construction.
-                    // The comparison runs against the pure vetting of the
-                    // same canned addresses, so exactly one resolution feeds
-                    // the assertion and no second lookup can split branches.
+                    // With the answer proven, the classifier must reuse the guard's resolved-range
+                    // vetting wording by construction.
                     let vetted = ApiSSRFGuard.vettedIPListDenial(host: pair.host, addresses: answers[pair.host] ?? [])
                     #expect(
                         Self.reason(verdict) == vetted,

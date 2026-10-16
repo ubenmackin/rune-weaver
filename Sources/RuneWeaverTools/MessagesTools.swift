@@ -238,12 +238,6 @@ public struct MessagesSendArgs: Sendable, Equatable, Decodable {
     }
 
     /// Validates the optional fire time and returns the minute-aligned instant to store.
-    ///
-    /// Bounds and alignment are shared with `email.send` and the scheduler
-    /// store through ``ScheduledSendTimeValidation``, so a requested schedule
-    /// can never disagree with the validation its deterministic replay runs.
-    /// - Parameter now: Reference instant the bounds are measured from.
-    /// - Returns: The validated fire time, or nil when the send is immediate.
     public func validateScheduleAt(now: Date = Date()) throws -> Date? {
         guard let scheduleAt else { return nil }
         return try ScheduledSendTimeValidation.validateScheduleAt(scheduleAt, now: now)
@@ -315,10 +309,6 @@ public struct MessagesResolveRecipientArgs: Sendable, Equatable, Decodable {
 }
 
 /// Copy-pasteable handoff for `messages.send`, derived from a unique resolution.
-///
-/// `recipient` carries the selected candidate's handle verbatim so the send
-/// call dials exactly the resolved identity, while `resolvedFrom` preserves
-/// the trimmed name the handle was resolved from for audit and alias learning.
 public struct MessagesResolveSendHint: Sendable, Equatable, Codable {
     public let recipient: String
     public let resolvedFrom: String
@@ -365,22 +355,12 @@ public struct MessagesResolveRecipientEnvelope: Sendable, Equatable, Codable {
 // MARK: - Name Routing
 
 /// Shared name-to-recipient routing for the read-only Messages tools.
-///
-/// Search and read accept the same recipient inputs and must agree on how one
-/// typed name becomes a set of gateway calls, so classification, resolution,
-/// handle dedupe, and the merge pipeline live here once. Ambiguity deliberately
-/// fans out across every candidate handle — reading cannot dial the wrong
-/// number, so it should show what each candidate said rather than refuse — while
-/// handle-shaped and absent recipients stay on the pre-existing single call.
 private enum MessagesRecipientRouting {
     /// Candidate budget for name resolution: enough to cover a person's handles
     /// without turning one lookup into an unbounded fan-out.
     static let candidateLimit = 5
 
     /// Whether `raw` classifies as a name rather than a handle.
-    ///
-    /// Unclassifiable input (blank, over-long) is deliberately not a name so the
-    /// tools keep their pre-existing pass-through behavior for it.
     static func isName(_ raw: String) -> Bool {
         guard let classified = MessageRecipientClassification.classify(raw) else { return false }
         if case .name = classified {
@@ -389,12 +369,9 @@ private enum MessagesRecipientRouting {
         return false
     }
 
-    /// Resolves a name to deduped handles in ranked order plus the chosen handle.
-    ///
-    /// Dedupe is by normalized handle key, matching the resolver's identity rule,
-    /// and keeps the first (best-ranked) spelling. A nil resolver resolves
-    /// nothing, so a name-shaped recipient fails closed with guidance instead of
-    /// reaching the gateway unaddressed.
+    /// Resolves a name to deduped handles in ranked order plus the chosen handle. A nil resolver
+    /// resolves nothing, so a name-shaped recipient fails closed with guidance instead of reaching
+    /// the gateway unaddressed.
     static func handles(
         for name: String,
         resolver: (any MessagesRecipientResolving)?
@@ -415,13 +392,6 @@ private enum MessagesRecipientRouting {
     }
 
     /// Merges per-handle results into one newest-first, capped list.
-    ///
-    /// Duplicate ids collapse to the first occurrence so a message reachable
-    /// through two handles is reported once. Ordering compares the ISO8601 `date`
-    /// string, which is chronological for that fixed format; undated rows sort
-    /// last and equal dates keep discovery order, so the merge stays
-    /// reproducible. The cap runs after the sort because callers asked for the
-    /// newest `limit` messages overall, not per handle.
     static func merged(_ batches: [[MessagesMessageItem]], limit: Int) -> [MessagesMessageItem] {
         var seenIDs: Set<String> = []
         var merged: [MessagesMessageItem] = []
@@ -445,12 +415,6 @@ private enum MessagesRecipientRouting {
     }
 
     /// Guidance for a name that resolved to no handles at all.
-    ///
-    /// The wording names the two repairs the owner can actually perform, so the
-    /// model asks for an exact handle instead of retrying the same name.
-    /// "Enable for Contacts" names the Contacts row's Enable button in the
-    /// Permissions window (the literal button label is the generic Enable),
-    /// so the guidance points at the row affordance without renaming it.
     static func noMatchesNote(for name: String) -> String {
         "No contact or recent conversation matches \"" + name + "\". Pass a phone number or email, "
             + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
@@ -510,10 +474,8 @@ public struct MessagesSearchTool: Tool, Sendable {
             return .failure(detail, callID: input.callID)
         }
 
-        // A name is not an address the gateway can filter on, so resolve it to
-        // concrete handles first and query each. Trimming only feeds
-        // classification and resolution; the original spelling still rides the
-        // envelope so the caller sees exactly what it passed.
+        // A name is not an address the gateway can filter on, so resolve it to concrete handles
+        // first and query each.
         let recipient = args.recipient?.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let messages: [MessagesMessageItem]
@@ -695,11 +657,9 @@ public struct MessagesSendTool: Tool, Sendable {
 
     public let permissionLevel = PermissionLevel.requiresApproval
 
-    /// Name-shaped refusals embed resolver candidates drawn from Contacts and
-    /// chat history (`displayName`, `handle`, `service`, `lastMessageAt`), so the
-    /// result channel carries attacker-influenceable fields even though the send
-    /// itself is engine-authored; declaring the tool untrusted routes every
-    /// result through the labeled data-only block at the model-context boundary.
+    /// Name-shaped refusals embed resolver candidates carrying attacker-influenceable
+    /// fields; declaring the tool untrusted routes every result through the labeled
+    /// data-only block at the model-context boundary.
     public var contentTrustLevel: ContentTrustLevel {
         .untrustedExternal
     }
@@ -730,10 +690,9 @@ public struct MessagesSendTool: Tool, Sendable {
             return .failure("Invalid messages.send arguments: expected {\"recipient\": \"...\", \"text\": \"...\"}.", callID: input.callID)
         }
 
-        // A fire time makes this a scheduled send: validate the bounds first
-        // so a past or out-of-horizon date is answered with its own reason,
-        // then book the exact approved bytes through the seam once the
-        // recipient and text below prove valid.
+        // A fire time makes this a scheduled send: validate the bounds first so a past or
+        // out-of-horizon date is answered with its own reason, then book the exact approved bytes
+        // through the seam once the recipient and text below prove valid.
         let scheduledFireAt: Date?
         do {
             scheduledFireAt = try args.validateScheduleAt()
@@ -762,11 +721,8 @@ public struct MessagesSendTool: Tool, Sendable {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .flatMap { $0.isEmpty ? nil : $0 }
 
-        // Only exact-address handles reach the gateway: a display name would
-        // guess at a contact, and a near-miss phone spelling could dial the
-        // wrong number. A name is refused with the resolver's best candidate
-        // (or the owner question when several match) before the dry-run branch,
-        // so an approval preview is never filed for a name.
+        // Only exact-address handles reach the gateway: a display name would guess at a contact,
+        // and a near-miss phone spelling could dial the wrong number.
         guard let canonicalRecipient = MessageRecipientClassification.canonicalHandle(recipient) else {
             return await .failure(nameRefusal(for: recipient), callID: input.callID)
         }
@@ -815,10 +771,7 @@ public struct MessagesSendTool: Tool, Sendable {
         }
     }
 
-    /// Books a validated scheduled send, or previews the booking under dry-run.
-    ///
-    /// Booking stores the exact approved bytes without dialing the gateway, so
-    /// dry-run and unwired contexts write nothing. Booking errors stay
+    /// Books a validated scheduled send, or previews the booking under dry-run. Booking errors stay
     /// caller-visible as failures, never silent.
     private func bookedSendOutput(recipient: String, text: String, fireAt: Date, callID: String, context: ToolContext) async -> ToolOutput {
         guard let booking else {
@@ -866,11 +819,6 @@ public struct MessagesSendTool: Tool, Sendable {
     }
 
     /// Composes the owner-facing note from a send result.
-    ///
-    /// A missing or positive confirmation leaves the gateway's own note
-    /// untouched; an explicitly unconfirmed send must not read as an
-    /// unqualified success, so the caveat is appended rather than replacing
-    /// whatever the gateway already reported.
     private func note(for result: MessagesSendResult) -> String? {
         guard result.confirmed == false else {
             return result.details
@@ -895,11 +843,6 @@ public struct MessagesSendTool: Tool, Sendable {
             + "stored and fired exactly once at the requested time."
 
     /// Refuses a name-shaped recipient with an exact handle to retry.
-    ///
-    /// The resolver is the only surface that knows who a name is, so its
-    /// selected candidate becomes the retry instruction and its alternatives
-    /// become the owner question. With no resolver wired nothing can be
-    /// offered, which is the same honest refusal as a zero-match lookup.
     private func nameRefusal(for raw: String) async -> String {
         let resolution: MessageRecipientResolution = if let resolver {
             await resolver.resolve(name: raw, limit: Self.candidateLimit)
@@ -959,9 +902,6 @@ public struct MessagesSendTool: Tool, Sendable {
     }
 
     /// Guidance when no lookup surface produced a candidate.
-    ///
-    /// "Enable for Contacts" names the Contacts row's Enable button in the
-    /// Permissions window (the literal button label is the generic Enable).
     private static func noMatchMessage(for raw: String) -> String {
         "No contact or recent conversation matches \"" + raw + "\". Ask the user for the exact phone number or email, "
             + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
@@ -988,14 +928,6 @@ public struct MessagesSendTool: Tool, Sendable {
 // MARK: - Pre-admission validation
 
 /// Minimal recipient projection for `messages.send` pre-admission validation.
-///
-/// Admission must judge the recipient independently of its companion fields:
-/// `MessagesSendArgs` requires a non-empty `text`, so a full decode lets a
-/// name-shaped call with a missing, blank, or wrong-typed `text` reach the
-/// permission gate and park for approval. Reading only the recipient keys keeps
-/// `execute` as the owner of malformed-argument errors for nameless shapes,
-/// while a wrong-typed recipient still fails this decode exactly as it fails the
-/// full one.
 private struct SendAdmissionRecipient: Decodable {
     /// Raw `recipient` when present, otherwise the `to` alias.
     let rawRecipient: String?
@@ -1005,10 +937,9 @@ private struct SendAdmissionRecipient: Decodable {
         case to
     }
 
-    /// Mirrors `MessagesSendArgs` recipient resolution: `recipient` wins when it
-    /// is a string, and `to` is read only when `recipient` is absent or JSON
-    /// null, so a wrong-typed companion key cannot change which value admission
-    /// judges.
+    /// Mirrors `MessagesSendArgs` recipient resolution: `recipient` wins when it is a string, and
+    /// `to` is read only when `recipient` is absent or JSON null, so a wrong-typed companion key
+    /// cannot change which value admission judges.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let recipient = try container.decodeIfPresent(String.self, forKey: .recipient) {
@@ -1021,18 +952,6 @@ private struct SendAdmissionRecipient: Decodable {
 
 extension MessagesSendTool: ToolAdmissionValidating {
     /// Refuses a display-name recipient before the call can park for approval.
-    ///
-    /// The turn loop consults this before the permission gate and before any
-    /// approval row is filed, so a name-shaped send is answered to the model
-    /// with the resolver's candidates immediately and no durable grant is ever
-    /// keyed on a name. The recipient is read straight from the argument JSON
-    /// rather than through `MessagesSendArgs`, so a name is still refused when
-    /// `text` is missing, blank, or wrong-typed. Malformed recipient keys, blank
-    /// values, null bytes, and nameless shapes proceed so `execute` reports its
-    /// existing argument errors unchanged, and canonical handles proceed to
-    /// normal admission.
-    /// - Parameter input: Raw `messages.send` invocation.
-    /// - Returns: `.refuse` with the shared name-refusal text, or `.proceed`.
     public func admissionVerdict(for input: ToolInput) async -> ToolAdmissionVerdict {
         guard let projection = try? JSONDecoder().decode(SendAdmissionRecipient.self, from: Data(input.argumentsJSON.utf8)),
               let rawRecipient = projection.rawRecipient,
@@ -1127,11 +1046,8 @@ public struct MessagesResolveRecipientTool: Tool, Sendable {
     private static let expectedShapeHint =
         "Expected \(expectedShape) with a contact name, nickname, phone number, or email address."
 
-    /// Guidance for a zero-candidate result: the model must ask for an exact
-    /// handle rather than guess at a name that matched nobody.
-    ///
-    /// "Enable for Contacts" names the Contacts row's Enable button in the
-    /// Permissions window (the literal button label is the generic Enable).
+    /// Guidance for a zero-candidate result: the model must ask for an exact handle rather than
+    /// guess at a name that matched nobody.
     private static func noMatchNote(for query: String) -> String {
         "No match for \"\(query)\". Ask the user for the exact phone number or email, "
             + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
@@ -1142,11 +1058,6 @@ public struct MessagesResolveRecipientTool: Tool, Sendable {
 
 #if !canImport(SQLite3)
     /// Fail-empty resolver for platforms where SQLite3 is unavailable.
-    ///
-    /// The production resolver's history surface needs SQLite3, so resolution
-    /// degrades to an empty result there. The tool stays registered and reports
-    /// the same zero-match guidance, which keeps the advertised and registered
-    /// tool set identical on every platform instead of shape-shifting.
     private struct UnavailableMessagesRecipientResolver: MessagesRecipientResolving {
         func resolve(name: String, limit _: Int) async -> MessageRecipientResolution {
             MessageRecipientResolution(query: name, candidates: [])
@@ -1165,11 +1076,9 @@ public enum MessagesTools {
         booking: (any ScheduledSendBooking)? = nil
     ) -> [any Tool] {
         let effectiveGateway = gateway ?? ProductionMessagesGateway(chatDatabasePath: chatDatabasePath)
-        // The default resolver reads contacts and chat history live per call, so
-        // constructing it here performs no I/O; tests and callers that need a
-        // hermetic lookup inject their own conformance instead. The alias store
-        // is wired here as well as into the send tool so a learned mapping is
-        // consulted by every resolution surface instead of only written.
+        // The default resolver reads contacts and chat history live per call, so constructing it
+        // here performs no I/O; tests and callers that need a hermetic lookup inject their own
+        // conformance instead.
         let effectiveResolver: any MessagesRecipientResolving
         if let resolver {
             effectiveResolver = resolver

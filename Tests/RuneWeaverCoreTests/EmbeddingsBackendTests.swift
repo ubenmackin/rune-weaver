@@ -1,4 +1,5 @@
 // Rune Weaver Core Tests — Contract tests for the embeddings seam.
+
 import Foundation
 @testable import RuneWeaverCore
 import Testing

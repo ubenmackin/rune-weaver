@@ -1,13 +1,4 @@
 // Rune Weaver Server — Run history routes.
-//
-// Owns the run-log listing, lookup, deletion, and cancellation surface
-// backing the dashboard history view. Run rows are the local audit trail for
-// chat turns, direct tool calls, scheduler firings, goal advancements, and
-// index runs, so listing stays bounded by a clamped limit while deletion is
-// deliberate and explicit. Cancelling is cooperative: any running or parked
-// awaiting_approval row settles to cancelled through its linked session with
-// a hub broadcast, while settled rows answer conflict and fan-out rows
-// cancel through the engine registry.
 
 import Foundation
 import RuneWeaverCore
@@ -73,10 +64,9 @@ func registerRunRoutes(_ app: Application) {
             case .workerCancelled:
                 return RunCancelResponse(cancelled: true, scope: "worker")
             case .notRunning:
-                // The engine's live registry owns liveness, not the row status: an
-                // unknown row, an already-settled worker, and a swarm that already
-                // settled all answer the same conflict so a late cancel can never
-                // read as a successful stop.
+                // The engine's live registry owns liveness, not the row status: an unknown row, an
+                // already-settled worker, and a swarm that already settled all answer the same
+                // conflict so a late cancel can never read as a successful stop.
                 throw Abort(.conflict, reason: "Nothing running for this row.")
             }
         }
@@ -84,13 +74,9 @@ func registerRunRoutes(_ app: Application) {
             throw Abort(.conflict, reason: "Nothing running for this row.")
         }
         let durationMs = Int(Date().timeIntervalSince(row.timestamp) * 1000)
-        // The atomic settle owns the generation guard: only a still-live row
-        // flips to cancelled, so a success that landed between the read above
-        // and this write answers 409 instead of being resurrected, while the
-        // cancelled-wins guard in `update` covers the opposite order. Parked
-        // `awaiting_approval` rows cancel exactly like `running` rows through
-        // the same cooperative contract plus steering clear, then settle to
-        // `cancelled` with a hub broadcast.
+        // The atomic settle owns the generation guard: only a still-live row flips to cancelled, so
+        // a success that landed between the read above and this write answers 409 instead of being
+        // resurrected, while the cancelled-wins guard in `update` covers the opposite order.
         guard let updated = await context.runs.cancel(id: id, durationMs: durationMs) else {
             throw Abort(.conflict, reason: "Nothing running for this row.")
         }

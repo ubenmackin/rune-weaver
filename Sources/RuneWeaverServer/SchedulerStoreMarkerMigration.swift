@@ -20,11 +20,9 @@ public struct SchedulerMarkerSeed: Sendable, Equatable {
     }
 }
 
-/// Outcome of the one-shot legacy email-report marker migration.
-///
-/// The report is the audit record for a seeded cursor jump: consumed markers
-/// are deleted, so without it the only trace of the jump would be the cursor
-/// itself.
+/// Outcome of the one-shot legacy email-report marker migration. The report is the audit record for
+/// a seeded cursor jump: consumed markers are deleted, so without it the only trace of the jump
+/// would be the cursor itself.
 public struct SchedulerMarkerMigrationReport: Sendable, Equatable {
     /// Cursors seeded from the newest admissible marker date, oldest job first.
     public let seeds: [SchedulerMarkerSeed]
@@ -81,28 +79,6 @@ public struct SchedulerMarkerMigrationReport: Sendable, Equatable {
 
 extension SchedulerStore {
     /// Seeds owning job cursors from legacy email-report marker facts, once.
-    ///
-    /// The sweep is strictly one-shot: a durable flag row in the same episodes
-    /// database records consumption, so a fact written after the migration can
-    /// never move a cursor again, and memory-only stores fall back to a
-    /// per-process latch. Seeding is bounded to the boot instant, so a marker
-    /// dated in the future never advances a cursor, and targets are real poll
-    /// jobs or the owner-set email-report flag — never prompt text.
-    ///
-    /// An empty email target set seeds no cursors and deletes no markers, so
-    /// deleting markers with no cursor to seed can never discard the window and
-    /// force a full rescan; the latch stays unset so a later boot retries once
-    /// such a job exists.
-    ///
-    /// Marker-shaped facts are the deletable unit, not the parseable subset: a
-    /// reserved-shape fact whose text carries no readable date is still run
-    /// bookkeeping the agent left in memory, so a durable cursor retires it with
-    /// the dated markers instead of leaving it behind to compete in recall.
-    ///
-    /// A delete that fails keeps the latch unset: the sweep returns its report
-    /// without recording consumption, so a later boot retries instead of
-    /// leaving a survivor to pollute recall under a latch that claims the
-    /// sweep already finished.
     @discardableResult
     public func migrateEmailReportMarkers(memoryEngine: MemoryEngine) async -> SchedulerMarkerMigrationReport {
         guard !markerMigrationConsumed else { return .skipped }
@@ -181,11 +157,9 @@ extension SchedulerStore {
             do {
                 try await memoryEngine.removeFactThrowing(id: marker.id)
             } catch {
-                // `removeFactThrowing` reports a cancelled vector-store write as
-                // a semantic failure, so the task flag is the only honest reading
-                // of cancellation at this boundary: a cancelled boot stops the
-                // sweep where it stands and the cancellation propagates instead
-                // of masquerading as a delete failure.
+                // `removeFactThrowing` reports a cancelled vector-store write as a semantic
+                // failure, so the task flag is the only honest reading of cancellation at this
+                // boundary: a cancelled boot stops the sweep where it stands and the cancellation.
                 guard !Task.isCancelled else {
                     return SchedulerMarkerMigrationReport(seeds: seeds, deletedMarkerCount: deleted)
                 }
@@ -224,10 +198,9 @@ extension SchedulerStore {
         #endif
     }
 
-    /// Latches the marker migration in process and persists its audit record.
-    ///
-    /// A store without a durable path still latches in memory so a single boot
-    /// never reseeds cursors from semantic facts twice.
+    /// Latches the marker migration in process and persists its audit record. A store without a
+    /// durable path still latches in memory so a single boot never reseeds cursors from semantic
+    /// facts twice.
     private func recordMarkerMigrationConsumed(seeds: [SchedulerMarkerSeed], deletedMarkerCount: Int) async {
         markerMigrationConsumed = true
         guard let dbPath else { return }
@@ -249,13 +222,6 @@ extension SchedulerStore {
 
 #if canImport(SQLite3)
     /// Durable one-shot latch plus audit row for the legacy marker migration.
-    ///
-    /// The single row is the framework's proof that the sweep already ran, so a
-    /// later boot never re-derives a run cursor from agent-writable semantic
-    /// memory. Seeded job identifiers and instants ride beside the latch because
-    /// the consumed markers themselves are deleted, leaving this row the only
-    /// surviving trace of a seeded cursor. The job and timestamp lists are
-    /// index-aligned: position `i` in one names position `i` in the other.
     enum SQLiteSchedulerMarkerMigration {
         private struct MigrationError: Error {
             let message: String
@@ -286,10 +252,6 @@ extension SchedulerStore {
         }
 
         /// Whether the durable latch records a completed sweep.
-        ///
-        /// An unreadable database fails open to "not yet migrated" so a broken
-        /// file can never strand legacy markers; markers written after this
-        /// change are rejected at every write boundary regardless.
         static func hasConsumed(dbPath: String) -> Bool {
             guard let handle = SQLiteOpenHelper.openLogged(
                 dbPath: dbPath,

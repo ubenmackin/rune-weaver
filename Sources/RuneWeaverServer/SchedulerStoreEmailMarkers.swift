@@ -6,30 +6,15 @@ import RuneWeaverCore
 // MARK: - Email-Report Marker Helpers
 
 /// Marker detection for the legacy email-report bookkeeping fact shape.
-///
-/// Detection lives beside the store because the store is where both directions
-/// of the reserved shape meet: every memory write boundary rejects reserved
-/// text through `SchedulerRunBookkeeping`, while these helpers are the one
-/// reader that consumes it, and a reader that drifted from the writer would
-/// either strand a marker in recall or delete an ordinary fact. Members stay
-/// on `SchedulerStore` itself, so no caller changes.
 extension SchedulerStore {
-    /// Whether a semantic fact carries the legacy email-report last-run shape.
-    ///
-    /// Delegates to the single-sourced reserved-shape guard so the writer-side
-    /// rejection and this reader-side detection can never drift apart. Anchored
-    /// to the `email report last run:` prefix so freeform notes that merely
-    /// mention those words are never treated as deletable markers.
+    /// Whether a semantic fact carries the legacy email-report last-run shape. Delegates to the
+    /// single-sourced reserved-shape guard so the writer-side rejection and this reader-side
+    /// detection can never drift apart.
     static func isEmailReportMarker(_ content: String) -> Bool {
         SchedulerRunBookkeeping.isReservedFactText(content)
     }
 
     /// Whether a job owns an email-report run cursor.
-    ///
-    /// Scoped to a real poll trigger or the owner-set email-report flag. Prompt
-    /// and name text is never sniffed: substring matching would hand any
-    /// mail-mentioning job a cursor seeded from agent-writable memory, so a
-    /// prompt-injected marker could silently skip a window.
     static func isEmailJob(_ job: SchedulerJob) -> Bool {
         job.hasPollTrigger || job.emailReportJob
     }
@@ -58,11 +43,6 @@ extension SchedulerStore {
     }
 
     /// Parses one embedded date candidate in decreasing specificity.
-    ///
-    /// Routes the cascade through the shared Core helpers so the locale plus
-    /// time-zone policy stays single-sourced with the rest of the codebase;
-    /// the precedence (fractional ISO, internet ISO, then UTC-pinned POSIX
-    /// layouts) is preserved exactly.
     private static func parseEmbeddedDate(_ text: String) -> Date? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

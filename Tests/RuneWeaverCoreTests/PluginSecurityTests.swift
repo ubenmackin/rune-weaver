@@ -114,10 +114,9 @@ struct PluginSecurityTests {
             }
         }
 
-        // The egress policy file and the memory tree are protected alongside
-        // the plugins directory and config, so a files.write targeting them is
-        // denied by the protected-path check before any approval or trust path
-        // is consulted.
+        // The egress policy file and the memory tree are protected alongside the plugins directory
+        // and config, so a files.write targeting them is denied by the protected-path check before
+        // any approval or trust path is consulted.
         let protectedArguments = [
             "{\"path\":\"\(home)/.runeweaver/plugins/evil.py\",\"content\":\"evil\"}",
             "{\"path\":\"\(home)/.runeweaver/memory/episodes.db\",\"content\":\"evil\"}",

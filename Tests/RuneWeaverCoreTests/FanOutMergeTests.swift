@@ -1,19 +1,5 @@
 // Rune Weaver Core Tests — Fan-out merge pass, background reviewer, and the
 // run settle surface.
-//
-// Exercises the merge pass with a collecting orchestrator stub (real worker
-// output), a stub reviewer LLM (canned JSON review or an error chunk), and a
-// capturing run logger that mirrors the store's kind filter: the
-// deterministic overlap conflict flagging (identical file paths across
-// subtasks, outranking reviewer verdicts), the reviewer success path (merged
-// summary plus per-subtask verdicts stored on the run and its parent row),
-// the fail-open path (a wired reviewer that flakes degrades to the raw
-// concatenation with an honest note, never losing worker output), the parent
-// row settling into the executeJob vocabulary (ok, awaiting_approval, error)
-// with a parked worker, the fanout.run permission-level assertion via
-// PermissionGate, the single-gate default run without opt-in, and the kind
-// filter end-to-end through the seam. Tests never touch the real run-log
-// store or the live orchestrator.
 
 import Foundation
 import os
@@ -46,11 +32,7 @@ private final class CollectingFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Prompts whose turns park awaiting approval.
     private let parks: Set<String>
 
-    /// Creates a collecting stub.
-    /// - Parameters:
-    ///   - outputs: Output text per prompt.
-    ///   - failures: Error reasons thrown per prompt.
-    ///   - parks: Prompts whose turns park awaiting approval.
+    /// Creates a collecting stub. outputs: Output text per prompt.
     init(outputs: [String: String] = [:], failures: [String: String] = [:], parks: Set<String> = []) {
         self.outputs = outputs
         self.failures = failures
@@ -117,10 +99,9 @@ private struct StubReviewLLM: LLMProvider {
     }
 }
 
-/// Stub run logger recording rows and updates so tests can pin the audit
-/// trail the engine actually wrote, with a kind-filtered read mirroring the
-/// store's list semantics so the dashboard's fanout fetch is exercisable
-/// end-to-end through the seam.
+/// Stub run logger recording rows and updates so tests can pin the audit trail the engine actually
+/// wrote, with a kind-filtered read mirroring the store's list semantics so the dashboard's fanout
+/// fetch is exercisable end-to-end through the seam.
 private final class CapturingMergeRunLogger: FanOutRunLogging {
     /// One recorded run row with its latest settled outcome.
     struct Row: Sendable {
@@ -167,13 +148,9 @@ private final class CapturingMergeRunLogger: FanOutRunLogging {
         }
     }
 
-    /// Kind-filtered read mirroring the store's list: the filter applies
-    /// before the limit so sparse kinds are not dropped by a newest-N window,
-    /// and rows return newest first.
-    /// - Parameters:
-    ///   - kind: Row kind to fetch.
-    ///   - limit: Newest-N window.
-    /// - Returns: Matching rows, newest first.
+    /// Kind-filtered read mirroring the store's list: the filter applies before the limit so sparse
+    /// kinds are not dropped by a newest-N window, and rows return newest first.
+    /// kind: Row kind to fetch.
     func rowsMatching(kind: String, limit: Int = 50) -> [Row] {
         let matching = recordedRows.filter { $0.kind == kind }
         return Array(matching.suffix(limit).reversed())

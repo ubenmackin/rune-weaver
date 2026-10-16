@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Document text extraction across supported formats.
-//
-// Exercises extension and content-type dispatch, the per-format extraction
-// paths (plain text, HTML, PDF, DOCX, XLSX, PPTX, iWork), the byte bound, the
-// empty-text metadata path, unsupported formats, and the overlapping chunk
-// split. Fixtures are built in-process: office packages are hand-assembled ZIP
-// archives (one stored and one deflated entry so both decompression paths run)
-// and PDFs are drawn with CoreGraphics so no binary fixtures are checked in.
 
 import CoreGraphics
 import CoreText
@@ -271,12 +264,6 @@ struct DocumentTextExtractorTests {
 // MARK: - ZIP fixture builder
 
 /// Builds a minimal ZIP archive with stored or deflated entries.
-///
-/// Deflated entries use a raw DEFLATE stored block (BFINAL set, BTYPE 00), which
-/// is a valid uncompressed stream, so the extractor's inflate path is exercised
-/// without needing a compressor in the test target.
-/// - Parameter entries: Entry name, UTF-8 content, and whether to mark the entry deflated.
-/// - Returns: A complete ZIP archive with a central directory and EOCD record.
 private func makeZIP(entries: [(name: String, content: String, deflate: Bool)]) -> Data {
     var archive = Data()
     var directory = Data()

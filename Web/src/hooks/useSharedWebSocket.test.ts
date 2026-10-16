@@ -1,12 +1,5 @@
 // Rune Weaver Dashboard — Direct tests for the shared WebSocket client's
 // `tool_progress` inbound guard.
-//
-// Every live view multiplexes over one `/ws` connection, so a malformed or
-// drifted frame must be dropped at the hub before it reaches typed view
-// handlers; otherwise a partial payload could render a zeroed or
-// mis-attributed progress line. These tests drive the real singleton through a
-// stubbed socket so the guard's counter and owner-tag checks are exercised on
-// the actual message path rather than through a pre-sanitized object.
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";

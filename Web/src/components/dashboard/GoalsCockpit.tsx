@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Goals Momentum Cockpit.
-//
-// Surfaces long-horizon autonomous goals currently active:
-// - Step progress bars (e.g. 4/9 steps, 44%)
-// - Next scheduled auto-advancement countdown
-// - Instantaneous "Advance Now" trigger so the operator can accelerate progress
-// - Direct link to open the full goal plan
 
 import { useCallback, useEffect, useState } from "react";
 import {

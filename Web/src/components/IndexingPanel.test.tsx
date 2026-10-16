@@ -1,6 +1,5 @@
 // Rune Weaver Dashboard — Component tests for the IndexingPanel status
 // dashboard (layout, charts, no-refresh updates, destructive modals) and the
-// IndexPolicyPanel form.
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -71,10 +70,9 @@ import sharedStyles from "../styles.css?raw";
 // raw text import keeps the regression pinned to the single stylesheet owner
 // while staying inside the bundler module graph with no runtime file access.
 
-/// Isolates the module-scoped index status cache between tests.
-/// Ownership: test isolation only; every test starts with a null cache so a
-/// prior successful load never leaks into the next cold-boot assertion.
-/// Edge cases: safe to clear when already null; per-test seeding re-caches explicitly.
+// / Isolates the module-scoped index status cache between tests. / Ownership: test isolation only;
+// every test starts with a null cache so a / prior successful load never leaks into the next
+// cold-boot assertion.
 beforeEach(() => {
   clearCachedIndexStatusForTesting();
 });
@@ -991,10 +989,8 @@ describe("IndexingPanel", () => {
       screen.queryByRole("button", { name: "Run" }),
     ).toBeNull();
 
-    // Master enable unlocks the source toggles; enabling Mail then saving must
-    // persist a partial [index] patch carrying the toggle.
-    // The save control matches every other Settings tab: a shared
-    // settings-footer wrapping a primary-button save-button.
+    // Master enable unlocks the source toggles; enabling Mail then saving must persist a partial
+    // [index] patch carrying the toggle.
     const saveButton = screen.getByRole("button", {
       name: "Save Index Settings",
     });
@@ -1146,10 +1142,9 @@ describe("IndexingPanel", () => {
         ),
       ).toBeInTheDocument();
     });
-    // The start request answers in-flight only; the strip settles from the
-    // refreshed status probe after the restart, so the "Last run ok" content
-    // arrives asynchronously and must be awaited like the other probe-driven
-    // assertions.
+    // The start request answers in-flight only; the strip settles from the refreshed status probe
+    // after the restart, so the "Last run ok" content arrives asynchronously and must be awaited
+    // like the other probe-driven assertions.
     expect(await screen.findByText(/Last run ok/)).toBeInTheDocument();
     const cancelAt = calls.findIndex((call) => call.url === "/index/cancel");
     const runAt = calls.findIndex((call) => call.url === "/index/run");
@@ -4415,10 +4410,8 @@ describe("IndexingPanel two-phase storage", () => {
     expect(screen.queryByTestId("index-size-breakdown")).toBeNull();
   });
 
-  /// Empty storage owns preserving phase-1 source rows.
-  /// Ownership: phase 2 keeps fast counts when storage rows are absent or empty.
-  /// Edge cases: zeroed `bySource: []` never clears true fast counts; slow byte
-  /// totals still merge including the slow content total.
+  // / Empty storage owns preserving phase-1 source rows. / Ownership: phase 2 keeps fast counts
+  // when storage rows are absent or empty.
   it("preserves phase-1 source rows when storage returns an empty payload", async () => {
     const fastStatus = {
       ...statusPayload,

@@ -18,10 +18,9 @@ private func removeHermeticWorkspaceBase(_ url: URL) {
     try? FileManager.default.removeItem(at: url)
 }
 
-/// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam.
-///
-/// The isolated root forces the host fallback so turns never create
-/// containers, while the stubbed seam keeps any isolated-tier probe hermetic.
+/// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam. The isolated root
+/// forces the host fallback so turns never create containers, while the stubbed seam keeps any
+/// isolated-tier probe hermetic.
 private func makeHermeticBashTool(
     bashConfig: BashConfig,
     filesConfig: FilesConfig = FilesConfig(),

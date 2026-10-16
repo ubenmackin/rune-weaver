@@ -1,20 +1,4 @@
 // Rune Weaver Core — Incremental mail indexer feeding the local document index.
-//
-// Walks configured mail accounts mailbox by mailbox, resuming from a persisted
-// per-mailbox IMAP UID watermark so each run only touches newly arrived mail.
-// Message bodies are indexed as plain text through the shared document
-// extractor (which strips HTML), and attachments discovered from the message
-// body structure are fetched read-only through `BODY.PEEK`, staged into
-// Seatbelt-confined temp, extracted to text, then deleted so only text chunks
-// and metadata persist. A per-attachment size cap, a per-run item budget, a
-// content-hash dedupe set for forwarded duplicates, and a configurable vector
-// window keep the local store bounded: mail older than the window stays
-// keyword-only for the shared embedding backfill path. Credentials resolve at
-// execution time through ``SecretsManager`` and are never logged or persisted.
-//
-// The gateway is a protocol seam so this file stays free of the tool layer;
-// the live `SubprocessIMAPGateway` is adapted to it in `RuneWeaverTools`, and
-// tests inject a stub that never touches the network.
 
 import CryptoKit
 import Dispatch
@@ -23,36 +7,20 @@ import Foundation
 // MARK: - Indexer
 
 /// Actor-isolated mail indexer over an injected read-only gateway seam.
-///
-/// One `run` enumerates every configured account and mailbox, indexes the
-/// messages newer than each mailbox's UID watermark, and advances the
-/// watermark as it goes. Malformed mail and unreachable mailboxes degrade to
-/// warnings rather than aborting the run, while cancellation propagates.
 public actor MailIndexer {
-    /// Newest-message page size fetched per gateway call.
-    ///
-    /// One call stays bounded by the bridge page cap while fixed UID windows
-    /// tile downward until they reach the watermark. The limit never widens;
-    /// backfill converges by paging, not by growing the page.
+    /// Newest-message page size fetched per gateway call. One call stays bounded by the bridge page
+    /// cap while fixed UID windows tile downward until they reach the watermark.
     public static let pageLimit = 50
 
-    /// Maximum fetch attempts per mailbox before skipping with a warning.
-    ///
-    /// The first failure of a retryable transport error backs off and retries;
-    /// the terminal failure warns once with an attempt suffix.
+    /// Maximum fetch attempts per mailbox before skipping with a warning. The first failure of a
+    /// retryable transport error backs off and retries; the terminal failure warns once with an
+    /// attempt suffix.
     public static let maxFetchAttempts = 3
 
     /// Backoff delays in seconds between fetch attempts.
-    ///
-    /// The first retry waits the first entry and the second retry waits the
-    /// second entry; the delays are cancellable so backoff aborts promptly.
     public static let fetchRetryDelaysSeconds: [TimeInterval] = [2, 8]
 
     /// Steady pause in seconds between gateway page calls.
-    ///
-    /// The fetch loop sleeps this long before every page except the first so
-    /// backfill paces uniformly across hosts; the pause is injectable for tests
-    /// and cancellable so a stop aborts the pause promptly.
     public static let interPagePauseSeconds: TimeInterval = 1.0
 
     /// Configured mail accounts.
@@ -76,18 +44,7 @@ public actor MailIndexer {
     /// Secrets manager used to resolve account passwords at execution time.
     private let secrets: SecretsManager
 
-    /// Creates a mail indexer.
-    /// - Parameters:
-    ///   - emailConfig: Configured mail accounts.
-    ///   - indexConfig: Index policy.
-    ///   - gateway: Read-only gateway seam.
-    ///   - store: Document store to index into.
-    ///   - embedder: Optional embeddings backend for vector-eligible chunks.
-    ///   - extractor: Text extractor; defaults to the shared document extractor.
-    ///   - checkpoints: Incremental watermark and dedupe store.
-    ///   - stagingRoot: Test-injectable staging root; nil uses confined temp.
-    ///   - now: Clock seam for the vector window.
-    ///   - secrets: Secrets manager used to resolve passwords at execution time.
+    /// Creates a mail indexer. emailConfig: Configured mail accounts.
     public init(
         emailConfig: EmailConfig,
         indexConfig: IndexConfig,
@@ -114,9 +71,6 @@ public actor MailIndexer {
 
     /// Runs one incremental indexing pass.
     /// - Parameter reporter: Sink for advisory progress; defaults to a no-op.
-    /// - Returns: Counts describing the run.
-    /// - Throws: Cancellation, or a store write failure; per-account and
-    ///   per-mailbox problems degrade to warnings.
     public func run(reporter: ToolProgressReporter = ToolContext.noProgress) async throws -> MailIndexRunReport {
         guard indexConfig.enabled, indexConfig.mail else {
             return MailIndexRunReport(skippedReason: "Mail indexing is disabled in [index].")
@@ -161,11 +115,9 @@ public actor MailIndexer {
             for mailbox in mailboxes {
                 try Task.checkCancellation()
                 guard cursor.budget > 0 else { break }
-                // The mail run gate owns Trash-class matching: a denied
-                // mailbox skips before any STATUS or fetch dial so transient
-                // deletes never cost a round trip, counting only as skipped
-                // with no warning. The name is remembered for the end-of-run
-                // retire below.
+                // The mail run gate owns Trash-class matching: a denied mailbox skips before any
+                // STATUS or fetch dial so transient deletes never cost a round trip, counting only
+                // as skipped with no warning.
                 if Self.isMailboxDenied(mailbox, patterns: indexConfig.mailboxDeny) {
                     cursor.report.mailboxesScanned += 1
                     cursor.report.mailboxesSkipped += 1
@@ -174,8 +126,7 @@ public actor MailIndexer {
                 }
                 // The context stores the trimmed spelling so the pooled session, checkpoint
                 // watermark, stored document mailbox, and document identity all agree; the shared
-                // mailbox key and document identity both trim, so trimming once here keeps one
-                // mailbox from forking pool and watermark from document identity.
+                // mailbox key and document identity both trim, so trimming once here keeps one.
                 let context = MailboxContext(
                     account: account,
                     mailbox: mailbox.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -187,12 +138,8 @@ public actor MailIndexer {
                 try await indexMailbox(context: context, cursor: &cursor, reporter: reporter)
             }
         }
-        // Retire on complete runs only: a cancelled pass, a budget-capped
-        // pass, or a halted pass never deletes what it never examined. Mail
-        // carries no thermal gate, so completeness is cancellation plus an
-        // unexhausted budget. Retired docs fold into the report so coordinator
-        // totals stay honest, and dropped checkpoints let a re-allowed mailbox
-        // backfill from scratch.
+        // Retire on complete runs only: a cancelled pass, a budget-capped pass, or a halted pass
+        // never deletes what it never examined.
         if !deniedObserved.isEmpty, !Task.isCancelled {
             let budgetExhausted = indexConfig.nightlyBudget > 0 && cursor.budget <= 0
             if !budgetExhausted {
@@ -209,9 +156,6 @@ public actor MailIndexer {
     }
 
     /// Mutable per-run budget, progress throttle, and report bundle.
-    ///
-    /// Grouped so mailbox helpers stay under the parameter budget without
-    /// changing the incremental watermark or budget semantics.
     private struct MailRunCursor: Sendable {
         /// Counts accumulated across mailboxes.
         var report: MailIndexRunReport
@@ -222,9 +166,6 @@ public actor MailIndexer {
     }
 
     /// One mailbox window ready for per-message indexing.
-    ///
-    /// Bundles the sorted fresh set with its watermark decision so the
-    /// message loop carries three arguments instead of a long parameter list.
     private struct MailboxBatch: Sendable {
         /// Per-mailbox indexing context.
         var context: MailboxContext
@@ -237,10 +178,6 @@ public actor MailIndexer {
     }
 
     /// Indexes one mailbox window, advancing the watermark only past considered messages.
-    ///
-    /// Newest-first pages are re-sorted ascending so the watermark never jumps
-    /// over an unfetched gap; a burst wider than the gateway page holds the
-    /// watermark while still recording hashes for dedupe on revisit.
     private func indexMailbox(
         context: MailboxContext,
         cursor: inout MailRunCursor,
@@ -257,15 +194,8 @@ public actor MailIndexer {
             matched: cursor.report.messagesIndexed,
             current: "\(context.account.name) - \(context.mailbox)"
         ))
-        // The named owner for the open-close bracket is this method: the STATUS
-        // probe plus every fetch page ride one pooled connection, with cancel,
-        // skip, plus throw all terminating it. An open failure skips with no
-        // one-shot fallback. Cleanup is explicit on every exit because an
-        // async close cannot suspend inside a synchronous defer. Each close
-        // runs through a detached-but-awaited helper so a cancel on the way
-        // into the close still evicts the pool entry instead of leaking it,
-        // and the evict completes before this method returns so callers
-        // observe it synchronously. Closes are idempotent no-ops when absent.
+        // The named owner for the open-close bracket is this method: the STATUS probe plus every
+        // fetch page ride one pooled connection, with cancel, skip, plus throw all terminating it.
         do {
             try await gateway.openMailboxSession(credentials: context.credentials, mailbox: context.mailbox)
         } catch let cancel as CancellationError {
@@ -292,39 +222,23 @@ public actor MailIndexer {
     }
 
     /// Indexes one mailbox over its already-open pooled session.
-    ///
-    /// The caller owns the open-close bracket and guarantees the close on both
-    /// return and throw, so this body uses plain returns for skips and plain
-    /// throws for cancellation without its own cleanup.
     private func indexMailboxOpened(
         context: MailboxContext,
         watermark: inout Int,
         cursor: inout MailRunCursor,
         reporter: ToolProgressReporter
     ) async throws {
-        // Reconcile the server validity token before paging: a mismatch means
-        // UIDs were reassigned, so restart from zero while retained hashes
-        // dedupe refetches. Unknown tokens skip the check without failing.
-        // The probe rides the pooled session opened above.
+        // Reconcile the server validity token before paging: a mismatch means UIDs were reassigned,
+        // so restart from zero while retained hashes dedupe refetches. Unknown tokens skip the check
+        // without failing.
         var probedStatus: MailIndexMailboxStatus?
         do {
             probedStatus = try await gateway.mailboxStatus(credentials: context.credentials, mailbox: context.mailbox)
         } catch let cancel as CancellationError {
             throw cancel
         } catch {
-            // Status is advisory; a failing probe must not skip the mailbox
-            // when the message path could still succeed. Only auth,
-            // validation, and unknown-account failures skip at once without
-            // a reopen so a bad credential or bad argument never pays for an
-            // extra handshake. A retryable session failure already evicted,
-            // so reopen fresh before paging instead of falling back to
-            // one-shot mid-bracket. Any other probe failure (for example a
-            // STATUS-unsupported server reporting a generic bridge failure)
-            // falls back to the unanchored path with a nil probe, matching
-            // the one-shot empty-query fallback, so session coverage never
-            // diverges. A reopen failure skips at once with no fallback
-            // so a dead session never pays for a fresh handshake it cannot
-            // reuse.
+            // Status is advisory; a failing probe must not skip the mailbox when the message path
+            // could still succeed.
             if Self.isSkippableStatusError(error) {
                 cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                 return
@@ -341,10 +255,9 @@ public actor MailIndexer {
             }
             probedStatus = nil
         }
-        // The checkpoint sync persists to disk, so its failure is a local
-        // store problem rather than a session problem: it warns and skips
-        // without redialing, keeping a sidecar IO fault from masquerading as
-        // an advisory STATUS failure.
+        // The checkpoint sync persists to disk, so its failure is a local store problem rather than
+        // a session problem: it warns and skips without redialing, keeping a sidecar IO fault from
+        // masquerading as an advisory STATUS failure.
         if let probedStatus {
             do {
                 let didReset = try await checkpoints.synchronizeValidity(
@@ -473,9 +386,6 @@ public actor MailIndexer {
     }
 
     /// Indexes one sorted mailbox window, recording watermarks and progress.
-    ///
-    /// Budget is decremented per message so a capped run stops mid-mailbox;
-    /// the watermark records each UID unless the window is held over a gap.
     private func indexFreshMessages(
         batch: MailboxBatch,
         cursor: inout MailRunCursor,
@@ -516,15 +426,8 @@ public actor MailIndexer {
 // MARK: - Streaming backfill
 
 extension MailIndexer {
-    /// Deletes index rows for newly denied mailboxes and drops their checkpoints.
-    ///
-    /// The store owns deletion while this gate owns the observed set: hashes
-    /// for the retired rows are read first so the checkpoint can forget them,
-    /// otherwise a re-allowed mailbox would dedupe against its own deleted
-    /// bodies instead of re-indexing. Failures degrade to a warning so a
-    /// retire problem never fails an otherwise complete run.
-    /// - Parameter denied: Mailbox names skipped this run.
-    /// - Returns: Number of mail documents retired.
+    /// Deletes index rows for newly denied mailboxes and drops their checkpoints. Failures degrade
+    /// to a warning so a retire problem never fails an otherwise complete run.
     private func retireDeniedMailboxes(_ denied: Set<String>) async -> Int {
         do {
             let hashes: Set<String>
@@ -576,9 +479,6 @@ extension MailIndexer {
     }
 
     /// Streams historical backfill downward page-by-page, indexing each batch immediately.
-    ///
-    /// Watermark is established on the first page if zero; the backfill floor advances
-    /// downward as pages arrive and is cleared when the start of the mailbox is reached.
     private func streamBackfill(
         context: MailboxContext,
         watermark: inout Int,
@@ -873,40 +773,6 @@ extension MailIndexer {
     }
 
     /// Fetches the newest window covering every UID above the watermark by paging downward.
-    ///
-    /// The named owner for tiling plus completion is this method: it owns the
-    /// downward UID loop while the adapter owns the `UID lo:hi` criterion
-    /// shape. The first page fetches the newest fixed window anchored from the
-    /// threaded STATUS `uidNext` when the caller probed, otherwise from the
-    /// gateway's own anchor; each later page passes `beforeUID` strictly below the
-    /// lowest numeric UID already fetched, so the gateway returns only UIDs
-    /// below that bound inside a window at most `MailIndexTiling.uidWindowWidth` wide. The
-    /// loop stops when a page reaches the watermark (steady state still costs
-    /// exactly one newest page), when a short page or a bound at the mailbox
-    /// start proves exhaustion, or when a repeated page proves the gateway
-    /// clamps to one newest window. An empty window steps downward to the next
-    /// fixed window instead of completing so UID gaps from deletions cannot
-    /// strand older mail. A clamped gateway therefore returns an incomplete
-    /// window and the caller holds its watermark, so huge mailboxes degrade to
-    /// multi-run backfill instead of stalling. Cancellation is honored at the
-    /// top of each page so the loop stops at the next checkpoint. The named
-    /// owner for pacing is this page loop: it pauses `interPagePauseSeconds`
-    /// before every gateway page call except the first, uniformly for every
-    /// host with no per-account branching.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to read.
-    ///   - watermark: Highest indexed UID; paging stops once a page reaches it.
-    ///   - anchoredUidNext: Threaded STATUS `uidNext` for the first page, when
-    ///     the caller already probed. A present value seeds the first
-    ///     `beforeUID` so the gateway skips its own anchor STATUS on the same
-    ///     connection; nil falls back to an unanchored newest page.
-    ///   - sleeper: Pause hook sleeping the given nanoseconds; defaults to
-    ///     `Task.sleep` so production paces while tests inject a recorder. The
-    ///     hook throws so cancellation aborts the pause.
-    /// - Returns: Unique messages in newest-first order, plus whether the window
-    ///   reaches the watermark or the mailbox start.
-    /// - Throws: Cancellation, the sleeper error, or the gateway error for the mailbox.
     func fetchFreshWindow(
         credentials: MailIndexCredentials,
         mailbox: String,
@@ -932,11 +798,8 @@ extension MailIndexer {
                 beforeUID: beforeUID
             )
             if page.isEmpty {
-                // Empty fixed windows step downward instead of completing so a
-                // UID gap cannot strand older mail below it. The next top is
-                // the current window bottom minus one, derived from the shared
-                // tiling helper the adapter criterion builds from. The mailbox
-                // start still completes.
+                // Empty fixed windows step downward instead of completing so a UID gap cannot
+                // strand older mail below it.
                 guard let current = beforeUID else {
                     return (collected, true)
                 }
@@ -965,11 +828,8 @@ extension MailIndexer {
             if reachedWatermark {
                 return (collected, true)
             }
-            // A repeated page means the gateway ignores the downward bound and
-            // clamps to one newest window, so stop and let the caller hold the
-            // watermark over the gap. This check precedes the short-page check
-            // because a clamped page is also shorter than a full window only
-            // when the mailbox itself is small.
+            // A repeated page means the gateway ignores the downward bound and clamps to one newest
+            // window, so stop and let the caller hold the watermark over the gap.
             if !advanced {
                 return (collected, false)
             }
@@ -1001,11 +861,8 @@ extension MailIndexer {
         }
     }
 
-    /// Resolves account credentials at execution time.
-    ///
-    /// The password is read from the environment or Keychain and never logged.
-    /// - Parameter account: Configured account.
-    /// - Returns: Resolved credentials, or nil when no password is available.
+    /// Resolves account credentials at execution time. The password is read from the environment or
+    /// Keychain and never logged.
     private func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
         let envVar = account.passwordEnvVar
         let password: String?
@@ -1030,16 +887,6 @@ extension MailIndexer {
     }
 
     /// Builds an advisory progress line for a message.
-    ///
-    /// The current names the owning account so concurrent mailboxes stay
-    /// distinguishable while the message copy and counts match the entering
-    /// plus window frames exactly.
-    /// - Parameters:
-    ///   - report: Counts accumulated so far.
-    ///   - account: Account nickname owning the mailbox.
-    ///   - mailbox: Mailbox being walked.
-    ///   - messageID: Message being indexed.
-    /// - Returns: A progress value with no secret content.
     private static func progress(report: MailIndexRunReport, account: String, mailbox: String, messageID: String) -> ToolProgress {
         ToolProgress(
             message: "Indexing mail: \(report.messagesIndexed) indexed, \(report.messagesSeen) scanned",
@@ -1049,12 +896,8 @@ extension MailIndexer {
         )
     }
 
-    /// Indexes one message and its stageable attachments.
-    /// - Parameters:
-    ///   - message: Message to index.
-    ///   - context: Per-mailbox indexing context.
-    /// - Returns: Counts describing the message outcome.
-    /// - Throws: Cancellation, or a document-store write failure.
+    /// Indexes one message and its stageable attachments. message: Message to
+    /// index.
     private func index(message: MailIndexMessage, context: MailboxContext) async throws -> MessageOutcome {
         var outcome = MessageOutcome()
         let bodyText = Self.messageText(subject: message.subject, body: message.body)
@@ -1150,13 +993,8 @@ extension MailIndexer {
         var degraded: Bool
     }
 
-    /// Stages and extracts attachment bodies into shared chunks.
-    /// - Parameters:
-    ///   - message: Message whose attachments are processed.
-    ///   - context: Per-mailbox indexing context.
-    ///   - eligible: Whether the message falls inside the vector window.
-    ///   - staging: Chunks, metadata, outcome, and degraded flag updated in place.
-    /// - Throws: Cancellation.
+    /// Stages and extracts attachment bodies into shared chunks. message: Message
+    /// whose attachments are processed.
     private func collectAttachmentChunks(
         message: MailIndexMessage,
         context: MailboxContext,
@@ -1252,20 +1090,9 @@ extension MailIndexer {
         }
     }
 
-    /// Embeds chunk text when the message is inside the vector window.
-    ///
-    /// Embedding failure degrades the affected chunks to keyword-only, matching
-    /// the shared fallback contract; cancellation still propagates. The probe
-    /// runs before the batch so a cancel observed between messages never starts
-    /// another embedding batch, bounding overrun to one message. Only the first
-    /// `max_vector_chunks_per_document` chunks are sent for embedding; the
-    /// remainder keep an empty embedding so they stay fully keyword-searchable.
-    /// - Parameters:
-    ///   - chunks: Chunks to embed.
-    ///   - title: Subject or title of the mail message for task prompt steering.
-    ///   - eligible: Whether the message falls inside the vector window.
-    ///   - precomputed: Precomputed multimodal vectors by chunk index.
-    /// - Returns: One vector per chunk, empty for keyword-only chunks.
+    /// Embeds chunk text when the message is inside the vector window. Embedding failure degrades
+    /// the affected chunks to keyword-only, matching the shared fallback contract; cancellation
+    /// still propagates.
     private func embeddings(
         for chunks: [DocumentChunk],
         title: String? = nil,
@@ -1312,12 +1139,8 @@ extension MailIndexer {
         return expanded
     }
 
-    /// Writes attachment bytes into Seatbelt-confined temp.
-    /// - Parameters:
-    ///   - bytes: Attachment bytes.
-    ///   - filename: Original filename, sanitized before use.
-    /// - Returns: The staging directory plus the staged file URL.
-    /// - Throws: `MailIndexError.stagingFailed` when confinement cannot be proven.
+    /// Writes attachment bytes into Seatbelt-confined temp. bytes: Attachment
+    /// bytes.
     private func stage(bytes: Data, filename: String) throws -> (directory: URL, file: URL) {
         let directory: URL
         if let stagingRoot {

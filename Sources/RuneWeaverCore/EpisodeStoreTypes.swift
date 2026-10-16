@@ -111,10 +111,6 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
     import SQLite3
 
     /// Allowlisted tables eligible for schema probing.
-    ///
-    /// The probe builds its `PRAGMA` from fixed constants so callers can
-    /// never inject an arbitrary identifier; adding a case here is the
-    /// only way to make another table queryable.
     package enum SQLiteKnownTable: Sendable {
         /// Conversation sessions.
         case sessions
@@ -140,13 +136,6 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
     }
 
     /// Shared SQLite primitives for the episode, session, scheduler, and run-log stores.
-    ///
-    /// `openHandle` is the single open path on this type: it creates parent
-    /// directories and applies the shared busy-timeout/WAL policy, mapping
-    /// failures through the caller's error factory. There is no `openLogged`
-    /// helper here — the log-on-open fallback some server stores use lives
-    /// separately as `SQLiteOpenHelper.openLogged` in the server layer, which
-    /// wraps this handle opener with one consistent log line.
     package enum SQLiteHelpers {
         /// Opens a database handle, creating parent directories.
         package static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {
@@ -229,18 +218,12 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         }
 
         /// Clamps a row limit to the SQLite bind range.
-        /// Shared so episode and run-log reads agree that oversized caller
-        /// limits cap at the 32-bit bound and non-positive limits bind as zero
-        /// instead of wrapping into a negative LIMIT with wrong rows.
         package static func sqliteLimit(_ limit: Int) -> Int32 {
             Int32(min(max(limit, 0), Int(Int32.max)))
         }
 
-        /// Lists declared columns for a table, lowercased for case-tolerant migration checks.
-        /// - Parameters:
-        ///   - handle: Open database handle being migrated or projected.
-        ///   - table: Allowlisted table; its fixed `PRAGMA` is the only SQL issued.
-        /// - Returns: Lowercased column names, or empty when the probe cannot prepare so callers attempt migration.
+        /// Lists declared columns for a table, lowercased for case-tolerant migration checks. -
+        /// Parameters: - handle: Open database handle being migrated or projected.
         package static func columnNames(handle: OpaquePointer?, table: SQLiteKnownTable) -> Set<String> {
             var names: Set<String> = []
             var statement: OpaquePointer?

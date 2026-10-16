@@ -1,11 +1,4 @@
 // Rune Weaver Tests — End-to-end tool progress emission through the orchestrator.
-//
-// Protects the wiring that carries a running tool's advisory `ToolProgress` from
-// its `ToolContext` sink onto `OrchestratorEvent.toolProgress`. The bus is the
-// layer that stamps authoritative call identity, so a tool emits without knowing
-// its own call; if the orchestrator constructs a context with the default no-op
-// reporter, every report is silently discarded and the dashboard's progress path
-// is unreachable even though the wire frame exists.
 
 import Foundation
 import os

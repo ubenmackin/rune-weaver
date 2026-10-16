@@ -1,15 +1,4 @@
 // Rune Weaver Tests — PermissionGate decision order, deny-outranks, write posture, and ephemeral visibility.
-//
-// Pins the live half of the rule model, decided in `checkPermission`: the
-// evaluation order where a durable deny outranks every allow decision, protected
-// engine paths refuse before any trust is consulted, the shell policy decides
-// before grants, the files write posture resolves, and grants only then release
-// the call; the deny-outranks contract in every mint order and over every
-// permission level; the files write posture matrix, where stage and live run
-// with no approval request filed while ask and a missing or unreadable path
-// park; and the ephemeral grants a session holds, surfaced by session with
-// their task or session kind. Durable administration and persistence of the
-// same rules live in `PermissionGatePersistenceTests`.
 
 import Foundation
 @testable import RuneWeaverCore

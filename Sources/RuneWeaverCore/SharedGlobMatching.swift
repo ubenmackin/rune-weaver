@@ -1,23 +1,9 @@
 // Rune Weaver Core — Shared file-glob matching for indexer excludes and file tools.
-//
-// Purpose: single regex-based Git/VS Code-shaped glob matcher so the files
-// indexer excludes and the file tools (`files.grep` includes, `files.glob`)
-// agree on what a pattern means.
-// Scope: pure string predicates only; filesystem walking stays with callers.
-// Architectural role: owned by `RuneWeaverCore` so both the indexer and
-// `RuneWeaverTools` resolve the same patterns. Matching is case-sensitive;
-// callers lowercase both sides for the case-insensitive macOS view.
 
 import Foundation
 import os
 
 /// Shared glob matching for file excludes, grep includes, and glob search.
-///
-/// Patterns follow the Git and VS Code convention: a pattern without a slash
-/// matches the filename component at any depth, while a slash-bearing pattern
-/// matches the root-relative path. `*` spans within one segment, `?` matches
-/// one non-separator character, `**` spans separators, and `[...]` classes
-/// (with `[!...]` negation) match one character.
 public enum SharedGlobMatching: Sendable {
     private static let regexCache = OSAllocatedUnfairLock(initialState: [String: NSRegularExpression]())
 
@@ -28,11 +14,7 @@ public enum SharedGlobMatching: Sendable {
         pattern.split(separator: "/", omittingEmptySubsequences: true).contains { $0 == ".." }
     }
 
-    /// Reports whether a relative path matches a glob.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - relativePath: Path to match against.
-    /// - Returns: True when the whole path matches.
+    /// Reports whether a relative path matches a glob. pattern: Glob pattern.
     public static func matches(pattern: String, relativePath: String) -> Bool {
         let expression: NSRegularExpression? = regexCache.withLock { cache in
             if let cached = cache[pattern] {
@@ -55,14 +37,9 @@ public enum SharedGlobMatching: Sendable {
         return expression.firstMatch(in: relativePath, range: range) != nil
     }
 
-    /// Reports whether a path matches a glob pattern, following the Git and
-    /// VS Code convention: patterns without a slash match against the filename
-    /// component at any depth; slash-bearing patterns match against the root-relative path.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - relativePath: Path relative to the walk root.
-    ///   - filename: Final path component.
-    /// - Returns: True when the filename or the relative path matches.
+    /// Reports whether a path matches a glob pattern, following the Git and VS Code convention:
+    /// patterns without a slash match against the filename component at any depth; slash-bearing
+    /// patterns match against the root-relative path.
     public static func matchesPath(pattern: String, relativePath: String, filename: String) -> Bool {
         if !pattern.contains("/") {
             if matches(pattern: pattern, relativePath: filename) {

@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Persona config defaults, decode, validation, and round-trip.
-//
-// Covers the additive `[persona]` table: stock defaults on an absent table,
-// key-by-key decode with partial and full tables, TOML render round-trip, the
-// blank-name fallback and overlong-style truncation (logged degradations), and
-// the fail-closed bounds for oversized or unprintable names, oversized owner
-// names, and unknown tone or avatar spellings across the TOML load, JSON
-// decode, and hand-built validate paths.
 
 import Foundation
 @testable import RuneWeaverCore

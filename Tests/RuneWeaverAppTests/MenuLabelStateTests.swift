@@ -1,23 +1,11 @@
 // Rune Weaver App Tests — Menu-bar label state priority truth tables.
-//
-// Purpose: Pins the single-selector priority for the menu-bar indicator so a
-// cold boot reads as progress, a token-adopt restart names the in-flight hop,
-// and a parked approval is never hidden behind desktop or indexing liveness.
-// Scope: Direct calls to the pure AppMenuLabel.labelState helper only. No view
-// rendering, no model boot, and no embedded service, so the suite stays fast
-// and hermetic while covering every priority pair.
-// Architectural role: Guards the bar-versus-dropdown contract where failure
-// shows a distinct mark in the bar while the dropdown carries the actionable
-// copy, and where boot progress outranks activity so the bar never reads as
-// idle while the running flag is still down.
 
 @testable import RuneWeaverApp
 import Testing
 
-/// `AppMenuLabel.labelState` is MainActor-isolated through its enclosing
-/// SwiftUI view type, so the suite pins that isolation instead of fighting it:
-/// every truth-table call stays synchronous inside `#expect` with no awaits,
-/// mirroring how the bar renders on the main actor in production.
+/// `AppMenuLabel.labelState` is MainActor-isolated through its enclosing SwiftUI view type, so the
+/// suite pins that isolation instead of fighting it: every truth-table call stays synchronous inside
+/// `#expect` with no awaits, mirroring how the bar renders on the main actor in production.
 @Suite("Menu label state")
 @MainActor
 struct MenuLabelStateTests {

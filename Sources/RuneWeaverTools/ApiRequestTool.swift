@@ -1,32 +1,4 @@
 // Rune Weaver Tools — Constrained API request tool with bounded I/O.
-//
-// The tool is the narrow, approval-gated replacement for shell curl: a closed
-// GET/POST/PUT/PATCH/DELETE surface with an allowlisted header subset, a 64KB body
-// cap, and a 256KB truncated response budget. File pulls stay manifest-only so
-// no remote bytes reach the host filesystem, and dry runs preview the redacted
-// shape without dialing.
-//
-// The SSRF guard lives single-source in `ApiSSRFGuard.swift` and validation in
-// `ApiRequestValidation.swift`; this file keeps the args, envelope, transport
-// choice, and manual redirect chain. Every hop re-validates through the mandatory
-// supervisor with the surrogate-form headers so the network policy and
-// credential-binding gates cover redirect hops too, and that same supervised
-// vetting produces the dial pin (vetted numeric addresses plus the original
-// host identity) the transport must use. The hostname is never resolved again
-// after vetting, so a DNS name that rebinds between the gate and the
-// connection cannot reach a destination the SSRF gate refused. The encoded
-// envelope is swept through that same supervisor at the output boundary, so
-// the choke-point that injected a live credential is also the one that removes
-// any echoed copy. An origin change (scheme + host + port) drops every
-// injected credential header, cross-origin 307/308
-// method-plus-body forwarding is refused, and only same-origin 307/308
-// preserve method plus body. Envelopes encode through the shared
-// `ToolEnvelopeEncoding` helper.
-//
-// The supervisor is a required collaborator, not an optional enhancement: the
-// network policy and credential-binding gates run before any DNS resolution or
-// Keychain access, so a denied destination is refused without a resolver query,
-// a socket, or a secret read. There is no surrogate fallback path.
 
 import Foundation
 import RuneWeaverCore
@@ -79,10 +51,9 @@ public struct ApiRequestArgs: Sendable, Equatable, Decodable {
         case body
     }
 
-    /// Decodes canonical request arguments.
-    /// Strict wire carries only `method`/`url`/`headers`/`body` so retired
-    /// spellings fail closed under additionalProperties false and wire plus
-    /// decoder agree.
+    /// Decodes canonical request arguments. Strict wire carries only
+    /// `method`/`url`/`headers`/`body` so retired spellings fail closed under additionalProperties
+    /// false and wire plus decoder agree.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .method), !direct.isEmpty {
@@ -209,41 +180,19 @@ public protocol ApiRequestTransport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, URLResponse)
 
     /// Performs one HTTP round trip against the SSRF-vetted dial pin.
-    ///
-    /// Declared as a requirement (not only an extension method) so a concrete
-    /// live transport's pinning implementation is dispatched dynamically
-    /// through the existential the tool holds; a plain extension method would
-    /// statically dispatch to the stub-forwarding default and silently dial by
-    /// name. The pinned dial must not resolve the hostname again: it connects
-    /// to the pin's addresses and preserves the pin's host identity for the
-    /// HTTP `Host` header and TLS server name.
-    /// - Parameters:
-    ///   - request: Request to send, with the original destination URL.
-    ///   - pin: Vetted addresses plus original host identity.
-    /// - Returns: Body bytes plus the URL response.
     func data(for request: URLRequest, pin: SSRFDialPin) async throws -> (Data, URLResponse)
 }
 
 extension ApiRequestTransport {
-    /// Default pinned entry for stub transports.
-    ///
-    /// Hermetic suites keep implementing only the unpinned entry; production's
-    /// live transport overrides this with the pinned dialer, so the default is
-    /// never the production path.
+    /// Default pinned entry for stub transports. Hermetic suites keep implementing only the
+    /// unpinned entry; production's live transport overrides this with the pinned dialer, so the
+    /// default is never the production path.
     public func data(for request: URLRequest, pin _: SSRFDialPin) async throws -> (Data, URLResponse) {
         try await data(for: request)
     }
 }
 
 /// Live API transport that dials only the address the SSRF gate pinned.
-///
-/// URLSession cannot satisfy the pinning contract: dialing a hostname
-/// re-resolves at connect time, and dialing an IP literal cannot present the
-/// original TLS server name. This transport instead opens its own HTTP/1.1
-/// connection to the pinned numbers, sends the original `Host` header, and
-/// completes TLS with the original host as the server name and certificate
-/// identity, so DNS rebinding between the gate and the dial has no effect.
-/// The unpinned entry refuses: there is no production path that dials by name.
 public struct PinnedApiRequestTransport: ApiRequestTransport, Sendable {
     /// Request timeout in seconds.
     public let timeoutSeconds: Double
@@ -260,12 +209,7 @@ public struct PinnedApiRequestTransport: ApiRequestTransport, Sendable {
         throw PinnedDialError.unpinnedDialRefused
     }
 
-    /// Sends one request against the pinned addresses, surfacing 3xx instead of
-    /// following.
-    /// - Parameters:
-    ///   - request: Request to send.
-    ///   - pin: Vetted addresses plus original host identity.
-    /// - Returns: Body plus response.
+    /// Sends one request against the pinned addresses, surfacing 3xx instead of following.
     public func data(for request: URLRequest, pin: SSRFDialPin) async throws -> (Data, URLResponse) {
         try await PinnedHTTPDialer.perform(
             request: request,
@@ -353,24 +297,12 @@ public struct ApiRequestTool: Tool, Sendable {
     /// HTTP transport (live pinned dialer by default, stub in tests).
     private let transport: any ApiRequestTransport
     /// Mandatory egress supervisor enforcing policy allowlist, target-binding, and SSRF.
-    ///
-    /// Non-optional by design: a production `api.request` without this
-    /// choke-point would silently fall back to unsupervised surrogate
-    /// resolution, so the supervisor is required at construction. The
-    /// supervisor also owns the SSRF exemption set (`searxng_url`, media, and
-    /// LLM origins) and returns the dial pin for every hop, so the tool carries
-    /// no second copy of that configuration.
     private let egressSupervisor: OutboundEgressSupervisor
 
     public let timeoutSeconds: Double
 
-    /// Creates an API request tool.
-    /// - Parameters:
-    ///   - transport: HTTP transport; the live pinned dialer when nil.
-    ///   - browserConfig: Optional browser config supplying fetchTimeoutSeconds.
-    ///   - timeoutSeconds: Optional explicit timeout override in seconds.
-    ///   - egressSupervisor: Live egress supervisor; required at every
-    ///     production construction site.
+    /// Creates an API request tool. transport: HTTP transport; the live pinned
+    /// dialer when nil.
     public init(
         transport: (any ApiRequestTransport)? = nil,
         browserConfig: BrowserConfig? = nil,
@@ -427,15 +359,9 @@ public struct ApiRequestTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         let bodyString = (args.body?.isEmpty == true) ? nil : args.body
-        // Surrogates resolve just-in-time at this boundary through the
-        // mandatory supervisor: agent-authored arguments carry only
-        // `rwsecret:<key>`, while the wire request below carries the live
-        // value. The supervisor evaluates the declarative network policy and
-        // credential target binding before its SSRF guard resolves any
-        // hostname, so a denied destination fails closed as a typed error
-        // without a DNS query, a socket, or a Keychain read. Dry runs take the
-        // same gates with credential resolution disabled, so a preview keeps
-        // the surrogate reference and never touches the live secret.
+        // Surrogates resolve just-in-time at this boundary through the mandatory supervisor:
+        // agent-authored arguments carry only `rwsecret:<key>`, while the wire request below carries
+        // the live value.
         let resolvedHeaders: [String: String]
         let resolvedSecrets: [String]
         let initialPin: SSRFDialPin
@@ -480,13 +406,9 @@ public struct ApiRequestTool: Tool, Sendable {
             )
             let envelope = outcome.envelope
             let encoded = try ToolEnvelopeEncoding.encode(envelope)
-            // Sweep every resolved value the server echoed back (a reflected
-            // credential in a body, for example) before the output reaches the
-            // model, mirroring the header redaction above. The sweep runs
-            // through the supervisor that injected the values, so the same
-            // choke-point owns both halves of the credential contract. The
-            // list spans all hops because a same-origin redirect re-injects
-            // from the same surrogate form.
+            // Sweep every resolved value the server echoed back (a reflected credential in a body,
+            // for example) before the output reaches the model, mirroring the header redaction
+            // above.
             let content = egressSupervisor.sweepResponse(encoded, secrets: outcome.injectedSecrets)
             RuneWeaverLog.tools.info(
                 "api.request done \(method.rawValue) \(envelope.finalUrl) status=\(envelope.statusCode.map(String.init) ?? "-") truncated=\(envelope.truncated)"
@@ -534,17 +456,6 @@ public struct ApiRequestTool: Tool, Sendable {
     // MARK: - Chain
 
     /// Performs the request, following redirects with per-hop validation.
-    ///
-    /// The initial hop arrives already validated by `execute`, which pins the
-    /// addresses the supervised SSRF gate proved for it; every redirect target
-    /// is resolved to a safe URL, checked by `validateHopURL`, then re-validated
-    /// through the mandatory egress supervisor before its wire headers are
-    /// built, so no hop can escape the network policy or ride a credential
-    /// binding that covered a different origin. The hop's dial then uses that
-    /// supervised pin, never the hostname. Failures that never reach a dial
-    /// (unresolved targets, hop budget, missing status) stay typed error
-    /// envelopes; a hop the supervisor refuses throws so the tool reports a
-    /// failure rather than a success-shaped refusal.
     private func requestChain(
         initialHop: ApiRequestHop,
         initialSecrets: [String],
@@ -605,10 +516,9 @@ public struct ApiRequestTool: Tool, Sendable {
                 )
             }
             guard let next = ApiRequestChain.redirectTarget(http: http, currentURL: hop.url) else {
-                // `redirectTarget` stays single-source nil for both a missing
-                // `Location` and a present-but-unsafe target that
-                // `resolveRedirect` refused, so the failure envelope keeps the
-                // distinction instead of reporting a plain `ok` success.
+                // `redirectTarget` stays single-source nil for both a missing `Location` and a
+                // present-but-unsafe target that `resolveRedirect` refused, so the failure envelope
+                // keeps the distinction instead of reporting a plain `ok` success.
                 return (
                     ApiRequestChain.redirectFailureEnvelope(
                         http: http,
@@ -631,11 +541,6 @@ public struct ApiRequestTool: Tool, Sendable {
     }
 
     /// Rejects one hop URL that fails the shared web-safety stage.
-    ///
-    /// The SSRF range vetting and the dial pin are not duplicated here: they
-    /// belong to the mandatory supervisor, whose SSRF gate runs the same guard
-    /// once per hop and returns the pin that hop dials. This stage keeps the
-    /// early typed refusal for non-web and credential-bearing URLs.
     private func validateHopURL(_ urlString: String) throws {
         guard WebURLSafety.isSafeUrl(urlString) else {
             throw ApiRequestError.unsafeURL(
@@ -645,11 +550,6 @@ public struct ApiRequestTool: Tool, Sendable {
     }
 
     /// Cross-origin method-plus-body refusal for one redirect, without vetting.
-    ///
-    /// Pure origin plus method check so the chain surfaces the approval-scope
-    /// refusal before any next-hop safety, policy, DNS, or Keychain work: a
-    /// denied hop never causes a resolver query or a secret read. A bodyless
-    /// GET stays allowed since it carries nothing a 302-to-GET would not.
     fileprivate static func crossOriginForwardingRefusal(
         statusCode: Int,
         current: ApiRequestHop,
@@ -682,10 +582,6 @@ public struct ApiRequestTool: Tool, Sendable {
 // MARK: - Surrogates & Egress
 
 /// Wire-ready result of one supervised egress validation for a hop.
-///
-/// Bundles the three values every hop carries — wire headers, the live secret
-/// values injected for response sweeping, and the vetted dial pin — so the
-/// validation seam returns one named value instead of a three-member tuple.
 private struct ResolvedEgressHeaders: Sendable {
     /// Wire headers with live secrets injected by the supervisor.
     let headers: [String: String]
@@ -696,23 +592,8 @@ private struct ResolvedEgressHeaders: Sendable {
 }
 
 extension ApiRequestTool {
-    /// Resolves outbound headers, live secrets, and the dial pin through the mandatory egress supervisor.
-    ///
-    /// Called once for the initial URL and again for every redirect hop, so the
-    /// supervisor's gates apply to the whole chain rather than only the
-    /// approved origin. There is no surrogate fallback: the supervisor owns the
-    /// network policy, credential-binding, SSRF, and wire-injection gates, so a
-    /// denied destination or unbound credential fails closed as a typed error
-    /// before any DNS query or Keychain read. The returned pin is the SSRF
-    /// gate's proof for this hop: its addresses are what the transport dials,
-    /// so the hostname is never resolved a second time after vetting.
-    /// - Parameters:
-    ///   - headers: Validated headers possibly holding `rwsecret:<key>` surrogates.
-    ///   - requestURL: Destination URL under evaluation.
-    ///   - method: HTTP method feeding the credential-binding gate.
-    ///   - resolvesCredentials: False for dry runs, which keep the surrogate
-    ///     reference and never read the live secret.
-    /// - Returns: Wire-ready headers, inserted live values for sweeping, and the vetted dial pin.
+    /// Resolves outbound headers, live secrets, and the dial pin through the mandatory egress
+    /// supervisor.
     private func resolveOutboundHeaders(
         headers: [String: String],
         requestURL: URL,
@@ -738,28 +619,8 @@ extension ApiRequestTool {
         }
     }
 
-    /// Builds and validates the next hop for one redirect response.
-    ///
-    /// Redirect hops re-enter the same mandatory supervisor `validate` gate the
-    /// initial URL passed, evaluated over the surrogate-form headers so the
-    /// network policy and credential-binding gates run before any Keychain read
-    /// or resolver query: a hop cannot escape `[network].allowed_domains` or
-    /// reach `blocked_domains`, and a same-origin hop still has its
-    /// `allowed_path_prefixes` re-checked. Each hop's pin comes from that same
-    /// supervised vetting pass, so the dial never re-resolves the name. An
-    /// origin change (scheme + host +
-    /// port) drops every credential-bearing header, and a 307/308 that would
-    /// forward the approved method plus body across origins is refused because
-    /// the approval descriptor covered the original URL only. A bodyless GET is
-    /// the one cross-origin 307/308 shape allowed to continue, since it carries
-    /// nothing a 302-to-GET would not.
-    /// - Parameters:
-    ///   - statusCode: Redirect status of the previous hop.
-    ///   - current: Validated state of the previous hop.
-    ///   - nextURL: Redirect target that already passed `validateHopURL`.
-    /// - Returns: Wire-ready state for the next hop plus the values injected for it.
-    /// - Throws: `ApiRequestError` when the target fails supervisor validation
-    ///   or would forward the approved method plus body across origins.
+    /// Builds and validates the next hop for one redirect response. Each hop's pin comes from that
+    /// same supervised vetting pass, so the dial never re-resolves the name.
     private func validatedRedirectHop(
         statusCode: Int,
         current: ApiRequestHop,
@@ -803,14 +664,6 @@ extension ApiRequestTool {
     }
 
     /// Credential-scope origin key: scheme plus normalized host plus effective port.
-    ///
-    /// Reuses the SSRF guard's host normalization and scheme-default port so
-    /// casing, trailing dots, brackets, or a default-port spelling cannot
-    /// masquerade as a new origin, while a scheme or port change stays a real
-    /// origin change: credentials never ride an https -> http downgrade or a
-    /// hop to a different port on the same host.
-    /// - Parameter url: URL whose origin is compared.
-    /// - Returns: Comparable origin string, or nil when the URL has no host.
     private static func credentialOrigin(for url: URL) -> String? {
         guard let host = url.host, !host.isEmpty else { return nil }
         let scheme = url.scheme?.lowercased() ?? ""
@@ -818,14 +671,6 @@ extension ApiRequestTool {
     }
 
     /// Drops every header that could carry a live credential across origins.
-    ///
-    /// A header survives only when it neither mentions an `rwsecret:` surrogate
-    /// (well-formed or malformed) nor is a plain `Authorization`; the previous
-    /// cross-host `Authorization` drop is preserved, and the origin rule closes
-    /// the same-host scheme/port bypass. Non-credential headers (`Accept`,
-    /// `Content-Type`) ride along unchanged.
-    /// - Parameter headers: Surrogate-form headers from the previous hop.
-    /// - Returns: Headers safe to send to a different origin.
     private static func strippedCredentialHeaders(_ headers: [String: String]) -> [String: String] {
         headers.filter { name, value in
             let lowered = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -837,14 +682,6 @@ extension ApiRequestTool {
 // MARK: - Redirect chain
 
 /// Validated state for one hop of the manual `api.request` redirect chain.
-///
-/// The chain keeps both header forms per hop: wire headers that already carry
-/// injected live secrets, and the surrogate-form headers the hop was validated
-/// from. Re-validating each redirect against the surrogate form is what lets a
-/// hop re-enter the supervisor's binding gate without exposing live values to
-/// validation, previews, or logs. The dial pin is the supervised SSRF gate's
-/// proof for this hop: the transport dials exactly those addresses, so the
-/// hostname is never resolved again after vetting.
 private struct ApiRequestHop: Sendable {
     /// Destination URL for this hop.
     let url: URL
@@ -861,11 +698,6 @@ private struct ApiRequestHop: Sendable {
 }
 
 /// Manual redirect chain builders for `api.request` hops.
-///
-/// Pure request shaping and failure classification live here so the tool type
-/// stays within budget; every hop still re-validates through the mandatory
-/// egress supervisor in the tool before dialing, and that vetting's pin is
-/// what the transport connects to.
 enum ApiRequestChain: Sendable {
     /// Builds one hop request with the shared timeout and User-Agent.
     static func chainRequest(
@@ -894,17 +726,6 @@ enum ApiRequestChain: Sendable {
     }
 
     /// Builds the error envelope for a hop that produced no usable response.
-    ///
-    /// `http` is nil only when no HTTP response arrived at all; otherwise the
-    /// status and content type are echoed so the model can see which hop failed
-    /// while the envelope still reports `error` instead of a success shape.
-    /// - Parameters:
-    ///   - method: Method of the failing hop.
-    ///   - originalURL: Original request URL reported by the envelope.
-    ///   - currentURL: Failing hop URL reported as `finalUrl`.
-    ///   - http: Response when one arrived, nil for transport failures.
-    ///   - note: Human-readable failure reason.
-    /// - Returns: Error envelope with an empty body.
     static func errorEnvelope(
         method: ApiMethod,
         originalURL: String,
@@ -925,19 +746,7 @@ enum ApiRequestChain: Sendable {
         )
     }
 
-    /// Builds the error envelope for a 3xx whose `Location` never resolved to a
-    /// safe target.
-    ///
-    /// `redirectTarget` stays single-source nil for both a missing `Location`
-    /// and a present-but-unsafe target that `resolveRedirect` refused, so the
-    /// distinction is reconstructed from the raw header: an unsafe hop fails
-    /// closed with its target named, a missing hop with its status.
-    /// - Parameters:
-    ///   - http: Redirect response.
-    ///   - currentURL: URL of the redirecting hop.
-    ///   - originalURL: Original request URL reported by the envelope.
-    ///   - method: Method of the redirecting hop.
-    /// - Returns: Error envelope for the refused location.
+    /// Builds the error envelope for a 3xx whose `Location` never resolved to a safe target.
     static func redirectFailureEnvelope(
         http: HTTPURLResponse,
         currentURL: URL,
@@ -969,9 +778,8 @@ enum ApiRequestChain: Sendable {
         currentMethod: ApiMethod
     ) -> ApiRequestEnvelope {
         let statusCode = http.statusCode
-        // Status leads the classification, mirroring
-        // `WebFetchTool.terminalEnvelope`: a non-2xx terminal hop is never
-        // `ok` or `download`, so a 404 text page cannot read as success and a
+        // Status leads the classification, mirroring `WebFetchTool.terminalEnvelope`: a non-2xx
+        // terminal hop is never `ok` or `download`, so a 404 text page cannot read as success and a
         // 404 octet-stream cannot read as a file pull.
         guard (200 ..< 300).contains(statusCode) else {
             let authHint = WebFetchTool.isAuthStatusCode(statusCode) ? " Authentication is required for this resource." : ""
@@ -1044,12 +852,6 @@ public enum ApiRequestTools {
     public static let toolNames = ["api.request"]
 
     /// Builds the API request tool over one shared egress supervisor.
-    ///
-    /// The supervisor owns the SSRF exemption set (configured searxng, media,
-    /// and LLM origins) and produces the dial pin, so no exempt-origin
-    /// configuration is duplicated here.
-    /// - Parameter supervisor: Live egress supervisor; required so every built
-    ///   tool shares the one policy-backed choke-point for this process.
     public static func makeTools(
         supervisor: OutboundEgressSupervisor,
         transport: (any ApiRequestTransport)? = nil,

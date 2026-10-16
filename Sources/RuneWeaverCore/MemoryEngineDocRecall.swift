@@ -1,12 +1,4 @@
 // Rune Weaver Core — Document-aware recall for the three-tier memory engine.
-//
-// Combines episodic, semantic, document-index, and profile hits onto one
-// calibrated scale so chat turns see files, mail, and facts together. The FTS5
-// keyword path and the cosine path over stored chunk embeddings are unioned
-// event-time-first, reranked with token overlap, recency, and exact name plus
-// display-name entity and contiguous-phrase bonuses, and stamped with the
-// MAX(indexed_at) watermark. Keyword-only fallback keeps retrieval alive when
-// embeddings are missing, and cancellation propagates instead of degrading.
 
 import Foundation
 
@@ -14,10 +6,6 @@ import Foundation
 
 extension MemoryEngine {
     /// Recalls across episodic, semantic, document-index, and profile tiers.
-    ///
-    /// `skipDocIndex` mirrors the plan-level freshness skip so direct callers
-    /// report the same miss-vs-skip observability as the automatic path; when
-    /// true the document fetch is skipped and `skippedDocIndex` reports true.
     public func recall(
         query: String,
         embedding: [Float]? = nil,
@@ -39,22 +27,9 @@ extension MemoryEngine {
         return hits
     }
 
-    /// Recalls across tiers while reporting observability alongside hits.
-    ///
-    /// Retrieved-vs-injected: `hits` are the retrieved set (deduped,
-    /// pre-threshold, up to `perTier * 4` for tool and merge use) while
-    /// `diagnostics` describe the injected set (threshold-filtered plus
-    /// `autoLimit`-capped via `injectedRecallHits`, matching what
-    /// `automaticRecallContext` actually injects and what
-    /// `recallMessageWithDiagnostics` reports, so both paths log the same
-    /// injected `hits/ids/scores`). Diagnostics carry hit identifiers plus
-    /// sources plus scores plus the would-inject char estimate plus the
-    /// doc-index skip flag, never content.
-    /// `injectedChars` estimates the budgets-aware context block length for the
-    /// injected hits; `skippedDocIndex` is true when the caller requested a
-    /// plan-level skip or no document store is configured, matching
-    /// `recallMessageWithDiagnostics`, so callers can distinguish an empty
-    /// index or a freshness skip from a miss.
+    /// Recalls across tiers while reporting observability alongside hits. Diagnostics carry hit
+    /// identifiers plus sources plus scores plus the would-inject char estimate plus the doc-index
+    /// skip flag, never content.
     public func recallWithDiagnostics(
         query: String,
         embedding: [Float]? = nil,
@@ -102,27 +77,9 @@ extension MemoryEngine {
         return (hits, diagnostics)
     }
 
-    /// Recalls document-index chunks by unioning keyword and vector candidates.
-    ///
-    /// The FTS5 keyword path and the cosine path over stored chunk embeddings
-    /// are reciprocal-rank-fused (`rrf = 1/(60+rank)` per list, summed when a
-    /// chunk appears in both), then reranked with the shared
-    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase` blend
-    /// plus the RRF boost and calibrated by the doc-index tier weight. A
-    /// missing query embedding or a failed vector read still returns the
-    /// keyword hits, so retrieval never fails a turn. The vector scan is an
-    /// event-time-ordered pool (parent `mtime` desc, NULLs last) widened by
-    /// budgets, so recently happening documents stay visible at scale while
-    /// the keyword leg reads at the same width and an old-but-relevant
-    /// keyword hit still surfaces via union.
-    /// - Parameters:
-    ///   - query: Raw user query.
-    ///   - embedding: Query embedding for the vector path, or nil for keyword-only.
-    ///   - limit: Maximum chunk results.
-    ///   - since: Inclusive lower bound on the parent document event time, or nil for unbounded.
-    ///   - until: Exclusive upper bound on the parent document event time, or nil for unbounded.
-    ///   - budgets: Recall budgets carrying the doc-pool multiplier and per-tier cap.
-    /// - Returns: Calibrated doc-index results carrying the index watermark.
+    /// Recalls document-index chunks by unioning keyword and vector candidates. A missing query
+    /// embedding or a failed vector read still returns the keyword hits, so retrieval never fails a
+    /// turn.
     public func recallDocuments(
         query: String,
         embedding: [Float]? = nil,
@@ -137,21 +94,13 @@ extension MemoryEngine {
         let clampedBudgets = budgets.clamped()
         let clamped = min(min(limit, clampedBudgets.perTierLimit), Self.maxPerTierResults)
         guard clamped > 0 else { return [] }
-        // Widen both scans beyond the returned page so a strong match is not
-        // crowded out by common-name flooding. The vector pool already scans
-        // an order of magnitude past `pool` with a floor keeping small pages
-        // visible; the keyword pool now shares that width so a matching series
-        // survives chatter outnumbering it twenty-to-one. The dated window
-        // filters candidates before ranking so calibration, watermark, and
-        // per-tier caps stay unchanged.
-        // `docPoolMultiplier` clamps to `1...8`, so the widened pool never
-        // shrinks below `clamped` and needs no lower bound.
+        // Widen both scans beyond the returned page so a strong match is not crowded out by
+        // common-name flooding.
         let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
         let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
-        // Keyword reads at the vector width so flooding cannot starve it, and
-        // windowed reads lift the store clamp to the same
-        // `maxVectorWindowResults` ceiling the vector pool uses, so a dated
-        // keyword leg never reads narrower than the vector leg beside it.
+        // Keyword reads at the vector width so flooding cannot starve it, and windowed reads lift
+        // the store clamp to the same `maxVectorWindowResults` ceiling the vector pool uses, so a
+        // dated keyword leg never reads narrower than the vector leg beside it.
         let keywordLimit = vectorLimit
         let keyword: [IndexedChunk]
         do {
@@ -266,10 +215,6 @@ extension MemoryEngine {
     private static let profileTierWeight = 1.0
 
     /// Applies the tier weight for a recall hit's source.
-    ///
-    /// The episodic weight comes from the clamped recall budgets so the
-    /// `recall_episodic_weight` file knob reaches the shared scale; the
-    /// remaining tier weights stay fixed.
     private static func calibrated(_ result: MemoryResult, episodicWeight: Double = episodicTierWeight) -> MemoryResult {
         let weight: Double = switch result.source {
         case .episodic: episodicWeight
@@ -306,10 +251,6 @@ extension MemoryEngine {
     }
 
     /// Orders merged recall hits by score, then tier priority, then stable identity.
-    ///
-    /// Equal-score equal-priority hits fall back to a deterministic
-    /// `source.rawValue`, then `metadata["id"]`, then `content` comparison so
-    /// repeated turns sort identically instead of leaving Swift sort order undefined.
     private static func recallOrder(_ lhs: MemoryResult, _ rhs: MemoryResult) -> Bool {
         if lhs.score != rhs.score {
             return lhs.score > rhs.score
@@ -345,10 +286,6 @@ extension MemoryEngine {
         /// Cosine similarity in `[0, 1]`, zero when vector-absent.
         let vectorScore: Double
         /// Position in the union, driving the recency prior.
-        ///
-        /// Vector-leg chunks precede keyword-only hits, so the position reads
-        /// event time (parent `mtime` desc, NULLs last) on the vector leg and
-        /// FTS rank order on the keyword leg rather than write order.
         let order: Int
         /// One-based keyword rank, nil when keyword-absent.
         let keywordRank: Int?
@@ -374,18 +311,9 @@ extension MemoryEngine {
     private static let docIndexExactMatchWeight = 0.1
 
     /// Display-name entity bonus in the doc-index rerank.
-    ///
-    /// Sits beside the exact-name bonus at the same fixed weight: a document
-    /// whose display name carries every salient query token is the entity the
-    /// user named, which is the same "pointed at this document" signal as an
-    /// in-body exact-name hit.
     private static let docIndexEntityNameWeight = 0.1
 
     /// Contiguous salient-phrase bonus in the doc-index rerank.
-    ///
-    /// Matches the exact-name weight: the whole salient run appearing as one
-    /// contiguous unit in the chunk is as strong a relevance signal as naming a
-    /// file, so it earns the same fixed bonus without touching the base curve.
     private static let docIndexPhraseWeight = 0.1
 
     /// Reciprocal-rank score for one list rank, zero when absent.
@@ -395,18 +323,6 @@ extension MemoryEngine {
     }
 
     /// Unions keyword and vector candidates into one list.
-    ///
-    /// Vector chunks arrive from the store pool in event-time order (parent
-    /// `mtime` desc, NULLs last, rowid breaking ties), so they keep that
-    /// order before the keyword-only hits are appended in FTS `rank` order
-    /// with rowid as the tie-break. The single fusion is an additive RRF
-    /// boost: each present list contributes `1/(60+rank)` (keyword rank from
-    /// FTS order, vector rank from cosine order), summed when a chunk appears
-    /// in both, then added to the
-    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase`
-    /// blend before tier calibration. Keyword-only chunks outside the
-    /// event-time vector pool still union in, so an old-but-relevant match
-    /// survives a narrow pool.
     private static func docIndexCandidates(
         keyword: [IndexedChunk],
         vectors: [IndexedChunk],
@@ -480,24 +396,8 @@ extension MemoryEngine {
         return candidates
     }
 
-    /// Calibrates and reranks doc-index candidates, stamping the index watermark and document metadata.
-    ///
-    /// `episodicWeight` threads through from the clamped recall budgets for
-    /// call-site uniformity with the merged path; doc-index hits calibrate
-    /// with the fixed doc-index tier weight.
-    ///
-    /// Beyond the `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase`
-    /// blend plus the RRF boost, two structural entity signals add fixed
-    /// bonuses measured off the already-fetched `documents` map: the parent
-    /// display name naming every salient query token, and the chunk carrying
-    /// the whole salient phrase contiguously. Each bonus is 0.1, matched to
-    /// the recency and exact weights, so the fused score stays clamped to
-    /// `[0, 1]` while the base curve, overlap, recency, exact, calibration,
-    /// and page size stay untouched.
-    ///
-    /// `salient` is the ordered salient token run the caller already derived
-    /// for its overlap set, threaded in so phrase contiguity is decided on the
-    /// caller's tokens instead of re-tokenizing the query per candidate.
+    /// Calibrates and reranks doc-index candidates, stamping the index watermark and document
+    /// metadata.
     private static func rankedDocIndexResults(
         _ candidates: [DocIndexCandidate],
         query: String,
@@ -567,23 +467,12 @@ extension MemoryEngine {
     }
 
     /// Recency prior for one union position, in `[0, 1]`.
-    ///
-    /// Union position follows event time on the vector leg, so an earlier
-    /// position reads as a more recently happening document rather than a
-    /// more recently written row.
     private static func docIndexRecency(order: Int, total: Int) -> Double {
         guard total > 1 else { return 1 }
         return min(max(1.0 - Double(order) / Double(total - 1), 0.0), 1.0)
     }
 
     /// Whether the query names a file or path that appears verbatim in the chunk.
-    ///
-    /// Exact-name and path tokens are literal fragments with a file-like
-    /// shape (a stem plus a dot plus an extension, or a slash-delimited path
-    /// with a minimum length), so a substring hit is a strong signal that
-    /// this chunk is the document the user pointed at rather than a topical
-    /// near-match. Bare dotted prose (`e.g.`, `i.e.`, `v1.2`) carries a dot
-    /// but no file shape and earns no bonus.
     private static func hasExactNameOrPathMatch(query: String, chunkText: String) -> Bool {
         let loweredChunk = chunkText.lowercased()
         let tokens = query.split { $0.isWhitespace || $0.isNewline }.map { String($0).lowercased() }
@@ -595,11 +484,6 @@ extension MemoryEngine {
     }
 
     /// Whether a query token has a file-like shape before any substring test.
-    ///
-    /// Slash tokens need a minimum length with the slash away from the edges
-    /// (so `src/foo` qualifies); dot tokens need a stem plus a dot plus a
-    /// short alphabetic extension (so `report.pdf` qualifies while `e.g.`,
-    /// `i.e.`, and `v1.2` do not).
     private static func isFileLikeToken(_ token: String) -> Bool {
         guard !token.isEmpty else { return false }
         if token.contains("/") {
@@ -621,25 +505,12 @@ extension MemoryEngine {
     }
 
     /// Whether a document's display name names the entity the query asks about.
-    ///
-    /// Display names carry extensions and separators (`report.pdf`,
-    /// `karate-birthday-series`), so containment is decided on the token sets
-    /// rather than a raw substring: every salient query token must appear in
-    /// the name. A single-token query already earns full overlap for any
-    /// chunk holding it, so requiring two or more tokens keeps this bonus an
-    /// entity signal instead of a second overlap term.
     private static func hasEntityNameMatch(queryTokens: Set<String>, displayName: String?) -> Bool {
         guard queryTokens.count > 1, let displayName else { return false }
         return queryTokens.isSubset(of: Tokenization.tokenize(displayName))
     }
 
     /// Whether the chunk text carries every salient query token as one run.
-    ///
-    /// Matching runs on the tokenized sequence so punctuation, casing, and
-    /// inserted separators never break or fake contiguity; non-adjacent
-    /// occurrences earn nothing beyond ordinary overlap. Stop words the salient
-    /// tokenizer dropped stay in the chunk stream, so one sitting between the
-    /// matched tokens breaks the run and costs the bonus.
     private static func hasContiguousPhraseMatch(salient: [String], chunkText: String) -> Bool {
         guard salient.count > 1 else { return false }
         let chunkTokens = chunkText.lowercased()

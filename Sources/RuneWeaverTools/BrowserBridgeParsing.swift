@@ -1,11 +1,4 @@
 // Rune Weaver Tools — Pure JSON parsing for the Playwright bridge payloads.
-//
-// Purpose: decode navigate/act helper envelopes into bounded snapshots plus
-// results while sharing the alias table with tool output and display.
-// Scope: payload shapes and parsing only; validation, subprocess I/O, and
-// gateway lifecycle stay with the bridge. Architectural role: focused helper
-// keeping the bridge file within the file-length budget; single owner of the
-// bridge `ok`/`error` contract so tool output cannot drift from helper shapes.
 
 import Foundation
 import RuneWeaverCore
@@ -54,9 +47,6 @@ public enum BrowserBridgeParsing: Sendable {
             authRequired = try container.decodeIfPresent(Bool.self, forKey: .authRequired)
             downloads = try container.decodeIfPresent([BrowserDownloadManifest].self, forKey: .downloads)
             // Chain tolerates typed steps, plain strings, and the `redirects` alias.
-            // Single-sourced through `BrowserNavigateWire` so bridge parsing
-            // shares one alias table with tool output and display; mismatches
-            // are logged there instead of silently swallowed.
             let typedChain: [BridgeRedirectEntry]? = BrowserNavigateWire.decodeFirst(
                 container,
                 keys: [.redirectChain, .redirectChainSnake, .redirects]
@@ -216,11 +206,9 @@ public enum BrowserBridgeParsing: Sendable {
         return (candidate, hash)
     }
 
-    /// Normalizes raw helper screenshot text to a data URL.
-    /// Single-sourced through `BrowserNavigateWire` so bridge parsing, tool
-    /// output, and display/audit share one screenshot shape.
-    /// - Parameter raw: Helper `screenshot` field, if any.
-    /// - Returns: Data URL, or nil when absent.
+    /// Normalizes raw helper screenshot text to a data URL. Single-sourced through
+    /// `BrowserNavigateWire` so bridge parsing, tool output, and display/audit share one screenshot
+    /// shape.
     static func normalizedDataURL(_ raw: String?) -> String? {
         BrowserNavigateWire.normalizedDataURL(raw)
     }
@@ -251,13 +239,6 @@ public enum BrowserBridgeParsing: Sendable {
     }
 
     /// Maps helper stderr text to the explicit missing-dependency error when Playwright is absent.
-    /// The managed-copy flag travels typed from the caller instead of matching
-    /// banner wording, so a copy edit never re-nests the venv path twice.
-    /// - Parameters:
-    ///   - detail: Raw helper stderr or response error text.
-    ///   - isManagedCopy: True when `detail` already carries the managed venv
-    ///     path plus manual fallback and must pass through unwrapped.
-    /// - Returns: Typed bridge error sharing the missing classification.
     public static func classifiedBridgeError(_ detail: String, isManagedCopy: Bool = false) -> BrowserError {
         if detail.contains("Playwright is not installed") || detail.contains("No module named playwright") {
             // Already actionable when the caller threaded the managed copy,

@@ -1,10 +1,4 @@
 // Rune Weaver Core — Mid-turn steering queue.
-// Allows users to inject guidance mid-stream into an active multi-round turn loop
-// without cancelling the turn or losing executed tool history. Both the queued
-// steering texts and the cooperative interrupt registrations are bounded so a
-// fast producer (repeated UI steering taps or leaked stream registrations) can
-// never grow memory without bound; the bounds mirror the session-count caps
-// used elsewhere in the engine.
 
 import Foundation
 
@@ -40,8 +34,7 @@ public actor SteeringQueue {
 
     /// Enqueues a mid-turn steering message and notifies any active streaming round.
     /// - Parameters:
-    ///   - text: User steering instruction.
-    ///   - sessionID: Target session.
+    /// - text: User steering instruction.
     public func enqueue(text: String, sessionID: UUID) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -110,18 +103,12 @@ public actor SteeringQueue {
     }
 
     /// Clears any pending steering messages for a session.
-    ///
-    /// Session-keyed spelling kept for existing callers; the brake clears
-    /// steering through ``clear(sessionID:)`` so both spellings share one body.
-    /// - Parameter sessionID: Target session.
     public func clear(for sessionID: UUID) {
         clear(sessionID: sessionID)
     }
 
-    /// Drops one copy of a just-enqueued steering text for a session.
-    /// - Parameters:
-    ///   - text: Steering text to withdraw.
-    ///   - sessionID: Target session.
+    /// Drops one copy of a just-enqueued steering text for a session. text:
+    /// Steering text to withdraw.
     public func remove(text: String, sessionID: UUID) {
         guard var list = pending[sessionID], !list.isEmpty else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -141,10 +128,7 @@ public actor SteeringQueue {
     }
 
     /// Registers a cooperative interrupt callback for an active streaming round.
-    /// - Parameters:
-    ///   - sessionID: Target session.
-    ///   - onInterrupt: Closure invoked when a steer message arrives.
-    /// - Returns: Registration token for unregistering.
+    /// sessionID: Target session.
     public func registerInterrupt(sessionID: UUID, onInterrupt: @Sendable @escaping () -> Void) -> UUID {
         let token = UUID()
         var tokens = interruptTokens[sessionID] ?? [:]
@@ -166,10 +150,7 @@ public actor SteeringQueue {
         return token
     }
 
-    /// Unregisters an interrupt callback.
-    /// - Parameters:
-    ///   - sessionID: Target session.
-    ///   - token: Registration token.
+    /// Unregisters an interrupt callback. sessionID: Target session.
     public func unregisterInterrupt(sessionID: UUID, token: UUID) {
         guard var tokens = interruptTokens[sessionID] else { return }
         tokens.removeValue(forKey: token)

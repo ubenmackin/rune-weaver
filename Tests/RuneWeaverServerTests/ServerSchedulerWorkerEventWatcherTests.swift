@@ -1,12 +1,4 @@
 // Rune Weaver Tests — ServerSchedulerWorker Event Watcher multi-source and rule execution tests.
-//
-// Purpose: pins ordered event-rule evaluation across email, messages, and calendar watchers,
-// including the zero-token direct-tool fast path, scoped agent turns, stopProcessing ordering,
-// and poll dedupe that prevents duplicate fires.
-// Scope: hermetic worker harness with stub ToolBus tools, stub LLM, and isolated temporary
-// episodes.db only; no live mail, Messages, calendar, or network access.
-// Architectural role: guards the watcher polling engine while validation tests own the
-// allowlist and interval bounds, so a polling regression surfaces here instead of in production.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -270,10 +262,7 @@ struct ServerSchedulerWorkerEventWatcherTests {
         // First tick baselines
         _ = await worker.tick(now: Date())
 
-        // New messages arrive:
-        // 1. Direct message from Mom
-        // 2. Group message from Mom in family group (should NOT match directRule!)
-        // 3. Group chat message with 'deadline' (should match groupRule!)
+        // New messages arrive: 1. Direct message from Mom 2.
         await messagesDataBox.set("""
         {
           "messages": [

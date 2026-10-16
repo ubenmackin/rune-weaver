@@ -1,14 +1,4 @@
 // Rune Weaver Server — HTTP-layer defense middleware: Host gate plus shared security headers.
-//
-// The owner bearer gate owns who may call the engine; this file owns how the
-// HTTP layer itself resists rebinding and passive sniffing. The Host gate keeps
-// a rebinding DNS name from reaching the engine through an allowed socket, and
-// the shared headers (nosniff, DENY framing, referrer policy, fail-closed CSP,
-// proxy-aware HSTS) ride every response including the Host gate's own early
-// rejections, so no rejection path can be fingerprinted by missing headers.
-// The server configuration installs both in the middleware chain; the Host gate
-// additionally applies the shared headers to its own early rejections instead
-// of duplicating the header list.
 
 import Foundation
 import RuneWeaverCore
@@ -22,32 +12,15 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     /// Whether missing Host headers should be permitted in testing environments.
     public let allowMissingHostInTesting: Bool
     /// Whether private-LAN Host values are accepted beside the explicit allowlist.
-    ///
-    /// True only for an all-interfaces bind (`0.0.0.0`, `::`, or `[::]`) with owner auth
-    /// configured, so a loopback-only bind never widens to LAN ranges and an
-    /// unauthenticated all-interfaces bind stays fail-closed on the explicit set.
     private let allowsLANRanges: Bool
 
-    /// Creates host validation middleware allowing standard loopback hosts plus the server's configured hostname.
-    /// - Parameters:
-    ///   - hostname: Configured bind hostname.
-    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
+    /// Creates host validation middleware allowing standard loopback hosts plus the server's
+    /// configured hostname.
     public init(hostname: String, allowMissingHostInTesting: Bool = true) {
         self.init(hostname: hostname, allowedHosts: [], authConfigured: false, allowMissingHostInTesting: allowMissingHostInTesting)
     }
 
     /// Creates host validation middleware bound to the runtime bind policy plus explicit hosts.
-    ///
-    /// The bind policy and the Host gate share one decision: an all-interfaces
-    /// bind with auth opens the LAN family (loopback, the literal bind, RFC 1918
-    /// plus link-local IPv4, IPv6 ULA plus link-local, `.local` names, and the
-    /// explicit entries), while any other bind stays strict on loopback plus the
-    /// literal plus the explicit entries with no automatic LAN ranges.
-    /// - Parameters:
-    ///   - hostname: Configured bind hostname.
-    ///   - allowedHosts: Explicit `allowed_hosts` entries, matched exact-only after lowercasing plus port stripping.
-    ///   - authConfigured: Whether a resolvable owner token guards this bind.
-    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
     public init(
         hostname: String,
         allowedHosts explicitHosts: [String],
@@ -56,13 +29,9 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     ) {
         var hosts: Set = ["127.0.0.1", "localhost", "::1", "[::1]"]
         let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        // Trailing FQDN dots never gate: validators reject them fail-closed,
-        // so a trailing-dot hostname (including a bare `.`) inserts nothing
-        // here and fails closed like any other trailing-dot host instead of
-        // riding the gate under a stripped spelling that never matches exactly.
-        // Enforce the DNS name bound on the bind hostname so an over-long value
-        // never widens the gate; file-load and ServeCommand already reject it,
-        // while a hand-built context stays fail-closed here.
+        // Trailing FQDN dots never gate: validators reject them fail-closed, so a trailing-dot
+        // hostname (including a bare `.`) inserts nothing here and fails closed like any other
+        // trailing-dot host instead of riding the gate under a stripped spelling that never matches.
         if !trimmed.isEmpty, trimmed != ".", !trimmed.hasSuffix("."), trimmed.count <= ServerEndpointConfig.maxAllowedHostLength {
             hosts.insert(trimmed)
             // Clients send IPv6 literals bracketed or bare, so both spellings are
@@ -78,17 +47,9 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
                 }
             }
         }
-        // Single-sourced through `dedupeNormalizedBootHosts` because the
-        // explicit entries are already-bounded stored values: the raw count
-        // was capped at write time by file-load and the settings PUT (which
-        // keep `dedupeNormalizedHosts` for raw input), so re-applying the
-        // raw-count prefix here would truncate an already-expanded store —
-        // 11 IPv6 entries persist as 22 (bracketed plus bare) and must gate
-        // as 22 instead of being cut back to 20. Widening shapes and
-        // trailing-dot entries drop fail-closed through the shared
-        // `RuneWeaverConfig.validateAllowedHosts` check inside the dedupe
-        // instead of allowlisting a carved fragment, and IPv6 counterparts
-        // ride along.
+        // Uses `dedupeNormalizedBootHosts` since explicit entries are already-bounded stored values;
+        // re-applying the raw-count prefix would truncate expanded stores (e.g. 11 IPv6 entries persist
+        // as 22 bracketed/bare forms and must gate as 22 rather than being cut to 20).
         for entry in ServerEndpointConfig.dedupeNormalizedBootHosts(explicitHosts) {
             hosts.insert(entry)
         }
@@ -98,25 +59,12 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     }
 
     /// Whether a bind hostname listens on every interface.
-    ///
-    /// Only the IPv4 and IPv6 unspecified addresses widen the Host gate; a LAN
-    /// IP bind (for example `192.168.1.20`) stays strict on its literal plus the
-    /// explicit entries so one device does not implicitly authorize the whole subnet.
-    /// - Parameter hostname: Trimmed, lowercased bind hostname.
-    /// - Returns: True for `0.0.0.0`, `::`, or `[::]`.
     public static func isAllInterfacesBind(_ hostname: String) -> Bool {
         let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return trimmed == "0.0.0.0" || trimmed == "::" || trimmed == "[::]"
     }
 
     /// Whether a normalized Host is reachable on an authenticated all-interfaces bind.
-    ///
-    /// Covers only the LAN family the owner implicitly trusts by binding
-    /// all-interfaces with auth: private IPv4, ULA plus link-local IPv6, and
-    /// `.local` names. Public IPs and DNS names still fail closed to the
-    /// explicit allowlist so a rebinding host cannot ride the LAN opening.
-    /// - Parameter host: Lowercased, port-stripped Host from ``extractHost(from:)``.
-    /// - Returns: True for a LAN-family host.
     public static func isLANAllowedHost(_ host: String) -> Bool {
         guard !host.isEmpty else { return false }
         if isPrivateIPv4LANHost(host) {
@@ -129,18 +77,6 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     }
 
     /// Whether a normalized Host is private IPv4 (RFC 1918) or link-local.
-    ///
-    /// Decimal dotted quads only: hex, octal, or short forms never open the LAN
-    /// path and stay on the explicit allowlist instead, so obfuscated spellings
-    /// cannot slip past the range check. The LAN family is exactly `10/8`,
-    /// `172.16/12`, `192.168/16`, and `169.254/16`, composed from the
-    /// sensitive-range table's per-family predicates so a widening of that
-    /// table (shared address space, TEST-NET, benchmarking, multicast,
-    /// reserved) can never silently widen this gate; loopback and the
-    /// unspecified block stay off the LAN path because they belong on the
-    /// explicit allowlist.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for `10/8`, `172.16/12`, `192.168/16`, or `169.254/16`.
     public static func isPrivateIPv4LANHost(_ host: String) -> Bool {
         guard let octets = parseIPv4Octets(host), octets.count == 4 else { return false }
         guard octets[0] != 0, octets[0] != 127 else { return false }
@@ -179,12 +115,6 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     }
 
     /// Whether a normalized Host is IPv6 ULA (`fc00::/7`) or link-local (`fe80::/10`).
-    ///
-    /// Bracketed and bare spellings both qualify because ``extractHost(from:)``
-    /// preserves the caller's brackets; the zone suffix (`%eth0`) is ignored for
-    /// the range decision since it names an interface, not an address change.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for ULA or link-local literals.
     public static func isPrivateIPv6LANHost(_ host: String) -> Bool {
         var candidate = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if candidate.hasPrefix("["), candidate.hasSuffix("]"), candidate.count >= 2 {
@@ -207,27 +137,11 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     }
 
     /// Parses IPv6 text into eight hextets for the ULA plus link-local masks.
-    ///
-    /// Single-sourced through `ApiSSRFGuard.ipv6Hextets` so the Host gate and
-    /// the SSRF guard parse literals identically instead of drifting on a
-    /// forked copy; dotted forms stay DNS names here because an embedded IPv4
-    /// tail belongs to the IPv4 range check, not this literal path.
-    /// - Parameter host: Unbracketed, zoneless, lowercased literal.
-    /// - Returns: Eight hextets, or nil when the text is not a plain IPv6 literal.
     public static func ipv6Hextets(_ host: String) -> [UInt16]? {
         ApiSSRFGuard.ipv6Hextets(host)
     }
 
     /// Whether a normalized Host is a lowercase `.local` mDNS name.
-    ///
-    /// The input is already lowercased by ``extractHost(from:)``, so the suffix
-    /// check itself enforces lowercase; a trailing FQDN dot fails closed to
-    /// the explicit allowlist like any other punctuation. Each
-    /// dot-separated label must be non-empty, at most 63 characters, and must
-    /// not start or end with a dash so shapes like `...local` or `-.local`
-    /// never open the LAN path.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for names ending in `.local`.
     public static func isLocalMDNSHost(_ host: String) -> Bool {
         guard !host.isEmpty else { return false }
         // A trailing FQDN dot never opens the LAN path: validators reject
@@ -264,9 +178,6 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     }
 
     /// Normalizes and extracts the host component from a raw Host header value.
-    /// Single-sourced through `ServerEndpointConfig.normalizeHost` in Core so
-    /// the gate, the settings PUT, and file-load validation compare under
-    /// identical semantics.
     public static func extractHost(from hostHeader: String) -> String {
         ServerEndpointConfig.normalizeHost(hostHeader)
     }
@@ -317,14 +228,8 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
 public struct GlobalSecurityHeadersMiddleware: AsyncMiddleware, Sendable {
     public init() {}
 
-    /// Applies the shared security headers to a response.
-    ///
-    /// Single-sourced so the Host gate's early rejections carry the same
-    /// nosniff/DENY/referrer policy plus proxy-aware HSTS as the middleware
-    /// path instead of drifting on a duplicated header list.
-    /// - Parameters:
-    ///   - response: Response receiving the headers.
-    ///   - request: Inbound request deciding proxy-aware HSTS.
+    /// Applies the shared security headers to a response. - request: Inbound request deciding
+    /// proxy-aware HSTS.
     public static func apply(to response: Response, for request: Request) {
         response.headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
         response.headers.replaceOrAdd(name: "X-Frame-Options", value: "DENY")

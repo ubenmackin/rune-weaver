@@ -1,10 +1,4 @@
 // Rune Weaver Server — Conversation session routes.
-//
-// Owns the session listing, retrieval, tool-action replay, rename, and
-// deletion surface. Sessions are the durable unit clients resume against, so
-// retrieval stays read-only while rename and delete funnel through the
-// conversation manager's single entry points so working memory and billed
-// token totals change together.
 
 import Foundation
 import RuneWeaverCore

@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Shared transient toast stack for action feedback.
-// Distinct notices stack with independent timers; an identical copy replaces
-// its sibling so repeat saves refresh one notice instead of duplicating.
 
 import { useCallback, useRef, useState } from "react";
 import type { ToastStackItem } from "../components/Toast";
@@ -12,12 +10,9 @@ export function useToastStack() {
   const [toasts, setToasts] = useState<ToastStackItem[]>([]);
   const toastIdRef = useRef(0);
 
-  // Single cap/dedupe path so success and error pushes cannot drift:
-  // replacing any identical copy already in the stack keeps repeat saves to
-  // a single refreshed notice, while distinct messages still stack with
-  // independent timers. Caps the stack at the last 5 notices so distinct
-  // messages cannot grow without bound and cover the UI. Stable so each
-  // per-toast auto-dismiss timer never restarts on unrelated renders.
+  // Single cap/dedupe path so success and error pushes cannot drift: replacing any identical copy
+  // already in the stack keeps repeat saves to a single refreshed notice, while distinct messages
+  // still stack with independent timers.
   const pushToast = useCallback((message: string, variant: "success" | "error", durationMs?: number) => {
     if (typeof message !== "string") return;
     // Trimmed-identity hardening: compare and store the trimmed copy so
@@ -39,11 +34,9 @@ export function useToastStack() {
     ]);
   }, []);
 
-  // Appends one transient success notice, replacing any identical copy
-  // already in the stack so repeat saves refresh a single notice instead of
-  // stacking duplicates. Distinct messages still stack with independent
-  // timers. Stable so each per-toast auto-dismiss timer never restarts on
-  // unrelated renders.
+  // Appends one transient success notice, replacing any identical copy already in the stack so
+  // repeat saves refresh a single notice instead of stacking duplicates. Distinct messages still
+  // stack with independent timers.
   const pushSuccessToast = useCallback(
     (message: string, durationMs?: number) => {
       pushToast(message, "success", durationMs);

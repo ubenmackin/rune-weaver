@@ -281,10 +281,6 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     }
 
     /// Applies the additive watcher migrations through a caller-supplied exec.
-    ///
-    /// Each statement is best-effort idempotent (`ADD COLUMN` fails when the
-    /// column already exists), so callers ignore per-statement failures and
-    /// keep the shared text as the single source of truth.
     public static func applyWatcherColumnMigrations(_ exec: (String) -> Void) {
         for statement in watcherColumnMigrationStatements {
             exec(statement)
@@ -415,10 +411,7 @@ public struct SchedulerConfig: Sendable, Codable, Equatable {
     /// Default tool iterations for scheduled jobs before triggering limit policy (1-100). Defaults to 25.
     public var defaultMaxToolIterations: Int
 
-    /// Creates a scheduler config.
-    /// - Parameters:
-    ///   - jobs: Configured jobs. Defaults to empty.
-    ///   - defaultMaxToolIterations: Default tool iterations (1-100). Defaults to 25.
+    /// Creates a scheduler config. jobs: Configured jobs.
     public init(jobs: [SchedulerJobConfig] = [], defaultMaxToolIterations: Int = 25) {
         self.jobs = jobs
         self.defaultMaxToolIterations = defaultMaxToolIterations
@@ -567,10 +560,7 @@ public struct SchedulerRunResult: Sendable, Equatable {
     public let startedAt: Date
     /// When the attempt finished.
     public let finishedAt: Date
-    /// Goal this run advanced, when the turn was a goal fire rather than a job
-    /// fire. Skipped goal fires carry a fresh placeholder `sessionID` plus this
-    /// link, so consumers joining `sessionID` to `sessions` never meet a goal
-    /// identifier masquerading as a session.
+    /// Goal this run advanced, when the turn was a goal fire rather than a job fire.
     public let goalID: UUID?
 
     /// Creates a run result.

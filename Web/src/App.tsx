@@ -1,22 +1,4 @@
 // Rune Weaver Dashboard — main application shell and section navigation.
-// Keeps chat mounted across tabs so in-flight turns and session state survive navigation, with a full-width sticky nav keeping health and notification badges visible.
-//
-// The shell is also the client-side half of the owner-auth gate. The engine
-// serves the dashboard bundle publicly (a browser cannot attach a bearer header
-// to navigation or asset fetches), so this gate decides the posture: the
-// authenticated dashboard only mounts once a health probe proves the session
-// cleared the owner gate or the engine serves no auth, and it falls back to the
-// in-bundle login view on logout or a uniform 401. Keeping the authenticated
-// hooks inside a child component means no dashboard socket or API polling runs
-// before the gate opens.
-//
-// Heavy tab-switched views load through React.lazy so each section ships as
-// its own route-level chunk: statically bundling every surface into one entry
-// pushed first-party code past the size ceiling Rollup warns on, while the
-// small above-the-fold shell pieces (login gate, top nav, mobile bar) stay
-// static so first paint never waits on a section chunk. The auth gate renders
-// before any lazy boundary mounts, so an unauthenticated browser never fetches
-// a dashboard chunk at all.
 
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
@@ -31,12 +13,7 @@ import MobileBottomNav from "./components/MobileBottomNav";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
-// Route-level chunks for the tab-switched surfaces. Splitting happens at the
-// import mechanism only: props, selection logic, and the shared WebSocket and
-// settings stores live exactly where they did under static imports, and the
-// panel mount/unmount pattern below is unchanged. Each lazy component is
-// created once at module scope, so a section's chunk is fetched on its first
-// render and reused for every later visit across tab switches.
+// Route-level chunks for the tab-switched surfaces.
 const ApprovalsInbox = lazy(() => import("./components/ApprovalsInbox"));
 const ChatView = lazy(() => import("./components/ChatView"));
 const DashboardView = lazy(() => import("./components/DashboardView"));
@@ -75,10 +52,7 @@ function getInitialTab(): Tab {
 // reports which posture it is serving.
 type AuthGate = "checking" | "authenticated" | "required";
 
-// Suspense placeholder for a lazy section while its chunk is in flight. Reuses
-// the shell's existing loading frame markup rather than inventing a second
-// progress visual: it occupies the same content slot the section will render
-// into, so the swap from placeholder to view adds no layout shift.
+// Suspense placeholder for a lazy section while its chunk is in flight.
 function SectionProgress() {
   return (
     <div className="section-loading">
@@ -130,12 +104,9 @@ export default function App() {
     return subscribeAuthState((authenticated) => {
       if (!authenticated) {
         setHealth(null);
-        // A cleared credential does not by itself mean a login form belongs on
-        // screen: the loopback no-auth posture serves no gate at all, so its
-        // public health probe keeps returning the full shape after logout. Re-
-        // probe with the cleared credential and only require a login when the
-        // engine answers with the minimal liveness shape; a deployment that
-        // accepts any non-empty value must never ask for one.
+        // A cleared credential does not by itself mean a login form belongs on screen: the loopback
+        // no-auth posture serves no gate at all, so its public health probe keeps returning the full
+        // shape after logout.
         getHealth()
           .then((response) => {
             if (isAuthenticatedHealth(response)) {
@@ -146,10 +117,9 @@ export default function App() {
             }
           })
           .catch(() => {
-            // The credential is already gone and the posture could not be
-            // confirmed, so fail toward the login gate: keeping the dashboard
-            // would leave a token-less session whose later 401s cannot flip the
-            // gate back, stranding the tab on errors with no way to sign in.
+            // The credential is already gone and the posture could not be confirmed, so fail toward
+            // the login gate: keeping the dashboard would leave a token-less session whose later
+            // 401s cannot flip the gate back, stranding the tab on errors with no way to sign in.
             setAuthGate("required");
           });
         return;
@@ -273,13 +243,8 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
     }
   }
 
-  // Bell wiring owns badge clearing plus the permission prompt, while the bell
-  // button itself owns the visible toast. Clearing happens only by showing chat:
-  // the warnings banner already informs there, so navigating there is the single
-  // acknowledgment. Denied and unsupported taps never clear and never re-prompt,
-  // keeping the count until the operator actually views chat. The resolved
-  // outcome is returned so the bell can toast granted versus guidance without
-  // re-reading globals.
+  // Bell wiring owns badge clearing plus the permission prompt, while the bell button itself owns
+  // the visible toast.
   async function handleRequestNotifications(): Promise<
     NotificationPermission | "unsupported"
   > {

@@ -1,25 +1,12 @@
 // Rune Weaver Core — Strict container list plus inspect parsing.
-//
-// Purpose: own listing and inspect decoding so the sweep reaps only stopped
-// shapes and ages running orphans without mistaking image text for status.
-// Scope: list parsing, status vocabulary, running detection, and creation
-// stamp decoding only; builders and live execution stay elsewhere.
-// Architectural role: focused extension backing `StrictContainerRunner`
-// keeping the enum body within the type-length budget.
 
 import Foundation
 
 // MARK: - StrictContainerRunner Inspection Parsing
 
 extension StrictContainerRunner {
-    /// Parses `container list --all` output into name plus status pairs.
-    ///
-    /// Rows carry NAME, IMAGE, STATUS left to right, so the image column must
-    /// never read as status. The header owns the STATUS index when present;
-    /// headerless output falls back to the third column, then to a scan for
-    /// status keywords across trailing tokens.
-    /// - Parameter output: Combined stdout plus stderr from the listing.
-    /// - Returns: Name plus status for each row, header skipped.
+    /// Parses `container list --all` output into name plus status pairs. Rows carry NAME, IMAGE,
+    /// STATUS left to right, so the image column must never read as status.
     public static func parseContainerListOutput(_ output: String) -> [(name: String, status: String)] {
         var entries: [(name: String, status: String)] = []
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
@@ -48,10 +35,9 @@ extension StrictContainerRunner {
         return entries
     }
 
-    /// Whether a token reads as a container status marker.
-    ///
-    /// Sweep only reaps stopped shapes, so the fallback must not mistake an
-    /// image reference for a status; only explicit status vocabulary counts.
+    /// Whether a token reads as a container status marker. Sweep only reaps stopped shapes, so the
+    /// fallback must not mistake an image reference for a status; only explicit status vocabulary
+    /// counts.
     static func isStatusToken(_ token: String) -> Bool {
         let lowered = token.lowercased()
         return lowered.contains("running")
@@ -65,12 +51,6 @@ extension StrictContainerRunner {
     }
 
     /// Whether a status string reports a live container.
-    ///
-    /// Negated and historical mentions never count as live, so
-    /// `not running`, `not-running`, and `stopped (was running)` read as
-    /// stopped while a whole-word `running` reads as live.
-    /// - Parameter status: Raw status text or full inspect dump.
-    /// - Returns: True only for an affirmative live marker.
     public static func isRunningStatus(_ status: String) -> Bool {
         let lowered = status.lowercased()
         if lowered.contains("not running") || lowered.contains("not-running") || lowered.contains("not_running") {
@@ -128,12 +108,6 @@ extension StrictContainerRunner {
     }
 
     /// Parses one raw creation stamp into a date.
-    ///
-    /// Accepts epoch seconds plus ISO-8601 text; overlong fractions truncate
-    /// to milliseconds so nanosecond stamps still parse instead of reading
-    /// as ageless.
-    /// - Parameter value: Raw stamp value.
-    /// - Returns: Parsed date, nil when unparseable.
     static func parsedContainerDate(_ value: Any) -> Date? {
         // Booleans bridge to NSNumber; never read `true` as epoch 1.
         if value is Bool {

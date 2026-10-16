@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Goal tool plumbing on the shared ToolBus.
-//
-// Exercises the three goal tools as the model sees them: strict schema shape, permission
-// tiers through the gate, creation with session linkage, status reads with plans and trails,
-// ledger progress with session-linked and single-active defaults, ambiguous guidance instead
-// of guessing, blocked parking, and fail-closed disabled copy. Backed by isolated temporary
-// databases with a stub language provider so no test touches the real memory store.
 
 import Foundation
 import os

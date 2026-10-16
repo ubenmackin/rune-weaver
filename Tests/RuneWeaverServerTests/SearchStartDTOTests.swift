@@ -1,11 +1,4 @@
 // Rune Weaver Server Tests — Search Start DTOs for staged health polling.
-//
-// Purpose: pins the `stage` plus `startedAt` contract that lets the dashboard
-// poll one endpoint about 1s for the live Start step plus elapsed time.
-// Scope: REST shapes only (`/search/health` plus `/health`); cascade budgets
-// and container policy stay single-sourced in the shared ensurer.
-// Architectural role: keeps Vapor adapters decoupled from the engine core by
-// translating in-flight Start snapshots into version-tolerant Codable bodies.
 
 import Foundation
 @testable import RuneWeaverServer

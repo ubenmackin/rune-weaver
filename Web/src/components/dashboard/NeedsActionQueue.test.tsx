@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Unit tests for the Needs Action queue card list.
-// Pins the duration-only split-button payload (Allow main plus chevron tiers,
-// Deny plus Deny always, every decision tagged surface dashboard with no
-// scope), the coerced-tool exception (one-shot cards carry no standing-deny
-// control, matching the chat banner's dedicated one-shot branches), the
-// truncated target line, the "Approve once" / "Deny" labels, the
-// Open in Inbox link on every approval card, the dedicated brake branch, the
-// severity-then-filing ordering matrix, the absence of any bulk control, and
-// the scheduled-sends monitoring group (placement and fire-time ordering, the
-// cancel flow, exclusion from the attention count and badge, the all-clear
-// matrix, and Manage navigation).
 
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -85,10 +75,8 @@ function makeSend(overrides: Partial<ScheduledSend> & Pick<ScheduledSend, "id">)
   };
 }
 
-// Stubs the engine surface the queue reads, capturing every decide write so the
-// wire payload (not just the call arguments) is asserted. The sends list stays
-// mutable so a DELETE cancel is reflected by the next refetch, matching the
-// engine settling the row.
+// Stubs the engine surface the queue reads, capturing every decide write so the wire payload (not
+// just the call arguments) is asserted.
 function stubApi(
   approvals: PermissionRequest[],
   goals: Goal[] = [],
@@ -233,10 +221,9 @@ describe("NeedsActionQueue", () => {
     expect(
       await screen.findByRole("button", { name: /Deny engine\.continue/i }),
     ).toBeInTheDocument();
-    // …but offers no Deny chevron and no Deny always item: the decision
-    // contract coerces any durable tier on a one-shot tool back to thisTime
-    // and mints no rule, so a standing deny would be a dead vote — the same
-    // semantics the chat banner's dedicated Continue/Stop branch renders.
+    // …but offers no Deny chevron and no Deny always item: the decision contract coerces any
+    // durable tier on a one-shot tool back to thisTime and mints no rule, so a standing deny would
+    // be a dead vote — the same semantics the chat banner's dedicated Continue/Stop branch renders.
     expect(
       screen.queryByRole("button", { name: /Deny options for engine\.continue/i }),
     ).toBeNull();

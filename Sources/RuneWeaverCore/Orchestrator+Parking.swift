@@ -14,9 +14,6 @@ extension Orchestrator {
     }
 
     /// Resumes a parked approval after its inbox decision.
-    /// Structured gated calls reuse this identical entry as narrated ones, so a
-    /// late decide resumes against the current history with the same take, session
-    /// ensure, and waiting-note removal instead of a second resume shape.
     public func resumeNarratedApproval(
         id: UUID,
         approved: Bool,
@@ -178,12 +175,8 @@ extension Orchestrator {
         )
     }
 
-    /// Resumes an allowed `desktop.resume` parked approval with a fresh capture.
-    ///
-    /// Fail-closed fresh capture: automation never resumes on a stale display.
-    /// A missing screenshot tool, a thrown capture, an error output, or empty
-    /// pixels ends the turn here with an honest refusal instead of synthesizing
-    /// follow-up desktop actions on old observation.
+    /// Resumes an allowed `desktop.resume` parked approval with a fresh capture. Fail-closed fresh
+    /// capture: automation never resumes on a stale display.
     private func resumeAllowedDesktopResume(
         _ parked: ParkedNarratedApproval,
         call: ToolInput,
@@ -472,9 +465,6 @@ extension Orchestrator {
     }
 
     /// Resolves the synthesis prompt for a parked turn.
-    /// Reuses an explicit operator override verbatim, otherwise recomposes from the live
-    /// registry with the model's vision branch so resumed synthesis advertises the same
-    /// tools as its wire even when toggles landed while parked.
     private func resolveParkedSynthesisPrompt(_ parked: ParkedNarratedApproval) async -> String? {
         if let stored = parked.systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
             return stored
@@ -571,9 +561,6 @@ extension Orchestrator {
     }
 
     /// Executes one allowed parked call without re-entering the gate.
-    /// The recorded decide is the authorization, so the call runs through direct
-    /// tool execution bypassing the bus handler, still emitting started plus
-    /// completed events and appending the labeled result for synthesis.
     private func executeParkedCall(
         _ call: ToolInput,
         tool: any Tool,
@@ -669,13 +656,8 @@ extension Orchestrator {
         )
     }
 
-    /// Parks the turn when tool iterations exceed the allowed limit and an approval queue is present.
-    ///
-    /// A caller that already persisted the continuation call's placeholder (the
-    /// boundary-refusal path) passes the identical prebuilt call so the park
-    /// files it against that placeholder instead of minting a second identifier.
-    /// The narration-persisted flag travels through so the filing path never
-    /// repeats a note the caller already wrote.
+    /// Parks the turn when tool iterations exceed the allowed limit and an approval queue is
+    /// present.
     func parkForContinuation(
         toolRounds: Int,
         context: ParkTurnContext,

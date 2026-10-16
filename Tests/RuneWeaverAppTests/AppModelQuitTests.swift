@@ -1,7 +1,4 @@
 // Rune Weaver App Tests — AppModel quit lifecycle and SearXNG auto-stop.
-//
-// Verifies that AppModel auto-stops the managed SearXNG container on quit,
-// executes cleanup idempotently, and notifies the termination handler.
 
 import Foundation
 import os

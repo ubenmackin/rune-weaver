@@ -131,16 +131,11 @@ public struct MessagesSendResult: Sendable, Equatable, Codable {
 
 /// Interface for executing Messages operations.
 public protocol MessagesGateway: Sendable {
-    /// Searches messages across all conversations.
-    ///
-    /// Bounds are already-resolved instants: `since` is inclusive and `until`
-    /// is exclusive, with nil meaning unbounded on that side. Undated rows
-    /// never match once either bound is present.
+    /// Searches messages across all conversations. Bounds are already-resolved instants: `since` is
+    /// inclusive and `until` is exclusive, with nil meaning unbounded on that side.
     func search(query: String?, recipient: String?, limit: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem]
-    /// Reads conversation history for a given chat or recipient.
-    ///
-    /// Bounds follow the same inclusive-since, exclusive-until contract as
-    /// search, with nil meaning unbounded on that side.
+    /// Reads conversation history for a given chat or recipient. Bounds follow the same
+    /// inclusive-since, exclusive-until contract as search, with nil meaning unbounded on that side.
     func read(chatID: String?, recipient: String?, limit: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem]
     /// Sends a message to a recipient.
     func send(recipient: String, text: String) async throws -> MessagesSendResult
@@ -341,10 +336,8 @@ public struct ProductionMessagesGateway: MessagesGateway {
         guard !trimmedText.contains("\0") else {
             throw MessagesToolError.invalidInput("Message text must not contain null bytes.")
         }
-        // Only exact-address handles are sendable here: a name would guess at a
-        // contact, and a near-miss phone spelling could dial the wrong number.
-        // Resolving a name to a handle belongs to the caller, which passes the
-        // canonical handle it selected.
+        // Only exact-address handles are sendable here: a name would guess at a contact, and a
+        // near-miss phone spelling could dial the wrong number.
         guard let canonicalRecipient = MessageRecipientClassification.canonicalHandle(trimmedRecipient) else {
             throw MessagesToolError.invalidInput("Recipient must be a phone number or email handle.")
         }
@@ -381,13 +374,6 @@ public struct ProductionMessagesGateway: MessagesGateway {
     }
 
     /// Reads the handle's most recent transport from direct-chat history.
-    ///
-    /// History is an optimization, never a gate: an unreadable database (no
-    /// Full Disk Access, no Messages history) yields nil and the send keeps the
-    /// recovery script. Rows are keyed by canonical handle so formatting cannot
-    /// hide a match, and the newest matching row wins because
-    /// ``MessagesChatHistorySource`` returns stats newest first — a number that
-    /// recently moved between services is addressed on the one it now uses.
     private func observedService(for recipient: String) async -> String? {
         #if canImport(SQLite3)
             guard let recipientKey = MessageRecipientNameNormalizer.handleKey(recipient) else {

@@ -1,13 +1,4 @@
 // Rune Weaver Dashboard — Component tests for GoalsManager.
-//
-// Drives the goal list, the create-form validation gate, the manual-advance
-// contention path, plan-step toggling, the Ideas panel (list, dismiss, accept,
-// and honest conflict copy), and the live WebSocket refreshes (goal_updated
-// list refresh). The needs-input attention count is shell-owned, so these tests
-// pin that the panel renders the passed count without counting the same
-// proactive frames a second time; frames travel through the real shared socket
-// singleton so the tests exercise the same message path a mounted dashboard
-// uses rather than a pre-sanitized handler.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

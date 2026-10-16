@@ -1,11 +1,4 @@
 // Rune Weaver Core — Chunk rows and keyword search for the document index.
-//
-// Holds the chunk write path plus retrieval: chunk replacement per document,
-// FTS5 keyword search with a LIKE fallback for stemming gaps, event-time
-// vector reads (`mtime` desc, NULLs last) for the capped semantic pool, row
-// decoding, FTS and LIKE escaping, and little-endian Float32 embedding codecs.
-// Document rows live in `DocIndexStoreDocuments.swift` and schema plus
-// maintenance live beside it.
 
 import Foundation
 import os
@@ -26,30 +19,12 @@ import os
     /// Chunk persistence and keyword retrieval for the document index.
     extension SQLiteDocIndexStore {
         /// Injectable hook forcing chunk writes to fail.
-        ///
-        /// Nil performs every write; a hook returning true for a chunk throws
-        /// before its row lands, so the surrounding transaction rolls back.
-        /// Tests use it to prove document, chunk, and stamp writes land or
-        /// roll back together instead of stranding partial state.
         static var chunkInsertFailureHook: DocIndexChunkFailureHook? {
             get { docIndexChunkFailureLock.withLock { $0 } }
             set { docIndexChunkFailureLock.withLock { $0 = newValue } }
         }
 
         /// Inserts chunk rows inside the caller's transaction.
-        ///
-        /// Binding always uses the resolved document identifier so a rewrite
-        /// that preserved the stable row keeps its foreign keys valid without
-        /// a second lookup, and FTS entries follow through the insert
-        /// triggers in the same commit. Every vector width is enforced on
-        /// write: a recorded dimension rejects mismatched chunks, and when no
-        /// dimension is recorded yet the first-seen width is pinned into
-        /// `schema_meta` so later writes (including provider-backend rows,
-        /// whose pre-run guard is skipped) cannot silently mix widths.
-        /// - Parameters:
-        ///   - documentID: Resolved document owning every chunk.
-        ///   - chunks: Chunks to store, in extraction order.
-        ///   - handle: Open database handle owning the transaction.
         static func insertChunkRows(documentID: UUID, chunks: [IndexedChunk], handle: OpaquePointer?) throws {
             guard !chunks.isEmpty else { return }
             let hook = chunkInsertFailureHook
@@ -141,14 +116,6 @@ import os
         }
 
         /// Full-text search over chunk text with a LIKE fallback.
-        ///
-        /// A dated window filters on the parent `indexed_documents.mtime`
-        /// before ranking: present bounds join chunks to their document and
-        /// compare epoch seconds, so undated parents (NULL `mtime`) never
-        /// match a bounded query while an unbounded query keeps today's rows.
-        /// A windowed read also lifts the row ceiling to the vector pool's
-        /// windowed maximum, so a dated keyword leg never reads narrower than
-        /// the vector leg beside it.
         static func searchKeyword(query: String, limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -243,10 +210,6 @@ import os
         }
 
         /// Token-overlap LIKE scan used when FTS returns nothing.
-        ///
-        /// The bounded form joins chunks to `indexed_documents` so the same
-        /// `mtime` window applies to literal matches; NULL parents stay
-        /// excluded because the comparison never holds for NULL.
         private static func likeSearch(query: String, limit: Int32, handle: OpaquePointer?, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             let maxLikePatterns = 50
             let salient = Tokenization.salientTokens(from: query)
@@ -325,16 +288,6 @@ import os
         }
 
         /// Reads chunks carrying an embedding, bounded by `limit`.
-        /// Event-time ordering keeps the capped semantic pool over recently
-        /// happening documents, never recently written rows; callers needing
-        /// full-corpus recall must page the bound.
-        ///
-        /// A dated window joins to `indexed_documents` so only chunks whose
-        /// parent event time falls in `[since, until)` survive; NULL parents
-        /// — undated rows plus the orphan chunks the maintenance path still
-        /// counts — stay excluded there, while unbounded reads concatenate an
-        /// index-ordered dated leg with a rowid-ordered undated-plus-orphan
-        /// tail, keeping NULL event times last without sorting the full table.
         static func chunkVectors(limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -344,15 +297,9 @@ import os
             let maxLimit = (since != nil || until != nil) ? maxVectorWindowResults : maxResults
             let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxLimit))
             if since == nil, until == nil {
-                // The dated leg leads with `indexed_documents` so the `mtime`
-                // index supplies event-time order and stops after `limit`
-                // rows instead of sorting every vector chunk with its
-                // embedding payload. Orphan chunks (missing parent) and
-                // undated parents cannot ride that index, so a second
-                // rowid-ordered tail covers exactly those rows; dated rows
-                // always precede the tail, matching NULLS LAST without a
-                // full-table sort. Rowid breaks event-time ties so equal
-                // timestamps stay deterministic.
+                // The dated leg leads with `indexed_documents` so the `mtime` index supplies
+                // event-time order and stops after `limit` rows instead of sorting every vector
+                // chunk with its embedding payload.
                 let datedSQL = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_documents d "
                     + "JOIN indexed_chunks c ON c.document_id = d.id "
                     + "WHERE c.is_vector = 1 AND d.mtime IS NOT NULL ORDER BY d.mtime DESC, c.rowid DESC LIMIT ?;"
@@ -372,11 +319,9 @@ import os
                 // tail cannot change the returned rows.
                 let need = Int(clamped) - results.count
                 guard need > 0 else { return results }
-                // The tail covers only chunks no dated scan could see — a
-                // missing parent row or a NULL parent event time — in newest
-                // insertion order, so undated documents never crowd out dated
-                // ones yet stay candidates like the keyword path's table-only
-                // read.
+                // The tail covers only chunks no dated scan could see — a missing parent row or a
+                // NULL parent event time — in newest insertion order, so undated documents never
+                // crowd out dated ones yet stay candidates like the keyword path's table-only read.
                 let tailSQL = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
                     + "LEFT JOIN indexed_documents d ON d.id = c.document_id "
                     + "WHERE c.is_vector = 1 AND (d.id IS NULL OR d.mtime IS NULL) ORDER BY c.rowid DESC LIMIT ?;"
@@ -402,11 +347,8 @@ import os
             if until != nil {
                 sql += " AND d.mtime < ?"
             }
-            // Windowed reads keep their bounds; only the pool order changes to
-            // event time so recent happenings outrank recent writes. Leading
-            // with the parent lets the `mtime` index supply both the range
-            // and the order, and the bounds already exclude NULL event times.
-            // Rowid breaks event-time ties so equal timestamps stay deterministic.
+            // Windowed reads keep their bounds; only the pool order changes to event time so recent
+            // happenings outrank recent writes.
             sql += " ORDER BY d.mtime DESC, c.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {

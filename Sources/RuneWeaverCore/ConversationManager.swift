@@ -25,14 +25,9 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     /// "fanout_worker").
     public var source: String?
     /// Linked goal identifier, when this session works toward a tracked goal.
-    /// Nil for unlinked sessions; persisted in the `sessions.goal_id` column and
-    /// surfaced on list/detail payloads so clients can badge a session without
-    /// joining against run history.
     public var goalID: UUID?
-    /// Session that spawned this session, when one did (e.g. a fan-out worker
-    /// nests under the session that invoked the swarm). Nil for unparented
-    /// sessions; a nil incoming value never clears a stored link, so untagged
-    /// turns cannot drop the nesting.
+    /// Session that spawned this session, when one did (e.g. a fan-out worker nests under the
+    /// session that invoked the swarm).
     public var parentSessionID: UUID?
     /// Whether this session is archived (e.g. quiet close on uneventful background jobs).
     public var isArchived: Bool
@@ -114,10 +109,9 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.isArchived = isArchived
     }
 
-    /// Decodes a session, defaulting a missing goal link to unlinked and a
-    /// missing parent link to unparented so rows written before either link
-    /// load instead of failing the whole history.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a session, defaulting a missing goal link to unlinked and a missing parent link to
+    /// unparented so rows written before either link load instead of failing the whole history. -
+    /// Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -166,10 +160,8 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
     /// Carried on the listing payload so the dashboard can resolve a
     /// session-to-goal chip without querying run history.
     public let goalID: UUID?
-    /// Parent session identifier, when this session was spawned by another
-    /// (e.g. a fan-out worker nesting under the session that invoked the
-    /// swarm). Carried on the listing payload so clients can nest workers
-    /// without querying run history; nil for unparented sessions.
+    /// Parent session identifier, when this session was spawned by another (e.g. a fan-out worker
+    /// nesting under the session that invoked the swarm).
     public let parentSessionID: UUID?
     /// Whether this session is archived.
     public let isArchived: Bool
@@ -214,9 +206,8 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.isArchived = isArchived
     }
 
-    /// Decodes a summary, defaulting a missing goal link to unlinked and a
-    /// missing parent link to unparented so payloads from engines that predate
-    /// either link still parse.
+    /// Decodes a summary, defaulting a missing goal link to unlinked and a missing parent link to
+    /// unparented so payloads from engines that predate either link still parse.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -329,10 +320,7 @@ public actor ConversationManager {
 
     // MARK: - Sessions
 
-    /// Creates a new empty session and tracks it.
-    ///
-    /// Warms the on-device safety model so the first gated turn finds it
-    /// already resident. Warm-up debounces internally and never blocks, so
+    /// Creates a new empty session and tracks it. Warm-up debounces internally and never blocks, so
     /// creation returns instantly and can never fail on warm-up.
     @discardableResult
     public func createSession(goalID: UUID? = nil) async -> ConversationSession {
@@ -381,12 +369,8 @@ public actor ConversationManager {
         await readSingleMerged(id: id)
     }
 
-    /// Single merge point for title/source/goal/parent fills so the memory, disk-hit, and
-    /// disk-miss paths converge instead of drifting when one path gains a fix.
-    /// Fill preserves an already-stored value unless overwrite requests
-    /// replacement, keeping a raced-in name from being clobbered. A nil goal
-    /// or parent never clears a stored link, so untagged turns cannot drop goal
-    /// linkage or worker nesting.
+    /// Single merge point for title/source/goal/parent fills so the memory, disk-hit, and disk-miss
+    /// paths converge instead of drifting when one path gains a fix.
     private func mergeTitleSource(
         into session: ConversationSession,
         title: String?,
@@ -417,10 +401,6 @@ public actor ConversationManager {
     }
 
     /// Returns the session, creating it when missing.
-    ///
-    /// Only the newly-created branch warms the on-device safety model, so
-    /// existing-session hits stay free of warm-up work while creation still
-    /// returns instantly without ever failing on warm-up.
     @discardableResult
     public func ensureSession(
         id: UUID,
@@ -492,11 +472,8 @@ public actor ConversationManager {
             }
             return merged
         }
-        // Durable bound: memory eviction alone would let the next list or read rehydrate
-        // the same persisted row, so the bound would never hold on disk. The evicted
-        // identifier is captured first so the in-memory insert stays suspension-free;
-        // the persisted row is deleted afterwards, keeping both views converged.
-        // Missing rows (never-persisted ghosts) stay a no-op.
+        // Durable bound: memory eviction alone would let the next list or read rehydrate the same
+        // persisted row, so the bound would never hold on disk.
         var evictedID: UUID?
         if sessions.count >= Self.maxSessions {
             if let oldest = sessions.values.min(by: { $0.updatedAt < $1.updatedAt }) {
@@ -571,10 +548,8 @@ public actor ConversationManager {
             }
     }
 
-    /// Sets the archived state of a session and persists the change.
-    /// - Parameters:
-    ///   - id: Session identifier.
-    ///   - isArchived: Whether the session should be hidden from normal sidebar views.
+    /// Sets the archived state of a session and persists the change. id: Session
+    /// identifier.
     public func setSessionArchived(id: UUID, isArchived: Bool) async {
         var sessionToUpdate: ConversationSession? = sessions[id]
         if sessionToUpdate == nil {
@@ -588,13 +563,7 @@ public actor ConversationManager {
         await persist(session)
     }
 
-    /// Links a session to a goal, persisting the association.
-    /// Passing nil unlinks the session. Unknown identifiers stay a no-op like
-    /// `updateTitle` so linking never materializes ghost sessions; callers that
-    /// need creation use `ensureSession` first.
-    /// - Parameters:
-    ///   - sessionID: Session to link.
-    ///   - goalID: Goal to link to, or nil to unlink.
+    /// Links a session to a goal, persisting the association. Passing nil unlinks the session.
     public func linkSession(_ sessionID: UUID, toGoal goalID: UUID?) async {
         var sessionToUpdate: ConversationSession? = sessions[sessionID]
         if sessionToUpdate == nil {
@@ -654,11 +623,8 @@ public actor ConversationManager {
 
     // MARK: - History
 
-    /// Appends a message to a session, truncating when over budget.
-    /// Returns the stored message so callers stamp from the persisted instant instead of a
-    /// pre-persistence sample. The timestamp is quantized to whole milliseconds so the
-    /// in-memory instant survives SQLite REAL plus JSON Double reloads without
-    /// sub-millisecond drift, keeping live completion stamps and history reloads in agreement.
+    /// Appends a message to a session, truncating when over budget. Returns the stored message so
+    /// callers stamp from the persisted instant instead of a pre-persistence sample.
     @discardableResult
     public func append(_ message: Message, to sessionID: UUID) async -> Message {
         var session = await ensureSession(id: sessionID)
@@ -711,10 +677,9 @@ extension ConversationManager {
         }
     }
 
-    /// Removes temporary waiting-on-approval notices from a session's persistent history.
-    /// Read-only lookup keeps unknown identifiers from materializing empty sessions
-    /// when merely clearing notices. Marker identity leads with content as legacy fallback
-    /// so pre-marker rows still clear.
+    /// Removes temporary waiting-on-approval notices from a session's persistent history. Read-only
+    /// lookup keeps unknown identifiers from materializing empty sessions when merely clearing
+    /// notices.
     public func removeWaitingMessages(from sessionID: UUID) async {
         guard var session = await session(id: sessionID) else { return }
         let initialCount = session.messages.count
@@ -762,9 +727,6 @@ extension ConversationManager {
     }
 
     /// Structured tool actions grouped by parent assistant message, oldest message first.
-    /// Each placeholder-bearing assistant note marks one chronological round boundary, so the
-    /// assigned round index increments per note in stored order. Reloads therefore interleave
-    /// identically to live turns even for payloads written before round tracking.
     public func toolActionsByMessage(for sessionID: UUID) async -> [UUID: [ToolAction]] {
         guard let session = await readSingleMerged(id: sessionID) else { return [:] }
         let resultsByCallID = collectToolResults(from: session.messages)
@@ -891,10 +853,8 @@ private func nonEmptyCallID(_ raw: String) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
-/// Indexes tool results by trimmed call identifier.
-/// Persisted error flags distinguish failures from successes; rows written before the
-/// flag default to success. The persisted category rides along so a reloaded action
-/// keeps its badge instead of degrading to the generic error case.
+/// Indexes tool results by trimmed call identifier. Persisted error flags distinguish failures from
+/// successes; rows written before the flag default to success.
 private func collectToolResults(from messages: [Message]) -> [String: ToolResult] {
     var resultsByCallID: [String: ToolResult] = [:]
     for message in messages where message.role == .tool {
@@ -958,9 +918,6 @@ private func collectAssistantNotes(from messages: [Message], resultsByCallID: [S
 }
 
 /// Selects the winning record per identifier with a single owning note.
-/// A narrated line plus its persisted twin share one identifier, so the
-/// execution-backed record wins over a pending ghost and the earliest wins ties
-/// to hold chronological order.
 private func selectBestOwners(perNote: [AssistantNoteActions]) -> ToolActionWinners {
     var bestByCallID: [String: ToolAction] = [:]
     var ownerByCallID: [String: UUID] = [:]
@@ -1026,11 +983,9 @@ extension ConversationManager {
         let joinedSummary = [session.summary, summary]
             .compactMap { $0?.isEmpty == false ? $0 : nil }
             .joined(separator: "\n")
-        // The rolling summary feeds every prompt's budget and the persisted
-        // row, so it keeps the same bound as eviction instead of growing
-        // without limit across repeated on-demand summarizes. The leading
-        // ellipsis marks truncation, so it occupies one slot of the budget
-        // and the retained tail keeps the total within the bound.
+        // The rolling summary feeds every prompt's budget and the persisted row, so it keeps the
+        // same bound as eviction instead of growing without limit across repeated on-demand
+        // summarizes.
         session.summary = if joinedSummary.count > Self.maxSummaryLength {
             "…" + String(joinedSummary.suffix(Self.maxSummaryLength - 1))
         } else {

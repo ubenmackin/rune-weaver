@@ -1,25 +1,9 @@
 // Rune Weaver Core — Media automation configuration (Sonarr & Radarr).
-//
-// Purpose: single source for self-hosted TV and movie manager settings backing
-// the `media.arr` tool, TOML decoding, validation, and serialization.
-// Scope: plain value types only; HTTP, secrets resolution, and tool gating live
-// with the client and tool layers. Architectural role: the `[media]` section
-// shape shared by config load, settings routes, and media execution.
-// Secrets live in the Keychain or environment and never in TOML — only
-// `apiKeyEnv` names persist and resolve at execution time. Network dials never
-// happen here; an enabled entry with a blank or missing URL stays unconfigured
-// (guidance error, no dial) so stock installs fail closed until a base URL is set.
 
 import Foundation
 
-/// One self-hosted Arr instance (Sonarr for TV, Radarr for movies).
-///
-/// Sonarr and Radarr share the same five-field shape, so a single struct backs
-/// both sections and the per-service key names stay with the factories and the
-/// `MediaConfig` defaults below. Only env-var names persist; key values resolve
-/// via `SecretsManager` at execution time. A blank or missing `url` with
-/// `enabled` true means unconfigured rather than active: callers report guidance
-/// and never dial.
+/// One self-hosted Arr instance (Sonarr for TV, Radarr for movies). Only env-var names persist; key
+/// values resolve via `SecretsManager` at execution time.
 public struct ArrInstanceConfig: Sendable, Codable, Equatable {
     /// Whether this service integration is enabled.
     public var enabled: Bool
@@ -108,13 +92,6 @@ public struct ArrInstanceConfig: Sendable, Codable, Equatable {
     }
 
     /// Whether this entry differs from stock in a way that must persist.
-    ///
-    /// Blank and missing values read identically (nil, empty, and whitespace all
-    /// mean absent), and a nil/blank/default key name all read as stock since the
-    /// client falls back to the conventional name — so a nil-only entry collapses
-    /// to stock instead of emitting a section that would decode back as default.
-    /// - Parameter defaultAPIKeyEnv: Conventional key name for this service.
-    /// - Returns: True when the entry carries user intent worth writing.
     func isCustomized(defaultAPIKeyEnv: String) -> Bool {
         if !enabled {
             return true
@@ -143,10 +120,9 @@ public typealias SonarrConfig = ArrInstanceConfig
 /// or environment, never in TOML.
 public typealias RadarrConfig = ArrInstanceConfig
 
-/// `[media]` — Media automation configurations (Sonarr & Radarr).
-///
-/// Both sides default to enabled-but-unconfigured (no URL, conventional key
-/// name): the tool reports guidance and never dials until a base URL is set.
+/// `[media]` — Media automation configurations (Sonarr & Radarr). Both sides default to
+/// enabled-but-unconfigured (no URL, conventional key name): the tool reports guidance and never
+/// dials until a base URL is set.
 public struct MediaConfig: Sendable, Codable, Equatable {
     /// Sonarr configuration.
     public var sonarr: SonarrConfig

@@ -1,12 +1,4 @@
 // Rune Weaver Dashboard — Config to Settings coverage ledger.
-//
-// Purpose: maps every RuneWeaverConfig leaf key to its owning Settings surface
-// so coverage, interface, and example stay in lockstep on config changes, with
-// bash snake_case canonical plus camelCase aliases accepted on decode.
-// Scope: ledger data plus lookup only; Settings panes, REST DTOs, and TOML
-// decoding stay with their owners.
-// Architectural role: fail-loudly contract that every leaf key resolves to
-// exactly one surface identifier or an explicit exclusion with reason.
 
 export const SETTINGS_SURFACES = [
   "bash-pane",

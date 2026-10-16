@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Durable parent-session origin persistence.
-//
-// Covers the additive `sessions.parent_session_id` column end to end: a parent
-// link survives a persist/reload cycle through episodes.db and rides the
-// listing payload, a database created before the column existed still reads
-// with an unparented session and no error, and malformed stored text degrades
-// to nil instead of failing the history load. Fixture setup writes raw SQLite
-// so legacy tables genuinely predate the migration instead of being produced
-// by the code under test, mirroring the goal-linkage migration harness.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -1,14 +1,4 @@
 // Rune Weaver Core Tests — Access rule scopes, the single matcher, and rule rows.
-//
-// Pins the contract that one tool plus one scope plus one action plus one
-// optional lifetime describes a rule, and that the single scope matcher is the
-// only place scope comparison happens: every case matches only its documented
-// shape, a malformed call matches nothing but toolWide, and a malformed scope is
-// refused at creation so it can never be judged at evaluation. Also pins the
-// canonicalizers (recipient spelling, host shape, path prefix, glob), the
-// tagged envelope's unknown-kind and non-canonical refusals, tolerant durable
-// decoding, and the legacy-target equivalence that keeps a migrated row
-// covering the exact call the owner approved.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -1,22 +1,4 @@
 // Rune Weaver Dashboard — DiffCard component tests.
-// Pins the inline review contract: mount hydration reads the durable review
-// ledger and only fills an unresolved card, HTTP 200 flips the pill
-// immediately (a hung engine walk surfaces a 10s retryable timeout instead of
-// an infinite loading state), a failed hydration leaves the actionable card
-// intact, and a card that does not own the file's review shows the
-// newer-write note instead of controls. Live coverage pins the
-// rollback-posture split (Accept/Revert on an existing file, Accept/Discard on
-// a new file), the HTTP-200 resolutions, the 10s live decline timeout, and the
-// live_resolved broadcast. Frame-kind coverage pins each ledger event to its
-// own card kind: staged file_accepted/file_discarded/file_superseded frames
-// never move a live card, and a file_superseded frame settles a staged card to
-// the terminal Superseded pill with no actions. Surface-batch coverage pins the
-// hoisted hydration contract: a provided batch state is adopted without any
-// per-card request, a null batch (in flight or failed) keeps the pending UI
-// without falling back, and a late batch never downgrades a settled action.
-// Collapse coverage pins the chat default: the diff body follows
-// `defaultExpanded` both on mount and across a settings flip on an
-// already-mounted card, while the header stays actionable.
 
 import {
   act,
@@ -110,10 +92,8 @@ interface FetchMockLike {
   mock: { calls: unknown[][] };
 }
 
-// Routes each request by URL: the mount hydration call coexists with
-// accept/discard/live calls, so tests count calls per route instead of
-// assuming a call order. An unspecified review-status call defaults to an
-// empty ledger, which leaves the card in its actionable posture.
+// Routes each request by URL: the mount hydration call coexists with accept/discard/live calls, so
+// tests count calls per route instead of assuming a call order.
 function stubRoutedFetch(
   handlers: {
     review?: FetchHandler;
@@ -201,11 +181,8 @@ afterEach(() => {
 describe("DiffCard accept timeout plus retry", () => {
   it("surfaces a retryable timeout banner when accept hangs", async () => {
     vi.useFakeTimers();
-    // Hung engine walk: never settles on its own so the card-side 10s race
-    // must supply the timeout without relying on the fetch abort alone. The
-    // mount hydration request hangs the same way. Explicit input/init params
-    // keep mock.calls typed as a 2-tuple so the abort-signal assertion below
-    // typechecks (a zero-arg impl would infer calls as [] and trip TS2493).
+    // Hung engine walk: never settles on its own so the card-side 10s race must supply the timeout
+    // without relying on the fetch abort alone. The mount hydration request hangs the same way.
     const fetchMock = vi.fn(
       (_input: unknown, _init?: unknown) =>
         new Promise<Response>(() => undefined),
@@ -275,11 +252,8 @@ describe("DiffCard accept timeout plus retry", () => {
     });
     expect(callsTo(fetchMock, REVIEW_STATUS_URL)).toHaveLength(1);
 
-    // The hydration response lands after the accept won the race and resolves
-    // to a different state; first write wins, so the pill must stay Accepted.
-    // Draining one macrotask inside act flushes the whole mocked fetch ->
-    // JSON -> setState chain, so a guardless implementation would visibly
-    // overwrite the settled pill here.
+    // The hydration response lands after the accept won the race and resolves to a different state;
+    // first write wins, so the pill must stay Accepted.
     await act(async () => {
       reviewGate.resolve(reviewResponse({ [STAGED_PATH]: "unknown" }));
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1163,10 +1137,8 @@ describe("DiffCard surface-batched hydration", () => {
   });
 });
 
-// The shadowed-card flag is computed by list owners (chat transcript and run
-// detail) from render order. This pins the identity contract those owners rely
-// on: the shared scan resolves two actions for one (path, kind) key to the
-// newer owner.
+// The shadowed-card flag is computed by list owners (chat transcript and run detail) from render
+// order.
 describe("newest-write ownership keys", () => {
   it("resolves one owner per path and envelope kind", () => {
     const actions: ToolAction[] = [

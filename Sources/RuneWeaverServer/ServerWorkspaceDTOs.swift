@@ -1,24 +1,12 @@
 // Rune Weaver Server — Workspace settings DTOs for the settings API.
-//
-// Purpose: carries the partial workspace patch for `PUT /settings` so dashboard
-// quota edits preserve untouched fields while scratch limits apply without a restart.
-// Scope: REST patch bodies only; the settings request type owns merge policy
-// while validation and persistence stay with the config layer.
-// Architectural role: keeps workspace Codable contracts version-tolerant and
-// decoupled from the broader settings surface, mirroring the bash DTO split so
-// the settings snapshot file stays within its length budget.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Partial `[workspace]` patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// rest of the stored scratch quotas untouched instead of resetting them.
-/// Covers the same field set as the full `WorkspaceConfig` snapshot, so a
-/// caller holding a complete policy can build the patch through `init(_:)` and
-/// reuse the merge path without hand-mapping fields.
+/// Partial `[workspace]` patch for `PUT /settings`. Every field stays optional so a request
+/// carrying only one key leaves the rest of the stored scratch quotas untouched instead of resetting
+/// them.
 public struct WorkspaceUpdate: Content, Sendable, Equatable {
     /// Total bytes permitted under the workspace root, in megabytes. Nil preserves the stored value.
     public var quotaMB: Int?
@@ -27,11 +15,8 @@ public struct WorkspaceUpdate: Content, Sendable, Equatable {
     /// Days `tmp/` entries survive before pruning. Nil preserves the stored value.
     public var tmpTTLDays: Int?
 
-    /// Creates a partial workspace patch.
-    /// - Parameters:
-    ///   - quotaMB: Total bytes permitted under the workspace root, in megabytes.
-    ///   - quotaFiles: Total files permitted under the workspace root.
-    ///   - tmpTTLDays: Days `tmp/` entries survive before pruning.
+    /// Creates a partial workspace patch. quotaMB: Total bytes permitted under the
+    /// workspace root, in megabytes.
     public init(
         quotaMB: Int? = nil,
         quotaFiles: Int? = nil,
@@ -92,15 +77,9 @@ public struct WorkspaceMachineResponse: Content, Sendable, Equatable {
 // MARK: - Workspace Settings Merge
 
 extension UpdateSettingsRequest {
-    /// Merges a partial workspace patch onto the stored quotas, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit to
-    /// one knob never resets the rest of the `[workspace]` section. Range checks
-    /// route through the single-sourced `WorkspaceConfig` validators the TOML
-    /// load path enforces, so the PUT and file-load paths refuse the same values
-    /// with the same dotted field instead of persisting a quota the loader rejects.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the workspace-specific logic lives beside its DTO.
+    /// Merges a partial workspace patch onto the stored quotas, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit to one knob never resets the rest of the
+    /// `[workspace]` section.
     func applyWorkspace(to workspace: inout WorkspaceConfig) throws {
         guard let update = self.workspace else { return }
         // Every present field validates before anything mutates, so a

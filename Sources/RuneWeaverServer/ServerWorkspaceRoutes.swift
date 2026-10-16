@@ -1,23 +1,11 @@
 // Rune Weaver Server — Agent scratch workspace routes.
-//
-// Purpose: exposes the bounded `workspace/` scratch tree over HTTP so
-// dashboards manage automation without shell access: usage with quotas,
-// age-based `tmp/` pruning, and container machine lifecycle controls.
-// Scope: route registration and request validation only;
-// quotas stay with WorkspaceStore.
-// Architectural role: thin Vapor adapter over the Core stores mirroring the
-// goal route idioms (strict UUID checks, honest status codes, no
-// route-specific auth).
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Registers every workspace route on the application.
-///
-/// Global middleware already guards data paths, so no route installs its own
-/// auth.
-/// - Parameter app: Application receiving the routes.
+/// Registers every workspace route on the application. Global middleware already guards data paths,
+/// so no route installs its own auth.
 func registerWorkspaceRoutes(_ app: Application) {
     registerWorkspaceUsageRoute(app)
     registerWorkspacePruneRoute(app)
@@ -29,11 +17,6 @@ func registerWorkspaceRoutes(_ app: Application) {
 // MARK: - Workspace
 
 /// Reports bounded scratch usage with quotas for dashboard bars.
-///
-/// A missing workspace reads as an empty snapshot rather than an error, so a
-/// fresh install renders an honest empty state; a walk failure stays a 500
-/// instead of masquerading as empty.
-/// - Parameter app: Application receiving the route.
 private func registerWorkspaceUsageRoute(_ app: Application) {
     app.get(
         PathComponent.constant(ServerPaths.workspace),
@@ -58,11 +41,8 @@ private func registerWorkspaceUsageRoute(_ app: Application) {
     }
 }
 
-/// Clears expired `tmp/` entries for dashboards.
-///
-/// Missing `tmp/` is a zero removal rather than an error, because a fresh
-/// workspace has nothing to prune; a store failure stays a 500.
-/// - Parameter app: Application receiving the route.
+/// Clears expired `tmp/` entries for dashboards. Missing `tmp/` is a zero removal rather than an
+/// error, because a fresh workspace has nothing to prune; a store failure stays a 500.
 private func registerWorkspacePruneRoute(_ app: Application) {
     app.post(
         PathComponent.constant(ServerPaths.workspace),
@@ -82,10 +62,6 @@ private func registerWorkspacePruneRoute(_ app: Application) {
 // MARK: - Workspace machine
 
 /// Reports machine lifecycle state for dashboard control.
-///
-/// A missing machine reads as exists false rather than an error, so a fresh
-/// install renders an honest empty state.
-/// - Parameter app: Application receiving the route.
 private func registerWorkspaceMachineStatusRoute(_ app: Application) {
     app.get(
         PathComponent.constant(ServerPaths.workspace),
@@ -105,10 +81,6 @@ private func registerWorkspaceMachineStatusRoute(_ app: Application) {
 }
 
 /// Stops the machine container without removing it.
-///
-/// The entry stays listed so the next ensure restarts it without recreating;
-/// a missing machine reports exists false after the best-effort halt.
-/// - Parameter app: Application receiving the route.
 private func registerWorkspaceMachineStopRoute(_ app: Application) {
     app.post(
         PathComponent.constant(ServerPaths.workspace),
@@ -129,11 +101,9 @@ private func registerWorkspaceMachineStopRoute(_ app: Application) {
     }
 }
 
-/// Stops plus removes the machine container so the next ensure recreates it.
-///
-/// Removal follows the halt so a running entry never half-deletes; a missing
-/// machine reports exists false after the best-effort remove.
-/// - Parameter app: Application receiving the route.
+/// Stops plus removes the machine container so the next ensure recreates it. Removal follows the
+/// halt so a running entry never half-deletes; a missing machine reports exists false after the
+/// best-effort remove.
 private func registerWorkspaceMachineRecycleRoute(_ app: Application) {
     app.post(
         PathComponent.constant(ServerPaths.workspace),

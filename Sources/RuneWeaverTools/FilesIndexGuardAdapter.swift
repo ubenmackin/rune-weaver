@@ -1,20 +1,10 @@
 // Rune Weaver Tools — Adapter binding the shared file access guard to the files indexer seam.
-//
-// The core files indexer walks candidate paths through a narrow protocol seam so it
-// stays free of the tool layer. This adapter maps that seam onto the shared
-// `FilesAccessGuard` deny patterns only, so background indexing filters exactly the
-// sensitive paths the file tools refuse while ignoring `[files]` allow roots.
-// Index roots drive the walk and deny matches stay skipped by the indexer;
-// escalation never fires from a background run.
 
 import Foundation
 import RuneWeaverCore
 
-/// Adapts the shared `[files]` deny patterns to the core files indexer seam.
-///
-/// Index roots drive the walk, so allow roots are ignored here; only deny
-/// patterns can refuse a candidate. Live file tools keep enforcing both
-/// through `FilesAccessGuard` directly.
+/// Adapts the shared `[files]` deny patterns to the core files indexer seam. Index roots drive the
+/// walk, so allow roots are ignored here; only deny patterns can refuse a candidate.
 public struct FilesIndexPolicyGuard: FilesIndexAccessGuard, Sendable {
     /// `[files]` policy consulted for every candidate path.
     private let filesConfig: FilesConfig
@@ -25,11 +15,8 @@ public struct FilesIndexPolicyGuard: FilesIndexAccessGuard, Sendable {
         self.filesConfig = filesConfig
     }
 
-    /// Evaluates one candidate path against the `[files]` deny patterns only.
-    /// - Parameters:
-    ///   - path: Raw candidate path.
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    /// - Returns: The policy decision for the path, with allow roots ignored.
+    /// Evaluates one candidate path against the `[files]` deny patterns only. path:
+    /// Raw candidate path.
     public func evaluate(path: String, homeDirectoryURL: URL?) -> FilesIndexAccessDecision {
         // Widen allow roots to the filesystem root so only deny patterns can
         // refuse: an index candidate outside `[files]` allow roots but matching

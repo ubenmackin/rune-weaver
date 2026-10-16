@@ -1,15 +1,4 @@
 // Rune Weaver Tools — IMAP bridge payload codecs for the email tool suite.
-//
-// Purpose: owns the JSON seam between the Swift tool layer and the embedded
-// Python IMAP bridge — decoding bridge stdout envelopes (search, fetch,
-// batch_fetch, attachment, append) into typed models and encoding tool
-// output documents with a stable sorted pretty-printed shape.
-// Scope: pure (de)serialization only. No networking, no subprocess control,
-// and no mailbox policy — those live behind the gateway protocols and the
-// mailbox-resolution extensions of this same namespace.
-// Architectural role: single wire-format surface for the IMAP bridge, so
-// response-shape drift is contained here and every consumer sees typed
-// models plus EmailIMAPError instead of raw JSON.
 
 import Foundation
 
@@ -100,11 +89,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Encodes search hits as the `email.search` tool output document.
-    ///
-    /// `accounts`/`failedAccounts` are omitted only when nil: single-account
-    /// callers pass them explicitly — `accounts:[name]` and `failedAccounts:[]` —
-    /// so single-account search output carries the multi-account envelope keys
-    /// rather than matching the pre-multi-account byte shape.
     public static func encodeSearchEnvelope(
         account: String,
         query: String,

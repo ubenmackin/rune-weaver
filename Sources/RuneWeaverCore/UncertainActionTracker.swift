@@ -1,7 +1,4 @@
 // Rune Weaver Core — Uncertain action idempotency tracker.
-// Tracks timeouts and ambiguous outcomes on mutating tools (e.g. network requests,
-// email sends, file writes, desktop actions) to prevent the LLM from naively retrying
-// identical actions that may have partially or fully succeeded.
 
 import CryptoKit
 import Foundation
@@ -39,15 +36,6 @@ public actor UncertainActionTracker {
     public let ttl: TimeInterval
 
     /// Set of known mutating tool names subject to idempotency safeguards.
-    ///
-    /// Fail-closed scope rule: every entry must name a shipped mutating tool, so an
-    /// uncertain outcome (timeout, unconfirmed write) always blocks an identical retry
-    /// until the owner verifies state. Names with no registered tool are never listed:
-    /// they can neither execute nor collide, so they only suggest coverage that does
-    /// not exist. `messages.send` stays listed alongside `email.send` because it is a
-    /// real approval-gated send — dropping it would leave a timed-out send retryable
-    /// and risk a duplicate message, which is exactly the fail-open outcome this
-    /// tracker exists to prevent.
     public static let defaultMutatingTools: Set<String> = [
         "api.request",
         "bash.exec",
@@ -69,14 +57,6 @@ public actor UncertainActionTracker {
     }
 
     /// Computes a SHA-256 hash of the canonical form of the arguments string.
-    ///
-    /// Key order in a JSON object carries no meaning, but a byte hash treats
-    /// `{"a":1,"b":2}` and `{"b":2,"a":1}` as different actions, letting a mere
-    /// reordering slip past `isBlocked` and retry an uncertain write. Sorting keys
-    /// before hashing closes that bypass so identical actions always share a key.
-    /// Non-object payloads (empty, malformed, or fragment JSON) fall back to the
-    /// trimmed raw string: hashing never fails, and distinct inputs still hash
-    /// distinctly rather than collapsing onto one shared key.
     public static func computeHash(for argumentsJSON: String) -> String {
         let canonical = canonicalArgumentsJSON(argumentsJSON)
         let digest = SHA256.hash(data: Data(canonical.utf8))
@@ -84,12 +64,6 @@ public actor UncertainActionTracker {
     }
 
     /// Returns the canonical encoding of an arguments payload for hashing.
-    ///
-    /// Objects and arrays round-trip through sorted-key serialization, which orders
-    /// every nested dictionary deterministically while leaving array order (which is
-    /// semantically significant) untouched. Anything that does not parse as JSON is
-    /// returned trimmed but otherwise unmodified so the hash still covers exactly
-    /// what the caller passed.
     private static func canonicalArgumentsJSON(_ argumentsJSON: String) -> String {
         let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,

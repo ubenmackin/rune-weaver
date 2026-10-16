@@ -1,11 +1,4 @@
 // Rune Weaver Core — Event watcher rules and domain models.
-//
-// Purpose: evaluate event conditions deterministically in Swift and execute zero-token
-// direct actions without LLM inference, keeping hot-path matching cheap and auditable.
-// Scope: email/messages/calendar condition and action Codable models, deterministic
-// matching predicates, and direct-tool wire shapes; polling and firing stay with callers.
-// Architectural role: single allowlist owner for direct tools plus wire-tolerant decoding
-// so older rows and newer dashboard payloads share one matching semantic.
 
 import Foundation
 
@@ -93,10 +86,9 @@ public struct EventRuleCondition: Sendable, Codable, Equatable {
         self.matchAll = matchAll
     }
 
-    /// Wire tolerance lives here so dashboard, config file, and durable rows agree:
-    /// the canonical keys stay camelCase while snake_case and the legacy
-    /// `calendarNames` alias still decode, so a renamed dashboard field or an
-    /// older stored row never silently drops a filter.
+    /// Wire tolerance lives here so dashboard, config file, and durable rows agree: the canonical
+    /// keys stay camelCase while snake_case and the legacy `calendarNames` alias still decode, so a
+    /// renamed dashboard field or an older stored row never silently drops a filter.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         senderContains = try container.decodeIfPresent([String].self, forKey: .senderContains)
@@ -286,10 +278,6 @@ public enum EventRuleAction: Sendable, Codable, Equatable {
 
 extension EventRuleAction {
     /// Direct tools permitted on the zero-token fast path.
-    ///
-    /// The fast path bypasses LLM inference, so only narrowly-scoped mailbox
-    /// and calendar mutations stay eligible; anything else must run as a
-    /// scoped agent turn where the permission gate and audit apply.
     public static let allowedDirectToolNames: Set<String> = [
         "email.move",
         "email.archive",

@@ -1,27 +1,4 @@
 // Rune Weaver Core Tests — Direct-chat handle history from a fixture chat.db.
-//
-// Purpose: pin the aggregate behavior behind recipient history — only
-// one-to-one chats contribute handles, a group chat's handles and messages are
-// excluded entirely, results order by most recent message with the limit
-// honored, the handle's service label is carried, message counts stay scoped
-// to direct chats, and an unavailable database surfaces the honest
-// `MessagesIndexError.databaseUnavailable`. Also pins the outgoing-evidence
-// read and the send confirmation built on it: direction is filtered, the
-// `since` bound and limit are honored through the shared seconds expression
-// (so a stale nanosecond-scale row can never confirm a later send), a matching
-// outgoing row confirms, an absent row does not, and an unreadable database
-// reports unknown rather than a false negative.
-//
-// Scope: isolated fixture databases only; no test touches the real
-// `~/Library/Messages` store. The source-level test exercises the full
-// snapshot-open-query-cleanup path against a fixture, while the SQL-level
-// tests drive each read directly so ordering and exclusion failures point at
-// one owner.
-//
-// Architectural role: guards the history and confirmation surfaces consumed by
-// recipient resolution and `messages.send`, so contact suggestions never
-// present a group participant as a direct contact and a send never claims
-// delivery history cannot support.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -65,10 +42,8 @@ private func openChatHistoryFixture(at path: String) throws -> OpaquePointer {
     #endif
 }
 
-/// Executes a multi-statement SQL string against a chat-history fixture.
-/// - Parameters:
-///   - handle: Open fixture handle.
-///   - sql: SQL to execute.
+/// Executes a multi-statement SQL string against a chat-history fixture. handle:
+/// Open fixture handle.
 private func execChatHistoryFixture(_ handle: OpaquePointer?, _ sql: String) throws {
     #if canImport(SQLite3)
         var message: UnsafeMutablePointer<CChar>?
@@ -81,14 +56,6 @@ private func execChatHistoryFixture(_ handle: OpaquePointer?, _ sql: String) thr
 }
 
 /// Creates the chat-history tables and seeds two direct chats plus one group chat.
-///
-/// The `chat_handle_join` table is intentionally local to this fixture: older
-/// Messages fixtures never needed participant cardinality, and it is exactly
-/// what separates a one-to-one chat from a group here. The group chat shares
-/// Alice's handle and holds the newest messages, so an aggregate that leaked
-/// group rows would top the ordering and inflate her count instead of failing
-/// silently.
-/// - Parameter path: Fixture database path.
 private func seedChatHistoryFixture(at path: String) throws {
     let handle = try openChatHistoryFixture(at: path)
     defer { sqlite3_close(handle) }
@@ -130,11 +97,6 @@ private func seedChatHistoryFixture(at path: String) throws {
 }
 
 /// Creates the minimal outgoing-evidence schema used by confirmation tests.
-///
-/// The direct-chat fixture above has no `is_from_me` or `handle_id` columns
-/// because its aggregate never read them; outgoing evidence filters on both,
-/// so it gets its own schema instead of widening the shared fixture.
-/// - Parameter path: Fixture database path.
 private func createOutgoingFixture(at path: String) throws {
     let handle = try openChatHistoryFixture(at: path)
     defer { sqlite3_close(handle) }
@@ -150,10 +112,8 @@ private func createOutgoingFixture(at path: String) throws {
     )
 }
 
-/// Inserts outgoing-evidence rows with raw Mac-epoch ticks at either scale.
-/// - Parameters:
-///   - handle: Open fixture handle.
-///   - rows: Row id, handle id, direction, and raw Mac-epoch tick per row.
+/// Inserts outgoing-evidence rows with raw Mac-epoch ticks at either scale. handle:
+/// Open fixture handle.
 private func insertOutgoingFixtureRows(
     _ handle: OpaquePointer?,
     _ rows: [(rowID: Int64, handleID: Int64, isFromMe: Bool, macEpoch: Int64)]

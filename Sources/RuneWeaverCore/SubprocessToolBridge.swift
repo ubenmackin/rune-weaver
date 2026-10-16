@@ -146,10 +146,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
         requestData: Data,
         input: ToolInput
     ) async throws -> ToolOutput {
-        // Track the child in a Sendable box so cancellation reaches the exact
-        // process even though the child is spawned on this executor and the
-        // cancel handler runs elsewhere. Without the box a cancelled turn
-        // would leak the subprocess until the timeout fires.
+        // Track the child in a Sendable box so cancellation reaches the exact process even though
+        // the child is spawned on this executor and the cancel handler runs elsewhere.
         let processBox = BoundedProcessRunner.ProcessBox()
         let invocation = SubprocessInvocation(
             executableURL: executableURL,
@@ -243,10 +241,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
         ) {
             return refusal
         }
-        // Sendable buffers isolate pipe bytes off the spawning executor so the
-        // readability handlers stay @Sendable under strict concurrency. Caps
-        // terminate via the shared box without moving the child across
-        // executors, preserving budgets without raw GCD.
+        // Sendable buffers isolate pipe bytes off the spawning executor so the readability handlers
+        // stay @Sendable under strict concurrency.
         let buffers = CappedPipeBuffers()
         let timedOut = OSAllocatedUnfairLock(initialState: false)
         let timeoutTaskStore = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
@@ -303,10 +299,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
             }
             do {
                 try process.run()
-                // Publish only after a successful spawn so a launch failure
-                // never leaves a dead child for cancellation to chase. A cancel
-                // racing the spawn still terminates via the latched box instead
-                // of leaking until the budget fires.
+                // Publish only after a successful spawn so a launch failure never leaves a dead
+                // child for cancellation to chase.
                 processBox.set(process)
             } catch {
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil

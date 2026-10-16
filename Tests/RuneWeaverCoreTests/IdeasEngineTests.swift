@@ -1,14 +1,4 @@
 // Rune Weaver Core Tests — Proactive Wayfinder ideas engine, store, and config.
-//
-// Exercises the ideas stack end to end against isolated temporary databases
-// with a stub language provider: forgiving JSON parsing (fenced and prefixed
-// wrappers plus structured plan-adjustment steps), the plan-adjustment goal
-// link carried through the review contract, the empty-batch contract for
-// flaky output, non-dismissed title dedup, per-cycle caps, the achieved-goal
-// trigger hook, and the opt-in no-op posture. Store coverage pins the additive
-// `ideas` table behavior, and configuration coverage pins the additive
-// `[ideas]` section defaults, decoding, round-trips, and bounds. Tests never
-// touch the real `~/.runeweaver/memory` store.
 
 import Foundation
 import os

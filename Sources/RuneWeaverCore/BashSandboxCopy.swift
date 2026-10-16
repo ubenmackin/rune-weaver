@@ -1,10 +1,8 @@
 // Rune Weaver Core — Plain-language sandbox approval copy.
 
 extension BashSandboxMode {
-    /// Fallback tier when no narrower resolution applies.
-    ///
-    /// Single-sourced on the `[bash]` default so the fallback cannot drift
-    /// from the configured default tier.
+    /// Fallback tier when no narrower resolution applies. Single-sourced on the `[bash]` default so
+    /// the fallback cannot drift from the configured default tier.
     public static var defaultMode: BashSandboxMode {
         BashConfig.defaultSandboxMode
     }

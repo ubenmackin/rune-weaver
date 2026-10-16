@@ -1,20 +1,4 @@
 // Rune Weaver Server — Scheduled-send booking surface and sovereign re-attestation.
-//
-// Purpose: books approved email and Messages sends as immutable payloads with
-// an exact fire time, lists and cancels booked sends, and exposes the
-// explicit sovereign re-attestation act. Booking and cancellation ride the
-// owner-authenticated REST surface, so each call is itself the fresh approval
-// the byte-immutable contract demands: the stored bytes, recipient, and fire
-// time are fixed at the booking moment, and a cancelled or edited send needs
-// a new approved booking.
-// Scope: the `/scheduler/sends` list, book, and cancel routes plus the
-// `/health/sovereign/reattest` route. Firing, expiry, and run-row audit stay
-// with the scheduled-send worker; ceremony verification stays with the
-// sovereign ledger.
-// Architectural role: the booking surface sharing the seam the send tools
-// book through — a `scheduleAt` send-tool call stores the same immutable row
-// an explicit `POST /scheduler/sends` booking writes — so delayed sends land
-// on one contract from either path.
 
 import Foundation
 import RuneWeaverCore
@@ -60,10 +44,6 @@ public struct NewScheduledSendRequest: Content, Sendable {
 extension ScheduledSend: Content {}
 
 /// Re-attestation response mirroring the ceremony verdict.
-///
-/// Kept as a server-owned shape rather than a retroactive `Content`
-/// conformance on the core verdict, so the wire contract stays versioned
-/// with the routes instead of the verifier.
 public struct SovereignReattestResponse: Content, Sendable {
     /// Closed outcome of the ceremony.
     public let outcome: String
@@ -130,13 +110,6 @@ private func bookingPayload(from body: NewScheduledSendRequest) throws -> NewSch
 }
 
 /// Registers the scheduled-send booking surface: list, book, and cancel.
-///
-/// Booking stores the exact approved bytes beside scheduler jobs; the fire
-/// worker replays those bytes with re-validation and no LLM regeneration.
-/// Cancelling stops a queued row only — a claimed row already passed the
-/// exactly-once claim — and re-booking needs a fresh approval because the
-/// stored payload is the approved artifact.
-/// - Parameter app: Application receiving the routes.
 func registerScheduledSendRoutes(_ app: Application) {
     let sends = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.sends))
     sends.get { req async -> ScheduledSendsResponse in
@@ -170,12 +143,6 @@ func registerScheduledSendRoutes(_ app: Application) {
 }
 
 /// Registers the explicit sovereign re-attestation route.
-///
-/// Re-attestation signs a fresh checkpoint at the current primary head and
-/// re-runs the ceremony, so a restored copy is corroborated by a verified
-/// vote rather than silently repaired. A mismatch still parks red with
-/// nothing rewritten.
-/// - Parameter app: Application receiving the route.
 func registerSovereignReattestRoute(_ app: Application) {
     app.post(
         PathComponent.constant(ServerPaths.health),

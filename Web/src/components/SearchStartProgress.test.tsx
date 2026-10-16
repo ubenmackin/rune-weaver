@@ -1,7 +1,4 @@
-// Shared staged Start progress for the SearXNG container lifecycle.
-// Proves the profile menu keeps the status text mounted beside the Starting
-// pill with per-stage copy and elapsed ticks while the toggle stays locked
-// until the terminal ensure result lands.
+// Rune Weaver Dashboard — Shared staged Start progress for the SearXNG container lifecycle.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

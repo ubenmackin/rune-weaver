@@ -212,17 +212,6 @@ public struct MediaTextExtractor: Sendable {
     }
 
     /// Transcribes speech from an audio or video file URL using Apple Speech.framework.
-    ///
-    /// Speech authorization is checked without prompting so background indexing
-    /// never surfaces a consent dialog; a non-authorized state degrades to an
-    /// empty transcript. Video containers have their audio track exported to a
-    /// temporary `.m4a` file before recognition and cleaned up on exit.
-    /// Recognition resumes exactly once: errors degrade to an empty string, a
-    /// final result returns its transcript, and a callback with neither result
-    /// nor error terminates instead of hanging the indexer. Cancellation
-    /// cooperatively stops the underlying recognition task.
-    /// - Parameter fileURL: Local URL to the audio/video file.
-    /// - Returns: Transcribed text, or empty string if unavailable.
     public static func transcribeAudio(fileURL: URL) async throws -> String {
         if let custom = customAudioTranscription {
             return try await custom(fileURL)

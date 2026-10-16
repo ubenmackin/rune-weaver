@@ -1,8 +1,4 @@
 // Rune Weaver App Tests — Menu bar desktop activity refresh regression tests.
-//
-// Pins the active-only invariant: the Desktop Control menu section appears
-// only while a batch runs, so armed-but-idle tool toggles stay hidden while
-// the active indicator and Emergency Stop surface mid-dispatch.
 
 import Foundation
 @testable import RuneWeaverApp
@@ -31,10 +27,8 @@ private final class DesktopGateStubProvider: LLMProvider, Sendable {
     }
 }
 
-/// Builds an in-memory server context on an isolated temp store so
-/// `refreshState()` runs against fixture state instead of the user's real
-/// `~/.runeweaver` database paths or a live bind.
-/// - Returns: Wired context plus its base directory for cleanup.
+/// Builds an in-memory server context on an isolated temp store so `refreshState()` runs against
+/// fixture state instead of the user's real `~/.runeweaver` database paths or a live bind.
 private func makeFixtureContext() throws -> (ServerContext, URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

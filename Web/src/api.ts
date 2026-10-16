@@ -1,4 +1,4 @@
-// Typed client for the engine JSON API.
+// Rune Weaver Dashboard — Typed client for the engine JSON API.
 
 import { isRecord } from "./typeGuards";
 import { formatRelativeAgo, formatRelativeIn } from "./relativeTime";
@@ -50,9 +50,7 @@ export interface HealthResponse {
   searchStage?: string | null;
   searchStartedAt?: number | null;
   // Verified system-pulse fields from the engine snapshot. Optional because older engines predate
-  // the pulse; absent means unknown and the card falls back to its legacy reading. Tips
-  // (ledgerTip, policyHash) are owner-private: an unauthenticated probe omits them while the
-  // status, verdict, and reasons stay on every projection so degraded dashboards still disclose.
+  // the pulse; absent means unknown and the card falls back to its legacy reading.
   ledgerTip?: string | null;
   // Last explicit ledger verification as Unix seconds, mirroring searchStartedAt. Absent until
   // an explicit verification is stamped.
@@ -99,10 +97,8 @@ export interface ToolAction {
   roundIndex?: number | null;
 }
 
-// Ordered timeline pieces for one assistant turn. Text and tool batches alternate
-// chronologically (text, tools, text, tools, text) so multi-round turns never
-// collapse into a single lumped bucket. The flat `text`/`toolActions` on message
-// state stay as back-compat summaries while rendering walks this list in order.
+// Ordered timeline pieces for one assistant turn. Text and tool batches alternate chronologically
+// (text, tools, text, tools, text) so multi-round turns never collapse into a single lumped bucket.
 export type ChatTextSegment = { kind: "text"; text: string };
 export type ChatToolsSegment = { kind: "tools"; actions: ToolAction[] };
 export type ChatThoughtSegment = { kind: "thought"; text: string };
@@ -118,10 +114,9 @@ export function normalizeRoundIndex(value: unknown): number | undefined {
   return Math.floor(value);
 }
 
-// Single non-negative integer contract shared by live token frames, terminal
-// counters, and cached bases so a fractional or negative payload degrades to
-// absent instead of rendering a floored value on one path and rejecting on
-// another. Mirrors the engine decoder so footers and persistence agree.
+// Single non-negative integer contract shared by live token frames, terminal counters, and cached
+// bases so a fractional or negative payload degrades to absent instead of rendering a floored value
+// on one path and rejecting on another.
 export function toNonNegativeInt(value: unknown): number | undefined {
   return typeof value === "number" &&
     Number.isFinite(value) &&
@@ -131,17 +126,11 @@ export function toNonNegativeInt(value: unknown): number | undefined {
     : undefined;
 }
 
-// Live progress for one executing tool, mirrored from the engine's throttled
-// `tool_progress` frame. Counters are monotonic while a call runs and `current`
-// is relative-only on purpose: the engine never streams absolute machine paths,
-// so the dashboard can show activity without exposing the local filesystem.
+// Live progress for one executing tool, mirrored from the engine's throttled `tool_progress` frame.
 export interface ToolProgress {
   callID: string;
   toolName: string;
-  // Human scope copy the engine composes (for example "Find *.txt in ~"). The
-  // broad-scope warning travels on its own `warning` field rather than folded
-  // into this line, so a pattern containing an em-dash is never misread as a
-  // scope-plus-warning pair.
+  // Human scope copy the engine composes (for example "Find *.txt in ~").
   message: string;
   // Advisory broad-scope warning for `message`, when the engine supplies one.
   // Optional and nullable so older frames and narrow scans degrade to no
@@ -160,12 +149,9 @@ export interface ToolProgress {
 // handcrafted frame cannot smuggle in a path the engine would have shortened.
 const MAX_TOOL_PROGRESS_CURRENT_LENGTH = 240;
 
-// Normalizes a progress tail the same way the engine's ToolProgress.relativeCurrent
-// does: trim, drop blank, refuse anything that could disclose an absolute
-// location or climb outside its root, then cap for display. The dashboard mirrors
-// this instead of trusting the wire as defense-in-depth, so a handcrafted frame
-// ("/etc/passwd", "~/.ssh", "../../secret") can never render a filesystem path
-// the engine deliberately keeps private.
+// Normalizes a progress tail the same way the engine's ToolProgress.relativeCurrent does: trim,
+// drop blank, refuse anything that could disclose an absolute location or climb outside its root,
+// then cap for display.
 export function relativeProgressCurrent(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -179,11 +165,8 @@ export function relativeProgressCurrent(value: unknown): string | null {
   return trimmed.slice(0, MAX_TOOL_PROGRESS_CURRENT_LENGTH);
 }
 
-// Shared trimmed-identity guard for tool frames: a tool identity without
-// non-whitespace characters cannot correlate with its end frame or approval,
-// so it must never enter turn state. Single source for progress parsing, live
-// start/end validation, and chat turn state so future grammar changes land in
-// one place.
+// Shared trimmed-identity guard for tool frames: a tool identity without non-whitespace characters
+// cannot correlate with its end frame or approval, so it must never enter turn state.
 export function isValidToolIDs(toolName: unknown, callID: unknown): boolean {
   return (
     typeof toolName === "string" &&
@@ -193,11 +176,7 @@ export function isValidToolIDs(toolName: unknown, callID: unknown): boolean {
   );
 }
 
-// Validates one live progress frame before it enters the keyed map. Required
-// numeric fields (scanned, matched, elapsedMs) share the engine's non-negative
-// integer contract so a drifted or partial payload drops instead of rendering a
-// floored or negative tally; the optional relative tail and warning degrade to
-// null rather than aborting the update.
+// Validates one live progress frame before it enters the keyed map.
 export function parseToolProgress(value: unknown): ToolProgress | null {
   if (!isRecord(value)) return null;
   if (!isValidToolIDs(value.toolName, value.callID)) return null;
@@ -248,10 +227,8 @@ export function formatToolProgressCounts(progress: {
   )}`;
 }
 
-// Compares two actions chronologically: numbered rounds ascend oldest-first with
-// untracked rounds partitioning after tracked so mixed legacy+tracked history
-// holds a total order. Untracked pairs keep stored order through sort stability,
-// while tracked rounds always meet numerically even across an untracked gap.
+// Compares two actions chronologically: numbered rounds ascend oldest-first with untracked rounds
+// partitioning after tracked so mixed legacy+tracked history holds a total order.
 export function compareToolActionsByRound(a: ToolAction, b: ToolAction): number {
   const left = normalizeRoundIndex(a.roundIndex);
   const right = normalizeRoundIndex(b.roundIndex);
@@ -268,11 +245,7 @@ export function sortToolActionsByRound(actions: ToolAction[]): ToolAction[] {
   return [...actions].sort(compareToolActionsByRound);
 }
 
-// Groups actions into one tools segment per round, oldest round first. Sorts
-// internally to the shared untracked-last order so unsorted callers cannot
-// place legacy actions ahead of numbered rounds; the single untracked bucket
-// always trails because mixed history renders chronologically only when
-// untracked legacy actions stay after tracked rounds.
+// Groups actions into one tools segment per round, oldest round first.
 export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
   if (actions.length === 0) return [];
   const ordered = sortToolActionsByRound(actions);
@@ -333,11 +306,7 @@ export interface OrchestratorResponse {
   // engines predate the resilient filter; absent means no tools were skipped
   // and the turn renders without a banner.
   warnings?: string[];
-  // Completion time on the server clock for this turn. Optional because older
-  // engines predate completion footers; absent degrades to client receipt time
-  // so live turns still show a footer until the server timestamp reconciles.
-  // Carries the same dual wire shape as run timestamps (Unix seconds from
-  // SQLite persistence versus ISO strings), normalized via parseRunTimestamp.
+  // Completion time on the server clock for this turn.
   completedAt?: string | number | null;
   // Content-free recall counts plus source names plus skip flag for the chip.
   // Optional because older engines predate the chip; absent renders no chip.
@@ -373,11 +342,9 @@ function talliedRecallCounts(sources: string[]): Record<string, number> {
   return tallied;
 }
 
-// Validates one recall diagnostics block before it enters turn state. Absent
-// blocks degrade to null so older engines render no chip, while drifted shapes
-// degrade the same way instead of failing the turn. Only counts plus source
-// names plus the skip flag cross this boundary; hit identifiers, scores, and
-// content never appear here by construction.
+// Validates one recall diagnostics block before it enters turn state. Absent blocks degrade to null
+// so older engines render no chip, while drifted shapes degrade the same way instead of failing the
+// turn.
 export function parseRecallDiagnostics(value: unknown): RecallDiagnostics | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return null;
@@ -422,10 +389,7 @@ export function isRecallDiagnosticsVisible(
   return diagnostics.sources.length > 0 || diagnostics.hitCount > 0;
 }
 
-// Collapsed chip copy: recalled counts per source plus skipped state. Counts
-// derive from the tallied map so the line reads identically with or without
-// an explicit hitCount on the wire; an empty map falls back to tallying
-// sources so drifted payloads still read per-source.
+// Collapsed chip copy: recalled counts per source plus skipped state.
 export function formatRecallCollapsed(
   diagnostics: RecallDiagnostics,
 ): string {
@@ -494,13 +458,8 @@ export interface ApprovalDecisionResponse {
   duration: TrustDuration;
 }
 
-// Scope one durable rule or one decision covers: the discriminator plus only
-// the per-kind fields that name what trust reaches. A tool-wide scope carries
-// its kind alone and matches any target for the tool; an exactTarget scope
-// names one target (a canonical handle for `messages.send`); a recipientSet
-// scope names the canonical handles a send may reach; a domain scope names one
-// egress host. Every other shape fails isAccessScope instead of reaching the
-// wire.
+// Scope one durable rule or one decision covers: the discriminator plus only the per-kind fields
+// that name what trust reaches.
 export type AccessScopeDTO =
   | { kind: "tool" }
   | { kind: "exactTarget"; target: string }
@@ -513,11 +472,8 @@ function isScopeText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-// Reports whether a value is a well-formed scope DTO: a known kind plus the
-// per-kind fields that kind requires. Fail-closed on every other shape — an
-// unknown kind, a missing or blank field, a wrong field type, or an empty
-// handle set — so a malformed scope fails here instead of reaching the wire,
-// where a drifted kind could mint trust the owner never chose.
+// Reports whether a value is a well-formed scope DTO: a known kind plus the per-kind fields that
+// kind requires.
 export function isAccessScope(value: unknown): value is AccessScopeDTO {
   if (!isRecord(value)) return false;
   const kind = value.kind;
@@ -540,17 +496,13 @@ export function isAccessScope(value: unknown): value is AccessScopeDTO {
   }
 }
 
-// Effect a durable access rule carries: an allow rule keeps a matching call
-// auto-approved until it expires or is revoked, while a deny rule parks the
-// matching call every time. A `forever` refusal mints a deny rule exactly like
-// a `forever` approval mints an allow rule.
+// Effect a durable access rule carries: an allow rule keeps a matching call auto-approved until it
+// expires or is revoked, while a deny rule parks the matching call every time.
 export type AccessRuleEffect = "allow" | "deny";
 
-// Durable access rule minted from a non-thisTime decision or from the rules
-// surface: one row per tool-plus-scope pair that stays auto-approved (or
-// parked, for a deny rule) until revoked or expired. A null expiresAt is the
-// forever tier, so the dashboard must render it as never expiring rather than
-// as missing data.
+// Durable access rule minted from a non-thisTime decision or from the rules surface: one row per
+// tool-plus-scope pair that stays auto-approved (or parked, for a deny rule) until revoked or
+// expired.
 export interface AccessRule {
   id: string;
   toolName: string;
@@ -570,10 +522,7 @@ export interface AccessRule {
   // trust without re-deriving it from run history. Zero means the rule never fired. Optional
   // because rows minted before usage tracking omit the key; absent degrades to untouched.
   useCount?: number;
-  // Last auto-approved use in either wire shape, or null when the rule never fired. Kept as
-  // the same ISO-or-Unix-seconds union as grantedAt/expiresAt so callers normalize through
-  // parseRunTimestamp instead of branching on the encoding. Optional because legacy payloads
-  // omit the key entirely; absent degrades to untouched like an explicit null.
+  // Last auto-approved use in either wire shape, or null when the rule never fired.
   lastUsedAt?: string | number | null;
   reason?: string | null;
   displayScope?: string;
@@ -584,10 +533,9 @@ export interface AccessRulesResponse {
   count: number;
 }
 
-// One ephemeral (never-persisted) grant a session still carries: the thisTime,
-// forTask, and forSession tiers that expire with their turn, task, or session
-// instead of surviving into the durable rule store. Ephemeral grants carry no
-// identity and no effect because a refusal stores nothing at all.
+// One ephemeral (never-persisted) grant a session still carries: the thisTime, forTask, and
+// forSession tiers that expire with their turn, task, or session instead of surviving into the
+// durable rule store.
 export interface EphemeralGrantDTO {
   toolName: string;
   scope: AccessScopeDTO;
@@ -657,11 +605,7 @@ export interface RunLogEntry {
   // Owning chat session when the run came from an interactive turn;
   // absent on older payloads, so callers must handle unattributed runs.
   sessionID?: string | null;
-  // Linked goal when the run works toward a tracked one. The engine encodes
-  // the goal link under the canonical `goalId` spelling (distinct from the
-  // `jobID`/`sessionID` families), so goal-scoped run filters compare this
-  // field rather than a renamed alias. Absent on untagged runs and older
-  // payloads that predate goal linking.
+  // Linked goal when the run works toward a tracked one.
   goalId?: string | null;
   kind: string;
   status: string;
@@ -699,11 +643,8 @@ export function parseRunTimestamp(value: string | number | undefined | null): Da
   return parsed;
 }
 
-// Compact run duration shared by every run-history surface: the scheduler
-// history, the run log, the run detail modal, and the goal drawer's linked
-// runs. Sub-second runs stay in milliseconds while longer runs collapse to one
-// decimal second so all four read identically; non-finite and negative values
-// render nothing rather than a bogus duration.
+// Compact run duration shared by every run-history surface: the scheduler history, the run log, the
+// run detail modal, and the goal drawer's linked runs.
 export function formatRunDuration(
   durationMs: number | null | undefined,
 ): string | null {
@@ -724,14 +665,7 @@ export interface RunLogsResponse {
   count: number;
 }
 
-// Fallback for how many interactive turns may run at once across sessions. The engine owns the
-// authoritative cap (ActiveTurnTracker.maxConcurrentTurns) and advertises it on every GET /health
-// probe; the dashboard prefers that server value via resolveMaxConcurrentChatTurns and only uses
-// this constant for older engines that predate the advertisement. Kept equal to the engine cap so
-// client-side refusal agrees with server enforcement instead of admitting turns the engine would
-// immediately reject. Local inference degrades sharply past a couple of concurrent evaluations,
-// so the dashboard refuses new sends with an honest busy notice instead of stacking turns that
-// would starve each other and look hung.
+// Fallback for how many interactive turns may run at once across sessions.
 export const MAX_CONCURRENT_CHAT_TURNS = 3;
 
 // Response header carrying the authoritative turn cap on GET /health, mirroring
@@ -774,36 +708,23 @@ export function concurrentTurnsBusyMessage(limit: number = MAX_CONCURRENT_CHAT_T
   return `Already running ${limit} chat turns — wait for one to finish or cancel it, then retry.`;
 }
 
-// Single web source for the chat text bound, pinned to the engine
-// ChatRequest.maxTextLength (which delegates to MemoryEngine.maxContentLength).
-// Chat input, steering guards, and pre-send checks share this instead of
-// mirroring the magic number per call site so client refusal agrees with
-// server enforcement instead of drifting when the engine bound moves.
+// Single web source for the chat text bound, pinned to the engine ChatRequest.maxTextLength (which
+// delegates to MemoryEngine.maxContentLength).
 export const MAX_CHAT_TEXT_LENGTH = 10000;
 
-// Single source for run-log polling so live badges and history views agree on
-// page size and cadence instead of drifting per call site. The shared
-// `useRunningRuns` hook owns the one interval at this cadence for the chat
-// view plus the sidebar, so two mounted views never double the run-log QPS;
-// live `run_started`/`run_completed` broadcasts stay the immediate path while
-// this poll covers reloads, missed sockets, and cross-tab turns.
+// Single source for run-log polling so live badges and history views agree on page size and cadence
+// instead of drifting per call site.
 export const RUN_LOG_POLL_LIMIT = 50;
 export const RUN_POLL_INTERVAL_MS = 2500;
 
-// Reports whether a run row represents an in-flight turn that should keep a
-// session badge lit. Single active contract shared by live broadcasts and
-// polled runs: only `running` counts. Parked `awaiting_approval` turns arrive
-// as completed on the hub and surface through the approvals badge, so counting
-// them here would double-badge one blocked turn and flicker after reload.
+// Reports whether a run row represents an in-flight turn that should keep a session badge lit.
+// Single active contract shared by live broadcasts and polled runs: only `running` counts.
 export function isActiveRunStatus(status: string | null | undefined): boolean {
   return status === "running";
 }
 
-// Collects the owning sessions behind in-flight runs, normalized for
-// case-insensitive comparison since the engine formats UUIDs uppercase while
-// the dashboard mints lowercase. Unattributed rows carry no owner and stay out
-// so one untagged scheduler run never lights every session. Accepts a frozen
-// snapshot because the shared poller hands out read-only rows it never mutates.
+// Collects the owning sessions behind in-flight runs, normalized for case-insensitive comparison
+// since the engine formats UUIDs uppercase while the dashboard mints lowercase.
 export function runningSessionIDsFromRuns(
   runs:
     | ReadonlyArray<Readonly<Pick<RunLogEntry, "status" | "sessionID">>>
@@ -821,12 +742,7 @@ export function runningSessionIDsFromRuns(
   return [...seen];
 }
 
-// Reports whether any run represents actively-running work that a settings save
-// would interrupt. Only `running` counts; parked `awaiting_approval` rows wait
-// on the inbox and never trigger the guard, so in-flight chat turns, running
-// tool calls, and running scheduler runs guard while parked work does not.
-// Accepts unknown status shapes so drifted payloads degrade to inactive rather
-// than failing the guard check.
+// Reports whether any run represents actively-running work that a settings save would interrupt.
 export function hasActiveRuns(
   runs: ReadonlyArray<{ status?: unknown } | null | undefined> | undefined | null,
 ): boolean {
@@ -839,38 +755,25 @@ export function hasActiveRuns(
   return false;
 }
 
-// Narration placeholder shape persisted by the engine for tool rounds
-// ("Calling <tool> <args> [callID]"). Substring checks for "[callID]" elsewhere
-// in prose over-match identifiers merely mentioned in passing, so coverage and
-// eviction parse the line shape instead of searching for the bracketed token.
+// Narration placeholder shape persisted by the engine for tool rounds ("Calling <tool> <args>
+// [callID]").
 
-// Structured placeholder record mirroring the engine ToolInput triple. The
-// arguments keep the engine empty-to-"{}" normalization so coverage and
-// history filters agree on which lines count as plumbing even when the model
-// narrates a bare tool with no arguments.
+// Structured placeholder record mirroring the engine ToolInput triple.
 export interface PlaceholderCall {
   toolName: string;
   argumentsJSON: string;
   callID: string;
 }
 
-// Trims only spaces and tabs, mirroring the engine remainder/argument trim
-// (`.whitespaces`) rather than the full Unicode trim used for outer lines and
-// identifiers. Wire lines are single-line after ending normalization, so the
-// narrower trim keeps engine and dashboard agreement on interior spacing.
+// Trims only spaces and tabs, mirroring the engine remainder/argument trim (`.whitespaces`) rather
+// than the full Unicode trim used for outer lines and identifiers.
 function trimPlaceholderSpaces(value: string): string {
   return value.replace(/^[ \t]+|[ \t]+$/g, "");
 }
 
-// Parses one persisted placeholder line exactly like the engine
-// (`ToolInput.parsePlaceholderLine`): last "[" wins, the char before it must
-// be a space or tab, the bracketed identifier trims and must hold no
-// space/tab/bracket, and the head splits into tool plus optional arguments
-// with empty arguments normalizing to "{}". Returns null for prose, code, or
-// drifted shapes so callers never treat a passing mention as an execution
-// record. This manual walk is the sole classifier because a greedy capture
-// cannot express inside-bracket trimming or the double-space head the engine
-// accepts.
+// Parses persisted placeholder lines mirroring `ToolInput.parsePlaceholderLine`: validates
+// `Calling <tool> <args> [callID]`, normalizes empty args to "{}", and returns null on invalid
+// or drifted shapes so callers never treat stray text as tool frames.
 export function parsePlaceholderLine(line: string): PlaceholderCall | null {
   if (typeof line !== "string") return null;
   const trimmed = line.trim();
@@ -914,13 +817,7 @@ export function parsePlaceholderCallID(line: string): string | null {
   return parsed ? parsed.callID : null;
 }
 
-// Shared wire-grammar vectors pinning the engine and dashboard parsers to one
-// shape. Each entry pairs a raw line with its expected triple (or null for
-// non-plumbing); the engine doc comment carries the same table so a grammar
-// change must update both sides together instead of drifting silently. Cases
-// cover the historic divergences: double-space heads, tab separators,
-// slash/bracket arguments via last-bracket wins, inside-bracket trimming, and
-// trailing-space tolerance.
+// Shared wire-grammar vectors pinning the engine and dashboard parsers to one shape.
 export const PLACEHOLDER_GRAMMAR_VECTORS: Array<{
   line: string;
   expected: PlaceholderCall | null;
@@ -1043,10 +940,8 @@ export interface ChatMessage {
   reasoning?: string | null;
   toolCallID?: string | null;
   isError?: boolean | null;
-  // Creation time in either wire shape the engine emits: ISO-8601 strings from
-  // the Vapor API versus Unix seconds as JSON numbers from SQLite persistence.
-  // Kept as a union so callers normalize through parseRunTimestamp instead of
-  // assuming one encoding.
+  // Creation time in either wire shape the engine emits: ISO-8601 strings from the Vapor API versus
+  // Unix seconds as JSON numbers from SQLite persistence.
   createdAt?: string | number;
 }
 
@@ -1058,16 +953,9 @@ export interface ConversationSession {
   createdAt: string;
   updatedAt: string;
   source?: string | null;
-  // Session that spawned this one (a fan-out worker's origin). The engine
-  // serializes the canonical `parentSessionID` spelling, and identifiers
-  // compare case-insensitively because UUID casing drifts between the engine
-  // and the dashboard. Absent on top-level sessions and older payloads.
+  // Session that spawned this one (a fan-out worker's origin).
   parentSessionID?: string | null;
-  // Linked goal when this session pursues a tracked one. The engine emits the
-  // goal link under the canonical `goalId` spelling, so the chat header can
-  // resolve a session-to-goal chip from the same detail fetch that hydrates
-  // history instead of joining against run records. Absent on unlinked
-  // sessions and on payloads that predate goal linkage.
+  // Linked goal when this session pursues a tracked one.
   goalId?: string | null;
 }
 
@@ -1098,10 +986,8 @@ export interface SessionsResponse {
 export interface SessionMessageToolActions {
   messageID: string;
   actions: ToolAction[];
-  // Parent message completion time on the server clock, mirroring the
-  // persisted ChatMessage.createdAt for the same note. Optional because older
-  // engines predate completion footers; absent degrades to the sibling history
-  // timestamp for the same message so reloads still show a footer.
+  // Parent message completion time on the server clock, mirroring the persisted
+  // ChatMessage.createdAt for the same note.
   completedAt?: string | number | null;
 }
 
@@ -1183,11 +1069,9 @@ export function validateCalendarLeadTimeMinutes(value: unknown): string | null {
   return null;
 }
 
-// Dashboard batch-limit window for email watchers, pinned to
-// EmailPollRule.minLimit...maxLimit (Sources/RuneWeaverCore/Scheduler.swift)
-// so the wizard refuses what the engine would silently clamp.
-// Single web source for the bound so input attributes and submit validation
-// agree instead of drifting per call site.
+// Dashboard batch-limit window for email watchers, pinned to EmailPollRule.minLimit...maxLimit
+// (Sources/RuneWeaverCore/Scheduler.swift) so the wizard refuses what the engine would silently
+// clamp.
 export const POLL_LIMIT_MIN = 1;
 export const POLL_LIMIT_MAX = 50;
 
@@ -1418,10 +1302,8 @@ export function isEventRuleConditionEmpty(
   return true;
 }
 
-// Fail-closed single-rule validator mirroring the engine reject set: empty
-// names, blank prompts, and off-allowlist tools refuse with a rule-scoped
-// message before any network write. Empty (catch-all) conditions stay valid
-// because the engine evaluates them as match-all in memory.
+// Fail-closed single-rule validator mirroring the engine reject set: empty names, blank prompts,
+// and off-allowlist tools refuse with a rule-scoped message before any network write.
 export function validateEventRule(
   rule: EventRule,
   index: number,
@@ -1587,13 +1469,9 @@ export class ApiError extends Error {
   }
 }
 
-// Extracts clean, human-readable error text from an HTML response (such as an
-// Apache, Nginx, or Cloudflare reverse proxy error page) to prevent raw HTML markup
-// from leaking into user-facing error notices. Every extracted segment is
-// capped so a hostile or misbehaving proxy cannot flood the detail (and the
-// ApiError.message built from it) with a multi-kilobyte title, reason, or
-// heading — the bound is the whole point of the tag-strip fallback applied
-// uniformly to every capture.
+// Extracts clean, human-readable error text from an HTML response (such as an Apache, Nginx, or
+// Cloudflare reverse proxy error page) to prevent raw HTML markup from leaking into user-facing
+// error notices.
 const maxHtmlErrorSegmentChars = 150;
 export function extractHtmlErrorDetail(
   html: string,
@@ -1640,11 +1518,6 @@ export function extractHtmlErrorDetail(
 
 // Validates an orchestrator turn before it enters chat state: the engine always emits text,
 // session, and tool actions together, so a partial object must never render as a completed reply.
-// The parked flag stays optional for back-compat and defaults to not parked when absent.
-// Degraded-tool notices stay optional the same way: missing or malformed warnings degrade to
-// absent via the shared sanitizer so an older or drifted payload never fails a complete turn.
-// Recall diagnostics stay optional the same way: the shared parser proves the
-// shape so drifted blocks degrade to absent instead of failing the turn.
 function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   if (!isRecord(value)) return false;
   if (typeof value.text !== "string") return false;
@@ -1661,12 +1534,8 @@ function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   return true;
 }
 
-// Validates one orchestrator turn before it enters typed state so a malformed
-// engine payload surfaces as an error instead of rendering a partial reply.
-// Warning shapes normalize through the shared sanitizer on the same pass so
-// chat and scheduler paths degrade drifted notices to absent identically.
-// Recall shapes normalize through the shared parser so drifted blocks degrade
-// to absent the same way.
+// Validates one orchestrator turn before it enters typed state so a malformed engine payload
+// surfaces as an error instead of rendering a partial reply.
 function validateTurnResponse(
   response: unknown,
   invalidMessage: string,
@@ -1742,10 +1611,9 @@ export function getAuthToken(): string | null {
   return authToken;
 }
 
-// Builds request headers for a direct same-origin fetch made outside the shared
-// JSON helper (for example a non-JSON lifecycle probe), so those calls carry the
-// owner credential too if one is configured. Extra headers are merged
-// last so a caller can still set Content-Type.
+// Builds request headers for a direct same-origin fetch made outside the shared JSON helper (for
+// example a non-JSON lifecycle probe), so those calls carry the owner credential too if one is
+// configured.
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const token = getAuthToken();
   return {
@@ -1792,10 +1660,7 @@ export function clearAuthToken(): void {
   }
 }
 
-// Subscribes to authentication transitions. The current state is intentionally
-// not emitted synchronously so a caller mounting before the boot probe does not
-// briefly believe the session is unauthenticated; callers read isSessionAuthenticated()
-// for the present value and this only reports changes.
+// Subscribes to authentication transitions.
 export function subscribeAuthState(listener: AuthStateListener): () => void {
   authStateListeners.add(listener);
   return () => {
@@ -1884,10 +1749,7 @@ export async function rotateToken(): Promise<string> {
   return token;
 }
 
-// Whether a health payload proves the request cleared the owner gate. With auth
-// active the unauthenticated shape is the minimal liveness object, so a missing
-// engine label means the probe never reached the full route; with auth inactive
-// every probe carries the full shape.
+// Whether a health payload proves the request cleared the owner gate.
 export function isAuthenticatedHealth(health: HealthResponse | null | undefined): boolean {
   if (!health) return false;
   return typeof health.engine === "string" && health.engine.length > 0;
@@ -1898,10 +1760,8 @@ async function fetchJsonWithHeaders<T>(
   init?: RequestInit,
 ): Promise<{ data: T; headers: Headers }> {
   const hasBody = init?.body != null;
-  // The owner token rides every request because auth is enforced uniformly
-  // across the engine surface: without it a protected route answers the same
-  // uniform 401 as a wrong one. Caller-supplied headers stay last so a probe can
-  // present a candidate credential without adopting it first.
+  // The owner token rides every request because auth is enforced uniformly across the engine
+  // surface: without it a protected route answers the same uniform 401 as a wrong one.
   const token = getAuthToken();
   let response: Response;
   try {
@@ -1922,10 +1782,7 @@ async function fetchJsonWithHeaders<T>(
   }
   if (!response.ok) {
     if (response.status === 401) {
-      // Uniform 401: retire the rejected credential and route the session back
-      // to the login gate. The token value never appears in the error body, a
-      // log line, or the transition notification, so a rejected credential
-      // stays unobserved.
+      // Uniform 401: retire the rejected credential and route the session back to the login gate.
       handleUnauthorized();
     }
     let detail = `${response.status} ${response.statusText}`.trim();
@@ -2055,11 +1912,9 @@ export interface ToolCancelResponse {
   cancelled: boolean;
 }
 
-// Cancels one tool call by identity, distinct from the session-wide turn cancel
-// above: a turn cancel aborts the whole reply while this stops a single
-// long-running execution and lets the model reason about the partial result.
-// The optional reason travels with the audit record; blank input is omitted so
-// the engine stores absence rather than an empty string.
+// Cancels one tool call by identity, distinct from the session-wide turn cancel above: a turn
+// cancel aborts the whole reply while this stops a single long-running execution and lets the model
+// reason about the partial result.
 export function toolCancel(
   sessionID: string,
   callID: string,
@@ -2081,13 +1936,8 @@ export function listApprovals(limit?: number): Promise<ApprovalsResponse> {
   return fetchJson<ApprovalsResponse>(`/approvals${query}`);
 }
 
-// Single decision path shared by the chat banner, the inbox, the dashboard
-// quick action, and WebSocket triage: one POST carrying
-// {approved, duration, scope}. The scope is optional and names what a stored
-// rule would cover — omitted, the engine resolves the request's own target.
-// A malformed scope fails the guard before the wire so the client refuses a
-// decision it cannot describe instead of letting a drifted DTO reach the
-// engine and mint trust the owner never chose.
+// Single decision path shared by the chat banner, the inbox, the dashboard quick action, and
+// WebSocket triage: one POST carrying {approved, duration, scope}.
 export async function decideApproval(
   id: string,
   approved: boolean,
@@ -2134,10 +1984,9 @@ export function respondToQuestion(
 // query reads as the owner chose rather than as a wire boolean.
 export type ApprovalHistoryAction = "allowed" | "denied";
 
-// One resolved decision in the audit trail, mirroring the server DTO: the
-// request identity plus the tool, the recorded scope split into kind and
-// data, the verdict, the tier, the deciding surface, and the resolution time
-// in either wire shape the engine emits.
+// One resolved decision in the audit trail, mirroring the server DTO: the request identity plus the
+// tool, the recorded scope split into kind and data, the verdict, the tier, the deciding surface,
+// and the resolution time in either wire shape the engine emits.
 export interface ApprovalHistoryEntry {
   id: string;
   toolName: string;
@@ -2192,10 +2041,8 @@ export function clearApprovalHistory(): Promise<void> {
   });
 }
 
-// Normalizes a rule expiry into a Date while preserving the forever contract: null stays
-// null so callers can branch on "never expires" without sentinel-date comparisons. Non-null
-// values delegate to parseRunTimestamp because the engine emits the same dual wire shape as
-// run timestamps (Unix seconds from SQLite versus ISO strings from older payloads).
+// Normalizes a rule expiry into a Date while preserving the forever contract: null stays null so
+// callers can branch on "never expires" without sentinel-date comparisons.
 export function parseRuleExpiry(
   value: string | number | null | undefined,
 ): Date | null {
@@ -2203,12 +2050,9 @@ export function parseRuleExpiry(
   return parseRunTimestamp(value);
 }
 
-// Normalizes a rule payload from the engine into the client model. The engine
-// encodes `action` ("allow" | "deny") while older client mocks and legacy frames
-// used `effect`; both spellings bridge to the two UI keys. Unknown effects,
-// blank tools, and unknown durations fail closed with ApiError instead of
-// defaulting to allow-forever. A missing duration on a deny rule reads as
-// forever; a missing duration on an allow rule stays absent (standing rule).
+// Normalizes a rule payload from the engine into the client model. The engine encodes `action`
+// ("allow" | "deny") while older client mocks and legacy frames used `effect`; both spellings bridge
+// to the two UI keys.
 export function normalizeAccessRule(raw: unknown): AccessRule {
   if (!isRecord(raw)) {
     throw new ApiError("Access rule response is malformed", 0);
@@ -2266,31 +2110,23 @@ export async function listRules(): Promise<AccessRulesResponse> {
   };
 }
 
-// Revokes one rule by id. A 404 surfaces as ApiError through the shared fetchJson reason
-// parsing so the UI can explain the rule already lapsed; a successful revoke returns 204
-// with no body, which fetchJson maps to void. Revocation stops future matches only — past
-// allowed calls already happened and stay in history.
+// Revokes one rule by id. A 404 surfaces as ApiError through the shared fetchJson reason parsing so
+// the UI can explain the rule already lapsed; a successful revoke returns 204 with no body, which
+// fetchJson maps to void.
 export function revokeRule(id: string): Promise<void> {
   return fetchJson<void>(`/approvals/rules/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
-// Widens an active rule to a tool-wide scope. The engine keeps the rule
-// identity and recomputes scope in place, so the client only names the rule
-// and refreshes on `access_rules_changed`; a 404 surfaces as ApiError when the
-// rule already lapsed, and a rule the engine cannot widen (a send rule) stays
-// a 409 with its reason.
+// Widens an active rule to a tool-wide scope.
 export function widenRule(id: string): Promise<void> {
   return fetchJson<void>(`/approvals/rules/${encodeURIComponent(id)}/widen`, {
     method: "POST",
   });
 }
 
-// Re-arms an active rule with a new expiry tier in place. The engine keeps the
-// rule identity and usage counters and recomputes expiry from confirmation
-// time, so the client only sends the new duration and refreshes rules on
-// `access_rules_changed`; a 404 surfaces as ApiError when the rule already lapsed.
+// Re-arms an active rule with a new expiry tier in place.
 export function rearmRule(
   id: string,
   duration: TrustDuration,
@@ -2308,10 +2144,9 @@ function isTrustDurationValue(value: unknown): value is TrustDuration {
   return trustDurationOptions.some((option) => option.value === value);
 }
 
-// Fail-closed validator for a rule creation request: the tool must name a
-// tool, the effect must be allow or deny, the scope must pass isAccessScope,
-// and the tier must be a defined TrustDuration with deny always forever.
-// Every other shape returns false so createRule refuses before the wire.
+// Fail-closed validator for a rule creation request: the tool must name a tool, the effect must be
+// allow or deny, the scope must pass isAccessScope, and the tier must be a defined TrustDuration
+// with deny always forever.
 function isAccessRuleInput(value: unknown): value is NewAccessRuleInput {
   if (!isRecord(value)) return false;
   const tool = typeof value.toolName === "string" ? value.toolName : value.tool;
@@ -2325,9 +2160,8 @@ function isAccessRuleInput(value: unknown): value is NewAccessRuleInput {
 }
 
 // Mints a durable rule directly from the rules surface. The engine broadcasts
-// `access_rules_changed` after the write, so every open dashboard refetches the
-// list without a manual refresh. A malformed input fails here before the wire
-// instead of asking the engine to store a half-described rule.
+// `access_rules_changed` after the write, so every open dashboard refetches the list without a
+// manual refresh.
 export async function createRule(
   input: NewAccessRuleInput,
 ): Promise<AccessRule> {
@@ -2370,13 +2204,9 @@ export interface EphemeralClearInput {
   scope: AccessScopeDTO;
 }
 
-// Revokes the ephemeral trust one session still carries for one tool plus
-// scope: the chip posts the owning session, the trusted tool, and the scoped
-// target verbatim so the clear reaches exactly the row the owner clicked.
-// Clearing stops future auto-approvals only — past allowed calls already
-// happened and stay in history. A failure surfaces as ApiError through the
-// shared fetchJson reason parsing so the caller keeps the row until proven
-// cleared.
+// Revokes the ephemeral trust one session still carries for one tool plus scope: the chip posts the
+// owning session, the trusted tool, and the scoped target verbatim so the clear reaches exactly the
+// row the owner clicked.
 export function clearEphemeralTrust(
   input: EphemeralClearInput,
 ): Promise<void> {
@@ -2420,11 +2250,8 @@ export function searchMemory(
   });
 }
 
-// Paged facts view for search-first browsing. The engine serves filtered,
-// windowed rows plus live store tallies so the dashboard never pulls an
-// unbounded list to count or to preview. Preferences ride along only when the
-// engine still sends them, keeping older payloads renderable without a second
-// fetch.
+// Paged facts view for search-first browsing. The engine serves filtered, windowed rows plus live
+// store tallies so the dashboard never pulls an unbounded list to count or to preview.
 export interface FactsPageResponse {
   facts: UserFact[];
   total: number;
@@ -2464,10 +2291,8 @@ export function getFacts(
   limit = 20,
   offset = 0,
 ): Promise<FactsPageResponse> {
-  // Every facts read builds its query through one shared encoder so paging,
-  // search, and counts agree on parameter spelling. An empty query is omitted
-  // so the default call stays a plain recent-window read while filtered reads
-  // name their substring explicitly.
+  // Every facts read builds its query through one shared encoder so paging, search, and counts
+  // agree on parameter spelling.
   const params = new URLSearchParams();
   const trimmed = q.trim();
   if (trimmed) params.set("q", trimmed);
@@ -2478,10 +2303,8 @@ export function getFacts(
   return fetchJson<FactsPageResponse>(path).then(normalizeFactsPage);
 }
 
-// Canonical episodic listing row for the dashboard finder. Carries full stored
-// content plus identity, owning session, and role newest first, so previews
-// never need a second fetch. Timestamp rides as Unix seconds to match the
-// engine DTO without sharing a date strategy.
+// Canonical episodic listing row for the dashboard finder. Carries full stored content plus
+// identity, owning session, and role newest first, so previews never need a second fetch.
 export interface EpisodicEpisode {
   id: string;
   sessionID: string;
@@ -2558,11 +2381,8 @@ export function deleteEpisode(id: string): Promise<void> {
   });
 }
 
-// Deletes every episodic turn for one session. An unknown session completes as
-// a no-op on the engine, so the dashboard clears stale hits only after the
-// call resolves. The literal session segment keeps this route distinct from
-// the id route server-side; the client keeps the same shape so the two never
-// collide.
+// Deletes every episodic turn for one session. An unknown session completes as a no-op on the
+// engine, so the dashboard clears stale hits only after the call resolves.
 export function deleteSessionEpisodes(sessionID: string): Promise<void> {
   return fetchJson<void>(
     `/memory/episodes/session/${encodeURIComponent(sessionID)}`,
@@ -2604,28 +2424,14 @@ export function deleteRun(id: string): Promise<void> {
   });
 }
 
-// Response from `POST /runs/:id/cancel`, mirroring the engine's
-// `RunCancelResponse`. Treated as a request acknowledgement rather than as
-// state: settled badges always come from refetching the runs list, while an
-// already-settled run answers 409 (and a pruned row 404) with an honest reason
-// that the shared fetchJson surfaces as ApiError. `scope` names what was
-// stopped (`"run"` for a whole swarm, `"worker"` for one child whose siblings
-// keep running), and `workerCount` is present only on a whole-swarm stop.
+// Response from `POST /runs/:id/cancel`, mirroring the engine's `RunCancelResponse`.
 export interface CancelRunResponse {
   cancelled: boolean;
   scope: string;
   workerCount?: number;
 }
 
-// Stops one in-flight run by row id. The engine owns swarm scope: cancelling a
-// fan-out parent stops the whole swarm while cancelling a worker row stops just
-// that worker, so the dashboard posts the exact row the operator chose and lets
-// the server decide how far the stop reaches instead of re-deriving scope from
-// the kind client-side.
-//
-// The route takes no request body, so none is sent: the shared fetch helper
-// only attaches the JSON content type when a body is present, and this handler
-// never decodes one.
+// Stops one in-flight run by row id.
 export function cancelRun(id: string): Promise<CancelRunResponse> {
   return fetchJson<CancelRunResponse>(
     `/runs/${encodeURIComponent(id)}/cancel`,
@@ -2779,12 +2585,6 @@ export interface GoalProgress {
 }
 
 // One goal row shared by the list, detail, and `goal_updated` push shapes.
-// Dates arrive in the engine's dual wire shape (ISO strings from Vapor, Unix
-// seconds from SQLite) so callers normalize through parseRunTimestamp; the
-// origin session stays nullable because headless and imported goals have no
-// owning conversation. The origin key follows the engine's canonical
-// `originSessionId` spelling, with the legacy variants accepted by
-// parseGoalSnapshot for payloads written before that canonicalization.
 export interface Goal {
   id: string;
   title: string;
@@ -2847,10 +2647,8 @@ export interface GoalCreateInput {
   stepIntervalMinutes?: number;
 }
 
-// Edit request for `PATCH /goals/:id`. Every field is optional so one call can
-// rename, restate, retime, or flip lifecycle state; absent keys leave their
-// columns untouched. A blank title or statement is rejected server-side rather
-// than stored, so a partial edit cannot wipe a field with whitespace.
+// Edit request for `PATCH /goals/:id`. Every field is optional so one call can rename, restate,
+// retime, or flip lifecycle state; absent keys leave their columns untouched.
 export interface GoalPatchInput {
   status?: string;
   title?: string;
@@ -2866,10 +2664,8 @@ export interface GoalStepPatchInput {
   note?: string;
 }
 
-// Manual-advance receipt for `POST /goals/:id/advance`. Both durable
-// identifiers ride along so the dashboard can link the fresh run row and its
-// session without a second lookup. Wire spellings match the engine: runs and
-// sessions keep their `ID` suffix while the goal link encodes as `goalId`.
+// Manual-advance receipt for `POST /goals/:id/advance`. Both durable identifiers ride along so the
+// dashboard can link the fresh run row and its session without a second lookup.
 export interface GoalAdvanceResponse {
   runID: string;
   sessionID: string;
@@ -2898,10 +2694,9 @@ export function goalStatusLabel(status: string): string {
   }
 }
 
-// Run-status pill tone reused by goal cards so goal and run surfaces share one
-// color language: active pursuit reads like a running turn, parked-on-owner
-// like a parked approval, achieved like an ok run, abandoned like an error,
-// and paused like a skipped row.
+// Run-status pill tone reused by goal cards so goal and run surfaces share one color language:
+// active pursuit reads like a running turn, parked-on-owner like a parked approval, achieved like an
+// ok run, abandoned like an error, and paused like a skipped row.
 export type GoalStatusTone =
   | "ok"
   | "error"
@@ -2996,10 +2791,7 @@ export function goalProgressPercent(
   return Math.max(0, Math.min(100, Math.round(percent)));
 }
 
-// Human countdown to the next due advancement. A paused or terminal goal has no
-// meaningful next fire, so it renders an em dash instead of a stale countdown;
-// a null due date reads as no schedule; a past due reads "due now" so an
-// overdue goal never renders a negative "in" value.
+// Human countdown to the next due advancement.
 export function formatGoalNextAdvance(
   status: string,
   nextDueAt: string | number | null | undefined,
@@ -3021,13 +2813,8 @@ export function formatGoalNextAdvance(
   return formatRelativeIn(diff);
 }
 
-// Parses a goal snapshot carried on a `goal_updated` frame (or a raw REST row)
-// before it enters view state. Identity plus the core display fields are
-// required; progress and cadence degrade to zeros, the origin session to null,
-// and timestamps to the epoch so a partially drifted payload still renders
-// instead of dropping an otherwise-usable row. Timestamps are type-checked
-// rather than cast so a non-string/non-number value can never reach
-// parseRunTimestamp and throw during render.
+// Parses a goal snapshot carried on a `goal_updated` frame (or a raw REST row) before it enters
+// view state.
 export function parseGoalSnapshot(value: unknown): Goal | null {
   if (!isRecord(value)) return null;
   const rawID = value.id;
@@ -3109,10 +2896,7 @@ export function parseGoalUpdatedFrame(value: unknown): Goal | null {
   return parseGoalSnapshot(value.goal);
 }
 
-// Reports whether a `proactive_message` frame signals a goal awaiting owner
-// input. The engine labels the trigger `goalNeedsInput`; normalizing case and
-// separators lets both that token and a snake_case `needs_input` variant match
-// so the attention badge cannot miss a parking notification over spelling.
+// Reports whether a `proactive_message` frame signals a goal awaiting owner input.
 export function isGoalNeedsInputProactive(value: unknown): boolean {
   if (!isRecord(value) || value.type !== "proactive_message") return false;
   // Bind to a local so the string narrowing survives the normalization chain.
@@ -3122,10 +2906,7 @@ export function isGoalNeedsInputProactive(value: unknown): boolean {
   return normalized.includes("needsinput");
 }
 
-// Reports whether a `proactive_message` frame announces a freshly proposed
-// idea. The engine labels the trigger `idea_proposed`; normalizing case and
-// separators lets that token and a camelCase `ideaProposed` variant both match
-// so the goals attention badge never misses a suggestion over spelling.
+// Reports whether a `proactive_message` frame announces a freshly proposed idea.
 export function isIdeaProposedProactive(value: unknown): boolean {
   if (!isRecord(value) || value.type !== "proactive_message") return false;
   // Bind to a local so the string narrowing survives the normalization chain.
@@ -3198,10 +2979,7 @@ export function patchGoalStep(
   );
 }
 
-// One proactive Wayfinder suggestion mirrored from the engine `Idea` snapshot. The
-// kind and status ride as the engine raw strings so the dashboard never invents
-// a case the store cannot round-trip; the goal link stays optional because tips
-// carry no owning goal.
+// One proactive Wayfinder suggestion mirrored from the engine `Idea` snapshot.
 export interface Idea {
   id: string;
   kind: string;
@@ -3225,15 +3003,7 @@ export interface IdeasSummaryResponse {
   dismissed: number;
 }
 
-// Parses one idea row before it enters view state. Identity plus the core
-// display fields are required; the body and goal link degrade to empty/null and
-// timestamps to the epoch so a partially drifted payload still renders instead
-// of dropping an otherwise-usable suggestion. A blank title rejects the row,
-// mirroring the engine's trimmed-empty drop, the store's blank-title skip, and
-// the wire decoder's blank-title rejection, instead of rendering an empty card.
-// The goal link accepts the canonical `goalId` spelling first, then the legacy
-// variants, mirroring the engine's alias-tolerant decoder, and trims padding so
-// deep links compare equal.
+// Parses one idea row before it enters view state.
 export function parseIdea(value: unknown): Idea | null {
   if (!isRecord(value)) return null;
   const rawID = value.id;
@@ -3347,12 +3117,7 @@ export interface EmailAccountData {
   smtpSecurity?: string;
 }
 
-// One self-hosted Arr instance (Sonarr for TV, Radarr for movies). Both
-// services share the same five-field shape mirroring the engine
-// ArrInstanceConfig, so a single interface backs both sections and keeps the
-// dashboard DTO from drifting out of lockstep when one side gains a knob.
-// Only env-var names persist; key values resolve via SecretsManager at
-// execution time and never enter TOML, logs, or model output.
+// One self-hosted Arr instance (Sonarr for TV, Radarr for movies).
 export interface ArrServiceConfigData {
   enabled: boolean;
   url?: string;
@@ -3375,10 +3140,7 @@ export interface MediaConfigData {
 }
 
 // Local background indexer policy mirroring the engine `IndexConfig`
-// (Sources/RuneWeaverCore/Config.swift). The indexer is off by default, so a
-// fresh install never walks the home directory or reads a mailbox until the
-// operator opts in. Only content and derived vectors live behind these knobs;
-// no secret ever appears here.
+// (Sources/RuneWeaverCore/Config.swift).
 export interface IndexConfigData {
   enabled: boolean;
   files: boolean;
@@ -3414,17 +3176,12 @@ export interface IndexConfigData {
   // Trash-class mailbox denylist skipped without dialing. Optional for
   // back-compat; absent degrades to the engine default instead of failing.
   mailboxDeny?: string[];
-  // Directory and file names the walker always skips, even when absent from
-  // `exclude`. Read-only: populated by the engine from the walker's prune list
-  // and ignored on write. Optional for back-compat with older engines that
-  // predate the field; absent degrades to an empty list instead of failing.
+  // Directory and file names the walker always skips, even when absent from `exclude`. Read-only:
+  // populated by the engine from the walker's prune list and ignored on write.
   alwaysSkipped?: string[];
 }
 
-// Partial index patch for `PUT /settings`, mirroring the engine
-// `IndexSettingsUpdate`. Every field is optional so a request carrying one key
-// leaves the rest of the stored `[index]` section untouched; the JSON keys are
-// the snake_case names the engine persists.
+// Partial index patch for `PUT /settings`, mirroring the engine `IndexSettingsUpdate`.
 export interface IndexSettingsUpdate {
   enabled?: boolean;
   files?: boolean;
@@ -3447,22 +3204,15 @@ export interface IndexSettingsUpdate {
   mailboxDeny?: string[];
 }
 
-// Native desktop vision and gated control policy mirroring the engine
-// `DesktopConfig` (Sources/RuneWeaverCore/Config.swift). Both desktop tools
-// always register so they stay visible in `GET /tools`, but they ship
-// disabled until enabled in the tool-state toggles. Only capture knobs and
-// the blocklist live here; enablement lives in the tool-state toggles and no
-// secret ever appears.
+// Native desktop vision and gated control policy mirroring the engine `DesktopConfig`
+// (Sources/RuneWeaverCore/Config.swift).
 export interface DesktopConfigData {
   maxImageDimension: number;
   jpegQuality: number;
   blockedApps: string[];
 }
 
-// Partial desktop patch for `PUT /settings`, mirroring the engine
-// `DesktopSettingsUpdate`. Every field is optional so a request carrying one
-// key leaves the rest of the stored `[desktop]` section untouched; the JSON
-// keys are the snake_case names the engine persists.
+// Partial desktop patch for `PUT /settings`, mirroring the engine `DesktopSettingsUpdate`.
 export interface DesktopSettingsUpdate {
   maxImageDimension?: number;
   jpegQuality?: number;
@@ -3470,9 +3220,7 @@ export interface DesktopSettingsUpdate {
 }
 
 // Steady goal pursuit policy mirroring the engine `GoalsConfig`
-// (Sources/RuneWeaverCore/Config.swift). Goals stay opt-in so a fresh install
-// never spends planning calls until the owner enables them; the cadence hint
-// is stored on each new goal and the active cap bounds scheduler fan-out.
+// (Sources/RuneWeaverCore/Config.swift).
 export interface GoalsConfigData {
   enabled: boolean;
   stepIntervalMinutes?: number;
@@ -3483,11 +3231,7 @@ export interface GoalsConfigData {
   maxToolIterations?: number;
 }
 
-// Partial goals patch for `PUT /settings`, mirroring the engine
-// `GoalsUpdate`. Every field is optional so a request carrying one key leaves
-// the rest of the stored `[goals]` section untouched; the dashboard sends the
-// snake_case keys the engine persists while the engine also accepts the
-// camelCase aliases, so either spelling writes.
+// Partial goals patch for `PUT /settings`, mirroring the engine `GoalsUpdate`.
 export interface GoalsSettingsUpdate {
   enabled?: boolean;
   stepIntervalMinutes?: number;
@@ -3516,9 +3260,8 @@ export const TOOL_ROUNDS_MIN = 1;
 export const TOOL_ROUNDS_MAX = 100;
 
 // Shared tool-round clamp for every max_tool_iterations budget: a finite number floors to an
-// integer and clamps into the engine-owned 1-100 range, while absent or drifted shapes degrade
-// to the caller-supplied fallback. Single source for the scheduler, per-job, chat, and goal
-// readers so the bounds cannot drift per call site.
+// integer and clamps into the engine-owned 1-100 range, while absent or drifted shapes degrade to
+// the caller-supplied fallback.
 export function clampToolRounds(raw: unknown, fallback: number): number {
   if (typeof raw === "number" && Number.isFinite(raw)) {
     const floored = Math.floor(raw);
@@ -3562,10 +3305,8 @@ export function engineMaxToolIterations(
   return clampToolRounds(raw, DEFAULT_ENGINE_MAX_TOOL_ITERATIONS);
 }
 
-// Interruption policy for background scheduler and goal turns, mirroring the
-// engine `ProactiveConfig` (Sources/RuneWeaverCore/Config.swift). The gate
-// filters notifications and interruption frames only; run history and the
-// approvals inbox always record regardless of mode.
+// Interruption policy for background scheduler and goal turns, mirroring the engine
+// `ProactiveConfig` (Sources/RuneWeaverCore/Config.swift).
 export interface ProactiveConfigData {
   mode: string;
   judgeTimeoutSeconds: number;
@@ -3580,9 +3321,7 @@ export interface ProactiveSettingsUpdate {
 }
 
 // Proactive Wayfinder suggestion policy mirroring the engine `IdeasConfig`
-// (Sources/RuneWeaverCore/Config.swift). Ideas stay opt-in so a fresh install
-// never spends background review calls; the per-cycle cap and review timeout
-// stay file-owned planning bounds.
+// (Sources/RuneWeaverCore/Config.swift).
 export interface IdeasConfigData {
   enabled: boolean;
   maxPerCycle?: number;
@@ -3620,12 +3359,7 @@ export function goalsMaxToolIterations(
   return clampToolRounds(raw, DEFAULT_GOALS_MAX_TOOL_ITERATIONS);
 }
 
-// Cadence choices offered by the New Goal form. Every value sits inside the
-// engine's 5..20160 bound (GOALS_STEP_INTERVAL_MIN_MINUTES..MAX) so the select
-// can never submit a cadence the server would reject, and the daily option
-// reuses DEFAULT_GOALS_STEP_INTERVAL_MINUTES so form and settings agree. Kept
-// beside the default it derives from so the initializer never reads the
-// constant before its declaration.
+// Cadence choices offered by the New Goal form.
 export const GOAL_CADENCE_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 60, label: "Hourly" },
   { value: 240, label: "Every 4 hours" },
@@ -3663,11 +3397,8 @@ export const PROACTIVE_MODES = ["all", "milestones", "guarded", "off"] as const;
 // Canonical proactive mode spelling carried on the wire and in the select.
 export type ProactiveModeName = (typeof PROACTIVE_MODES)[number];
 
-// Normalizes a proactive mode to its canonical lowercase spelling so the
-// dashboard accepts the same values the file loader does. The TOML decoder
-// trims and lowercases before matching `ProactiveMode`, so `ALL` or padded
-// ` Guarded ` load from disk; the client must converge to the same spelling
-// before validating or sending instead of rejecting what the file accepts.
+// Normalizes a proactive mode to its canonical lowercase spelling so the dashboard accepts the same
+// values the file loader does.
 export function normalizeProactiveMode(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
@@ -3692,21 +3423,16 @@ export const PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS = 1;
 export const PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS = 120;
 
 // Unified container runtime policy mirroring the engine `ContainersConfig`
-// (Sources/RuneWeaverCore/Config.swift). One `[containers]` table governs the
-// container tiers: the guest memory budget, the concurrent-container cap, and
-// the idle reclamation TTL across bash tiers plus detonation; the images
-// themselves are pinned in code and carry no key.
+// (Sources/RuneWeaverCore/Config.swift).
 export interface ContainersConfigData {
   memoryMb: number;
   maxConcurrent: number;
   ttlMinutes: number;
 }
 
-// Partial containers patch for `PUT /settings`, mirroring the engine
-// `ContainersUpdate`. Every field is optional so a request carrying one key
-// leaves the rest of the stored `[containers]` section untouched. The
-// dashboard sends camelCase keys only. Legacy sandbox keys are ignored
-// server-side and shed on resave, so no sandbox alias exists here.
+// Partial containers patch for `PUT /settings`, mirroring the engine `ContainersUpdate`. Every
+// field is optional so a request carrying one key leaves the rest of the stored `[containers]`
+// section untouched.
 export interface ContainersSettingsUpdate {
   memoryMb?: number;
   maxConcurrent?: number;
@@ -3718,11 +3444,9 @@ export const DEFAULT_CONTAINERS_MEMORY_MB = 512;
 export const DEFAULT_CONTAINERS_MAX_CONCURRENT = 5;
 export const DEFAULT_CONTAINERS_TTL_MINUTES = 60;
 
-// Container knob bounds mirror ContainersConfig.min*/max* statics in
-// Sources/RuneWeaverCore/Config.swift (memory clamped 256-8192 MB,
-// concurrency clamped 1-32, TTL clamped 5-1440 minutes); the server owns the
-// ranges and this mirror is the single source for the client validator so
-// the form agrees with the server 400. The contract test pins both ends.
+// Container knob bounds mirror ContainersConfig.min*/max* statics
+// (memory 256-8192 MB, concurrency 1-32, TTL 5-1440 min); the server owns
+// the ranges and this mirror sources the client validator so the two cannot drift.
 export const CONTAINERS_MEMORY_MIN_MB = 256;
 export const CONTAINERS_MEMORY_MAX_MB = 8192;
 export const CONTAINERS_MAX_CONCURRENT_MIN = 1;
@@ -3740,26 +3464,14 @@ export const DEFAULT_CONTAINERS_CONFIG: ContainersConfigData = {
 };
 
 // Sandboxed shell execution policy mirroring the engine `BashConfig`
-// (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom
-// last-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
-// live here; the enabled flag mirrors the stored `[bash]` section.
+// (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom last-match-wins; the
+// timeout is bounded 1-3600 seconds.
 export interface BashRuleData {
   pattern: string;
   action: string;
 }
 
 // Full bash snapshot on `GET /settings`, mirroring the engine `BashConfig`.
-// The canonical wire keys are snake_case; the engine also accepts the
-// camelCase aliases through the same dual-alias decode as providers, so
-// either spelling reads. The dashboard sends snake_case and reads either
-// spelling so file-configured values survive a dashboard PUT instead of
-// being stripped to nil. Resource bounds ride the same dual spelling: the
-// CPU budget maps `ulimit -t` while the memory budget maps `ulimit -v`, so
-// both read either key and send the snake form the file persists. The bounds
-// plus the sandbox tier and host allowlist stay optional because older
-// engines omit them, and the form keeps its defaults until a value arrives.
-// Full bash snapshot on `GET /settings`, mirroring the engine `BashConfig`.
-// The canonical wire keys are camelCase only.
 export interface BashConfigData {
   enabled: boolean;
   defaultAction: string;
@@ -3787,13 +3499,9 @@ export interface BashSettingsUpdate {
   hostAllowPatterns?: string[];
 }
 
-// Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift
-// (enabled, defaultAction, defaultRules, defaultTimeoutSeconds,
-// cpuSeconds, memoryMB, allowNetwork, sandboxMode, hostAllowPatterns).
-// The server owns the values; this mirror seeds the fresh form
-// before the first GET /settings fetch and the contract test pins it so drift
-// fails loudly. DEFAULT_BASH_CONFIG stays derived from the pieces below so
-// the pieces remain the single source.
+// Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift (enabled, defaultAction,
+// defaultRules, defaultTimeoutSeconds, cpuSeconds, memoryMB, allowNetwork, sandboxMode,
+// hostAllowPatterns).
 export const DEFAULT_BASH_ENABLED = true;
 export const DEFAULT_BASH_DEFAULT_ACTION = "ask";
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 30;
@@ -3806,26 +3514,20 @@ export const DEFAULT_BASH_HOST_ALLOW_PATTERNS: string[] = [
   "codesign*",
 ];
 
-// Bash timeout bounds mirror BashConfig.minTimeoutSeconds/maxTimeoutSeconds
-// in Sources/RuneWeaverCore/Config+Validation.swift and the PUT merge in
-// Sources/RuneWeaverServer/ServerBashDTOs.swift. The server owns the 1-3600
-// bound; this mirror is the single source for the client validator so the two
-// cannot drift. The contract test pins both ends.
+// Bash timeout bounds mirror BashConfig.minTimeoutSeconds/maxTimeoutSeconds in
+// Sources/RuneWeaverCore/Config+Validation.swift and the PUT merge in
+// Sources/RuneWeaverServer/ServerBashDTOs.swift.
 export const BASH_TIMEOUT_MIN_SECONDS = 1;
 export const BASH_TIMEOUT_MAX_SECONDS = 3600;
 
-// CPU budget bounds mirror BashConfig.minCPUSeconds/maxCPUSeconds: a zero
-// budget would kill every command instantly while an unbounded one holds a
-// run past any plausible shell turn, so both fail closed. Single source for
-// the Bash section inputs and the client validator so the form clamps agree
-// with the server 400.
+// CPU budget bounds mirror BashConfig.minCPUSeconds/maxCPUSeconds: a zero budget would kill every
+// command instantly while an unbounded one holds a run past any plausible shell turn, so both fail
+// closed.
 export const BASH_CPU_MIN_SECONDS = 1;
 export const BASH_CPU_MAX_SECONDS = 3600;
 
-// Address-space bounds mirror BashConfig.minMemoryMB/maxMemoryMB: a tiny
-// budget fails every spawn while a host-scale one invites OOM swaps, so both
-// fail closed. Single source for the Bash section inputs and the client
-// validator so the form clamps agree with the server 400.
+// Address-space bounds mirror BashConfig.minMemoryMB/maxMemoryMB: a tiny budget fails every spawn
+// while a host-scale one invites OOM swaps, so both fail closed.
 export const BASH_MEMORY_MIN_MB = 64;
 export const BASH_MEMORY_MAX_MB = 8192;
 
@@ -3835,11 +3537,8 @@ export const DEFAULT_BASH_RULES: BashRuleData[] = [
   { pattern: "*", action: "ask" },
 ];
 
-// Combined bash default mirroring BashConfig. The fresh form seeds from this
-// object so the editor matches the boundary the engine enforces before the
-// first settings fetch. Resource budgets join the timeout here so a fresh
-// section shows the same CPU and memory bounds the engine clamps at use,
-// while the sandbox tier plus host allowlist seed the confinement editors.
+// Combined bash default mirroring BashConfig. The fresh form seeds from this object so the editor
+// matches the boundary the engine enforces before the first settings fetch.
 export const DEFAULT_BASH_CONFIG: BashConfigData = {
   enabled: DEFAULT_BASH_ENABLED,
   defaultAction: DEFAULT_BASH_DEFAULT_ACTION,
@@ -3857,14 +3556,9 @@ export const DEFAULT_BASH_CONFIG: BashConfigData = {
 // option lists so the two cannot drift.
 export const BASH_PERMISSION_ACTIONS = ["allow", "ask", "deny"] as const;
 
-// Bash textarea codec: one rule per line as `pattern = action` with `allow`,
-// `ask`, or `deny` on the right, mirroring the engine
-// `BashSecurity.evaluate(command:config:)` contract
-// (Sources/RuneWeaverTools/BashSecurity.swift). Rules evaluate top-to-bottom
-// and the last matching rule decides, so the catch-all stays first and
-// specifics follow. Blank lines are ignored and line order is preserved so
-// copy and paste of rule sets works. Owner for parsing is parseBashRulesText
-// here; owner for saving is AccessBashSection.tsx.
+// Bash textarea codec: one rule per line as `pattern = action` with `allow`, `ask`, or `deny` on
+// the right, mirroring the engine `BashSecurity.evaluate(command:config:)` contract
+// (Sources/RuneWeaverTools/BashSecurity.swift).
 export function parseBashRulesText(text: string | undefined | null): BashRuleData[] {
   if (typeof text !== "string") return [];
   const rules: BashRuleData[] = [];
@@ -3924,10 +3618,8 @@ export const BASH_SANDBOX_MODES = [
 export const BASH_HOST_ALLOW_PATTERNS_MAX = 50;
 export const BASH_HOST_ALLOW_PATTERN_MAX_LENGTH = 256;
 
-// Host allowlist textarea codec: one pattern per line. Trims lines, drops
-// blanks, preserves first-seen order, and caps at the auditable bound so
-// copy and paste of pattern sets works. Owner for parsing is
-// parseHostAllowPatternsText here; owner for saving is AccessBashSection.tsx.
+// Host allowlist textarea codec: one pattern per line. Trims lines, drops blanks, preserves
+// first-seen order, and caps at the auditable bound so copy and paste of pattern sets works.
 export function parseHostAllowPatternsUncapped(
   text: string | undefined | null,
 ): string[] {
@@ -3998,9 +3690,6 @@ export function bashSandboxSummary(
 }
 
 // Human-readable tier labels plus scope sentences for the Bash & Shell editor.
-// Values derive from BASH_SANDBOX_MODES so the vocabulary stays single-sourced;
-// labels and scope copy ride alongside, but the tier values never duplicate
-// the closed set above.
 export const BASH_SANDBOX_TIERS = [
   {
     value: BASH_SANDBOX_MODES[0],
@@ -4097,11 +3786,9 @@ export const DEFAULT_DESKTOP_BLOCKED_APPS: string[] = [
 export const DEFAULT_DESKTOP_BLOCKED_APPS_TEXT: string =
   DEFAULT_DESKTOP_BLOCKED_APPS.join("\n");
 
-// Shared line-list codec for multiline editors: one entry per line, trimmed,
-// with blank lines dropped so an emptied editor reads as an explicit empty
-// list instead of persisting whitespace-only rows. Null input degrades to a
-// copy of the caller-supplied fallback so default boundaries stay with the
-// wrappers and the server remains the authoritative enforcer.
+// Shared line-list codec for multiline editors: one entry per line, trimmed, with blank lines
+// dropped so an emptied editor reads as an explicit empty list instead of persisting whitespace-only
+// rows.
 export function parseLinesToList(
   text: string | undefined | null,
   fallback: string[],
@@ -4145,12 +3832,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
 };
 
 // Parallel worker fan-out policy mirroring the engine `FanOutConfig`
-// (Sources/RuneWeaverCore/Config.swift). Workers stay on the read-only subset
-// unless fullTools widens them to the full registry; the modal owns these
-// knobs while tool enablement lives in the tool-state toggles. The dashboard
-// defaults below are the modal empty-field fallbacks so a cleared input saves
-// an explicit value instead of omitting the key; the engine file defaults may
-// differ and the server remains the authoritative enforcer.
+// (Sources/RuneWeaverCore/Config.swift).
 export interface FanoutConfigData {
   maxWorkers: number;
   workerTimeoutSeconds: number;
@@ -4166,11 +3848,9 @@ export interface FanoutSettingsUpdate {
   fullTools?: boolean;
 }
 
-// Modal empty-field fallbacks for the fan-out knobs: a cleared Max workers
-// input saves the small-swarm default and a cleared timeout saves unlimited
-// (0) so local models are never held to a stale budget by accident. Full
-// tools stays off so workers keep the read-only subset until explicitly
-// widened.
+// Modal empty-field fallbacks for the fan-out knobs: a cleared Max workers input saves the
+// small-swarm default and a cleared timeout saves unlimited (0) so local models are never held to a
+// stale budget by accident.
 export const DEFAULT_FANOUT_MAX_WORKERS = 2;
 export const DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS = 0;
 export const DEFAULT_FANOUT_FULL_TOOLS = false;
@@ -4247,11 +3927,7 @@ export interface IndexExtractStatusCounts {
   documents: number;
 }
 
-// Display labels for index run triggers. The engine persists the
-// machine-readable wire token (`nightly`, `onDemand`, `catchUp`) in run
-// messages and the `Trigger:` detail line; the dashboard maps each token to
-// plain language here so run notices, the last-run strip, and run-history
-// rows agree on one copy without branching per call site.
+// Display labels for index run triggers.
 export const INDEX_RUN_TRIGGER_LABELS: Record<string, string> = {
   nightly: "Nightly Run",
   onDemand: "Manual Run",
@@ -4268,12 +3944,7 @@ export function indexRunTriggerLabel(trigger: string | null | undefined): string
   return INDEX_RUN_TRIGGER_LABELS[token] ?? token;
 }
 
-// Extracts the machine-readable trigger token from an index run log row. The
-// start message carries `Index run started (<trigger>)` while the completion
-// response carries a `Trigger: <trigger>` detail line; either shape yields the
-// token only when anchored to its prefix and matching a known trigger
-// (`nightly`, `catchUp`, `onDemand`), and a row carrying neither degrades to
-// null instead of guessing.
+// Extracts the machine-readable trigger token from an index run log row.
 export function parseIndexRunTrigger(
   run: Pick<RunLogEntry, "message" | "response"> | null | undefined,
 ): string | null {
@@ -4315,12 +3986,9 @@ export function indexRunLabelForRun(
   return indexRunTriggerLabel(parseIndexRunTrigger(run));
 }
 
-// Per-source outcome on run-status payloads, mirroring the engine
-// `IndexSourceRunOutcome`. Counts degrade to zero and `didRun` degrades to
-// the absence of a skip reason so drifted rows never fail the strip.
-// The canonical wire keys are `didRun` and `skippedReason`; the `did_run`
-// and `skipped_reason` spellings are decode-only back-compat read via
-// `resolveIndexSourceOutcomes` and never emitted.
+// Per-source outcome on run-status payloads, mirroring the engine `IndexSourceRunOutcome`. Counts
+// degrade to zero and `didRun` degrades to the absence of a skip reason so drifted rows never fail
+// the strip.
 export interface IndexSourceRunOutcome {
   kind: string;
   didRun?: boolean | null;
@@ -4329,10 +3997,8 @@ export interface IndexSourceRunOutcome {
   skippedReason?: string | null;
 }
 
-// Resolves the per-source outcome list from any run shape. The canonical wire
-// key is `sources`; `sourceOutcomes` and `outcomes` are decode-only
-// back-compat with the first present winning. Absent or malformed lists
-// degrade to empty so older engines still render with no per-source notes.
+// Resolves the per-source outcome list from any run shape. The canonical wire key is `sources`;
+// `sourceOutcomes` and `outcomes` are decode-only back-compat with the first present winning.
 export function resolveIndexSourceOutcomes(
   run:
     | Pick<IndexLastRunStatus, "sources">
@@ -4428,13 +4094,8 @@ export function resolveIndexSourceSkippedReason(
   return reason.trim();
 }
 
-// Latest index run outcome on `GET /index/status`, distilled server-side from
-// the newest `index`-kind run log row. Counts are nullable because a drifted
-// summary line still reports status and finish time; finishedAt keeps the dual
-// wire shape (ISO-8601 string or Unix seconds) normalized via parseRunTimestamp.
-// The trigger token (`nightly`, `catchUp`, `onDemand`) is optional for
-// back-compat with older engines that predate trigger tracking; absent
-// degrades to an unlabeled strip instead of failing.
+// Latest index run outcome on `GET /index/status`, distilled server-side from the newest
+// `index`-kind run log row.
 export interface IndexLastRunStatus {
   status: string;
   indexed?: number | null;
@@ -4460,10 +4121,8 @@ export interface IndexLastRunStatus {
   // Alias some engines emit for the same count. Read via
   // `resolveIndexTruncatedCount` so either spelling renders honestly.
   truncated?: number | null;
-  // Per-source outcomes on the canonical `sources` key. Optional for
-  // back-compat; absent degrades to no per-source notes instead of failing.
-  // The `sourceOutcomes` and `outcomes` spellings are decode-only back-compat
-  // read via `resolveIndexSourceOutcomes` and never emitted.
+  // Per-source outcomes on the canonical `sources` key. Optional for back-compat; absent degrades
+  // to no per-source notes instead of failing.
   sources?: IndexSourceRunOutcome[] | null;
 }
 
@@ -4486,10 +4145,7 @@ export interface IndexLiveStatus {
   current: string | null;
 }
 
-// Resolved effort block on `GET /index/status`, mirroring the engine
-// `IndexEffortStatus`. Always present on current engines so the dashboard
-// renders workers without a second fetch; absent on older engines, which
-// degrade to the top-level aliases below or to no effort line.
+// Resolved effort block on `GET /index/status`, mirroring the engine `IndexEffortStatus`.
 export interface IndexEffortStatus {
   preset: string;
   resolvedWorkers: number;
@@ -4542,13 +4198,8 @@ export interface IndexStatusResponse {
   effort?: IndexEffortStatus | null;
 }
 
-// Storage breakdown for `GET /index/storage`: byte-exact totals plus per-source
-// document, chunk, and byte rows from the slow aggregate pass. Every field is
-// optional for back-compat; absent degrades to pending rather than failing so
-// older engines and older dashboards keep decoding. The dashboard merges these
-// slow keys over the fast `/index/status` state and never clears fast counts
-// while slow is in flight; fast `bySource[].bytes` stays 0 meaning pending,
-// never an estimate.
+// Storage breakdown for `GET /index/storage`: byte-exact totals plus per-source document, chunk,
+// and byte rows from the slow aggregate pass.
 export interface IndexStorageResponse {
   bytes?: number | null;
   textBytes?: number | null;
@@ -4586,10 +4237,8 @@ export interface IndexRunResponse {
   // of failing.
   truncatedCount?: number | null;
   truncated?: number | null;
-  // Per-source outcomes on the canonical `sources` key. Optional for
-  // back-compat; absent degrades to no per-source notes instead of failing.
-  // The `sourceOutcomes` and `outcomes` spellings are decode-only back-compat
-  // read via `resolveIndexSourceOutcomes` and never emitted.
+  // Per-source outcomes on the canonical `sources` key. Optional for back-compat; absent degrades
+  // to no per-source notes instead of failing.
   sources?: IndexSourceRunOutcome[] | null;
 }
 
@@ -4598,11 +4247,7 @@ export interface IndexCancelResponse {
   cancelled: boolean;
 }
 
-// Normalized run description shared by the top run notice and the last-run
-// strip. Both surfaces render one identical line — status plus the trigger
-// display label, outcome counts, and finish age — so a completed run can never
-// read differently in the two places. The terminal summary (`IndexRunResponse`)
-// and the status strip (`IndexLastRunStatus`) both normalize into this shape.
+// Normalized run description shared by the top run notice and the last-run strip.
 export interface IndexRunDescription {
   status: string;
   trigger?: string | null;
@@ -4615,10 +4260,8 @@ export interface IndexRunDescription {
   truncatedCount?: number | null;
 }
 
-// Resolves the retired count from any run shape, accepting both `retiredCount`
-// and the `retired` alias some engines emit. Non-finite, negative, and
-// fractional payloads degrade to null so callers omit the count instead of
-// rendering a drifted figure.
+// Resolves the retired count from any run shape, accepting both `retiredCount` and the `retired`
+// alias some engines emit.
 export function resolveIndexRetiredCount(
   run:
     | Pick<IndexLastRunStatus, "retiredCount" | "retired">
@@ -4636,10 +4279,8 @@ export function resolveIndexRetiredCount(
   return Math.floor(candidate);
 }
 
-// Resolves the truncated count from any run shape, accepting both
-// `truncatedCount` and the `truncated` alias some engines emit. Non-finite,
-// negative, and fractional payloads degrade to null so callers omit the count
-// instead of rendering a drifted figure.
+// Resolves the truncated count from any run shape, accepting both `truncatedCount` and the
+// `truncated` alias some engines emit.
 export function resolveIndexTruncatedCount(
   run:
     | Pick<IndexLastRunStatus, "truncatedCount" | "truncated">
@@ -4710,10 +4351,8 @@ export function indexRunDescriptionFromSummary(
   };
 }
 
-// Explicit type-guard distinguishing the terminal run summary from the
-// status strip and shared description shapes. Checks the summary's own
-// `documentsIndexed` plus `vectorChunks` pair so a future strip field
-// addition cannot silently flip the branch the way a bare `in` check would.
+// Explicit type-guard distinguishing the terminal run summary from the status strip and shared
+// description shapes.
 export function isIndexRunResponse(
   run: IndexRunDescription | IndexLastRunStatus | IndexRunResponse,
 ): run is IndexRunResponse {
@@ -4725,11 +4364,7 @@ export function isIndexRunResponse(
   );
 }
 
-// Single owner for every integer count on the Index Status page. Floors
-// finite numbers so fractional payloads never render decimals, groups en-US
-// at and above 10000 so large stores stay scannable, and degrades anything
-// non-finite to zero so a drifted payload never renders NaN. Decimals,
-// percents, rates, and byte units never pass through here.
+// Single owner for every integer count on the Index Status page.
 export function formatIndexCount(value: unknown): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "0";
   const floored = Math.floor(value);
@@ -4737,21 +4372,9 @@ export function formatIndexCount(value: unknown): string {
   return String(floored);
 }
 
-// One-line human summary of an index run shared by the top notice and the
-// last-run strip: status plus the trigger display label, outcome counts, and
-// run age, omitting any count the payload did not carry so a drifted
-// payload still renders its status and time. The trigger label stays
-// parenthesized after the status so the `Last run <status>` prefix survives
-// verbatim, except an ok run that still recorded errors folds that count into
-// the head (`finished with N errors`) so success-with-errors never reads as a
-// clean ok plus a duplicated trailing count. A live run names its start
-// (`started … ago`) because its row still carries the start instant, while
-// every terminal status names its finish (`finished … ago`) from the persisted
-// completion instant. A cancelled run appends the
-// kept-work copy because committed batches survive the stop and the next run
-// resumes from there. A skipped run appends its reason so a skip never reads
-// as a silent no-op. Null renders the honest never-ran copy so a fresh store
-// never reads as an empty history.
+// One-line human summary of an index run shared by the top notice and the last-run strip: status
+// plus the trigger display label, outcome counts, and run age, omitting any count the payload did
+// not carry so a drifted payload still renders its status and time.
 export function describeIndexRun(
   run:
     | IndexRunDescription
@@ -4881,10 +4504,7 @@ export const INDEX_MAIL_VECTOR_WINDOWS = ["30d", "6m", "1y", "2y", "all"];
 // IndexConfig.allowedICloudEvictions.
 export const INDEX_ICLOUD_EVICTIONS = ["skip", "download"];
 
-// Closed set of valid `effort` preset ids, mirroring
-// IndexConfig.allowedEfforts without `custom`. `custom` carries an explicit
-// worker count in `workers`; the other three map onto the engine worker
-// derivation so the same preset scales from a laptop to a studio machine.
+// Closed set of valid `effort` preset ids, mirroring IndexConfig.allowedEfforts without `custom`.
 export const INDEX_EFFORT_PRESETS = ["light", "balanced", "performance"] as const;
 
 // Display labels for the effort presets, plus the custom worker mode. Unknown
@@ -4899,20 +4519,12 @@ export const INDEX_EFFORT_PRESET_LABELS: Record<string, string> = {
 
 // Default effort preset: balanced work without saturating the machine.
 export const DEFAULT_INDEX_EFFORT = "balanced";
-// Default custom worker count used when `effort` is `custom` and no stored
-// value exists yet. This is the stepper fallback only; the wire default in
-// DEFAULT_INDEX_CONFIG.workers stays 0 (derive from the preset) mirroring
-// IndexConfig.defaultWorkers.
+// Default custom worker count used when `effort` is `custom` and no stored value exists yet.
 export const DEFAULT_INDEX_WORKERS = 4;
-// Static ceiling for a `custom` worker count, mirroring
-// IndexConfig.maxAllowedWorkers. Validation accepts 1..64 on any machine;
-// resolution clamps to the live core count, so a value carried over from a
-// larger machine never oversubscribes the current hardware.
+// Static ceiling for a `custom` worker count, mirroring IndexConfig.maxAllowedWorkers.
 export const INDEX_MAX_CUSTOM_WORKERS = 64;
 // Default exclude patterns, mirroring IndexConfig.defaultExcludePatterns
-// (Sources/RuneWeaverCore/IndexConfig.swift). Single-sourced here so the
-// fresh form before the first settings fetch and the back-compat fallback
-// cannot drift from the engine walker list.
+// (Sources/RuneWeaverCore/IndexConfig.swift).
 export const DEFAULT_INDEX_EXCLUDE_PATTERNS: string[] = [
   ".build",
   "*.app",
@@ -4982,10 +4594,8 @@ export function formatMailboxDenyText(
   return formatListToText(deny, DEFAULT_INDEX_MAILBOX_DENY_TEXT);
 }
 
-// Default index policy values mirroring IndexConfig so a fresh form matches the
-// boundary the engine enforces before the first settings fetch. `workers` is
-// 0 (derive from the preset) mirroring IndexConfig.defaultWorkers; presets
-// require 0 and only `custom` carries an explicit 1..64 count.
+// Default index policy values mirroring IndexConfig so a fresh form matches the boundary the engine
+// enforces before the first settings fetch.
 export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   enabled: false,
   files: true,
@@ -5009,14 +4619,7 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
 };
 
 // Owner-facing assistant persona mirrored from the engine `PersonaConfig`
-// (Sources/RuneWeaverCore/PersonaConfig.swift). The persona is the only
-// owner-authored identity the prompt carries, so the closed tone/avatar sets
-// and the name and style bounds are pinned to the core here and re-validated
-// server-side — a client can prefer the bounds but never smuggle a shape the
-// file loader would refuse. The stored snapshot rides the settings GET and
-// patches through the `PUT /settings` partial merge; a persona save is
-// boot-held, so the running engine adopts the new identity on reload while
-// the dashboard mirrors it immediately.
+// (Sources/RuneWeaverCore/PersonaConfig.swift).
 export interface PersonaData {
   assistantName?: string;
   tone?: string;
@@ -5025,10 +4628,7 @@ export interface PersonaData {
   avatar?: string;
 }
 
-// Partial persona patch for `PUT /settings`, mirroring the engine
-// `PersonaUpdate`. Every field is optional so a request carrying one key
-// leaves the rest of the stored `[persona]` section untouched; the dashboard
-// sends camelCase keys only.
+// Partial persona patch for `PUT /settings`, mirroring the engine `PersonaUpdate`.
 export interface PersonaSettingsUpdate {
   assistantName?: string;
   tone?: string;
@@ -5054,10 +4654,9 @@ export const PERSONA_TONE_OPTIONS: Array<{ value: string; label: string }> = [
 // client-side colorway only and never reaches a prompt byte.
 export const PERSONA_AVATAR_COLORS = ["violet", "cyan", "emerald", "rose"] as const;
 
-// Manual mirrors of PersonaConfig bounds (maxAssistantNameLength,
-// maxStyleLength, maxUserNameLength) and defaults (defaultAssistantName,
-// defaultTone, defaultAvatar); the server owns the values and the contract
-// tests pin both ends so a drift fails loudly.
+// Manual mirrors of PersonaConfig bounds (maxAssistantNameLength, maxStyleLength,
+// maxUserNameLength) and defaults (defaultAssistantName, defaultTone, defaultAvatar); the server
+// owns the values and the contract tests pin both ends so a drift fails loudly.
 export const MAX_PERSONA_ASSISTANT_NAME_LENGTH = 32;
 export const MAX_PERSONA_STYLE_LENGTH = 2000;
 export const MAX_PERSONA_USER_NAME_LENGTH = 64;
@@ -5131,21 +4730,16 @@ export interface SettingsResponse {
   voiceSTTProvider: string;
   voiceWhisperModel: string;
   voiceTTSProvider: string;
-  // Unified container runtime policy under [containers]; optional for
-  // back-compat with older engines that predate the section. An absent
-  // section keeps the documented defaults so the Containers editors fall
-  // back instead of blanking. Container images are pinned in code and never
-  // ride the wire, so no image key exists here.
+  // Unified container runtime policy under [containers]; optional for back-compat with older
+  // engines that predate the section.
   containers?: ContainersConfigData;
   // File access policy persisted under [files]; optional for back-compat
   // with older engines that predate the deny list.
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
-  // Forced files.write posture from [files] write_mode (`model` | `staged` |
-  // `live`); optional for back-compat with older engines that predate the key.
-  // `model` keeps per-call mode selection with an omitted mode defaulting to
-  // staged review; the engine remains the validator of record.
+  // Forced files.write posture from [files] write_mode (`model` | `staged` | `live`); optional for
+  // back-compat with older engines that predate the key.
   filesWriteMode?: string;
   filesWritePathRules?: FilesWritePathRuleData[];
   // Web search policy persisted under [browser] (searxng_url, timeout, max_results). The engine
@@ -5203,10 +4797,8 @@ export interface SettingsResponse {
   serverPort?: number;
   serverAllowedHosts?: string[];
   configPath: string;
-  // Whether the last PUT needs a restart to take effect. True only when the
-  // save carried bind-affecting [server] keys; the route never live-reloads
-  // the socket or the middleware set. Optional because older engines predate
-  // the flag; absent means no restart was advertised.
+  // Whether the last PUT needs a restart to take effect. True only when the save carried
+  // bind-affecting [server] keys; the route never live-reloads the socket or the middleware set.
   requiresRestart?: boolean;
 }
 
@@ -5289,13 +4881,9 @@ export const DEFAULT_SERVER_PORT = 8082;
 export const MAX_SERVER_ALLOWED_HOSTS = 20;
 export const MAX_SERVER_ALLOWED_HOST_LENGTH = 253;
 
-// Whether a bind hostname is loopback-only. Non-loopback binds need a
-// resolvable owner token and fail closed otherwise, so the Network pane gates
-// its save copy on this check before any network write. A trailing FQDN dot
-// never counts as loopback, mirroring ServerConfig.isLoopbackHostname:
-// validators reject trailing-dot hosts fail-closed, so `localhost.`
-// classifies as non-loopback here to agree with the validator instead of
-// riding loopback under a spelling that can never be configured.
+// Whether a bind hostname is loopback-only. Non-loopback binds need a resolvable owner token and
+// fail closed otherwise, so the Network pane gates its save copy on this check before any network
+// write.
 export function isLoopbackHostname(hostname: string | undefined | null): boolean {
   const trimmed = (hostname ?? "").trim().toLowerCase();
   return (
@@ -5306,15 +4894,9 @@ export function isLoopbackHostname(hostname: string | undefined | null): boolean
   );
 }
 
-// Single web source for the restart compare: trimmed plus lowercased, then a
-// single outer bracket pair stripped only when the inner text holds a colon
-// so `::1` and `[::1]` (or `::` and `[::]`) compare equal while bracketed
-// non-IPv6 spellings stay distinct. Matches canonicalRestartHost in
-// Sources/RuneWeaverServer/ServerSettingsRoutes.swift; the Host gate stores
-// both spellings for IPv6 literals, so without this the compare reports a
-// spurious restart when only the bracket spelling moves. SettingsManager
-// consumes this helper directly so casing or IPv6 bracket-only spellings the
-// gate treats identically never trip a spurious save or restart badge.
+// Single web source for the restart compare: trimmed plus lowercased, then a single outer bracket
+// pair stripped only when the inner text holds a colon so `::1` and `[::1]` (or `::` and `[::]`)
+// compare equal while bracketed non-IPv6 spellings stay distinct.
 export function canonicalRestartHost(value: string): string {
   const candidate = value.trim().toLowerCase();
   if (candidate.length >= 2 && candidate.startsWith("[") && candidate.endsWith("]")) {
@@ -5324,15 +4906,8 @@ export function canonicalRestartHost(value: string): string {
   return candidate;
 }
 
-// Normalizes one allowed_hosts entry to the compared Host form: trimmed,
-// lowercased, with a trailing empty or numeric :port stripped so
-// Example.COM:8082 stores as example.com. Bracketed IPv6 keeps its brackets
-// while a bare IPv6 literal keeps its colons instead of being mistaken for
-// host:port. A bracketed literal strips only for an empty suffix or a colon
-// plus numeric port (`[::1]`, `[::1]:8082`); any other trailing shape stays
-// verbatim so `[::1]evil` never truncates to an allowlisted literal. An
-// unbracketed suffix strips only for an empty or numeric port so
-// `evil.com:evil` stays verbatim instead of truncating to an allowlisted host.
+// Normalizes one allowed_hosts entry to the compared Host form: trimmed, lowercased, with a
+// trailing empty or numeric :port stripped so Example.COM:8082 stores as example.com.
 export function normalizeServerAllowedHost(entry: string): string {
   const trimmed = entry.trim().toLowerCase();
   if (!trimmed) return trimmed;
@@ -5364,27 +4939,16 @@ export function normalizeServerAllowedHost(entry: string): string {
   return trimmed;
 }
 
-// Single source for IPv6 bracket-shape validation shared by the allowed_hosts
-// and hostname validators. Brackets only ever wrap an IPv6 literal, so any
-// other bracket shape would never match the Host gate exactly yet would read
-// as configured; keeping the shape check here keeps the client agreeing with
-// the server 400 when the accepted shape evolves. Takes the trimmed value for
-// shape checks but echoes the original entry for repair, matching the
-// surrounding validators. Mirrors validateExactHost.
+// Single source for IPv6 bracket-shape validation shared by the allowed_hosts and hostname
+// validators.
 export function validateBracketedHost(trimmed: string, entry: string): string | null {
   // Fail closed on `[` without `]` (and vice versa): an unbalanced bracket
   // would never match exactly yet read as configured.
   if (trimmed.includes("[") !== trimmed.includes("]")) {
     return `must not contain unbalanced brackets (got '${entry}')`;
   }
-  // Fail closed on bracketed non-IPv6 and empty brackets: `[example.com]`,
-  // `[127.0.0.1]`, or `[]` would never match exactly yet read as configured.
-  // A `:port` suffix after `]` strips only for a numeric port, so any other
-  // tail stays verbatim garbage and must fail here while numeric tails pass
-  // through for the allowlist strip or the hostname port-suffix rejection.
-  // Prefixed `[`, single `[`/`]` counts, non-empty inner holding a colon, and
-  // an after-bracket that is empty or colon-plus-numeric-port; bracket extras,
-  // prefix doubles, bare tails, and non-numeric ports all reject.
+  // Fail closed on bracketed non-IPv6 and empty brackets: `[example.com]`, `[127.0.0.1]`, or `[]`
+  // would never match exactly yet read as configured.
   if (trimmed.includes("[") || trimmed.includes("]")) {
     const openCount = (trimmed.match(/\[/g) ?? []).length;
     const closeCount = (trimmed.match(/\]/g) ?? []).length;
@@ -5418,14 +4982,7 @@ export function validateBracketedHost(trimmed: string, entry: string): string | 
   return null;
 }
 
-// Validates one allowed_hosts entry against the exact-only Host semantics the
-// gate enforces. A bare * would allow every host, schemes/wildcards/CIDR would
-// never match exactly yet read as configured, unbalanced brackets or brackets
-// around a non-IPv6 host would never match yet read as allowed, a trailing
-// FQDN dot would never match the stored form, and over-long entries exceed
-// the DNS name limit, so each shape fails closed here with the entry echoed
-// for repair. Mirrors RuneWeaverConfig.validateAllowedHosts via
-// validateExactHost.
+// Validates one allowed_hosts entry against the exact-only Host semantics the gate enforces.
 export function validateServerAllowedHost(entry: string): string | null {
   const trimmed = entry.trim();
   if (!trimmed) return "must not contain empty strings";
@@ -5464,11 +5021,8 @@ export function validateServerAllowedHost(entry: string): string | null {
   if (bracketProblem) {
     return bracketProblem;
   }
-  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
-  // normalization strips only an empty or numeric port, so `evil.com:evil`
-  // would otherwise persist verbatim garbage. Empty or numeric suffixes pass
-  // through for the allowlist strip; IPv6 literals keep their colons above.
-  // Mirrors validateExactHost.
+  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix: normalization strips only
+  // an empty or numeric port, so `evil.com:evil` would otherwise persist verbatim garbage.
   if (!trimmed.startsWith("[")) {
     const colonCount = (trimmed.match(/:/g) ?? []).length;
     if (colonCount === 1) {
@@ -5507,12 +5061,7 @@ export function validateServerAllowedHosts(hosts: string[]): string | null {
   return null;
 }
 
-// Whether a trimmed hostname carries a `:port` suffix. Bracketed literals keep
-// their brackets and only a colon plus numeric port after `]` marks a port,
-// while unbracketed values with more than one colon are IPv6 literals that
-// keep their colons. Mirrors RuneWeaverConfig.isHostWithPortSuffix so a
-// `host:port` spelling fails closed here instead of persisting a hostname the
-// Host gate would never match.
+// Whether a trimmed hostname carries a `:port` suffix.
 function isServerHostnameWithPortSuffix(trimmed: string): boolean {
   if (trimmed.startsWith("[")) {
     const close = trimmed.indexOf("]");
@@ -5530,13 +5079,9 @@ function isServerHostnameWithPortSuffix(trimmed: string): boolean {
   return /^[0-9]+$/.test(suffix);
 }
 
-// Validates one server.hostname value against the exact-only Host semantics the
-// gate enforces, mirroring RuneWeaverConfig.validateServerHostname so a bad bind
-// fails closed in the form before any network write. Shares the allowed_hosts
-// widening shapes (scheme, wildcards, CIDR, userinfo, query, whitespace,
-// controls, unbalanced brackets, brackets around a non-IPv6 host, trailing
-// dot) while hostname wording stays singular and a `:port` suffix is rejected
-// because the port lives in server.port.
+// Validates one server.hostname value against the exact-only Host semantics the gate enforces,
+// mirroring RuneWeaverConfig.validateServerHostname so a bad bind fails closed in the form before
+// any network write.
 export function validateServerHostname(entry: string): string | null {
   const trimmed = entry.trim();
   if (!trimmed) return "must not be empty";
@@ -5574,11 +5119,8 @@ export function validateServerHostname(entry: string): string | null {
   if (bracketProblem) {
     return bracketProblem;
   }
-  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
-  // normalization strips only an empty or numeric port, so `evil.com:evil`
-  // would otherwise persist verbatim garbage. Empty or numeric suffixes pass
-  // through for the port-suffix rejection below; IPv6 literals keep their
-  // colons above. Mirrors validateExactHost.
+  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix: normalization strips only
+  // an empty or numeric port, so `evil.com:evil` would otherwise persist verbatim garbage.
   if (!trimmed.startsWith("[")) {
     const colonCount = (trimmed.match(/:/g) ?? []).length;
     if (colonCount === 1) {
@@ -5727,27 +5269,20 @@ export function updateSettings(
   });
 }
 
-// Reads the local index status: counts, bytes, per-source enablement, recent
-// failures, the last watermark, and live run state. A missing store or
-// coordinator reports an honest zeroed snapshot instead of failing, so a stock
-// install still renders an empty state.
+// Reads the local index status: counts, bytes, per-source enablement, recent failures, the last
+// watermark, and live run state.
 export function getIndexStatus(): Promise<IndexStatusResponse> {
   return fetchJson<IndexStatusResponse>("/index/status");
 }
 
-// Reads the slow index storage breakdown: byte-exact totals plus per-source
-// bytes from the TTL-shared slow pass. A missing store reports a zeroed
-// payload rather than failing. Callers merge these slow keys over the fast
-// status state and never clear fast counts while slow is in flight.
+// Reads the slow index storage breakdown: byte-exact totals plus per-source bytes from the
+// TTL-shared slow pass. A missing store reports a zeroed payload rather than failing.
 export function getIndexStorage(): Promise<IndexStorageResponse> {
   return fetchJson<IndexStorageResponse>("/index/storage");
 }
 
-// Milliseconds elapsed since the last successful index watermark, or null when
-// the store has never been indexed. The status dashboard renders this as the
-// watermark-age card through the shared relative-time ladder instead of
-// re-parsing the wire shape (ISO-8601 string or Unix seconds) per render; a
-// future-skewed timestamp clamps to zero so the label reads "just now".
+// Milliseconds elapsed since the last successful index watermark, or null when the store has never
+// been indexed.
 export function indexWatermarkAgeMs(
   value: string | number | null | undefined,
 ): number | null {
@@ -5833,14 +5368,9 @@ export function requestIndexAccess(kind: string): Promise<IndexRequestAccessResp
   });
 }
 
-// Web search (SearXNG) lifecycle surfaced by the engine service. The service
-// runs SearXNG in an Apple Container machine with no Docker dependency, so
-// these routes start and stop that machine rather than proxying queries.
-// The ensure path carries a trimmed banner (terminal cause plus one
-// `scripts/searxng-up.sh` remediation) in `message` and the chained per-stage
-// detail (stage, exit, capped tail, timeout) in `diagnostics` when unreachable.
-// Inline slots render `message` once; the Settings pane optionally exposes
-// `diagnostics` in a collapsed element while warn logs keep the full chain.
+// Web search (SearXNG) lifecycle surfaced by the engine service. The service runs SearXNG in an
+// Apple Container machine with no Docker dependency, so these routes start and stop that machine
+// rather than proxying queries.
 export interface SearchHealthResponse {
   reachable: boolean;
   url?: string;
@@ -5878,11 +5408,9 @@ export function resolveSearchURL(
   return candidate || fallback;
 }
 
-// Single-sourced banner extraction for the search lifecycle: trims the engine
-// `message` (terminal cause plus one remediation) and normalizes blank or
-// non-string payloads to null so callers never render whitespace as a banner.
-// Per-stage detail lives in `diagnostics`, never in this slot, so install,
-// daemon, pull, and timeout banners each render once without nesting.
+// Single-sourced banner extraction for the search lifecycle: trims the engine `message` (terminal
+// cause plus one remediation) and normalizes blank or non-string payloads to null so callers never
+// render whitespace as a banner.
 export function resolveSearchMessage(
   response: SearchHealthResponse | null | undefined,
 ): string | null {
@@ -5890,10 +5418,9 @@ export function resolveSearchMessage(
   return typeof message === "string" && message.trim() ? message.trim() : null;
 }
 
-// Single-sourced diagnostics extraction for the search lifecycle: trims the
-// engine `diagnostics` (chained stage, exit, capped tail, timeout) and
-// normalizes blank or non-string payloads to null so the collapsed Settings
-// element only renders when real per-stage detail exists.
+// Single-sourced diagnostics extraction for the search lifecycle: trims the engine `diagnostics`
+// (chained stage, exit, capped tail, timeout) and normalizes blank or non-string payloads to null so
+// the collapsed Settings element only renders when real per-stage detail exists.
 export function resolveSearchDiagnostics(
   response: SearchHealthResponse | null | undefined,
 ): string | null {
@@ -5903,12 +5430,9 @@ export function resolveSearchDiagnostics(
     : null;
 }
 
-// Staged Start progress: while a Start is in flight the engine publishes the current step plus
-// the Start time on health payloads, and the dashboard polls about 1s so the amber Starting
-// line tracks the cascade instead of sitting static. The client cap (~6 min) bounds a hung
-// Start past the minutes-budget image pull plus the cached cascade: past it the UI stops the
-// stage line and re-probes the dot while keeping the toggle locked, and the cap suspends while
-// the stage reports pulling so a first-run pull never trips it early.
+// Staged Start progress: while a Start is in flight the engine publishes the current step plus the
+// Start time on health payloads, and the dashboard polls about 1s so the amber Starting line tracks
+// the cascade instead of sitting static.
 export const SEARCH_START_POLL_INTERVAL_MS = 1000;
 export const SEARCH_START_CAP_MS = 360_000;
 
@@ -6017,11 +5541,9 @@ export function stopSearch(): Promise<SearchHealthResponse> {
   });
 }
 
-// Deletes the SearXNG container entry and reports the resulting health. The
-// server stops a running entry first rather than half-deleting, and the image
-// cache survives so the next Start recreates the entry from cache. Idempotent
-// when already absent: an unknown-never-started host reports unreachable with
-// removed true, while a still-reachable engine refuses with guidance.
+// Deletes the SearXNG container entry and reports the resulting health. The server stops a running
+// entry first rather than half-deleting, and the image cache survives so the next Start recreates
+// the entry from cache.
 export function removeSearch(): Promise<SearchHealthResponse> {
   return fetchJson<SearchHealthResponse>("/search/remove", {
     method: "POST",
@@ -6255,10 +5777,8 @@ export async function acceptLiveReview(
   });
 }
 
-// Declines one live write review: the engine restores the rollback copy when
-// the review owns one and deletes the created file otherwise. The branch is
-// the ledger row's to decide, so the caller names only the path instead of
-// choosing between revert and discard client-side.
+// Declines one live write review: the engine restores the rollback copy when the review owns one
+// and deletes the created file otherwise.
 export async function declineLiveReview(
   path: string,
   signal?: AbortSignal,
@@ -6270,10 +5790,7 @@ export async function declineLiveReview(
   });
 }
 
-// Review states shared with the engine's durable review ledger. `pending` means
-// a row exists with no resolution yet; `unknown` means no row exists at all,
-// and the two stay distinct so a card can tell "still reviewable" apart from
-// "the ledger no longer tracks this path".
+// Review states shared with the engine's durable review ledger.
 export type FileReviewState =
   | "pending"
   | "accepted"
@@ -6291,10 +5808,6 @@ export interface FileReviewStates {
 }
 
 // Batch-hydrates review posture for the given live paths in one round trip.
-// The engine echoes a key for every requested path in both maps, so a reloaded
-// card can render its stored outcome; a response that omits either map degrades
-// to an empty map instead of throwing, keeping the caller's actionable
-// fallback intact when an older engine predates the route.
 export async function getFileReviewStates(
   paths: string[],
   signal?: AbortSignal,
@@ -6334,10 +5847,7 @@ export interface WorkspacePruneResponse {
 }
 
 // Single client mirror of the engine `WorkspaceConfig` bounds
-// (Sources/RuneWeaverCore/Config.swift). The server owns the values; this
-// mirror only labels quota bars before the first usage fetch and documents
-// the file-owned ranges for the dashboard hint. Retention of zero clears
-// `tmp/` on every boot, so the minimum stays zero rather than one.
+// (Sources/RuneWeaverCore/Config.swift).
 export const DEFAULT_WORKSPACE_QUOTA_MB = 500;
 export const DEFAULT_WORKSPACE_QUOTA_FILES = 10000;
 export const DEFAULT_WORKSPACE_TMP_TTL_DAYS = 7;
@@ -6356,10 +5866,7 @@ export interface WorkspaceConfigData {
   tmpTTLDays: number;
 }
 
-// Partial workspace patch for `PUT /settings`, mirroring the engine
-// `WorkspaceUpdate`. Every field is optional so a request carrying one key
-// leaves the rest of the stored `[workspace]` section untouched; the dashboard
-// sends camelCase keys only.
+// Partial workspace patch for `PUT /settings`, mirroring the engine `WorkspaceUpdate`.
 export interface WorkspaceSettingsUpdate {
   quotaMB?: number;
   quotaFiles?: number;
@@ -6376,10 +5883,7 @@ export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfigData = {
 };
 
 
-// Human byte tally shared by the quota bar and prune receipts. Uses 1024
-// steps with one decimal so a 500 MB quota and a few-kilobyte scratch file
-// read on one scale; non-finite or negative payloads read as 0 B instead of
-// NaN.
+// Human byte tally shared by the quota bar and prune receipts.
 export function formatWorkspaceBytes(bytes: unknown): string {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
     return "0 B";

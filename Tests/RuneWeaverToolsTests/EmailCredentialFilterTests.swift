@@ -1,11 +1,4 @@
 // Rune Weaver Tools Tests — Deterministic credential filter for agent-visible mail.
-//
-// Pins the least-privilege boundary around one-time codes, magic sign-in
-// links, and password-reset links: definite signals redact link URLs and code
-// values while subjects and senders stay visible, suspicious hints pass
-// through untouched, the disabled filter is byte-identical, ordinary numbers
-// never trigger without a nearby keyword, and the index gateway ingests the
-// same redacted form the tools show so recall cannot resurrect a hidden link.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -210,10 +210,9 @@ public actor VoicePipeline {
 
     // MARK: - Private
 
-    /// Owner-only staging directory for transient voice files.
-    /// A dedicated 0700 directory keeps staged audio and prompts unreachable
-    /// while child processes write with default umask permissions.
-    /// - Returns: Staging directory URL.
+    /// Owner-only staging directory for transient voice files. A dedicated 0700 directory keeps
+    /// staged audio and prompts unreachable while child processes write with default umask
+    /// permissions.
     private func secureStagingDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-voice", isDirectory: true)
@@ -226,13 +225,9 @@ public actor VoicePipeline {
         return directory
     }
 
-    /// Stages bytes without a world-readable window.
-    /// A direct atomic write inherits the process umask, so creation through
-    /// an owner-only file keeps audio and prompts private at every instant.
-    /// - Parameters:
-    ///   - data: Bytes to stage.
-    ///   - filename: Unique leaf name inside the staging directory.
-    /// - Returns: Staged file URL.
+    /// Stages bytes without a world-readable window. A direct atomic write inherits the process
+    /// umask, so creation through an owner-only file keeps audio and prompts private at every
+    /// instant.
     private func stageSecureBytes(_ data: Data, filename: String) throws -> URL {
         let directory = try secureStagingDirectory()
         let url = directory.appendingPathComponent(filename)
@@ -283,11 +278,6 @@ public actor VoicePipeline {
     }
 
     /// Reserves an owner-only output slot for a child-produced file.
-    /// Pre-creating at 0600 inside the 0700 staging directory keeps the
-    /// eventual payload unreachable even though the child writes with the
-    /// process umask; permissions are re-enforced after the child exits.
-    /// - Parameter filename: Unique leaf name inside the staging directory.
-    /// - Returns: Reserved file URL.
     private func reserveSecureOutput(filename: String) throws -> URL {
         try stageSecureBytes(Data(), filename: filename)
     }

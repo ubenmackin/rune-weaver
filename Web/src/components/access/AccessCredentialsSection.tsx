@@ -1,18 +1,5 @@
 // Rune Weaver Dashboard — Credentials section of the declarative security policy
 // surface for policy.toml.
-//
-// Purpose: Owns the target-bound credential bindings half of the policy editor:
-// the searchable bindings list, the Keychain presence badges and attention
-// reasons, the add/edit binding modal, the unlinked-secret reconciliation, and
-// the guarded delete confirmations. The file governs per-secret bindings only;
-// network egress boundaries live in the network section beside it.
-// Scope: Rendering bindings plus their secret postures and driving the modal
-// and confirmation flows through callbacks. Draft state, structured
-// persistence, and the shared Save stay with the owning policy surface, so this
-// section never writes the policy itself.
-// Architectural role: Credentials half of the Settings policy surface, split
-// from the network half so each section owns its controls while one verified
-// draft and one write path remain.
 
 import { useMemo, useState } from "react";
 import {
@@ -66,12 +53,8 @@ export interface CredentialsListProps {
   onDeleteSecretRequest?: (key: string) => void;
 }
 
-// Searchable credentials list. Rows stay compact so dozens scan without
-// scrolling fatigue: key headline, Keychain presence, host and scope
-// summaries, and a single attention dot. Search matches key plus host
-// substrings case-insensitively while the toggle narrows to rows worth
-// opening; rows themselves hold no editors so binding edits always flow
-// through the modal and the pane save.
+// Searchable credentials list. Rows stay compact so dozens scan without scrolling fatigue: key
+// headline, Keychain presence, host and scope summaries, and a single attention dot.
 export function CredentialsList({
   bindings = {},
   secretStatus = {},
@@ -395,10 +378,7 @@ export interface AccessCredentialsSectionProps {
   onSetSecret?: (key: string) => void;
   onDeleteSecretRequest?: (key: string) => void;
   onLinkUnlinkedSecret?: (key: string) => void;
-  // Whether this section is the visible policy sub-tab. The section stays
-  // mounted across sub-tab switches so an open binding or Keychain modal
-  // behaves exactly as the single-pane surface did, while the visible lists
-  // unmount with the panel.
+  // Whether this section is the visible policy sub-tab.
   active: boolean;
   bindingModal: PolicyBindingModalState | null;
   editingBinding: PolicyBindingEditingBinding | null;

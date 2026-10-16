@@ -1,9 +1,5 @@
 // Rune Weaver Dashboard — Shared viewport test helper for Vitest suites.
-//
-// Single source for the width-driven matchMedia double so handheld and desktop
-// suites agree on the shared mobile breakpoint without duplicating the query
-// parser. Widths at or below the navigation contract ceiling report handheld
-// while wider viewports stay on the desktop branch.
+
 import { vi } from "vitest";
 import { MOBILE_BREAKPOINT_PX } from "../components/navigationConfig";
 

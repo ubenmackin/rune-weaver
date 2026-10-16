@@ -96,9 +96,6 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Streams chunk-level events for one chat session.
-    /// Builds a per-turn client so the chat identifier follows the turn as the
-    /// session header; a per-turn identifier wins when present, otherwise the
-    /// stored value preserves existing tagged-request behavior.
     public func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk> {
         let resolved: String? = if let sessionID, !sessionID.isEmpty {
             sessionID

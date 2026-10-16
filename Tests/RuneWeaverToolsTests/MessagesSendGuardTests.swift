@@ -1,26 +1,4 @@
 // Rune Weaver Tools Tests — messages.send display-name guard and alias learning.
-//
-// Purpose: pin the user-facing invariant that a display name can never reach
-// AppleScript. A name-shaped recipient is refused before any dry-run preview or
-// gateway call, with the resolver's best candidate and an exact retry handle
-// (or the owner question when several contacts match, or guidance when none
-// do); a handle recipient still canonicalizes and sends; a successful send
-// with `resolvedFrom` records exactly one alias; and because a refusal embeds
-// contact-derived candidate fields, the tool declares untrusted content so the
-// model-context boundary wraps that refusal as data, never instructions.
-// The tool also declares the shared pre-admission validation seam so the turn
-// loop can refuse a name-shaped call with this same refusal before it can park
-// for approval.
-//
-// Scope: hermetic tool-level tests over `StubMessagesGateway`,
-// `StubMessagesRecipientResolver`, and `StubMessageAliasStore`; no test touches
-// Contacts, `chat.db`, or `osascript`.
-//
-// Architectural role: guards the send tool's refusal contract, its
-// untrusted-content declaration for candidate-bearing refusals, and the
-// best-effort alias write, so a regression would surface as an unlabeled
-// attacker-influenceable field reaching model context or as a wrong recipient
-// in the real world rather than as a compile error.
 
 import Foundation
 @testable import RuneWeaverCore

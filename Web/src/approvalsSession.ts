@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Shared approval session correlation helpers.
-// Single source for mapping approval payloads to their owning chat session
-// across wire shapes, so chat and run views filter the same inbox identically.
 
 import type { PermissionRequest, RunLogEntry } from "./api";
 import { isRecord } from "./typeGuards";

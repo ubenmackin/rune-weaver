@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Collapsible right-hand drawer for staged changes review.
-// Shows all un-actioned staged files (.rune_*), one collapsible card per file
-// with its full unified diff, and provides per-file Accept/Discard controls as
-// well as batch [Accept All] and [Discard All]. Cards start collapsed so a long
-// review queue scans by filename first; expansion is keyed by path so live
-// refetches never reopen the wrong file.
 
 import { useState, useEffect, useCallback } from "react";
 import {

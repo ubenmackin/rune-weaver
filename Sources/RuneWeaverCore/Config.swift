@@ -1,4 +1,5 @@
 // Rune Weaver Core — Configuration types and loader for config.toml.
+
 import Foundation
 
 /// Errors thrown while loading or validating `config.toml`.
@@ -55,12 +56,9 @@ public struct EngineConfig: Sendable, Codable, Equatable {
 
 // MARK: - Server endpoint & owner auth
 
-/// `[server]` — HTTP API bind endpoint for the engine service.
-///
-/// Distinct from `RuneWeaverServer.ServerConfig`, which carries the runtime
-/// bind policy and resolves auth; this is the file-facing shape only. Keeping
-/// the names apart avoids an ambiguous `ServerConfig` when a module imports
-/// both `RuneWeaverCore` and `RuneWeaverServer`.
+/// `[server]` — HTTP API bind endpoint for the engine service. Distinct from
+/// `RuneWeaverServer.ServerConfig`, which carries the runtime bind policy and resolves auth; this is
+/// the file-facing shape only.
 public struct ServerEndpointConfig: Sendable, Codable, Equatable {
     /// Default loopback hostname; the v1 service is localhost-only.
     public static let defaultHostname = "127.0.0.1"
@@ -76,18 +74,9 @@ public struct ServerEndpointConfig: Sendable, Codable, Equatable {
     /// TCP port the service binds.
     public var port: Int
     /// Extra exact hostnames the Host gate accepts beside loopback and the bind hostname.
-    ///
-    /// Entries are exact-only and matched after lowercasing plus port stripping,
-    /// so no scheme, wildcard, CIDR, or bare `*` is stored here; validation
-    /// rejects those shapes fail-closed and the middleware normalizes the rest.
     public var allowedHosts: [String]
 
     /// Creates a server endpoint config.
-    ///
-    /// The hostname and allowlist entries are trimmed so padded file values or
-    /// direct construction never reach the bind or the gate with whitespace;
-    /// widening shapes stay verbatim for the gate to drop fail-closed instead
-    /// of allowlisting a carved fragment.
     public init(hostname: String = defaultHostname, port: Int = defaultPort, allowedHosts: [String] = []) {
         self.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.port = port
@@ -100,10 +89,9 @@ public struct ServerEndpointConfig: Sendable, Codable, Equatable {
         case allowedHosts
     }
 
-    /// Decodes an endpoint, defaulting omitted keys to the loopback default.
-    ///
-    /// Values trim so padded payloads never reach the bind or the gate with
-    /// whitespace; widening shapes stay verbatim for the gate to drop.
+    /// Decodes an endpoint, defaulting omitted keys to the loopback default. Values trim so padded
+    /// payloads never reach the bind or the gate with whitespace; widening shapes stay verbatim for
+    /// the gate to drop.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawHostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? Self.defaultHostname
@@ -114,16 +102,8 @@ public struct ServerEndpointConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[auth]` — single-owner bearer-token source for non-loopback binds.
-///
-/// Rune Weaver is single-owner by design: exactly one bearer token guards the
-/// HTTP surface once it leaves loopback. The token value never lives in
-/// `config.toml`; this section only names where to resolve it, in the order the
-/// auth resolver applies: the environment variable named by `token_env` for
-/// headless runs first, then macOS Keychain via ``SecretsManager`` (account
-/// ``defaultTokenKey``, which itself prefers a same-named environment variable),
-/// then the `0600` file named by `token_file`. Resolved token bytes must never
-/// be logged or rendered into diagnostics.
+/// `[auth]` — single-owner bearer-token source for non-loopback binds. Rune Weaver is single-owner
+/// by design: exactly one bearer token guards the HTTP surface once it leaves loopback.
 public struct AuthConfig: Sendable, Codable, Equatable {
     /// Keychain account and default environment variable holding the token.
     public static let defaultTokenKey = "RUNEWEAVER_AUTH_TOKEN"
@@ -144,11 +124,6 @@ public struct AuthConfig: Sendable, Codable, Equatable {
     }
 
     /// Whether this section names an explicit token source.
-    ///
-    /// The Keychain is always an implicit source, so an all-nil section can
-    /// still authenticate when a token is stored there; this reflects only the
-    /// declared env/file overrides. Boot resolves whether a token is actually
-    /// present.
     public var declaresTokenSource: Bool {
         tokenEnv != nil || tokenFile != nil
     }
@@ -183,11 +158,6 @@ public enum APIStyle: String, Sendable, Codable, CaseIterable {
 }
 
 /// Single source of truth for llama.cpp prefix-reuse knob defaults.
-/// Both the TOML file shape and the JSON options shape store an absent key as
-/// unset so small servers keep auto-assignment and stored payloads keep an omitted
-/// key distinct from an explicit hint; the effective wire hint for an absent cache
-/// key is enabled, resolved through `resolvedCachePrompt(fileValue:)` at provider
-/// construction so storage stays aligned while the wire keeps the always-on hint.
 public enum LlamaPrefixReuse: Sendable {
     /// File-level default for `slot_count` (absent keeps server auto-assign).
     public static let defaultSlotCount: Int? = nil
@@ -259,10 +229,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.cachePrompt = cachePrompt
     }
 
-    /// Snake wire keys match the TOML file shape. The JSON options shape in RuneWeaverLLM keeps
-    /// camel keys for a different transport; stored defaults for both reference LlamaPrefixReuse
-    /// plus the mirror test so the two shapes share one file-level default, with the effective
-    /// wire hint resolved separately at provider construction.
+    /// Snake wire keys match the TOML file shape.
     private enum CodingKeys: String, CodingKey {
         case enabled
         case model
@@ -333,15 +300,6 @@ public struct LLMConfig: Sendable, Codable, Equatable {
 }
 
 /// `[memory]` recall budgets bounding automatic and explicit recall fan-out.
-///
-/// Single source for the budgets-aware auto-recall path: per-tier fetch caps,
-/// the auto injection cap, the calibrated score floor, the total and per-hit
-/// char budgets, the document candidate-pool widening factor, scaled by the
-/// vector leg's own read width and mirrored by the keyword leg, and the
-/// episodic tier weight. The budgets-aware
-/// `MemoryEngine` overloads read only this struct on the auto path; the
-/// `automaticRecallLimit/threshold/maxChars` statics remain as defaults for
-/// the legacy threshold-based overloads.
 public struct RecallBudgets: Sendable, Codable, Equatable {
     /// Maximum hits fetched per tier before merging. Clamped `1...50`.
     public var perTierLimit: Int
@@ -353,10 +311,9 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     public var maxChars: Int
     /// Maximum characters kept per hit before ellipsis truncation. Clamped `100...8000`.
     public var perHitChars: Int
-    /// Widening factor for the document candidate pool beyond the returned
-    /// page: the vector leg scans `pool * 10` with a 500-row floor and the
-    /// keyword leg reads that same width, so the multiplier only moves the
-    /// vector leg once `pool * 10` clears 500. Clamped `1...8`.
+    /// Widening factor for the document candidate pool beyond the returned page: the vector leg
+    /// scans `pool * 10` with a 500-row floor and the keyword leg reads that same width, so the
+    /// multiplier only moves the vector leg once `pool * 10` clears 500.
     public var docPoolMultiplier: Int
     /// Weight mapping episodic rank scores onto the shared recall scale. Clamped `0...1`.
     public var episodicWeight: Double
@@ -457,12 +414,6 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     /// Embedding backend selector.
     public var embeddingBackend: String
     /// Recall budgets bounding automatic and explicit recall fan-out.
-    ///
-    /// The budgets-aware `MemoryEngine` auto path reads this struct; file keys
-    /// land as flat `recall_*` entries under `[memory]`. `MemoryConfig` itself
-    /// nests them as the `recall_budgets` object in its Codable form, while the
-    /// settings DTO exposes the same values as flat `memoryRecall*` fields so
-    /// dashboard payloads stay version-tolerant without sharing the nesting.
     public var recallBudgets: RecallBudgets
 
     /// `embedding_backend` selector that disables vectors (keyword-only recall).
@@ -546,16 +497,6 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
 }
 
 /// `[containers]` — unified container runtime policy for sandboxed execution.
-///
-/// Single source for the container knobs: the guest memory budget, the
-/// concurrent-container cap, and the idle reclamation TTL. Supersedes the
-/// legacy `[sandbox]` table, which is ignored on load (with a logged note)
-/// and shed on resave; legacy values are never migrated into this section.
-/// The container images themselves are pinned in code — strict per-turn and
-/// machine-scoped workspace containers run ``StrictContainerRunner/defaultImage``
-/// (`debian:stable-slim`) and detonation containers run
-/// ``LiveEmailArchiveDetonator/detonationImage`` (`alpine:3.22`) — so this
-/// section carries no image key.
 public struct ContainersConfig: Sendable, Equatable {
     /// Memory budget in megabytes for one container. Clamped `256...8192`.
     public var memoryMB: Int
@@ -641,13 +582,8 @@ public struct BashRule: Sendable, Codable, Equatable {
     }
 }
 
-/// Sandbox execution tier for `bash.exec`.
-///
-/// Baseline is macOS 26 with no version branches; tiers describe mount scope only.
-/// - `strictContainer` mounts only workspace `tmp`.
-/// - `machineScoped` mounts only the workspace root.
-/// - `hostSeatbelt` runs only on fnmatch/prefix match via `BashSecurity.matches`.
-/// No tier mounts HOME.
+/// Sandbox execution tier for `bash.exec`. Baseline is macOS 26 with no version branches; tiers
+/// describe mount scope only.
 public enum BashSandboxMode: String, Sendable, Codable, Equatable, CaseIterable {
     case strictContainer
     case machineScoped
@@ -655,10 +591,6 @@ public enum BashSandboxMode: String, Sendable, Codable, Equatable, CaseIterable 
 }
 
 /// `[bash]` — granular shell execution policy.
-///
-/// CPU and memory bounds ride `ulimit` inside the shell so every spawned
-/// command inherits them without a new supervisor process; the wall-clock
-/// timeout stays the hard backstop because `ulimit` is best-effort on macOS.
 public struct BashConfig: Sendable, Codable, Equatable {
     /// Whether the bash tool is enabled. Defaults to true.
     public var enabled: Bool
@@ -908,13 +840,8 @@ public struct EmailConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[ideas]` — proactive Wayfinder suggestions.
-///
-/// Ideas stay opt-in so a fresh install never spends background model calls
-/// brainstorming. `maxPerCycle` caps how many candidate ideas one generation
-/// pass may surface, and `timeoutSeconds` bounds the single cheap review call
-/// so a hung backend returns no ideas instead of stalling the trigger that
-/// asked for them.
+/// `[ideas]` — proactive Wayfinder suggestions. Ideas stay opt-in so a fresh install never spends
+/// background model calls brainstorming.
 public struct IdeasConfig: Sendable, Equatable {
     /// Whether proactive idea generation runs at all. Off by default.
     public var enabled: Bool
@@ -976,13 +903,8 @@ extension IdeasConfig: Codable {
     }
 }
 
-/// Parallel worker fan-out policy.
-///
-/// Single-gate policy: availability flows through tool registration alone,
-/// so this section only tunes the swarm shape. The worker cap keeps a swarm
-/// cheap on a local model, the timeout bounds one worker turn (zero means no
-/// timeout, intentional for slow local models), and the tool-subset switch
-/// stays off so research fan-out cannot mutate state unless explicitly widened.
+/// Parallel worker fan-out policy. Single-gate policy: availability flows through tool registration
+/// alone, so this section only tunes the swarm shape.
 public struct FanOutConfig: Sendable, Equatable {
     /// Maximum workers running at once. Clamped `1...8` so a wide subtask
     /// list cannot oversubscribe the serving model.
@@ -1027,13 +949,6 @@ public struct FanOutConfig: Sendable, Equatable {
     }
 
     /// Returns a copy clamped into the validated ranges.
-    /// The engine clamps at init so a hand-built config degrades to the
-    /// nearest sane bound instead of refusing to run or oversubscribing;
-    /// load-time validation fails closed, and both postures share the same
-    /// range constants so they cannot drift.
-    /// - Returns: Config with the worker cap pulled inside bounds and a
-    ///   non-positive timeout folded to unlimited (zero), otherwise clamped
-    ///   to `1...maxWorkerTimeoutSeconds`.
     public func clamped() -> FanOutConfig {
         let timeout: Int = if workerTimeoutSeconds <= 0 {
             Self.unlimitedWorkerTimeoutSeconds
@@ -1075,11 +990,6 @@ extension FanOutConfig: Codable {
 }
 
 /// `[workspace]` — agent scratch directory quotas and temp retention.
-///
-/// The workspace is the default working directory for shell execution, so it
-/// needs explicit bounds: a size cap keeps stray downloads from filling the
-/// disk, a file cap keeps quota walks and shell globs cheap, and a temp TTL
-/// keeps `tmp/` from accumulating across runs without manual cleanup.
 public struct WorkspaceConfig: Sendable, Equatable {
     /// Total bytes permitted under the workspace root. Clamped `10...10240` MB.
     public var quotaMB: Int
@@ -1119,11 +1029,6 @@ public struct WorkspaceConfig: Sendable, Equatable {
     }
 
     /// Returns a copy clamped into the validated ranges.
-    /// The engine clamps at use so a hand-built config degrades to the
-    /// nearest sane bound instead of refusing to run or oversubscribing;
-    /// load-time validation fails closed, and both postures share the same
-    /// range constants so they cannot drift.
-    /// - Returns: Config with quotas and retention pulled inside bounds.
     public func clamped() -> WorkspaceConfig {
         WorkspaceConfig(
             quotaMB: min(max(quotaMB, Self.minQuotaMB), Self.maxQuotaMB),
@@ -1370,16 +1275,6 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
-    ///
-    /// TOML loading early-returns hardened when the section is missing, so JSON
-    /// must match: payloads written before the defense policy, goal pursuit,
-    /// proactive surfacing, or idea suggestions existed decode with hardened,
-    /// disabled, surfacing, and opt-in defaults instead of throwing.
-    /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, proactive, ideas, fanout, workspace, persona,
-    /// and containers sections are absent-tolerant; every other section decodes
-    /// strictly so a truncated payload cannot silently load as hardened defaults.
-    /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.engine = try container.decode(EngineConfig.self, forKey: .engine)

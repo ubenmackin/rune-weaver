@@ -1,8 +1,4 @@
 // Rune Weaver Core — Orchestrator public contract types.
-// Holds the turn input, tool-action, response, event, and parked-approval value types shared
-// by the orchestration loop, the service routes, and the CLI. Keeping the wire and resume
-// contract in one place lets the loop file stay focused on execution while the shapes it
-// exchanges remain stable across callers.
 
 import Foundation
 
@@ -32,10 +28,6 @@ public struct UserInput: Sendable, Codable, Equatable {
     /// turns carry nil and never disturb an existing link.
     public let goalID: UUID?
     /// Explicit tool names this turn may call, or nil for the full registry.
-    /// Fan-out workers carry the read-only subset so research fan-out cannot
-    /// mutate state; the orchestrator tool loop filters its registry snapshot
-    /// by this list before the loop, so the prompt and the wire advertise only
-    /// the callable subset.
     public let allowedTools: [String]?
     /// Optional display title this turn stamps on its session, when the caller
     /// names the work (e.g. a fan-out subtask title). Nil leaves an existing
@@ -91,10 +83,9 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.maxToolIterations = maxToolIterations
     }
 
-    /// Decodes user input, defaulting a missing goal tag to untagged, a missing
-    /// tool subset to the full registry, and missing origin fields to nil so
-    /// inputs encoded before goal linkage, fan-out, or worker nesting decode.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes user input, defaulting a missing goal tag to untagged, a missing tool subset to the
+    /// full registry, and missing origin fields to nil so inputs encoded before goal linkage,
+    /// fan-out, or worker nesting decode.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.text = try container.decode(String.self, forKey: .text)
@@ -128,17 +119,6 @@ public struct UserInput: Sendable, Codable, Equatable {
     }
 
     /// Filters a tool snapshot down to the input's allowed subset.
-    ///
-    /// Fan-out workers carry an explicit allowed list so research fan-out
-    /// cannot mutate state; nil keeps the full registry so plain turns pay
-    /// nothing. Names match exactly (no aliases, no prefixes) because the
-    /// subset is composed from registry names the caller already observed,
-    /// and the snapshot's order is preserved so prompt and wire bytes stay
-    /// identical for server prefix caching.
-    /// - Parameters:
-    ///   - tools: Registry snapshot (sorted, disabled tools omitted).
-    ///   - allowed: Explicit tool names to keep, or nil for the full registry.
-    /// - Returns: The filtered snapshot.
     public static func filteredTools(_ tools: [any Tool], allowed: [String]?) -> [any Tool] {
         guard let allowed else { return tools }
         let allowedSet = Set(allowed)
@@ -226,12 +206,6 @@ public struct ToolAction: Sendable, Codable, Equatable {
 }
 
 /// Content-free recall observability carried on every turn completion.
-///
-/// Projects `RecallDiagnostics` down to hit counts plus per-tier source names
-/// plus the index-skip flag so dashboards can render a recall chip without ever
-/// receiving hit identifiers, scores, or content. The per-hit `sources` array
-/// stays in rank order and `countsBySource` tallies it, so collapsed and
-/// expanded copies agree without a second derivation drifting.
 public struct RecallSummary: Sendable, Codable, Equatable {
     /// Per-hit source raw values in rank order, never content.
     public let sources: [String]
@@ -400,12 +374,9 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.recallDiagnostics = recallDiagnostics
     }
 
-    /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to empty
-    /// while rejecting negative token counters so a drifted payload fails here exactly
-    /// where the live progress frame drops it, instead of reconciling to a negative total.
-    /// Integer decoding already rejects fractional counters; the explicit guards below
-    /// reject negatives to match `WSTurnTokensFrame`.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to
+    /// empty while rejecting negative token counters so a drifted payload fails here exactly where
+    /// the live progress frame drops it, instead of reconciling to a negative total.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.text = try container.decode(String.self, forKey: .text)
@@ -464,9 +435,6 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
 }
 
 /// Resolved automatic recall plus starter footing for one turn.
-/// Named fields keep the shared turn wiring readable at call sites where an
-/// anonymous 4-tuple would trip `large_tuple` and hide which value carries
-/// diagnostics versus the deterministic plan.
 public struct TurnRecallAndStarter: Sendable, Equatable {
     /// Recall message for the stable slot, nil when the turn stays silent.
     public let recall: Message?
@@ -527,16 +495,9 @@ public enum OrchestratorEvent: Sendable, Codable, Equatable {
     /// Degraded-tool notice for a tool omitted this turn. Carries only the
     /// preformatted warning line so no schema payloads reach subscribers.
     case warning(String)
-    /// Per-round token usage for the in-flight turn. Emitted after each LLM round
-    /// that reports usage so dashboards can show a running turn total and a live
-    /// session estimate without waiting for the terminal done frame, which stays
-    /// authoritative for reconciliation. Missing usage emits nothing so views keep
-    /// prior totals instead of zeroing.
+    /// Per-round token usage for the in-flight turn.
     case turnTokens(roundIndex: Int, roundTokens: Int, turnTotalTokens: Int, contextTokens: Int? = nil)
-    /// Generic indeterminate progress from a tool that is still running. Emitted
-    /// only when a tool chooses to report through its context, so subscribers must
-    /// treat it as advisory: dropping it never affects the turn's outcome, and the
-    /// terminal tool result remains the authoritative record.
+    /// Generic indeterminate progress from a tool that is still running.
     case toolProgress(ToolProgress)
 }
 
@@ -644,10 +605,7 @@ struct ParkGatedCallsContext {
     /// identically to live.
     let gatedRoundIndex: Int
     var contextTokens: Int?
-    /// Whether this turn's assistant narration note was already persisted before
-    /// filing. Mixed turns execute their structured calls first, which writes the
-    /// note once; filing must stay a no-op then or the narration and its
-    /// placeholders land in history twice.
+    /// Whether this turn's assistant narration note was already persisted before filing.
     let narrationAlreadyPersisted: Bool
     /// Live bash policy stamped onto filed bash approvals so the tier line
     /// renders on every card.

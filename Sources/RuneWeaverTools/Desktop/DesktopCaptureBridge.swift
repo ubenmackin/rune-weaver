@@ -1,9 +1,4 @@
 // Rune Weaver Tools — Desktop screen and window capture bridge for macOS.
-//
-// Encapsulates ScreenCaptureKit image capture with in-memory downscaling via
-// ImageIO. Returns a bounded JPEG data URL and coordinate scale metadata
-// so `desktop.action` can translate LLM-inferred pixel positions back to the
-// native display coordinate space.
 
 import Foundation
 import RuneWeaverCore
@@ -93,29 +88,19 @@ public protocol DesktopCapturing: Sendable {
     ) async throws -> DesktopCaptureResult
 
     /// Lists currently visible windows across all displays.
-    ///
-    /// Throws the Screen Recording denial instead of returning an empty list
-    /// so callers can distinguish "no windows" from "no permission".
     func listWindows() async throws -> [DesktopWindowInfo]
 }
 
 // MARK: - Live capture bridge
 
 /// Live desktop capture using macOS ScreenCaptureKit and ImageIO downscaling.
-///
-/// TCC queries are isolated to the main actor because the system prompt takes
-/// focus and the underlying capture query expects main-thread execution; the
-/// tool path stays on the silent check so autonomous turns never pop a dialog
-/// off-thread under Swift 6.
 public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
     /// Silent gate injected for tests; live turns use the TCC preflight.
     private let screenRecordingAccess: @Sendable () async -> Bool
 
-    /// Creates the live bridge.
-    ///
-    /// The injected gate exists so bridge-level tests can exercise the
-    /// fail-closed denial without prompting for real TCC trust; live turns
-    /// keep the silent preflight default.
+    /// Creates the live bridge. The injected gate exists so bridge-level tests can exercise the
+    /// fail-closed denial without prompting for real TCC trust; live turns keep the silent preflight
+    /// default.
     public init(
         screenRecordingAccess: @escaping @Sendable () async -> Bool = {
             await MainActor.run { Self.hasScreenRecordingAccess() }
@@ -125,11 +110,6 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
     }
 
     /// Silent Screen Recording check with no system dialog.
-    ///
-    /// Why silent here and requesting elsewhere: popping the sanctioned
-    /// prompt mid-turn steals focus and derails the autonomous turn, so the
-    /// capture path fails closed on `false` and leaves prompting to moments
-    /// when the operator has just asked for desktop access.
     @MainActor
     public static func hasScreenRecordingAccess() -> Bool {
         #if canImport(CoreGraphics)
@@ -148,11 +128,6 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
     }
 
     /// Requests Screen Recording trust, showing the system prompt when needed.
-    ///
-    /// Call this only in direct response to explicit operator intent (for
-    /// example enabling desktop tools), because the dialog takes focus and
-    /// would derail an in-flight turn. The return reflects trust at call
-    /// time, so callers re-check after the user responds.
     @MainActor
     @discardableResult
     public static func requestScreenRecordingAccess() -> Bool {
@@ -177,12 +152,9 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
         #endif
     }
 
-    /// Explicit-intent preflight kept for callers that already prompt on toggle.
-    ///
-    /// Why not use this mid-turn: it presents the sanctioned system prompt,
-    /// which steals focus from the autonomous turn. The capture path uses the
-    /// silent check instead; call this only when the operator has just asked
-    /// for desktop access.
+    /// Explicit-intent preflight kept for callers that already prompt on toggle. The capture path
+    /// uses the silent check instead; call this only when the operator has just asked for desktop
+    /// access.
     @MainActor
     public static func preflightScreenRecording() -> Bool {
         requestScreenRecordingAccess()
@@ -193,11 +165,8 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
         maxDimension: Int,
         jpegQuality: Double
     ) async throws -> DesktopCaptureResult {
-        // Fail closed before touching shareable content so a denied
-        // install surfaces the permission error instead of an empty capture.
-        // The injected gate stays silent mid-turn; explicit intent uses the
-        // requesting variant instead. Checked before the platform gate so
-        // the denial is testable even where capture is unsupported.
+        // Fail closed before touching shareable content so a denied install surfaces the permission
+        // error instead of an empty capture.
         guard await screenRecordingAccess() else {
             throw DesktopCaptureError.screenRecordingPermissionDenied
         }
@@ -242,10 +211,8 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
         maxDimension: Int,
         jpegQuality: Double
     ) async throws -> DesktopCaptureResult {
-        // Same fail-closed silent gate as the display path so a denied
-        // window capture maps to the permission error, not a missing window.
-        // Checked before the platform gate so the denial stays testable
-        // where window capture is unsupported.
+        // Same fail-closed silent gate as the display path so a denied window capture maps to the
+        // permission error, not a missing window.
         guard await screenRecordingAccess() else {
             throw DesktopCaptureError.screenRecordingPermissionDenied
         }
@@ -294,11 +261,9 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
     }
 
     public func listWindows() async throws -> [DesktopWindowInfo] {
-        // A denial throws instead of returning an empty list so callers can
-        // distinguish "no windows" from "no permission"; an empty result
-        // would otherwise read as a successful scan of a bare desktop.
-        // The silent gate keeps this dialog-free mid-turn; explicit intent
-        // uses the requesting variant instead.
+        // A denial throws instead of returning an empty list so callers can distinguish "no
+        // windows" from "no permission"; an empty result would otherwise read as a successful scan
+        // of a bare desktop.
         guard await screenRecordingAccess() else {
             throw DesktopCaptureError.screenRecordingPermissionDenied
         }
@@ -321,10 +286,9 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
                     )
                 }
             } catch {
-                // Shareable-content failures under a granted preflight still
-                // mean the capture gate refused; surface the permission error
-                // so the turn explains how to unblock instead of implying
-                // the desktop simply has no windows.
+                // Shareable-content failures under a granted preflight still mean the capture gate
+                // refused; surface the permission error so the turn explains how to unblock instead
+                // of implying the desktop simply has no windows.
                 throw DesktopCaptureError.screenRecordingPermissionDenied
             }
         #else

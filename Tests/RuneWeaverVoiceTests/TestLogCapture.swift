@@ -1,33 +1,11 @@
 // Rune Weaver Voice Tests — Test-only swift-log capture bootstrap.
-//
-// This target's suites drive voice pipeline paths whose underlying engine
-// layers can emit warning- and error-level fail-soft events through the
-// centralized RuneWeaverLog loggers. Left
-// unrouted, the swift-log default handler mirrors those events to the
-// console, which breaks the contract that a captured test run contains zero
-// warning/error lines. This file installs a test-only handler that records
-// every event in memory instead of printing it, so behavioral assertions can
-// consult the captured store while the console stays silent. Installation
-// runs from a Swift Testing trait's preparation step, which the library
-// invokes after discovering all tests and their traits and before it begins
-// to run any of them: strictly earlier than the first touch of any lazy
-// Logger static initializer, because those are only reached from test bodies.
-// One process hosts exactly one test bundle here, so the one-shot global
-// bootstrap is claimed once by whichever installation lands first.
 
 import Foundation
 import Logging
 import os
 import Testing
 
-/// Pins the unqualified name `Logger` to the swift-log type. This file must
-/// import `os` for `OSAllocatedUnfairLock`, and that module exports its own
-/// `Logger`, so without this binding every `Logger` spelling below would be
-/// ambiguous between the two imports. Aliasing once keeps the handler
-/// conformance and the Record API in their natural spelling instead of
-/// forcing `Logging.` qualifications at every use site; no other file in the
-/// test targets references `Logger`, so the binding cannot steer a sibling
-/// file's name lookup.
+/// Pins the unqualified name `Logger` to the swift-log type.
 typealias Logger = Logging.Logger
 
 /// In-memory capture store plus the one-shot global logging bootstrap.
@@ -44,10 +22,9 @@ enum TestLogCapture {
         let source: String
     }
 
-    /// Lock-protected record list shared by every handler instance.
-    ///
-    /// swift-log requires handlers to be value types, so the process-wide
-    /// store must live behind a reference that handler copies share.
+    /// Lock-protected record list shared by every handler instance. swift-log requires handlers to
+    /// be value types, so the process-wide store must live behind a reference that handler copies
+    /// share.
     private final class Sink: Sendable {
         private let state = OSAllocatedUnfairLock(initialState: [Record]())
 
@@ -62,11 +39,9 @@ enum TestLogCapture {
 
     private static let sink = Sink()
 
-    /// Claim-or-skip latch for the one-shot bootstrap. swift-log traps when
-    /// `bootstrap` runs twice in one process, so the first `install()` claims
-    /// the latch and every later call collapses to a no-op. The bootstrap
-    /// happens under the latch so a losing call can never observe "claimed"
-    /// before the winning call has finished installing the factory.
+    /// Claim-or-skip latch for the one-shot bootstrap. swift-log traps when `bootstrap` runs twice
+    /// in one process, so the first `install()` claims the latch and every later call collapses to a
+    /// no-op.
     private static let installGuard = OSAllocatedUnfairLock(initialState: false)
 
     /// Installs the capture handler as the process-wide log factory.
@@ -126,11 +101,6 @@ enum TestLogCapture {
 }
 
 /// Suite trait that performs the capture installation during preparation.
-///
-/// `prepare(for:)` is the earliest public hook the testing library offers:
-/// it is invoked after all tests and their traits are discovered and before
-/// any test body runs, which is the window in which a global bootstrap is
-/// still guaranteed to precede every lazy Logger creation in this process.
 struct TestLogCaptureBootstrap: SuiteTrait {
     func prepare(for _: Test) async throws {
         TestLogCapture.install()

@@ -1,19 +1,4 @@
 // Rune Weaver Tools Tests — name-shaped recipients for messages.search and messages.read.
-//
-// Purpose: pin the shared name-routing path on the read-only Messages tools. A
-// name resolves to every candidate handle (deduped, ranked order), the gateway
-// is queried once per handle, and the merged rows are deduped by id, sorted
-// newest first, and capped to the request limit — with read reversing the capped
-// set back to its chronological contract. Also pins the fail-closed zero-match
-// note, ambiguity fan-out with no `resolvedRecipient`, and exact passthrough for
-// handle- and chatId-shaped inputs.
-//
-// Scope: hermetic tool-level tests over `StubMessagesGateway` and
-// `StubMessagesRecipientResolver`; nothing here touches Contacts or `chat.db`.
-//
-// Architectural role: guards the contract that lets one typed name read the
-// same conversation a handle would, without guessing identity when the resolver
-// reports ambiguity.
 
 import Foundation
 @testable import RuneWeaverCore

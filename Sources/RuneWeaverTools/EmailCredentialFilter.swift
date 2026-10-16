@@ -1,13 +1,4 @@
 // Rune Weaver Tools — Deterministic credential filter for agent-visible mail.
-//
-// Scans subjects and bodies for one-time codes, magic sign-in links, and
-// password-reset links without any model call, so the agent can never be
-// steered into reading or exfiltrating a credential. Senders stay visible so
-// the agent knows what arrived; link URLs and code values redact in both the
-// subject and the body of the agent-visible copy. The human inbox is untouched
-// — the filter applies at the envelope boundary where tool output is built and
-// at the index gateway where mail is ingested, so search recall cannot
-// resurrect a redacted link.
 
 import Foundation
 
@@ -32,11 +23,7 @@ public struct EmailCredentialVerdict: Sendable, Equatable {
     /// Redacted subject for `credentialBearing`, nil otherwise.
     public let redactedSubject: String?
 
-    /// Creates a verdict.
-    /// - Parameters:
-    ///   - level: Severity of the finding.
-    ///   - redactedBody: Redacted body when redaction applies, nil otherwise.
-    ///   - redactedSubject: Redacted subject when redaction applies, nil otherwise.
+    /// Creates a verdict. level: Severity of the finding.
     public init(level: EmailCredentialLevel, redactedBody: String? = nil, redactedSubject: String? = nil) {
         self.level = level
         self.redactedBody = redactedBody
@@ -53,23 +40,14 @@ public struct EmailCredentialVerdict: Sendable, Equatable {
         EmailCredentialVerdict(level: .none, redactedBody: nil)
     }
 
-    /// Redacted verdict for a definite credential.
-    /// - Parameters:
-    ///   - redactedBody: Body with links and codes replaced.
-    ///   - redactedSubject: Subject with links and codes replaced.
+    /// Redacted verdict for a definite credential. redactedBody: Body with links
+    /// and codes replaced.
     public static func credentialBearing(redactedBody: String, redactedSubject: String? = nil) -> EmailCredentialVerdict {
         EmailCredentialVerdict(level: .credentialBearing, redactedBody: redactedBody, redactedSubject: redactedSubject)
     }
 }
 
 /// Deterministic, model-free scanner keeping credentials out of agent context.
-///
-/// Heuristics stay deliberately narrow: a bare number is never enough, and a
-/// bare keyword without an artifact stays `suspicious` so dates, prices, and
-/// years never redact. Only the co-occurrence of a code keyword with nearby
-/// digits, or a reset/magic phrase or URL-path marker, reaches
-/// `credentialBearing`. Matching is case-insensitive and scheme-agnostic so
-/// `HTTP`, `www.`, and bare-domain links classify the same.
 public enum EmailCredentialFilter: Sendable {
     /// Placeholder replacing every link URL in a redacted body.
     public static let redactedLinkPlaceholder = "[redacted credential link]"
@@ -81,10 +59,7 @@ public enum EmailCredentialFilter: Sendable {
     public static let codeWindowRadius = 120
 
     /// Assesses one message, returning the redacted subject and body when definite.
-    /// - Parameters:
-    ///   - subject: Decoded `Subject` header, redacted when the verdict is definite.
-    ///   - body: Decoded plain-text body (or snippet) to scan.
-    /// - Returns: Verdict with redacted forms set only for `credentialBearing`.
+    /// subject: Decoded `Subject` header, redacted when the verdict is definite.
     public static func assess(subject: String, body: String) -> EmailCredentialVerdict {
         let combinedLower = (subject + "\n" + body).lowercased()
         if codeIsCredentialBearing(subject: subject, body: body) {
@@ -105,12 +80,8 @@ public enum EmailCredentialFilter: Sendable {
         return .none
     }
 
-    /// Returns the agent-visible subject, redacting only when definite.
-    /// - Parameters:
-    ///   - subject: Original subject, possibly carrying a code or link.
-    ///   - body: Original body giving keyword context for windowed codes.
-    ///   - enabled: False passes through byte-identically (config off-switch).
-    /// - Returns: Redacted subject, or the input verbatim.
+    /// Returns the agent-visible subject, redacting only when definite. subject:
+    /// Original subject, possibly carrying a code or link.
     public static func agentVisibleSubject(subject: String, body: String, enabled: Bool) -> String {
         guard enabled else { return subject }
         let verdict = assess(subject: subject, body: body)
@@ -118,12 +89,8 @@ public enum EmailCredentialFilter: Sendable {
         return redacted
     }
 
-    /// Returns the agent-visible body, redacting only when definite.
-    /// - Parameters:
-    ///   - subject: Message subject giving keyword context for windowed codes.
-    ///   - body: Original body.
-    ///   - enabled: False passes through byte-identically (config off-switch).
-    /// - Returns: Redacted body, or the input verbatim.
+    /// Returns the agent-visible body, redacting only when definite. subject:
+    /// Message subject giving keyword context for windowed codes.
     public static func agentVisibleBody(subject: String, body: String, enabled: Bool) -> String {
         guard enabled else { return body }
         let verdict = assess(subject: subject, body: body)
@@ -131,25 +98,13 @@ public enum EmailCredentialFilter: Sendable {
         return redacted
     }
 
-    /// Returns the agent-visible snippet, redacting only when definite.
-    /// - Parameters:
-    ///   - subject: Message subject giving keyword context.
-    ///   - snippet: Search-hit snippet to scan.
-    ///   - enabled: False passes through byte-identically.
-    /// - Returns: Redacted snippet, or the input verbatim.
+    /// Returns the agent-visible snippet, redacting only when definite. subject:
+    /// Message subject giving keyword context.
     public static func agentVisibleSnippet(subject: String, snippet: String, enabled: Bool) -> String {
         agentVisibleBody(subject: subject, body: snippet, enabled: enabled)
     }
 
     /// Applies the credential filter to one agent-visible value.
-    /// Single-sources the `guard enabled else return self` plus verbatim-copy
-    /// pass-through so the four envelope `agentVisible` shapes cannot drift on
-    /// disabled versus non-bearing behavior.
-    /// - Parameters:
-    ///   - enabled: False passes through byte-identically.
-    ///   - original: Value to filter.
-    ///   - transform: Filtered copy builder, run only when enabled.
-    /// - Returns: Filtered copy, or the original when disabled or unchanged.
     public static func applyFilter<T: Equatable>(enabled: Bool, original: T, transform: () -> T) -> T {
         guard enabled else { return original }
         let filtered = transform()
@@ -157,29 +112,12 @@ public enum EmailCredentialFilter: Sendable {
     }
 
     /// Redacts every link URL and windowed code in a definite body.
-    ///
-    /// Links go first so digits inside a token URL leave with the URL instead
-    /// of double-redacting; codes are then re-licensed against the surviving
-    /// text so only keyword-adjacent numbers are replaced.
-    /// - Parameters:
-    ///   - subject: Message subject for code keyword context.
-    ///   - body: Original body.
-    /// - Returns: Body with placeholders in place of links and codes.
     public static func redactedAgentBody(subject: String, body: String) -> String {
         let withoutLinks = redactURLs(in: body)
         return redactCredentialCodes(subject: subject, body: withoutLinks)
     }
 
     /// Redacts every link URL and windowed code in a definite subject.
-    ///
-    /// Mirrors the body path so a code carried by the subject alone (for
-    /// example `Your verification code is 482913`) cannot persist verbatim
-    /// while the body redacts. Links strip first so token digits leave with
-    /// the URL; codes then re-license against the surviving text.
-    /// - Parameters:
-    ///   - subject: Original subject.
-    ///   - body: Original body giving keyword context for windowed codes.
-    /// - Returns: Subject with placeholders in place of links and codes.
     public static func redactedAgentSubject(subject: String, body: String) -> String {
         let withoutLinks = redactURLs(in: subject)
         return redactSubjectCodes(subject: withoutLinks, body: body)
@@ -260,10 +198,6 @@ extension EmailCredentialFilter {
     }
 
     /// Whether a 4–8 digit run sits near a code keyword in the combined text.
-    ///
-    /// The subject joins the window so a subject like "Your verification code"
-    /// licenses a code at the top of the body, while a year or price pages
-    /// away from any keyword never qualifies.
     fileprivate static func codeIsCredentialBearing(subject: String, body: String) -> Bool {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString
@@ -282,9 +216,6 @@ extension EmailCredentialFilter {
     }
 
     /// All one-time-code candidate ranges in one text.
-    ///
-    /// Covers contiguous 4–8 digits plus the common spaced/dashed 3–3 split
-    /// ("123 456", "123-456") so formatted codes classify like compact ones.
     fileprivate static func allCodeRanges(in text: String) -> [NSRange] {
         let nsText = text as NSString
         var ranges: [NSRange] = []
@@ -308,12 +239,9 @@ extension EmailCredentialFilter {
         CharacterSet(charactersIn: ".,;:!?)'\"")
     }
 
-    /// Replaces every link URL with the link placeholder.
-    ///
-    /// Matches `https?://`, `www.`, and bare-domain links so a credential URL
-    /// without a scheme still redacts. Email addresses are skipped by checking
-    /// for a preceding `@`, since redacting the sender's address would only
-    /// obscure routing without removing any credential.
+    /// Replaces every link URL with the link placeholder. Email addresses are skipped by checking
+    /// for a preceding `@`, since redacting the sender's address would only obscure routing without
+    /// removing any credential.
     fileprivate static func redactURLs(in text: String) -> String {
         let nsText = text as NSString
         guard let regex = try? NSRegularExpression(
@@ -346,10 +274,6 @@ extension EmailCredentialFilter {
     }
 
     /// Replaces only keyword-licensed codes, leaving dates and prices alone.
-    ///
-    /// Ranges are recomputed on the link-stripped body so digits that left
-    /// with a token URL are never considered, and replacement runs back to
-    /// front so earlier offsets stay valid as placeholders change the length.
     fileprivate static func redactCredentialCodes(subject: String, body: String) -> String {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString
@@ -373,12 +297,9 @@ extension EmailCredentialFilter {
         return mutable as String
     }
 
-    /// Replaces only keyword-licensed codes inside the subject, leaving dates alone.
-    ///
-    /// Ranges are recomputed on the link-stripped subject so digits that left
-    /// with a token URL are never considered. Licensing uses the combined
-    /// subject-plus-body window, so a keyword in either half can license a
-    /// subject code while an isolated year never qualifies.
+    /// Replaces only keyword-licensed codes inside the subject, leaving dates alone. Ranges are
+    /// recomputed on the link-stripped subject so digits that left with a token URL are never
+    /// considered.
     fileprivate static func redactSubjectCodes(subject: String, body: String) -> String {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString

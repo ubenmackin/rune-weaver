@@ -1,16 +1,9 @@
 // Rune Weaver Core — Document index configuration.
-//
-// Source toggles narrow what an enabled indexer may touch, roots/exclude
-// bound the file walk, and the remaining knobs cap per-item work and where the
-// index database lives. Secrets never appear here; the index stores content
-// and derived vectors only.
 
 import Foundation
 
-/// Source toggles narrow what an enabled indexer may touch, `roots`/`exclude`
-/// bound the file walk, and the remaining knobs cap per-item work and where the
-/// index database lives. Secrets never appear here; the index stores content
-/// and derived vectors only.
+/// Source toggles narrow what an enabled indexer may touch, `roots`/`exclude` bound the file walk,
+/// and the remaining knobs cap per-item work and where the index database lives.
 public struct IndexConfig: Sendable, Codable, Equatable {
     /// Whether the background indexer runs at all. Defaults to off.
     public var enabled: Bool
@@ -46,10 +39,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// Indexing effort preset: `light`, `balanced`, `performance`, or `custom`.
     /// Defaults to `balanced` so stock installs stay cool and responsive.
     public var effort: String
-    /// Explicit worker count for the `custom` effort preset. `0` means derive
-    /// from the preset; non-custom presets must leave this at `0`. Custom
-    /// counts validate against a static 1...64 ceiling and clamp to the live
-    /// core count at resolve time.
+    /// Explicit worker count for the `custom` effort preset. `0` means derive from the preset;
+    /// non-custom presets must leave this at `0`.
     public var workers: Int
     /// Whether indexing backs off when the system reports thermal pressure.
     /// Defaults to on so stock installs stay cool under sustained load.
@@ -62,15 +53,9 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// beyond the cap stay keyword-only.
     public var maxVectorChunksPerDocument: Int
     /// Glob patterns for mailboxes the mail indexer skips without dialing.
-    /// Defaults to Trash-class mailboxes so transient deletes never enter the
-    /// index; denied mailboxes retire on the next complete run and re-index
-    /// from scratch when re-allowed.
     public var mailboxDeny: [String]
-    /// Directory and file names the files walker always skips, even when they
-    /// are absent from `exclude`. Read-only: always populated from the walker's
-    /// prune list (`FilesIndexer.alwaysSkippedPatterns`) so the dashboard copy
-    /// cannot drift from what is actually pruned. The `[files]` deny patterns
-    /// stay out of this list and are described generically in the UI.
+    /// Directory and file names the files walker always skips, even when they are absent from
+    /// `exclude`.
     public let alwaysSkipped: [String]
 
     /// Default file source toggle.
@@ -86,16 +71,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// Default file roots (home directory).
     public static let defaultRoots = ["~"]
     /// Default exclude patterns skipped during a file scan.
-    ///
-    /// The visible, editable list that seeds the Index Policy "Exclude patterns"
-    /// editor: ordinary globs the owner can read and change. Machine-output
-    /// files (`*.log`, `*.tmp`, `.DS_Store`) and package-manager, build, model,
-    /// and agent tool caches ship here so a fresh index skips them. Distinct from
-    /// `FilesIndexer.alwaysSkippedPatterns`: the walker's traversal-safety entries
-    /// (`Music`, `Pictures`, `Movies`, `Library`,
-    /// `.Trash`, `.runeweaver`, `.git`, `node_modules`, `DerivedData`,
-    /// `__pycache__`, `.venv`) are applied unconditionally outside this list and
-    /// cannot be removed by configuration.
     public static let defaultExcludePatterns = [
         ".build",
         "*.app",
@@ -157,10 +132,7 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     public static let allowedEfforts = ["light", "balanced", "performance", "custom"]
     /// Default `workers` value (`0` means derive from the effort preset).
     public static let defaultWorkers = 0
-    /// Static ceiling for a `custom` worker count. Validation uses this fixed
-    /// bound so the same file loads on a laptop and a studio machine;
-    /// resolution clamps to the live core count, so a large-but-valid count
-    /// never oversubscribes the current hardware.
+    /// Static ceiling for a `custom` worker count.
     public static let maxAllowedWorkers = 64
     /// Default `thermal_backoff` value.
     public static let defaultThermalBackoff = true
@@ -172,10 +144,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// from admitting an unbounded embedding batch per document.
     public static let maxAllowedVectorChunksPerDocument = 4096
     /// Default Trash-class mailbox denylist.
-    ///
-    /// Trash-like mail is transient by nature, so a fresh install skips it
-    /// without dialing; clearing the list opts back into indexing every
-    /// mailbox.
     public static let defaultMailboxDeny = ["Trash", "Junk", "Spam", "Deleted*"]
 
     /// Creates an index config.
@@ -307,16 +275,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     }
 
     /// Resolves the effort preset to a concrete worker count for a core count.
-    ///
-    /// `light` pins one worker, `balanced` takes half the cores up to four,
-    /// `performance` takes all but one core, and `custom` clamps the stored
-    /// count into 1...64 and then to the available cores so a value carried
-    /// over from a larger machine never oversubscribes this one. `balanced` is
-    /// an explicit case; unknown strings bypassing `validate()` fall back to
-    /// the balanced formula as a defensive default so a typo degrades to the
-    /// stock preset instead of oversubscribing.
-    /// - Parameter cores: Logical core count to resolve against.
-    /// - Returns: Deterministic worker count for the given core count.
     public func resolvedWorkerCount(cores: Int) -> Int {
         let safeCores = max(1, cores)
         switch effort {

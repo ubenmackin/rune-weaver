@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the shared Keychain secret modal.
-//
-// Purpose: Pins the single owner behind every in-pane secret Set and Update:
-// one header naming the key, Keychain-scoped copy that never echoes secret
-// bytes, prefix-tolerant key normalization, and a guarded submit path that
-// reports empty, oversize, and transport failures honestly while staying
-// inert under Escape and backdrop dismissal mid-flight.
-// Scope: Header, scope copy, and dialog role, normalizeSecretKey vectors, the
-// empty-trim guard with no request, the 413 size message, success clearing
-// plus onSuccess, and mid-flight dismissal guards only; wire shapes stay with
-// the api client suite and row badges stay with the pane suite.
-// Architectural role: Guards the only dashboard surface that carries secret
-// bytes, so every entry point stores through one validated modal instead of
-// drifting per-tab copies that could log, persist, or replay a value.
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -87,10 +74,8 @@ describe("StoreSecretModal", () => {
     const user = userEvent.setup();
     renderModal({ onSuccess });
 
-    // Whitespace-only keeps the named save disabled, so the form submits
-    // directly to prove the trim guard reports before any request exists.
-    // The dialog aria-label also contains "secret", so the input is pinned
-    // by test id to avoid matching the dialog wrapper.
+    // Whitespace-only keeps the named save disabled, so the form submits directly to prove the trim
+    // guard reports before any request exists.
     const secretInput = screen.getByTestId("secret-value-input");
     const form = secretInput.closest("form");
     expect(form).not.toBeNull();

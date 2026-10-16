@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Ephemeral session-trust chip for chat and the approvals inbox.
-//
-// Purpose: render the live ephemeral trust one session still carries — the
-// gate's thisTime, forTask, and forSession grants plus the egress supervisor's
-// session and one-shot domain allowances — as one compact line per trust, each
-// with its own Revoke.
-// Scope: mounts beside an owning session id and refetches on mount, on
-// approval-family frames, on access-rule changes, and on a 30-second poll.
-// Empty trust renders nothing, so a fresh or unattributed session stays silent.
-// Architectural role: the only surface that lists ephemeral grants; durable
-// standing rules live in Settings → Access and never enter this chip.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -27,10 +17,9 @@ import { normalizeSessionID } from "../approvalsSession";
 // the poll only keeps a long-lived tab honest while the socket is quiet.
 const POLL_INTERVAL_MS = 30_000;
 
-// Frame families that can change one session's ephemeral trust: a fresh
-// approval request, its decided broadcast, and any durable-rule write, because
-// a decision with a dated tier mints a rule while the ephemeral tiers land in
-// the session tables this chip reads.
+// Frame families that can change one session's ephemeral trust: a fresh approval request, its
+// decided broadcast, and any durable-rule write, because a decision with a dated tier mints a rule
+// while the ephemeral tiers land in the session tables this chip reads.
 const TRUST_FRAME_TYPES = new Set([
   "approval",
   "approval_decided",

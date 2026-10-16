@@ -1,27 +1,4 @@
 // Rune Weaver App Tests — Permissions onboarding store, gate, and mappings.
-//
-// Pins the first-run contract without touching real TCC state: the completion
-// flag round-trips through an isolated defaults suite, the auto-open gate
-// respects token posture, every pure status mapping matches the platform
-// truth table, and every status maps to its row affordance. Live probes are
-// deliberately absent here so the suite never prompts for Contacts,
-// Automation, or Full Disk Access on the machine running it.
-//
-// Scope: store persistence with injected suites, the four-row gate table,
-// contacts including limited, accessibility and screen recording booleans,
-// Full Disk Access success versus denial versus environmental failure,
-// Automation across its documented OSStatus outcomes, and the
-// action-for-status table.
-// Shared Contract:
-// - Store key round-trips completion across instances sharing one suite.
-// - shouldAutoOpen is true only when no token is needed and onboarding is incomplete.
-// - Contacts: authorized grants; denied, restricted, and limited deny; notDetermined stays unasked.
-// - Accessibility and Screen Recording: true grants, false stays unasked.
-// - Full Disk Access: success grants; permissionDenied denies; any other error is unavailable.
-// - Automation: noErr grants; -1743 denies; -1744 stays unasked; -600 defers; anything else is unavailable.
-// - Actions: granted and deferred need nothing; notDetermined enables; denied and unavailable open Settings.
-// Owner: Sources/RuneWeaverApp/PermissionTypes.swift mappings plus
-// Sources/RuneWeaverApp/PermissionsOnboardingStore.swift persistence.
 
 import Contacts
 import Foundation
@@ -86,10 +63,8 @@ struct PermissionsOnboardingStoreTests {
         // so they read denied rather than unasked.
         #expect(PermissionStatusMapping.contacts(.denied) == .denied)
         #expect(PermissionStatusMapping.contacts(.restricted) == .denied)
-        // Limited still withholds arbitrary lookups the send path needs, so
-        // it denies instead of claiming a usable grant. Raw value 4 matches
-        // limited where the symbol is unavailable, keeping the denied reading
-        // pinned on every platform.
+        // Limited still withholds arbitrary lookups the send path needs, so it denies instead of
+        // claiming a usable grant.
         let limited = try #require(CNAuthorizationStatus(rawValue: 4))
         #expect(PermissionStatusMapping.contacts(limited) == .denied)
         // Untouched prompt keeps the Enable affordance.

@@ -117,13 +117,8 @@ public actor EpisodeStore {
         }
     }
 
-    /// Every episode across all sessions in canonical verification order.
-    ///
-    /// Chronological sequence with a stable identifier tie-break: the
-    /// sovereign verifier recomputes the ledger hash chain in exactly this
-    /// order, so the canonical sort — not insertion chance — is what makes a
-    /// re-verification reproducible. The read is uncapped; the verification
-    /// bounds live on the sovereign copy, not on the primary read.
+    /// Every episode across all sessions in canonical verification order. The read is uncapped; the
+    /// verification bounds live on the sovereign copy, not on the primary read.
     public func orderedEpisodesForVerification() async throws -> [Episode] {
         let dbPath = self.dbPath
         return try await SQLiteSerialIO.run {
@@ -188,12 +183,6 @@ public actor EpisodeStore {
     }
 
     /// Atomically counts then deletes all episodes in one store operation.
-    ///
-    /// `SELECT COUNT(*)` and `DELETE FROM episodes` run in one `BEGIN IMMEDIATE`/
-    /// `COMMIT` transaction inside one `SQLiteSerialIO.run`, so a concurrent
-    /// `store`/`delete` on the same engine cannot interleave between the measure
-    /// and the delete and the returned count always names what was removed.
-    /// - Returns: Episode count measured in the same transaction before deleting.
     public func clearReturningCount() async throws -> Int {
         let dbPath = self.dbPath
         return try await SQLiteSerialIO.run {
@@ -442,9 +431,6 @@ enum EpisodeStoreIO {
         /// - Returns: Open database handle. Caller must close it.
         private static func open(dbPath: String) throws -> OpaquePointer? {
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
-            // Episodic FTS is a plain contentful table, so row removal uses a direct
-            // DELETE by rowid: the FTS5 'delete' command only serves external-content
-            // and contentless tables and fails on recent macOS SQLite.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: EpisodeStoreError.storeUnavailable)
             try SQLiteHelpers.exec(
                 handle: handle,
@@ -473,22 +459,13 @@ enum EpisodeStoreIO {
                 """,
                 failure: EpisodeStoreError.persistenceFailed
             )
-            // One-time repair for databases created with the earlier broken
-            // VALUES('delete', ...) triggers. Steady-state opens stay read-only
-            // (`IF NOT EXISTS` is a no-op once triggers exist) and idempotent
-            // cross-process; legacy bodies are replaced exactly once.
+            // One-time repair for databases created with the earlier broken VALUES('delete', ...)
+            // triggers.
             try repairLegacyTriggersIfNeeded(handle: handle)
             return handle
         }
 
         /// Replaces legacy FTS5 delete-command triggers exactly once.
-        ///
-        /// Probes `sqlite_master` (read-only) for the old `VALUES('delete', ...)`
-        /// trigger body and only rewrites `episodes_ad`/`episodes_au` when present,
-        /// so steady-state opens perform no schema write and concurrent serve +
-        /// CLI runners cannot interleave unconditional `DROP`/`CREATE` into a
-        /// `trigger already exists` failure.
-        /// - Parameter handle: Open database handle being migrated.
         private static func repairLegacyTriggersIfNeeded(handle: OpaquePointer?) throws {
             guard hasLegacyDeleteTrigger(handle: handle) else { return }
             try SQLiteHelpers.exec(
@@ -509,13 +486,6 @@ enum EpisodeStoreIO {
         }
 
         /// Whether `episodes_ad`/`episodes_au` still carry the legacy delete-command body.
-        ///
-        /// The broken triggers used the FTS5 `VALUES('delete', ...)` command syntax,
-        /// which fails on plain contentful tables; the repaired triggers contain no
-        /// quoted `'delete'` literal (only `DELETE FROM`), so a quoted-literal probe
-        /// distinguishes legacy from repaired without a schema write.
-        /// - Parameter handle: Open database handle to probe.
-        /// - Returns: True when a legacy trigger body is present.
         private static func hasLegacyDeleteTrigger(handle: OpaquePointer?) -> Bool {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(
@@ -634,9 +604,6 @@ enum EpisodeStoreIO {
         }
 
         /// Reads one session's episodes in insertion order.
-        ///
-        /// Row order preserves replay: turns return in the sequence they were
-        /// stored, so a reloaded session replays identically even when clocks collide.
         static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
             if let limit, limit <= 0 {
                 return []
@@ -669,10 +636,6 @@ enum EpisodeStoreIO {
         }
 
         /// Reads one session's newest episodes, oldest first with a stable identifier tie-break.
-        ///
-        /// The window selects the newest rows by timestamp then identifier so the
-        /// set matches the global newest-first contract; the returned order is
-        /// oldest first within that window for session replay.
         static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -703,9 +666,6 @@ enum EpisodeStoreIO {
         }
 
         /// Reads episodes at or before a cutoff in insertion order.
-        ///
-        /// Row order keeps compaction deterministic: sessions summarize the same
-        /// rows in the same sequence regardless of equal timestamps.
         static func episodes(olderThan: Date, dbPath: String) throws -> [Episode] {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
@@ -728,11 +688,8 @@ enum EpisodeStoreIO {
             return results
         }
 
-        /// Reads the newest episodes across all sessions, newest first with a stable identifier tie-break.
-        ///
-        /// Ordering by timestamp then identifier keeps repeated reads identical
-        /// and matches the engine-owned listing contract instead of leaving
-        /// equal timestamps to insertion chance.
+        /// Reads the newest episodes across all sessions, newest first with a stable identifier
+        /// tie-break.
         static func recent(dbPath: String, limit: Int) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -757,11 +714,6 @@ enum EpisodeStoreIO {
         }
 
         /// Every episode across all sessions in canonical verification order.
-        ///
-        /// Timestamp ascending with an identifier tie-break so equal
-        /// timestamps cannot reorder between reads: the sovereign chain hash
-        /// depends on this exact sequence, and a stable order is what makes
-        /// re-verification reproducible across processes and restarts.
         static func orderedAll(dbPath: String) throws -> [Episode] {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
@@ -783,12 +735,8 @@ enum EpisodeStoreIO {
             return results
         }
 
-        /// Full-text search over episode content (FTS5 with LIKE fallback).
-        ///
-        /// A dated window filters on `timestamp` before ranking: `since` is
-        /// inclusive and `until` is exclusive, so adjacent day windows tile
-        /// without overlap. Both the FTS5 path and the LIKE fallback carry
-        /// the same predicates so stemming gaps cannot dodge the window.
+        /// Full-text search over episode content (FTS5 with LIKE fallback). Both the FTS5 path and
+        /// the LIKE fallback carry the same predicates so stemming gaps cannot dodge the window.
         static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -1091,12 +1039,6 @@ enum EpisodeStoreIO {
         }
 
         /// Atomically counts then deletes all episodes in one transaction.
-        ///
-        /// `SELECT COUNT(*)` and `DELETE FROM episodes` run in one `BEGIN IMMEDIATE`/
-        /// `COMMIT` transaction on the already-open handle, so a concurrent writer in
-        /// another process cannot interleave between the measure and the delete.
-        /// - Parameter dbPath: SQLite file path.
-        /// - Returns: Episode count measured in the same transaction before deleting.
         static func clearReturningCount(dbPath: String) throws -> Int {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return 0 }

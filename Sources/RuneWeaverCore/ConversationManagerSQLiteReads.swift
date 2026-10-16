@@ -1,5 +1,4 @@
 // Rune Weaver Core — SQLite session read support for conversation persistence.
-// Decodes stored sessions and their ordered messages for the conversation manager.
 
 import Foundation
 
@@ -9,21 +8,15 @@ import Foundation
     /// Row decoding shared by full and single-session SQLite reads.
     enum SQLiteSessionReadSupport {
         /// Loads every session row without messages, preserving file order.
-        /// Databases whose link migrations have not landed carry no `goal_id`
-        /// or `parent_session_id` column; those rows decode as unlinked and
-        /// unparented instead of failing the read.
-        /// - Parameter handle: Open database handle.
-        /// - Returns: Sessions keyed by string identifier plus file order.
         static func loadAllSessions(
             handle: OpaquePointer?
         ) throws -> ([String: ConversationSession], [String]) {
             var sessionsByID: [String: ConversationSession] = [:]
             var order: [String] = []
             var statement: OpaquePointer?
-            // The probe keeps the projection honest when the additive migrations
-            // have not landed: selecting a missing column would fail the whole
-            // read, while appending each link column only when present keeps old
-            // indices stable and decodes absent links as nil.
+            // The probe keeps the projection honest when the additive migrations have not landed:
+            // selecting a missing column would fail the whole read, while appending each link column
+            // only when present keeps old indices stable and decodes absent links as nil.
             let sessionColumns = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
             let hasGoalID = sessionColumns.contains("goal_id")
             let hasParent = sessionColumns.contains("parent_session_id")
@@ -106,10 +99,9 @@ import Foundation
             }
         }
 
-        /// Loads one session row without messages.
-        /// A missing `goal_id` or `parent_session_id` column (pre-migration
-        /// database) decodes as unlinked and unparented rather than failing the
-        /// lookup.
+        /// Loads one session row without messages. A missing `goal_id` or `parent_session_id`
+        /// column (pre-migration database) decodes as unlinked and unparented rather than failing
+        /// the lookup.
         static func loadSingleSessionBase(
             handle: OpaquePointer?,
             sessionID: UUID
@@ -209,16 +201,8 @@ import Foundation
             let isArchived: Bool
         }
 
-        /// Decodes session field columns for one stepped row.
-        /// Link columns are only read when the projection includes them; older
-        /// tables decode as unlinked and unparented. Malformed link text
-        /// degrades to nil so one bad row cannot fail the whole history load.
-        /// - Parameters:
-        ///   - statement: Stepped statement positioned on a session row.
-        ///   - hasGoalID: Whether the projection selected the goal-link column.
-        ///   - hasParentLink: Whether the projection selected the parent-link column.
-        ///   - hasArchived: Whether the projection selected the is_archived column.
-        /// - Returns: Decoded session fields.
+        /// Decodes session field columns for one stepped row. Link columns are only read when the
+        /// projection includes them; older tables decode as unlinked and unparented.
         static func sessionFields(
             from statement: OpaquePointer?,
             hasGoalID: Bool = false,
@@ -275,12 +259,8 @@ import Foundation
             let exitCode: Int32?
         }
 
-        /// Decodes error-flag, timestamp, category, reasoning, and exit-code columns for one message row.
-        /// An absent or unrecognized category decodes to nil so legacy rows and future
-        /// values both fall back to the generic client badge instead of failing the read.
-        /// A NULL exit code stays nil so legacy rows never fabricate a status.
-        /// - Parameter statement: Stepped statement positioned on a message row.
-        /// - Returns: Decoded error flag, creation date, failure category, reasoning, and exit code.
+        /// Decodes error-flag, timestamp, category, reasoning, and exit-code columns for one
+        /// message row.
         static func messageOutcome(from statement: OpaquePointer?) -> MessageOutcome {
             let isError: Bool? = if sqlite3_column_type(statement, 5) == SQLITE_NULL {
                 nil

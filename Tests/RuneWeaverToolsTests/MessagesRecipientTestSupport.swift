@@ -1,18 +1,4 @@
 // Rune Weaver Tools Tests — Shared lock-backed doubles for recipient resolution.
-//
-// Purpose: every Messages tool suite that resolves a recipient — the
-// resolveRecipient tool itself plus the send-flow integration that consumes the
-// resolver and records aliases — needs the same hermetic doubles. This file owns
-// them once so each suite seeds resolutions and aliases instead of reaching for
-// Contacts, the Messages database, or durable alias storage.
-//
-// Scope: in-memory stubs only. Both doubles are lock-backed, matching
-// `StubMessagesGateway`, so a test may hand them across `@Sendable` tool
-// boundaries and read recorded calls after execution without a data race.
-//
-// Architectural role: the test-side implementations of the
-// `MessagesRecipientResolving` and `MessageAliasStoring` seams; no production
-// path depends on this file.
 
 import Foundation
 import os

@@ -1,16 +1,4 @@
 // Rune Weaver App — Native macOS Permissions Window Controller.
-//
-// Purpose: Presents the first-run and on-demand Permissions checklist from the
-// menu-bar app in a native window, without opening Terminal or the dashboard,
-// while keeping consent prompts behind explicit Enable presses in the hosted view.
-// Scope: One retained NSWindow hosting the SwiftUI PermissionsView, shared
-// through the singleton and re-rooted with a fresh view model on every show so
-// row state stays live; frame persistence plus centering fallback plus
-// activation ride the shared single-instance helper.
-// Architectural role: Keeps AppKit window lifecycle (creation, autosave,
-// delegate retention for fast re-opening, completion marking on close) separate
-// from the SwiftUI checklist content, so the menu model stays the sole owner of
-// onboarding completion and live TCC reads never escape the view model.
 
 import AppKit
 import Foundation

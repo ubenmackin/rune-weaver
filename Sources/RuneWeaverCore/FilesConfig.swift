@@ -1,26 +1,10 @@
 // Rune Weaver Core — Files tool access policy (`[files]`).
-//
-// Purpose: single source for the file-tool access policy backing reads and
-// writes — deny patterns, allow roots, the forced write posture, and the
-// per-path write rules — plus their TOML/JSON decoding and defaults.
-// Scope: plain value types only; glob matching, path canonicalization, and
-// precedence evaluation live with `SharedGlobMatching`, `FilesAccessGuard`,
-// and `WritePathPolicy`. Architectural role: the `[files]` section shape
-// shared by config load, the settings routes, the file tools, and the CLI.
-// The engine-owned protected patterns are not duplicated here: they live with
-// `WritePathPolicy.alwaysDenyPatterns`, the single list both the read guard
-// and the write policy union in.
 
 import Foundation
 
-/// Write posture for the `files.write` tool.
-///
-/// `model` keeps per-call mode selection, so an omitted call mode means staged
-/// review; `staged` and `live` force every write through that posture even when
-/// the call asks for the other mode, because the durable owner setting
-/// outranks a model-authored request. A forced write is never rejected for
-/// contradicting the setting — it proceeds in the forced mode and names the
-/// override in its envelope so the outcome stays honest.
+/// Write posture for the `files.write` tool. A forced write is never rejected for contradicting the
+/// setting — it proceeds in the forced mode and names the override in its envelope so the outcome
+/// stays honest.
 public enum FilesWriteMode: String, Sendable, Codable, Equatable, CaseIterable {
     /// The agent picks per call; an omitted call mode stages for review.
     case model
@@ -31,11 +15,6 @@ public enum FilesWriteMode: String, Sendable, Codable, Equatable, CaseIterable {
 }
 
 /// Per-path write posture from a `[[files.write_paths]]` entry.
-///
-/// The closed set keeps the policy vocabulary aligned with the write-path
-/// precedence contract: `stage` and `live` execute the tool with no approval
-/// request filed, `ask` parks an approval request, and `deny` refuses the
-/// write outright.
 public enum FilesWritePathPosture: String, Sendable, Codable, Equatable, CaseIterable {
     /// Applies the write live with a `.rune_backup_` rollback copy.
     case live
@@ -47,12 +26,7 @@ public enum FilesWritePathPosture: String, Sendable, Codable, Equatable, CaseIte
     case deny
 }
 
-/// One `[[files.write_paths]]` entry: a path and the posture a matching
-/// write takes.
-///
-/// A rule outranks the global `write_mode` for the paths it covers, and the
-/// longest matching rule wins, so a broad `~/Documents` stage rule can be
-/// narrowed by a deeper `~/Documents/Secrets` deny rule.
+/// One `[[files.write_paths]]` entry: a path and the posture a matching write takes.
 public struct FilesWritePathRule: Sendable, Equatable, Codable {
     /// Path the rule covers (`~` expands to home); descendants match too.
     public var path: String

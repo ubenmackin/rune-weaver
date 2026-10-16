@@ -1,34 +1,10 @@
 // Rune Weaver Core — Concrete index source stages for the coordinator.
-//
-// Builds the files, mail, and Messages stages the `IndexCoordinator`
-// sequences in canonical run order. Each factory adapts its concrete indexer
-// into an `IndexClosureStage` so the coordinator stays transport-agnostic and
-// cancellation reaches the in-flight files indexer through a small actor box.
 
 import Foundation
 
 extension IndexClosureStage {
-    /// Builds the files stage over the shared document store.
-    ///
-    /// Live selection re-derives every run via `IndexSourceKind.isEnabled(in:)`
-    /// from the run-policy snapshot, so both selection and every per-run value
-    /// (roots, excludes, caps, effort, workers, windows) track saves with no
-    /// rebuild. The `isEnabled` flag captured at build time is diagnostics
-    /// only and never gates a run. A fresh indexer is built per run against
-    /// that snapshot and kept in a small actor box so
-    /// cancellation can reach it; the boot-time config never leaks into the
-    /// run.
-    /// - Parameters:
-    ///   - config: Index policy snapshot used only for the build-time diagnostics flag.
-    ///   - store: Document store the run writes into.
-    ///   - extractor: Text extractor for candidate files.
-    ///   - embedder: Embeddings backend, or nil for keyword-only.
-    ///   - makeEmbeddingsBackend: Per-slot backend factory for the run's pool, or nil to share `embedder`.
-    ///   - accessGuard: Path policy consulted before opening a candidate.
-    ///   - vectorPolicy: Which extracted documents are vectorized.
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    ///   - nowProvider: Monotonic instant source for the walk.
-    /// - Returns: A files source stage.
+    /// Builds the files stage over the shared document store. The `isEnabled` flag captured at
+    /// build time is diagnostics only and never gates a run.
     public static func files(
         config: IndexConfig,
         store: DocIndexStore,
@@ -46,10 +22,9 @@ extension IndexClosureStage {
             isEnabled: config.enabled && config.files,
             onCancel: { await box.cancel() },
             body: { policy, reporter, _ in
-                // Pool sizing tracks the live run snapshot so a settings save
-                // between boots still fans the next pass correctly; the shared
-                // recall embedder stays out of the pool and remains the
-                // keyword fallback when the factory yields nothing.
+                // Pool sizing tracks the live run snapshot so a settings save between boots still
+                // fans the next pass correctly; the shared recall embedder stays out of the pool and
+                // remains the keyword fallback when the factory yields nothing.
                 let workerCount = policy.resolvedWorkerCount()
                 var embeddingsPool: EmbeddingsBackendPool?
                 // Single-worker runs stay sequential and never consult the
@@ -100,23 +75,8 @@ extension IndexClosureStage {
         )
     }
 
-    /// Builds the mail stage over the shared document store.
-    ///
-    /// Boot-time selection comes from `config`; the indexer itself is built
-    /// per run from the coordinator-supplied snapshot so caps, budgets, and
-    /// the vector window track saves without rebuilt stages.
-    /// - Parameters:
-    ///   - config: Index policy snapshot used only for boot-time selection.
-    ///   - emailConfig: Configured mail accounts.
-    ///   - gateway: Read-only IMAP gateway seam.
-    ///   - store: Document store the run writes into.
-    ///   - embedder: Optional embeddings backend for vector-eligible mail.
-    ///   - extractor: Text extractor shared with the rest of the pipeline.
-    ///   - checkpoints: Incremental watermark and dedupe store.
-    ///   - stagingRoot: Test-injectable staging root; nil uses confined temp.
-    ///   - secrets: Secrets manager resolving account passwords.
-    ///   - now: Clock seam for the vector window.
-    /// - Returns: A mail source stage.
+    /// Builds the mail stage over the shared document store. config: Index policy
+    /// snapshot used only for boot-time selection.
     public static func mail(
         config: IndexConfig,
         emailConfig: EmailConfig,
@@ -159,23 +119,8 @@ extension IndexClosureStage {
         }
     }
 
-    /// Builds the Apple Messages stage over the shared document store.
-    ///
-    /// The reader itself carries no policy knobs, so the body honors the
-    /// per-run snapshot as an enablement gate: live selection re-derives every
-    /// run via `IndexSourceKind.isEnabled(in:)`, so a source turned on after
-    /// boot runs on the next pass and a source turned off after boot is
-    /// filtered before the body runs. The body guard below remains only as
-    /// defense for direct indexer use outside the coordinator.
-    /// - Parameters:
-    ///   - config: Index policy snapshot used only for the build-time diagnostics flag.
-    ///   - store: Document store the run writes into.
-    ///   - chatDatabasePath: Live chat database path.
-    ///   - extractor: Text extractor for attachment bodies.
-    ///   - contacts: Opportunistic handle-to-name resolver.
-    ///   - statePath: Persisted watermark file.
-    ///   - batchLimit: Maximum messages read per pass.
-    /// - Returns: A Messages source stage.
+    /// Builds the Apple Messages stage over the shared document store. The body guard below remains
+    /// only as defense for direct indexer use outside the coordinator.
     public static func messages(
         config: IndexConfig,
         store: DocIndexStore,
@@ -187,10 +132,9 @@ extension IndexClosureStage {
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {
         IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { policy, reporter, _ in
-            // Live selection is filtered by the coordinator before the body
-            // runs, so a live enable runs on the next pass and a live disable
-            // never reaches here; the guard below remains only as defense for
-            // direct indexer use outside the coordinator.
+            // Live selection is filtered by the coordinator before the body runs, so a live enable
+            // runs on the next pass and a live disable never reaches here; the guard below remains
+            // only as defense for direct indexer use outside the coordinator.
             guard policy.enabled, policy.messages else {
                 return IndexSourceRunReport(
                     kind: .messages,
@@ -208,11 +152,9 @@ extension IndexClosureStage {
                     statePath: statePath,
                     batchLimit: batchLimit
                 )
-                // The looping entry snapshots once and drains every pending
-                // batch, so the stage folds its accumulated totals straight
-                // into the report while per-batch memory stays bounded.
-                // The reporter flows through so each batch advances the top
-                // scanned and indexed counts.
+                // The looping entry snapshots once and drains every pending batch, so the stage
+                // folds its accumulated totals straight into the report while per-batch memory stays
+                // bounded.
                 let result = try await indexer.indexAllNewMessages(reporter: reporter)
                 return IndexSourceRunReport(
                     kind: .messages,

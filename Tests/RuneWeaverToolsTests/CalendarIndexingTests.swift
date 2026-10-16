@@ -1,8 +1,4 @@
 // Rune Weaver Tools Tests — Calendar indexing tests.
-//
-// Purpose: verify calendar occurrence mapping, hash skip, pruning, caps, and skip paths.
-// Scope: hermetic calendar store plus isolated document index; no live EventKit access.
-// Architectural role: guards calendar indexer behavior while gateway tests own persistence.
 
 import Foundation
 import os

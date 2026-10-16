@@ -1,9 +1,4 @@
 // Rune Weaver Server — Scheduler worker goal execution.
-//
-// Advances due and manually triggered goals under the dedicated goal
-// single-flight lock. Owns busyness checks, skipped rows, turn dispatch, and
-// run-row settlement with live broadcasts, mirroring the job path so manual
-// and automatic fires never stack.
 
 import Foundation
 import RuneWeaverCore
@@ -53,10 +48,8 @@ extension ServerSchedulerWorker {
         eventKind: ProactiveEventKind = .goalStepDone
     ) async -> SchedulerRunResult {
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        // Parked goal turns remain as awaiting_approval like scheduler
-        // turns, resolving through the same inbox resume path in their
-        // session. Budget exceeded turns finish with forced diagnostic
-        // synthesis and budget_exceeded status.
+        // Parked goal turns remain as awaiting_approval like scheduler turns, resolving through the
+        // same inbox resume path in their session.
         let runStatus = outcome.isParked ? "awaiting_approval" : (outcome.isBudgetExceeded ? "budget_exceeded" : "ok")
         let entry = await runs.update(
             id: runID,
@@ -96,11 +89,6 @@ extension ServerSchedulerWorker {
             await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
         }
         // Suggestions born from the achievement ride their own proactive frames.
-        // They are surfaced here rather than only on the nightly pass because
-        // `generate()` returns just the newly inserted rows and the store dedups
-        // their titles, so the next nightly batch would never announce them. Each
-        // frame is gated independently so a suppressed goal outcome never hides a
-        // fresh suggestion.
         for idea in outcome.ideas {
             await broadcastIdeaProposed(idea)
         }
@@ -160,12 +148,6 @@ extension ServerSchedulerWorker {
     }
 
     /// Executes one due goal under the dedicated goal single-flight lock.
-    /// Mirrors `executeJob` exactly: a fresh per-run session linked to the
-    /// goal, a `goal` run row cycling running to ok, awaiting_approval, or
-    /// error, then a due-date bump so the next firing keeps its rhythm.
-    /// Parked goal turns stay in their session for the inbox resume path.
-    /// Cancelled turns stay due with a `cancelled` row and rethrow instead of
-    /// recording an error, so cooperative cancellation always propagates.
     func checkCompletedPreflight(
         goal: Goal,
         store: GoalStore,
@@ -372,22 +354,12 @@ extension ServerSchedulerWorker {
     }
 
     /// Contention signal for manual goal advancement when the goal is already running.
-    ///
-    /// Thrown after recording the honest skipped audit row so the route can
-    /// answer 409 like the manual job run without inventing a second lock.
     public struct GoalBusyError: Error, Sendable {
         /// Creates a busy signal.
         public init() {}
     }
 
     /// Advances one goal immediately, bypassing its due cadence.
-    ///
-    /// Shares the single-flight lock, per-run session, run-row lifecycle, and
-    /// proactive gating with the background tick so manual and automatic fires
-    /// cannot stack or drift. The returned identifiers let the route answer
-    /// with both the durable run row and its session without a second lookup.
-    /// - Parameter goalID: Goal to advance.
-    /// - Returns: Run-log identifier plus the per-run session identifier.
     public func advanceGoalNow(goalID: UUID) async throws -> (runID: UUID, sessionID: UUID) {
         guard let store = goalStore, let engine = goalEngine else {
             throw GoalEngineError.disabled
@@ -474,10 +446,9 @@ extension ServerSchedulerWorker {
         }
     }
 
-    /// Pushes the current goal row to live sockets after an advancement turn.
-    ///
-    /// Best-effort refresh so dashboards patch one row instead of refetching;
-    /// failures only log because the run row and its broadcast already landed.
+    /// Pushes the current goal row to live sockets after an advancement turn. Best-effort refresh
+    /// so dashboards patch one row instead of refetching; failures only log because the run row and
+    /// its broadcast already landed.
     func broadcastGoalSnapshot(goalID: UUID, store: GoalStore) async {
         do {
             if let goal = try await store.goal(id: goalID) {
@@ -501,9 +472,6 @@ extension ServerSchedulerWorker {
 }
 
 /// Creates an isolated per-run goal session for one advancement fire.
-/// Mirrors `makeSchedulerRunSession`: a fresh identifier keeps background
-/// runs isolated from chat and from each other, while the goal link keeps
-/// runs and sessions joinable without a second lookup.
 func makeGoalRunSession(goal: Goal, conversations: ConversationManager) async -> UUID {
     let sessionID = UUID()
     await conversations.ensureSession(id: sessionID, title: goal.title, source: "goal", overwrite: true, goalID: goal.id)

@@ -68,14 +68,6 @@ struct AppMenuLabel: View {
     @State private var showOnboarding = false
 
     /// Menu-bar indicator priority, highest first.
-    ///
-    /// Ordering keeps a refused bind visible in the bar while the dropdown
-    /// carries the actionable copy, keeps a parked approval visible above all
-    /// liveness, surfaces boot and restart progress above activity, and lets
-    /// desktop outrank indexing so Emergency Stop is never hidden behind a
-    /// sync mark. Stays internal (not private) so MenuLabelStateTests can pin
-    /// the priority table directly; `View` is a struct, never actor-isolated,
-    /// so no `nonisolated` is needed.
     enum LabelState {
         case failed
         case approvals
@@ -86,13 +78,9 @@ struct AppMenuLabel: View {
         case idle
     }
 
-    /// Selects the single menu-bar indicator for a snapshot of model flags.
-    ///
-    /// Failure outranks everything, approvals outrank progress and activity,
-    /// and boot progress outranks activity so a cold launch never reads as
-    /// idle. A restart names the in-flight hop even after the running flag
-    /// flips, which is why it ignores `isRunning`. Stays internal alongside
-    /// `LabelState` for the priority-table tests.
+    /// Selects the single menu-bar indicator for a snapshot of model flags. Failure outranks
+    /// everything, approvals outrank progress and activity, and boot progress outranks activity so a
+    /// cold launch never reads as idle.
     static func labelState(
         isRunning: Bool,
         isServerFailed: Bool,
@@ -133,10 +121,9 @@ struct AppMenuLabel: View {
                 isIndexing: model.isIndexing
             ) {
             case .failed:
-                // Failure shows a distinct octagon in the bar so a refused bind
-                // never reads as healthy idle; the dropdown still owns the
-                // actionable copy plus recovery, so the bar stays a mark
-                // without duplicating text.
+                // Failure shows a distinct octagon in the bar so a refused bind never reads as
+                // healthy idle; the dropdown still owns the actionable copy plus recovery, so the
+                // bar stays a mark without duplicating text.
                 Image(systemName: "exclamationmark.octagon.fill")
             case .approvals:
                 // Approvals outrank every activity indicator so a parked write
@@ -177,11 +164,9 @@ struct AppMenuLabel: View {
                           hasCompleted: model.hasCompletedPermissionsOnboarding
                       )
             {
-                // Owner-token onboarding outranks permissions guidance: only
-                // a provisioned launch with unseen guidance opens the window,
-                // so first run never competes with the blocking token sheet.
-                // Gated on isRunning so first launch waits for boot to resolve
-                // the token posture instead of reading the pre-boot flag.
+                // Owner-token onboarding outranks permissions guidance: only a provisioned launch
+                // with unseen guidance opens the window, so first run never competes with the
+                // blocking token sheet.
                 model.openPermissions()
             }
             // First launch with boot still resolving opens nothing here; the
@@ -205,10 +190,9 @@ struct AppMenuLabel: View {
                 model.openPermissions()
             }
         }
-        // First-run onboarding sheet driven by separate presentation state
-        // seeded from the boot-time posture flag, so the show-once copy plus
-        // adopting restart never require Terminal. Dismissing without minting
-        // defers to Settings, which stays one click away in the menu.
+        // First-run onboarding sheet driven by separate presentation state seeded from the
+        // boot-time posture flag, so the show-once copy plus adopting restart never require
+        // Terminal.
         .sheet(isPresented: $showOnboarding, onDismiss: {
             // Dismissal only hides presentation; reassert the posture flag
             // while the service still has no token so the Server section
@@ -232,16 +216,8 @@ struct AppMenuView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        // A healthy provisioned server needs no menu chrome, so the Server
-        // section stays hidden until it earns attention: a failed bind or a
-        // tokenless local-only boot. Hiding both the section and its divider
-        // keeps the steady-state menu free of a leading separator.
-        // The embedded service can refuse a bind (for example an all-interfaces
-        // address without an owner token), and that refusal is otherwise only
-        // visible in the log. The title stays short via the model helper and
-        // the detail stays a one-line summary so the menu keeps a narrow
-        // width; token recovery flows through the single bottom Owner Access
-        // entry plus a full restart, never a live endpoint.
+        // A healthy provisioned server needs no menu chrome, so the Server section stays hidden
+        // until it earns attention: a failed bind or a tokenless local-only boot.
         if model.isServerFailed || model.needsOwnerToken {
             Section("Server") {
                 Text(model.serverStatus)
@@ -309,11 +285,9 @@ struct AppMenuView: View {
             }
 
             if !model.pendingApprovals.isEmpty {
-                // Every request kind — including question.ask and desktop.resume
-                // — decides in the dashboard inbox through the shared decision
-                // contract, so the menu bar owns no approve/deny control: the row
-                // reports the parked count and routes there instead of deciding
-                // natively.
+                // Every request kind decides in the dashboard inbox through the shared decision contract;
+                // the menu bar owns no approve/deny control, reporting the parked count and routing there
+                // instead of deciding natively.
                 Button("Attention required (\(model.pendingApprovals.count))") {
                     model.openInbox()
                 }
@@ -331,10 +305,8 @@ struct AppMenuView: View {
         if model.isIndexing {
             Divider()
 
-            // Shown only while a run is in flight; the shared refresh tick
-            // drives it so no second cadence is needed. Counts prefer the
-            // coordinator live snapshot with committed store counts as the
-            // fallback, and the current file truncates to menu width.
+            // Shown only while a run is in flight; the shared refresh tick drives it so no second
+            // cadence is needed.
             Section("Indexing") {
                 Text("\(model.indexTriggerText) · \(model.indexElapsedText)")
                 Text("Scanned \(model.indexScannedCount) · Indexed \(model.indexIndexedCount)")

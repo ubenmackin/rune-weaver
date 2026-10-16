@@ -1,10 +1,4 @@
 // Rune Weaver Server — Shared query limit parsing for list routes.
-//
-// Centralizes the strict `limit` query handling so memory, approvals, and
-// other list endpoints share one closed-range contract: a missing value falls
-// back, a present value must parse as an integer inside the advertised range,
-// and anything else fails with a 400 instead of silently clamping. Bounds stay
-// single-sourced here so route handlers only supply their defaults and ranges.
 
 import Vapor
 

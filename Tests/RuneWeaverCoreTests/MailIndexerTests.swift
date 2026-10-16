@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Incremental mail indexer pipeline.
-//
-// Drives the mail indexer end to end against an in-memory stub gateway and an
-// isolated temporary document store: per-mailbox UID watermark increments
-// across runs, the read-only PEEK fetch mode, per-attachment size caps,
-// content-hash dedupe for forwarded duplicates, the vector window, confined
-// staging cleanup, and the vision fallback for unreadable attachments. No test
-// touches the network, the real Keychain, or `~/.runeweaver`.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -76,11 +69,8 @@ private actor ProgressRecorder {
     }
 }
 
-/// Records the exclusive upper bound of every message page in call order.
-///
-/// A nil entry is the newest window; a non-nil entry is a downward backfill
-/// page requesting only UIDs below the bound. The count doubles as the page
-/// count for steady-state and repeated-page assertions.
+/// Records the exclusive upper bound of every message page in call order. A nil entry is the newest
+/// window; a non-nil entry is a downward backfill page requesting only UIDs below the bound.
 private actor BoundRecorder {
     /// Bounds observed in call order.
     private var bounds: [Int?] = []
@@ -105,10 +95,6 @@ private actor BoundRecorder {
 }
 
 /// Records inter-page pauses requested by the fetch loop.
-///
-/// Each entry is the requested pause in nanoseconds, in call order. The count
-/// proves the loop pauses once per additional page while the values prove the
-/// steady one-second pacing.
 private actor SleepRecorder {
     /// Pauses observed in call order.
     private var sleeps: [UInt64] = []
@@ -133,19 +119,13 @@ private actor SleepRecorder {
 }
 
 /// Records search queries and limits seen by the adapter double.
-///
-/// Capturing the verbatim query proves the adapter emits the exact `UID lo:hi`
-/// fixed-window shape without free text, while the limit proves the 50-per-page clamp.
 private actor SearchCapture {
     /// Queries observed in call order.
     private var queries: [String] = []
     /// Limits observed in call order.
     private var limits: [Int] = []
 
-    /// Records one search.
-    /// - Parameters:
-    ///   - query: Verbatim query passed to the bridge.
-    ///   - limit: Limit passed to the bridge.
+    /// Records one search. query: Verbatim query passed to the bridge.
     func record(query: String, limit: Int) {
         queries.append(query)
         limits.append(limit)
@@ -187,15 +167,7 @@ private struct StubMailGateway: MailIndexGateway {
     /// Status snapshot returned by `mailboxStatus`, when set.
     let statusValue: MailIndexMailboxStatus?
 
-    /// Creates a stub gateway.
-    /// - Parameters:
-    ///   - mailboxNames: Mailboxes reported by the stub.
-    ///   - messages: Canned messages in newest-first order.
-    ///   - attachments: Canned attachment bytes.
-    ///   - recorder: Mode recorder shared with the test.
-    ///   - attachmentCalls: Attachment-call counter shared with the test.
-    ///   - bounds: Page-bound recorder shared with the test.
-    ///   - statusValue: Status snapshot for validity tests, nil means unknown.
+    /// Creates a stub gateway. mailboxNames: Mailboxes reported by the stub.
     init(
         mailboxNames: [String] = ["INBOX"],
         messages: [MailIndexMessage],
@@ -225,12 +197,6 @@ private struct StubMailGateway: MailIndexGateway {
     }
 
     /// Returns the canned page for one downward bound and records the fetch mode.
-    ///
-    /// A nil bound returns the newest window; a present bound returns only
-    /// numeric UIDs inside the fixed `UID lo:hi` window derived from the bound,
-    /// preserving newest-first order, so the stub models a bridge that honors
-    /// bounded-window paging clamped to the requested limit. A bound at the
-    /// mailbox start is already exhausted.
     func messages(
         credentials _: MailIndexCredentials,
         mailbox _: String,
@@ -271,12 +237,6 @@ private struct StubMailGateway: MailIndexGateway {
 }
 
 /// Gateway stub modelling a bridge that ignores the downward bound and clamps to one newest window.
-///
-/// Regardless of the requested `limit` or `beforeUID`, at most `cap` newest
-/// messages surface, so a burst larger than the cap leaves an unfetched middle
-/// the indexer must hold its watermark over instead of jumping. The ignored
-/// bound is what makes the second page repeat the first, exercising the
-/// repeated-page stop without duplicate indexing.
 private struct ClampedMailGateway: MailIndexGateway {
     /// Canned messages in newest-first order.
     let messages: [MailIndexMessage]
@@ -285,11 +245,7 @@ private struct ClampedMailGateway: MailIndexGateway {
     /// Page-bound recorder shared with the test.
     let bounds: BoundRecorder
 
-    /// Creates a clamped gateway.
-    /// - Parameters:
-    ///   - messages: Canned messages in newest-first order.
-    ///   - cap: Widest page ever surfaced.
-    ///   - bounds: Page-bound recorder shared with the test.
+    /// Creates a clamped gateway. messages: Canned messages in newest-first order.
     init(messages: [MailIndexMessage], cap: Int, bounds: BoundRecorder = BoundRecorder()) {
         self.messages = messages
         self.cap = cap
@@ -325,12 +281,8 @@ private struct ClampedMailGateway: MailIndexGateway {
     }
 }
 
-/// Gateway double capturing the verbatim search query the adapter emits.
-///
-/// Proves the adapter's `UID lo:hi` fixed-window shape reaches the bridge
-/// without free text while still clamping to one page. Hits are canned
-/// newest-first; the fetch path returns a synthesized body so the adapter can
-/// complete the page.
+/// Gateway double capturing the verbatim search query the adapter emits. Proves the adapter's `UID
+/// lo:hi` fixed-window shape reaches the bridge without free text while still clamping to one page.
 private struct CapturingIMAPGateway: EmailIMAPGateway, Sendable {
     /// Hits returned by `search`, already newest-first.
     let hits: [EmailSearchHit]
@@ -339,11 +291,7 @@ private struct CapturingIMAPGateway: EmailIMAPGateway, Sendable {
     /// Status snapshot returned for the newest-window anchor.
     let statusValue: EmailMailboxStatus
 
-    /// Creates a capturing gateway.
-    /// - Parameters:
-    ///   - hits: Canned hits in newest-first order.
-    ///   - capture: Box receiving queries and limits.
-    ///   - statusValue: Status snapshot anchoring the first window.
+    /// Creates a capturing gateway. hits: Canned hits in newest-first order.
     init(
         hits: [EmailSearchHit] = [],
         capture: SearchCapture,
@@ -436,11 +384,8 @@ private struct CapturingIMAPGateway: EmailIMAPGateway, Sendable {
     func append(credentials _: ResolvedEmailCredentials, mailbox _: String, rawMessage _: Data) async throws {}
 }
 
-/// Paging gateway whose second page sleeps cancellably so a mid-backfill cancel lands deterministically.
-///
-/// The first page returns immediately; the second page parks in a cancellable
-/// sleep that the test aborts, proving the downward loop stops at the next
-/// checkpoint instead of draining the mailbox.
+/// Paging gateway whose second page sleeps cancellably so a mid-backfill cancel lands
+/// deterministically.
 private struct CancellablePagingGateway: MailIndexGateway {
     /// Messages backing every page, already newest-first.
     let messages: [MailIndexMessage]
@@ -486,10 +431,9 @@ private struct CancellablePagingGateway: MailIndexGateway {
     }
 }
 
-/// Probe error carrying a fixed message for retry classification checks.
-///
-/// The message surfaces as the localized description so the classifier sees
-/// the same text a live transport or authentication failure would carry.
+/// Probe error carrying a fixed message for retry classification checks. The message surfaces as
+/// the localized description so the classifier sees the same text a live transport or authentication
+/// failure would carry.
 private struct RetryProbeError: LocalizedError {
     /// Message surfaced as the localized description.
     let message: String
@@ -507,10 +451,6 @@ private struct RetryProbeError: LocalizedError {
 }
 
 /// Gateway double failing a fixed number of fetches before succeeding.
-///
-/// Leading `messages` calls throw a probe error with the configured message;
-/// later calls serve the canned newest window. The attempt counter doubles as
-/// the fetch count for retry assertions.
 private struct RetryProbeGateway: MailIndexGateway {
     /// Messages returned once the configured failures are exhausted.
     let probeMessages: [MailIndexMessage]
@@ -521,12 +461,8 @@ private struct RetryProbeGateway: MailIndexGateway {
     /// Counter for message fetch calls.
     let attempts: CallRecorder
 
-    /// Creates a retry probe gateway.
-    /// - Parameters:
-    ///   - probeMessages: Canned messages in newest-first order.
-    ///   - failuresBeforeSuccess: Leading fetches that throw.
-    ///   - failureMessage: Message for the thrown probe error.
-    ///   - attempts: Counter shared with the test.
+    /// Creates a retry probe gateway. probeMessages: Canned messages in
+    /// newest-first order.
     init(
         probeMessages: [MailIndexMessage],
         failuresBeforeSuccess: Int,
@@ -595,11 +531,8 @@ private struct StubEmbeddings: EmbeddingsBackend {
     }
 }
 
-/// Records pooled session open plus close calls per mailbox.
-///
-/// Each entry is `account/mailbox` so the bracket count asserts without
-/// touching the network. The inbox never leaks: every open pairs with a close
-/// except an open failure, which never reaches the close.
+/// Records pooled session open plus close calls per mailbox. The inbox never leaks: every open
+/// pairs with a close except an open failure, which never reaches the close.
 private actor SessionOpenCloseRecorder {
     /// Opens observed in call order.
     private var opens: [String] = []
@@ -632,10 +565,6 @@ private actor SessionOpenCloseRecorder {
 }
 
 /// Gateway double recording the session bracket the indexer owns.
-///
-/// Messages serve canned per-mailbox windows; an injected open or message
-/// failure message exercises the skip path while the recorder proves the
-/// bracket still opened plus closed exactly once.
 private struct RecordingSessionGateway: MailIndexGateway {
     /// Mailboxes reported by `mailboxes`.
     let mailboxNames: [String]
@@ -650,14 +579,7 @@ private struct RecordingSessionGateway: MailIndexGateway {
     /// Counter for message page calls.
     let messageCalls: CallRecorder
 
-    /// Creates a recording gateway.
-    /// - Parameters:
-    ///   - mailboxNames: Mailboxes reported by the stub.
-    ///   - perMailbox: Canned messages per mailbox.
-    ///   - recorder: Bracket recorder shared with the test.
-    ///   - openFailureMessage: Failure message thrown by open when set.
-    ///   - messagesFailureMessage: Failure message thrown by messages when set.
-    ///   - messageCalls: Counter shared with the test.
+    /// Creates a recording gateway. mailboxNames: Mailboxes reported by the stub.
     init(
         mailboxNames: [String] = ["INBOX"],
         perMailbox: [String: [MailIndexMessage]] = [:],
@@ -720,19 +642,14 @@ private struct RecordingSessionGateway: MailIndexGateway {
 }
 
 /// Gateway double parking cancellably on later pages while recording the bracket.
-///
-/// The first page returns immediately; later pages sleep so a mid-backfill
-/// cancel lands deterministically with the session still closed once.
 private struct CancellableSessionGateway: MailIndexGateway {
     /// Messages backing every page, already newest-first.
     let messages: [MailIndexMessage]
     /// Bracket recorder shared with the test.
     let recorder: SessionOpenCloseRecorder
 
-    /// Creates a cancellable gateway.
-    /// - Parameters:
-    ///   - messages: Canned messages in newest-first order.
-    ///   - recorder: Bracket recorder shared with the test.
+    /// Creates a cancellable gateway. messages: Canned messages in newest-first
+    /// order.
     init(messages: [MailIndexMessage], recorder: SessionOpenCloseRecorder) {
         self.messages = messages
         self.recorder = recorder
@@ -1266,12 +1183,8 @@ struct MailIndexerTests {
         let base = makeTempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
-        // A corrupt office package stands in for an unreadable attachment: the
-        // in-repo ZIP reader rejects the bytes, so extraction fails before any
-        // framework parser runs. A corrupt PDF would exercise the same routing
-        // branch, but CoreGraphics reports the parse failure through an os_log
-        // channel outside the test logging bootstrap, which the zero-noise
-        // gate rejects.
+        // A corrupt office package stands in for an unreadable attachment: the in-repo ZIP reader
+        // rejects the bytes, so extraction fails before any framework parser runs.
         let bytes = Data("this is not a zip package".utf8)
         let info = MailIndexAttachmentInfo(
             filename: "broken.docx",
@@ -1638,10 +1551,8 @@ struct MailIndexerTests {
         }
 
         let frames = await recorder.snapshot()
-        // Entering, window-fetched, and finished frames surround the fetch so
-        // a long IMAP stretch never reads stuck; per-message frames stay
-        // throttled and may not appear on a fast run. Every mail current names
-        // the owning account so concurrent mailboxes stay distinguishable.
+        // Entering, window-fetched, and finished frames surround the fetch so a long IMAP stretch
+        // never reads stuck; per-message frames stay throttled and may not appear on a fast run.
         #expect(frames.count >= 3)
         #expect(frames[0].message == "Indexing mail: 0 indexed, 0 scanned")
         #expect(frames[0].scanned == 0)

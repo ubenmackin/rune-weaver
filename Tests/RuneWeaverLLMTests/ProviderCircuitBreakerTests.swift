@@ -1,7 +1,4 @@
 // Rune Weaver LLM Tests — Provider circuit breaker and routing failover tests.
-// Exercises ProviderCircuitBreaker tracking of 429 rate limits and 5xx outages,
-// verifying that failing backends enter cooldown and LLMRouter automatically bypasses
-// them in favor of healthy fallback providers.
 
 import Foundation
 @testable import RuneWeaverCore

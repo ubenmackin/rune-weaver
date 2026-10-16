@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — useFileReviewHydration hook tests.
-// Pins the surface-batch contract for write-review hydration: rendered write
-// cards dedupe their paths into one review-status request per batch, an
-// oversized card set splits at the engine route's path bound, a failed batch
-// stays unresolved, and a card set that changes (or flips back) reads pending
-// until its own batch settles instead of inheriting stale states.
 
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

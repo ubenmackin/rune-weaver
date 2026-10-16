@@ -1,12 +1,4 @@
 // Rune Weaver Core — Fan-out worker subagent contract types.
-//
-// Holds the subtask and run value types exchanged between the fan-out engine,
-// the calling agent, and the run audit trail. Subtasks are explicit: the
-// calling agent composes each title and prompt, and the engine only executes
-// the list it is handed — decomposition belongs to the agent's own planning,
-// never to the engine. Keeping the contract in one place lets the engine file
-// stay focused on concurrency while the shapes it exchanges remain stable
-// across callers, the run rows, and future dashboards.
 
 import Foundation
 
@@ -46,12 +38,7 @@ public struct FanOutSubtask: Sendable, Codable, Equatable {
         case status
     }
 
-    /// Creates one subtask.
-    /// - Parameters:
-    ///   - id: Subtask identifier; a fresh UUID when omitted.
-    ///   - title: Display title for the run rows.
-    ///   - prompt: Full prompt the worker turn runs.
-    ///   - status: Starting state; fresh subtasks arrive pending.
+    /// Creates one subtask. id: Subtask identifier; a fresh UUID when omitted.
     public init(id: UUID = UUID(), title: String, prompt: String, status: Status = .pending) {
         self.id = id
         self.title = title
@@ -128,15 +115,8 @@ public struct FanOutRun: Sendable, Codable, Equatable {
         case updatedAt
     }
 
-    /// Creates one run over explicit subtasks.
-    /// - Parameters:
-    ///   - id: Run identifier; a fresh UUID when omitted.
-    ///   - parentSessionID: Session that spawned the run.
-    ///   - subtasks: Explicit subtask list.
-    ///   - status: Starting state; fresh runs arrive running.
-    ///   - summary: Outcome digest, or nil while in flight.
-    ///   - createdAt: Creation timestamp.
-    ///   - updatedAt: Last-update timestamp.
+    /// Creates one run over explicit subtasks. id: Run identifier; a fresh UUID
+    /// when omitted.
     public init(
         id: UUID = UUID(),
         parentSessionID: UUID,
@@ -184,9 +164,6 @@ public struct FanOutRun: Sendable, Codable, Equatable {
 }
 
 /// Typed fan-out rejections surfaced before any worker turn runs.
-/// The engine never throws mid-swarm for a worker failure — those settle into
-/// subtask statuses — so these cases are the caller's only error surface and
-/// each reads as its own honest reason.
 public enum FanOutError: Error, Equatable, Sendable {
     /// The subtask list exceeds the configured worker cap, so a run can
     /// never oversubscribe the serving model.
@@ -196,22 +173,11 @@ public enum FanOutError: Error, Equatable, Sendable {
     case emptySubtasks
 }
 
-/// Answer to an owner-requested fan-out cancellation, keyed by an audit-row
-/// identifier so the same vocabulary the Runs tab shows is what the owner
-/// cancels.
-///
-/// A cancel targets either the parent row (stop the whole swarm) or one child
-/// worker row (stop that worker, leave its siblings running). Only three
-/// answers can be honest: a live run stopped, a live worker stopped, and a row
-/// that no live run or worker owns. A settled run is deliberately
-/// indistinguishable from an unknown row — neither accepts a cancel — so
-/// callers read `.notRunning` as "nothing to stop" rather than an error.
+/// Answer to an owner-requested fan-out cancellation, keyed by an audit-row identifier so the same
+/// vocabulary the Runs tab shows is what the owner cancels.
 public enum FanOutCancelOutcome: Sendable, Equatable {
-    /// The parent row carried the cancel: every in-flight worker was stopped
-    /// and every still-running subtask marked cancelled. The count reports how
-    /// many worker tasks were in flight and were cancelled by this call; a
-    /// cancel racing startup may legitimately report zero while still landing,
-    /// because the run's remaining subtasks settle cancelled without running.
+    /// The parent row carried the cancel: every in-flight worker was stopped and every
+    /// still-running subtask marked cancelled.
     case runCancelled(workerCount: Int)
     /// A child row carried the cancel: that worker was stopped and its subtask
     /// marked cancelled; sibling workers keep running.

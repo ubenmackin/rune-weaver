@@ -1,13 +1,4 @@
 // Rune Weaver Server — Shared REST and WebSocket contracts for the engine API.
-//
-// Purpose: carries the canonical route paths plus the shared REST and
-// WebSocket request/response shapes so chat, tools, memory, approvals,
-// scheduler, runs, and sessions encode identically on both ends of the wire.
-// Scope: DTO bodies and wire classification only; route registration, auth
-// gating, and persistence stay with the route and store layers.
-// Architectural role: keeps the Vapor adapters decoupled from the engine core
-// in version-tolerant Codable contracts, so a dashboard built against an
-// older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
@@ -257,9 +248,6 @@ public struct FileActionResponse: Content, Sendable {
 }
 
 /// Batch review-status request for `POST /files/review-status`.
-///
-/// The caller names the live paths it is rendering so the response can carry
-/// one answer per requested path even when a path has no ledger row at all.
 public struct ReviewStatusRequest: Content, Sendable {
     /// Live file paths to look up; 1-200 non-empty entries.
     public let paths: [String]
@@ -271,10 +259,6 @@ public struct ReviewStatusRequest: Content, Sendable {
 }
 
 /// Batch review-status response for `POST /files/review-status`.
-///
-/// Both maps key on the requested path strings exactly, so a client hydrates
-/// every row from one round trip; a path absent from a ledger reads `"unknown"`
-/// rather than being omitted, which keeps staged and live lookups symmetric.
 public struct ReviewStatusResponse: Content, Sendable {
     /// Staged-ledger state per requested path, `"unknown"` when no row exists.
     public let stagedStates: [String: String]
@@ -289,13 +273,6 @@ public struct ReviewStatusResponse: Content, Sendable {
 }
 
 /// WebSocket broadcast payload for file actions.
-///
-/// Staged actions carry only type and path; a `live_resolved` frame also names
-/// its terminal state so one event type covers acceptance, revert, and discard
-/// without a second frame shape the dashboard would have to learn. A
-/// `file_superseded` frame reuses the same shape with state `superseded` to
-/// report a live write that resolved a pending staged row in-session — a
-/// transition the write tool owns, so no resolution route broadcasts it.
 public struct WSFileActionEvent: Content, Sendable {
     public let type: String
     public let path: String?
@@ -434,8 +411,6 @@ public struct ToolInfo: Content, Equatable {
 
     /// Creates a row from a runtime tool.
     /// - Parameter tool: Registered tool.
-    /// - Parameter hasConfig: Whether the tool exposes settings, supplied by the
-    ///   caller so this type never branches on tool names.
     public init(
         _ tool: any Tool,
         isEnabled: Bool = true,
@@ -738,12 +713,6 @@ public struct FactsResponse: Content, Equatable {
 }
 
 /// Paged facts window for `GET /memory/facts` with optional `q`, `limit`, and `offset`.
-///
-/// Carries the windowed rows plus the pre-slice total and the live store
-/// tallies so the dashboard settles tab labels and the "More" cursor from one
-/// read. Preferences ride along so older snapshots decoding as `FactsResponse`
-/// keep parsing the same payload without a second fetch; the extra paging keys
-/// are ignored by that shape while newer clients page off them.
 public struct FactsPageResponse: Content, Equatable {
     /// Windowed facts for this page, newest first.
     public let facts: [UserFact]
@@ -818,10 +787,6 @@ public struct FactsPageResponse: Content, Equatable {
 }
 
 /// Episodic clear receipt for `DELETE /memory/episodes`.
-///
-/// Both counts describe the episodic tables only: how many rows the clear
-/// removed and how many remain, so the dashboard can confirm the wipe without
-/// a second read while semantic facts stay out of the shape entirely.
 public struct EpisodicClearResponse: Content, Equatable {
     /// Rows removed by the clear, measured immediately before deleting.
     public let deletedCount: Int
@@ -836,11 +801,6 @@ public struct EpisodicClearResponse: Content, Equatable {
 }
 
 /// One episodic turn for `GET /memory/episodes/recent`, newest first.
-///
-/// Carries the full stored content plus identity, owning session, and role so
-/// the dashboard can preview a session without a second fetch. Timestamp rides
-/// as Unix seconds so every client decodes it without sharing a date strategy.
-/// Rows order newest first so the listing reads as a recency preview.
 public struct EpisodicEpisodeDTO: Content, Equatable {
     /// Stored episode identifier.
     public let id: UUID
@@ -863,14 +823,9 @@ public struct EpisodicEpisodeDTO: Content, Equatable {
     }
 }
 
-/// Recent episodic listing for `GET /memory/episodes/recent`, newest first.
-///
-/// Episodes cover the episodic tables only and order newest first; semantic
-/// facts, profile, document index, and session ledgers stay out of the shape.
-/// An unknown session reads as an empty list with count zero rather than an error.
-/// The count always mirrors the row array length so tab tallies and listing rows
-/// agree without a second fetch; a transmitted mismatch fails decoding instead
-/// of surfacing as a silent empty.
+/// Recent episodic listing for `GET /memory/episodes/recent`, newest first. Episodes cover the
+/// episodic tables only and order newest first; semantic facts, profile, document index, and session
+/// ledgers stay out of the shape.
 public struct EpisodicRecentResponse: Content, Equatable {
     /// Episodic rows, newest first.
     public let episodes: [EpisodicEpisodeDTO]
@@ -949,16 +904,6 @@ public struct ApprovalsResponse: Content, Equatable {
 
 extension ApprovalsResponse {
     /// Dashboard sandbox summary for one approval, single-sourced on the copy owner.
-    ///
-    /// Routes through the single shared call site so the dashboard DTO reads
-    /// identical bytes to triage badges plus approval cards with no duplicate
-    /// copy and no command, path, or host interpolation. Nil for non-bash
-    /// tools or missing commands.
-    /// - Parameters:
-    ///   - request: Approval request carrying bash arguments.
-    ///   - bashConfig: Live bash policy owning tier plus network defaults.
-    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
-    /// - Returns: Shared summary for bash requests, or nil otherwise.
     public static func bashSandboxSummary(
         for request: PermissionRequest,
         bashConfig: BashConfig,
@@ -969,27 +914,16 @@ extension ApprovalsResponse {
 }
 
 /// Approval decision request for `POST /approvals/:id/decide`.
-///
-/// The single decision path every transport sends: the chat inline banner, the
-/// approvals inbox, the dashboard quick action, and WebSocket triage all post
-/// this one body, so tier semantics cannot drift between surfaces. An
-/// egress-parked request resolves its own domain scope, which is why the scope
-/// stays optional rather than required.
 public struct ApprovalDecisionRequest: Content, Equatable {
     /// Whether the tool call may run.
     public let approved: Bool
     /// Graduated-trust tier recorded on approval. Defaults to `thisTime`.
     public var duration: TrustDuration?
-    /// How wide a durable decision reaches. Nil derives the request's own
-    /// scope: an egress-parked request resolves to the host it dialed, every
-    /// other request to the target the gate derives for the next identical
-    /// call.
+    /// How wide a durable decision reaches. Nil derives the request's own scope: an egress-parked
+    /// request resolves to the host it dialed, every other request to the target the gate derives
+    /// for the next identical call.
     public var scope: AccessScopeDTO?
-    /// Decision surface tag. REST callers name one of the client-facing
-    /// surfaces — `chat`, `inbox`, or `dashboard`; anything else (including
-    /// `websocket` and `question`, which arrive solely through trusted
-    /// internal paths and are not client-settable) normalizes to `unknown`
-    /// in the decision log.
+    /// Decision surface tag.
     public var surface: String?
 
     /// Creates a decision request.
@@ -1184,20 +1118,18 @@ extension WSInboundKind {
             }
         }()
         let hasText = !(peek?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        // A decision is identified by its required `id` plus `approved` pair and
-        // is classified before chat content sniffing: a payload can carry both
-        // a stray text field and an approval decision, and preferring chat
-        // would drop the decision so the request stays pending forever.
+        // A decision is identified by its required `id` plus `approved` pair and is classified
+        // before chat content sniffing: a payload can carry both a stray text field and an approval
+        // decision, and preferring chat would drop the decision so the request stays pending.
         do {
             let decision = try JSONDecoder().decode(WSDecisionMessage.self, from: data)
             return .decision(decision)
         } catch {
             RuneWeaverLog.server.debug("WSInboundKind.classify: not a decision message: \(error.localizedDescription)")
         }
-        // A per-tool cancel carries an explicit discriminator plus a call
-        // identifier, so it is matched before chat sniffing: its optional
-        // `reason` never masquerades as chat text, and a malformed frame falls
-        // through to unknown instead of aborting a whole turn.
+        // A per-tool cancel carries an explicit discriminator plus a call identifier, so it is
+        // matched before chat sniffing: its optional `reason` never masquerades as chat text, and a
+        // malformed frame falls through to unknown instead of aborting a whole turn.
         if peek?.type == "tool_cancel" {
             do {
                 let toolCancel = try JSONDecoder().decode(WSToolCancelMessage.self, from: data)
@@ -1215,10 +1147,8 @@ extension WSInboundKind {
         } catch {
             RuneWeaverLog.server.debug("WSInboundKind.classify: not a chat message: \(error.localizedDescription)")
         }
-        // A cancel frame is only honored without text: chat sniffing already ran
-        // above, so text surviving to here is either a stray field on a cancel
-        // frame or a malformed body, and canceling the active turn on that
-        // ambiguity would abort a turn the user never asked to stop.
+        // Cancel frames are only honored without text: text reaching here indicates ambiguity,
+        // and canceling on ambiguity could abort an active turn the user never asked to stop.
         if peek?.type == "cancel" {
             return hasText ? .unknown : .cancel(WSCancelMessage(sessionID: peek?.sessionID))
         }
@@ -1421,10 +1351,6 @@ public struct CancelChatResponse: Content, Equatable {
 }
 
 /// Request payload to cancel one in-flight tool call via `POST /chat/tool_cancel`.
-///
-/// Separate from ``CancelChatRequest`` because the two abort different scopes: a
-/// turn cancel stops the whole reply, while this stops exactly one tool and lets
-/// the model re-scope around its injected failure.
 public struct ToolCancelRequest: Content, Equatable {
     /// Session owning the running call.
     public let sessionID: UUID
@@ -1447,10 +1373,8 @@ public struct ToolCancelRequest: Content, Equatable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Trimmed and capped reason, or nil when nothing usable remains.
-    /// Reuses the shared policy normalizer so REST and WebSocket cancellations
-    /// bound the reason identically.
-    /// - Returns: Normalized reason, or nil.
+    /// Trimmed and capped reason, or nil when nothing usable remains. Reuses the shared policy
+    /// normalizer so REST and WebSocket cancellations bound the reason identically.
     public var resolvedReason: String? {
         OrchestratorToolLoop.normalizedToolCancelReason(reason)
     }
@@ -1475,10 +1399,6 @@ public struct ToolCancelResponse: Content, Equatable {
 // MARK: - Workspace DTOs
 
 /// Usage snapshot for `GET /workspace/usage`.
-///
-/// Carries the bounded walk counts alongside the configured quotas so the
-/// dashboard renders a quota bar from one fetch; the walk never follows
-/// symlinks, and `truncated` tells the viewer the counts are lower bounds.
 public struct WorkspaceUsageResponse: Content, Equatable {
     /// Total bytes across counted regular files.
     public let bytes: Int

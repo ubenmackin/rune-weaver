@@ -1,15 +1,4 @@
 // Rune Weaver Server Tests — Episodic cleanup REST surface.
-//
-// Purpose: pins the episodic deletion contract without a live network: bulk
-// clear receipts, single-row deletes, session-scoped deletes, UUID validation,
-// idempotent missing-row handling, and semantic isolation end to end through
-// the registered routes.
-// Scope: route status codes, DTO shapes, and episodic-vs-semantic isolation
-// only; episodic compaction, vector ranking, and dashboard refetching stay with
-// the engine and client suites.
-// Architectural role: guards the thin adapter so future route edits cannot
-// silently widen validation, touch semantic rows, or reorder the session
-// literal behind the identifier parameter.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -38,13 +27,6 @@ private final class EpisodicStubLLM: LLMProvider, Sendable {
 }
 
 /// Builds a configured application sharing an isolated episodes database.
-///
-/// The temporary directory keeps episodic rows, vectors, and the profile off
-/// the operator's live data directory; every caller-supplied store points at
-/// the same `episodes.db` so goals and tool toggles observe the same file the
-/// engine does without leaking into sibling tests.
-/// - Parameter body: Test body receiving the app plus its context.
-/// - Returns: Whatever `body` returns.
 private func withEpisodesApp<T>(
     _ body: (Application, ServerContext) async throws -> T
 ) async throws -> T {
@@ -101,12 +83,8 @@ private func withEpisodesApp<T>(
     }
 }
 
-/// Sends one request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Path plus optional query string.
-/// - Returns: Route response.
+/// Sends one request through the full registered surface. app: Configured
+/// application.
 private func episodeRequest(app: Application, method: HTTPMethod, path: String) async throws -> Response {
     let request = Request(
         application: app,
@@ -118,14 +96,6 @@ private func episodeRequest(app: Application, method: HTTPMethod, path: String) 
 }
 
 /// Seeds one episodic turn and returns its stored row identifier.
-///
-/// The engine surfaces the row id through recall metadata rather than the
-/// store type, so tests read it the same way a dashboard would after a search.
-/// - Parameters:
-///   - context: Server context owning the memory engine.
-///   - content: Unique turn text.
-///   - sessionID: Owning session.
-/// - Returns: Stored episode identifier.
 private func seedEpisode(
     _ context: ServerContext,
     content: String,

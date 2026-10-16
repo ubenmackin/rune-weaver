@@ -1,16 +1,4 @@
 // Rune Weaver Server Tests — Per-tool cancel classification, route, and socket.
-//
-// Three untrusted entry points feed the per-call cancel path: the inbound
-// WebSocket frame classified by `WSInboundKind.classify`, the
-// `POST /chat/tool_cancel` route, and the WebSocket handler
-// `handleWebSocketToolCancel` the classified frame dispatches to. All must scope
-// the abort to the session that owns the call and reject a blank identifier
-// rather than aborting an arbitrary running tool. These tests pin the structural
-// classification, including the malformed frames that must degrade to `.unknown`
-// instead of throwing, the route's success, rejection, and miss responses, and
-// the handler's non-terminal miss frames on a miss or rejection versus its
-// silence on a successful cancel. A per-tool miss must never emit an `error`
-// frame because the dashboard treats an owned error as a terminal turn failure.
 
 import Foundation
 import NIOWebSocket
@@ -110,14 +98,6 @@ private struct ToolCancelStubProvider: LLMProvider, Sendable {
 }
 
 /// Builds a configured application plus an isolated context sharing `bus`.
-///
-/// The route reaches the tool bus through `req.application.runeWeaver`, so the
-/// context must be registered exactly as `serve` does; the temporary database
-/// keeps the stores off the real engine data directory.
-/// - Parameters:
-///   - bus: Tool bus carrying the registered blocking fixture.
-///   - body: Test body receiving the configured application.
-/// - Returns: Whatever `body` returns.
 private func withToolCancelApp<T>(bus: ToolBus, _ body: (Application) async throws -> T) async throws -> T {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-tool-cancel-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -160,11 +140,8 @@ private func withToolCancelApp<T>(bus: ToolBus, _ body: (Application) async thro
     }
 }
 
-/// POSTs one per-tool cancel payload through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - body: Cancel request to encode as the JSON body.
-/// - Returns: The route response.
+/// POSTs one per-tool cancel payload through the full registered surface. app:
+/// Configured application.
 private func postToolCancel(app: Application, body: ToolCancelRequest) async throws -> Response {
     let request = Request(
         application: app,
@@ -226,10 +203,8 @@ struct ToolCancelTests {
     @Test
     func `Whitespace identifier classifies structurally and is rejected at the cancel boundary`() {
         let sessionID = UUID().uuidString
-        // Classification is structural: a whitespace-only string is still a
-        // valid String, so it reaches `.toolCancel`. The blank guard lives on the
-        // shared cancel path, where REST answers 400 and WebSocket answers a
-        // non-terminal miss frame instead of aborting the running turn.
+        // Classification is structural: a whitespace-only string is still a valid String, so it
+        // reaches `.toolCancel`.
         let blank = "{\"type\":\"tool_cancel\",\"sessionID\":\"\(sessionID)\",\"callID\":\"   \"}"
         guard case let .toolCancel(message) = WSInboundKind.classify(blank) else {
             Issue.record("Expected structural toolCancel classification")
@@ -321,10 +296,9 @@ struct ToolCancelTests {
                 context: context
             )
 
-            // A miss is reported honestly so the dashboard can roll back its
-            // optimistic "cancelling" mark, but through the dedicated
-            // non-terminal frame: a session-tagged `error` would make the
-            // dashboard tear down a turn that is still running.
+            // A miss is reported honestly so the dashboard can roll back its optimistic
+            // "cancelling" mark, but through the dedicated non-terminal frame: a session-tagged
+            // `error` would make the dashboard tear down a turn that is still running.
             let frames = await socket.sent
             #expect(frames.count == 1)
             let raw = try #require(frames.first)
@@ -352,10 +326,8 @@ struct ToolCancelTests {
                 context: context
             )
 
-            // The shared cancel path rejects a blank identifier before the bus is
-            // consulted, so it can never degrade into aborting an arbitrary call.
-            // The rejection still travels as the non-terminal miss frame so the
-            // running turn survives a malformed cancel request.
+            // The shared cancel path rejects a blank identifier before the bus is consulted, so it
+            // can never degrade into aborting an arbitrary call.
             let frames = await socket.sent
             #expect(frames.count == 1)
             let raw = try #require(frames.first)

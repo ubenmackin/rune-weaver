@@ -1,23 +1,10 @@
 // Rune Weaver Server — Search lifecycle DTOs for the local SearXNG engine.
-//
-// Purpose: carries the health, ensure, and stop shapes for the `/search`
-// routes so the dashboard can poll one contract for reachability, the live
-// Start stage, and retry-aware failure detail.
-// Scope: REST request/response bodies only; lifecycle policy and cascade
-// budgets stay single-sourced in the shared ensurer.
-// Architectural role: keeps the Vapor search adapters decoupled from the
-// engine core by translating ensurer outcomes into version-tolerant Codable
-// contracts.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// One agreement point for search and browser DTO defaults.
-/// Health pills and error banners poll these DTOs independently; without shared
-/// absence and reachability defaults, one endpoint would show an empty banner
-/// while another collapses it and staged progress would read as idle in one
-/// view but starting in another.
 private enum SearchDTOFields {
     /// In-flight stage worth rendering, so idle reads as absent everywhere.
     /// Shares the banner absence agreement rather than repeating it, so staged
@@ -34,10 +21,6 @@ private enum SearchDTOFields {
     }
 
     /// Resolves the canonical base URL plus its dashboard alias.
-    /// - Parameters:
-    ///   - base: Canonical `baseURL` value, if present.
-    ///   - alias: Dashboard `url` alias, if present.
-    /// - Returns: Pair where the alias falls back to the resolved base.
     static func resolvedBaseURL(base: String?, alias: String?) -> (baseURL: String, url: String) {
         let resolved = base ?? alias ?? ""
         return (resolved, alias ?? resolved)
@@ -51,12 +34,9 @@ private enum SearchDTOFields {
     }
 }
 
-/// Search engine health response for `GET /search/health`.
-/// Encodes both `baseURL` (canonical) and `url` plus `status` so dashboard
-/// clients reading either contract keep the custom port instead of falling
-/// back to the default. Carries the live Start stage plus Start time while an
-/// ensure flight runs so the dashboard can poll this one endpoint about 1s
-/// for the amber Starting line; both decode to nil on idle or older engines.
+/// Search engine health response for `GET /search/health`. Encodes both `baseURL` (canonical) and
+/// `url` plus `status` so dashboard clients reading either contract keep the custom port instead of
+/// falling back to the default.
 public struct SearchHealthResponse: Content, Equatable {
     /// Whether the SearXNG base URL answered with 2xx/3xx.
     public let reachable: Bool
@@ -130,13 +110,6 @@ public struct SearchHealthResponse: Content, Equatable {
 }
 
 /// Search engine ensure response for `POST /search/ensure`.
-/// `message` carries the single trimmed banner (one retry-aware terminal cause
-/// plus one hatch command: pull timeout names cached-layer retry, pull failure
-/// names Hub reachability, run failure names the exit plus tail) for inline
-/// error slots, while `diagnostics` carries the full per-stage detail (stage,
-/// exit, capped tail, timeout, including the pull stage ahead of run) for warn
-/// logs plus the collapsed Settings diagnostics element. Older engines omit
-/// `diagnostics`, which decodes to nil.
 public struct SearchEnsureResponse: Content, Equatable {
     /// Whether the engine answers after the ensure attempt.
     public let reachable: Bool
@@ -207,9 +180,6 @@ public struct SearchEnsureResponse: Content, Equatable {
 }
 
 /// Search engine stop response for `POST /search/stop`.
-/// Carries a failure detail in `message` when the engine still answers after
-/// the stop, so the dashboard can render why the halt did not take instead of
-/// falling back to a generic notice.
 public struct SearchStopResponse: Content, Equatable {
     /// Whether the container is stopped (honest re-probe: false when the engine still answers).
     public let stopped: Bool
@@ -281,14 +251,9 @@ public struct SearchStopResponse: Content, Equatable {
     }
 }
 
-/// Search container remove response for `POST /search/remove`.
-/// Reports whether the managed entry is gone plus an honest reachability
-/// re-probe, so the dashboard can keep the pill honest without a second fetch.
-/// The image cache survives removal by design, so the next Start recreates the
-/// entry from the cached image instead of paying another pull. A running entry
-/// stops first on the server rather than half-deleting; when the engine still
-/// answers afterwards the response refuses with guidance instead of claiming
-/// the entry is gone.
+/// Search container remove response for `POST /search/remove`. Reports whether the managed entry is
+/// gone plus an honest reachability re-probe, so the dashboard can keep the pill honest without a
+/// second fetch.
 public struct SearchRemoveResponse: Content, Equatable {
     /// Whether the container entry is gone (false when still reachable or still listed).
     public let removed: Bool
@@ -361,13 +326,6 @@ public struct SearchRemoveResponse: Content, Equatable {
 }
 
 /// Browser Python health response for `GET /browser/health`.
-/// Carries readiness of the managed `~/.runeweaver/python` venv plus the live
-/// provision stage so the dashboard can poll one contract about 1s for the
-/// amber Preparing line, mirroring the search health shape. `stage` holds one
-/// of `resolving`, `creating`, `installing`, `browsers` while a provision
-/// flight runs and clears to nil when idle; `startedAt` carries Unix seconds
-/// when the flight began, nil when idle. `message` holds the actionable
-/// banner naming the venv path plus manual fallback when not ready.
 public struct BrowserPythonHealthResponse: Content, Equatable {
     /// Whether the effective interpreter can `import playwright`.
     public let ready: Bool
@@ -437,10 +395,6 @@ public struct BrowserPythonHealthResponse: Content, Equatable {
 }
 
 /// Browser Python ensure response for `POST /browser/ensure`.
-/// `message` carries the single trimmed banner (cause plus venv path plus
-/// manual fallback) for inline error slots, while `diagnostics` carries the
-/// capped pip or browser-install tail for warn logs plus collapsed UI.
-/// Older engines omit `diagnostics`, which decodes to nil.
 public struct BrowserPythonEnsureResponse: Content, Equatable {
     /// Whether the interpreter can `import playwright` after the attempt.
     public let ready: Bool

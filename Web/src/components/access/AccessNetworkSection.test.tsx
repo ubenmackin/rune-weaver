@@ -1,16 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the access network policy section.
-//
-// Purpose: Pins the structured network egress editor of the declarative policy
-// surface: loading the verified snapshot into the mode select and domain
-// editors, persisting the DTO without raw text, and keeping the saved banner
-// honest across edits with no restart promise ever shown.
-// Scope: Surface fetch and save shapes, the mode select and domain editors,
-// the local-exemption display with its Re-check flow, the invariant banner,
-// the shared save footer, and the sub-tab chrome that hosts the credentials
-// section. Credential rows and the binding modal stay with their owner suite.
-// Architectural role: Guards the network half of the single dashboard surface
-// whose writes steer the mandatory egress choke-point, so a network edit
-// cannot persist unvalidated text or claim a write that never landed.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -48,13 +36,8 @@ describe("AccessNetworkSection", () => {
     clearAuthToken();
   });
 
-  // Routes the pane fetch plus the Keychain presence probe so each case
-  // overrides only the response it exercises.
-  // Secrets side of the stub: store and delete answer the bodyless 204 from
-  // the engine contract while status answers only the existence map. Status
-  // accepts a fixed map or a probe function so store and delete flows can
-  // flip presence mid-test; posted bodies and deleted keys ride out through
-  // callbacks instead of globals.
+  // Routes the pane fetch plus the Keychain presence probe so each case overrides only the response
+  // it exercises.
   interface PaneSecretsStub {
     secretStatus?: Record<string, boolean> | ((keys: string[]) => Record<string, boolean>);
     onSecretPosted?: (body: Record<string, unknown>) => void;

@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Tests for the verbatim bash sandbox tier line.
-//
-// Purpose: pin verbatim tier rendering plus the null and undefined no-output cases.
-// Scope: summary text, tier CSS classes, and empty-DOM behavior; no command interpolation.
-// Architectural role: contract guard for the approval tier line owned by the inline banner.
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";

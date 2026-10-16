@@ -1,7 +1,4 @@
 // Rune Weaver Tools — Operator question tool (`question.ask`).
-//
-// Purpose: pauses the agent's turn and solicits operator input when encountering
-// multiple candidate matches or ambiguous directions, preventing unauthorized default actions.
 
 import Foundation
 import RuneWeaverCore
@@ -64,12 +61,6 @@ public struct QuestionAskTool: Tool, Sendable {
 
 extension QuestionAskTool: ToolAdmissionValidating {
     /// Refuses malformed questions before the call can park for approval.
-    ///
-    /// The turn loop consults this before the permission gate and before any
-    /// approval row is filed, so an empty question or an out-of-range option
-    /// list fails fast instead of interrupting the operator.
-    /// - Parameter input: Raw `question.ask` invocation.
-    /// - Returns: `.refuse` with the caller-facing reason, or `.proceed`.
     public func admissionVerdict(for input: ToolInput) async -> ToolAdmissionVerdict {
         guard let data = input.argumentsJSON.data(using: .utf8) else {
             return .refuse(reason: "Invalid arguments for question.ask: invalid UTF-8 string.")

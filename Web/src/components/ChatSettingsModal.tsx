@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Chat settings configuration dialog.
-//
-// Offers user controls for chat behavior including default thinking process and
-// file write card expansion, keyboard send shortcuts, and auto-scrolling
-// preferences.
 
 import { type FC } from "react";
 import Modal from "./Modal";

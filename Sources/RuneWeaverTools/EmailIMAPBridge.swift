@@ -9,10 +9,9 @@ public enum EmailIMAPError: Error, Sendable, Equatable {
     case unknownAccount(name: String, available: [String])
     /// The bridge subprocess reported a failure.
     case bridgeFailed(String)
-    /// A caller-side argument failed fail-closed validation before any dial.
-    ///
-    /// Dedicated case so callers match validation on type instead of
-    /// string-prefixing `bridgeFailed`; validation rejects before any dial.
+    /// A caller-side argument failed fail-closed validation before any dial. Dedicated case so
+    /// callers match validation on type instead of string-prefixing `bridgeFailed`; validation
+    /// rejects before any dial.
     case validationFailed(String)
     /// The bridge output could not be decoded.
     case decodeFailed(String)
@@ -151,11 +150,8 @@ public protocol EmailIMAPGateway: Sendable {
     /// - Returns: Selectable mailbox names in server order plus the common delimiter.
     func mailboxListing(credentials: ResolvedEmailCredentials) async throws -> EmailMailboxListing
 
-    /// Reads the STATUS snapshot for one mailbox.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to inspect.
-    /// - Returns: Next UID plus validity token for fixed-window anchoring.
+    /// Reads the STATUS snapshot for one mailbox. credentials: Resolved connection
+    /// fields plus password.
     func status(credentials: ResolvedEmailCredentials, mailbox: String) async throws -> EmailMailboxStatus
 
     /// Compatibility shim over `mailboxListing` for existing callers.
@@ -176,14 +172,7 @@ public protocol EmailIMAPGateway: Sendable {
     ) async throws -> [EmailSearchHit]
 
     /// Searches one mailbox for `query` within an optional temporal window.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to search.
-    ///   - query: Free-text query matched against subject, sender, and body.
-    ///   - limit: Maximum hits, bounded to `1...50`.
-    ///   - since: Inclusive lower bound, or nil for unbounded below.
-    ///   - until: Exclusive upper bound, or nil for unbounded above.
-    /// - Returns: Matching hits, newest first.
+    /// credentials: Resolved connection fields plus password.
     func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -194,14 +183,7 @@ public protocol EmailIMAPGateway: Sendable {
     ) async throws -> [EmailSearchHit]
 
     /// Searches one mailbox for `query` with attachment and temporal filters.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to search.
-    ///   - query: Free-text query matched against subject, sender, and body.
-    ///   - limit: Maximum hits, bounded to `1...50`.
-    ///   - hasAttachment: Optional attachment-presence filter.
-    ///   - range: Optional temporal window bounding message date.
-    /// - Returns: Matching hits, newest first.
+    /// credentials: Resolved connection fields plus password.
     func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -234,13 +216,7 @@ public protocol EmailIMAPGateway: Sendable {
     func append(credentials: ResolvedEmailCredentials, mailbox: String, rawMessage: Data) async throws
 
     /// Moves one message to another mailbox, optionally marking it read.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Source mailbox holding the message.
-    ///   - messageID: UID of the message to move.
-    ///   - destination: Destination mailbox.
-    ///   - markAsRead: Whether to set `\Seen` on the moved message.
-    /// - Returns: Source, destination, and whether the move and flag update applied.
+    /// credentials: Resolved connection fields plus password.
     func move(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -457,9 +433,6 @@ public struct EmailMoveResult: Sendable, Equatable, Codable {
 }
 
 /// Bridge request document sent to the Python helper over stdin.
-///
-/// Named owner for the STATUS op alongside the embedded script: this document
-/// defines the `"status"` operation shape the script dispatches.
 struct EmailIMAPBridgeRequest: Encodable {
     /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, `"status"`, `"append"`, or `"move"`.
     let op: String
@@ -681,11 +654,8 @@ struct EmailIMAPBridgeRequest: Encodable {
         )
     }
 
-    /// Creates a mailbox STATUS request for UIDNEXT plus UIDVALIDITY.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to inspect.
-    /// - Returns: `status` request anchoring the first fixed window.
+    /// Creates a mailbox STATUS request for UIDNEXT plus UIDVALIDITY. credentials:
+    /// Resolved connection fields plus password.
     static func status(credentials: ResolvedEmailCredentials, mailbox: String = "INBOX") -> Self {
         Self(
             op: "status",
@@ -843,10 +813,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     }
 
     /// Reads the STATUS snapshot for one mailbox via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to inspect.
-    /// - Returns: Next UID plus validity token for fixed-window anchoring.
+    /// credentials: Resolved connection fields plus password.
     public func status(credentials: ResolvedEmailCredentials, mailbox: String) async throws -> EmailMailboxStatus {
         try EmailIMAPValidation.validateMailbox(mailbox)
         let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
