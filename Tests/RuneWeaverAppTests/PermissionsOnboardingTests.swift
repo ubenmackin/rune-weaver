@@ -153,8 +153,8 @@ struct CalendarsRemindersOnboardingTests {
         let kinds = PermissionKind.allCases.map(\.rawValue)
         #expect(
             kinds == [
-                "fullDiskAccess", "contacts", "calendars", "reminders", "accessibility",
-                "screenRecording", "messagesAutomation"
+                "fullDiskAccess", "contacts", "calendars", "reminders",
+                "speechRecognition", "accessibility", "screenRecording", "messagesAutomation"
             ]
         )
     }
@@ -163,6 +163,7 @@ struct CalendarsRemindersOnboardingTests {
     func `titles rationales images and panes map`() {
         #expect(PermissionKind.calendars.title == "Calendars")
         #expect(PermissionKind.reminders.title == "Reminders")
+        #expect(PermissionKind.speechRecognition.title == "Speech Recognition")
 
         // Each rationale names its search plus creation pair so the owner
         // knows why the row matters before pressing Enable.
@@ -176,14 +177,21 @@ struct CalendarsRemindersOnboardingTests {
         #expect(remindersRationale.contains("search"))
         #expect(remindersRationale.contains("task"))
         #expect(remindersRationale.contains("creat"))
+        let speechRationale = PermissionKind.speechRecognition.rationale.lowercased()
+        #expect(speechRationale.contains("transcribe"))
+        #expect(speechRationale.contains("audio"))
+        #expect(speechRationale.contains("video"))
 
         #expect(PermissionKind.calendars.systemImage == "calendar")
         #expect(PermissionKind.reminders.systemImage == "checklist")
+        #expect(PermissionKind.speechRecognition.systemImage == "waveform")
 
         #expect(PermissionKind.calendars.pane == .calendars)
         #expect(PermissionKind.reminders.pane == .reminders)
+        #expect(PermissionKind.speechRecognition.pane == .speechRecognition)
         #expect(PermissionPane.calendars.url?.absoluteString.contains("Privacy_Calendars") == true)
         #expect(PermissionPane.reminders.url?.absoluteString.contains("Privacy_Reminders") == true)
+        #expect(PermissionPane.speechRecognition.url?.absoluteString.contains("Privacy_SpeechRecognition") == true)
     }
 
     @Test

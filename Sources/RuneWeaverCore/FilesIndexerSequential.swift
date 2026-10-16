@@ -131,7 +131,8 @@ extension FilesIndexer {
             return
         }
         let size = values.fileSize ?? 0
-        guard size <= maxFileBytes else {
+        let isMediaCandidate = MediaTextExtractor.isAudioOrVideoFile(fileName: filename)
+        guard isMediaCandidate || size <= maxFileBytes else {
             counters.skipped += 1
             await reportWork(relative, counters: counters, start: start)
             return
@@ -161,7 +162,7 @@ extension FilesIndexer {
         ) else {
             return
         }
-        guard data.count <= maxFileBytes else {
+        guard isMediaCandidate || data.count <= maxFileBytes else {
             counters.skipped += 1
             await reportWork(relative, counters: counters, start: start)
             return
@@ -366,9 +367,16 @@ extension FilesIndexer {
         // OCR-empty images stay interim (`.partial`, visual pending) yet must
         // still reach the visual path, so images bypass the status gate while
         // keeping the byte bound; other formats follow the shared policy.
-        let shouldAttemptVectors: Bool = if pending.extraction.format == .image {
-            vectorPolicy.enabled && pending.byteCount <= vectorPolicy.maxBytes
-        } else {
+        let imageMaxBytes = vectorPolicy.maxBytes == FilesVectorPolicy.defaultMaxBytes
+            ? 30 * 1024 * 1024
+            : vectorPolicy.maxBytes
+        let transcriptBytes = pending.extraction.chunks.reduce(0) { $0 + $1.text.utf8.count }
+        let shouldAttemptVectors: Bool = switch pending.extraction.format {
+        case .image:
+            vectorPolicy.enabled && pending.byteCount <= imageMaxBytes
+        case .audio, .video:
+            vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: transcriptBytes)
+        default:
             vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount)
         }
         if shouldAttemptVectors,

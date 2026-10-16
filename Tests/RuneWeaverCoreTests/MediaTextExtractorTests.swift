@@ -66,4 +66,30 @@ struct MediaTextExtractorTests {
             #expect(result.text.contains("Simulated audio transcription text"))
         }
     }
+
+    @Test
+    func `MediaTextExtractor distinguishes video containers and exempts media from maxFileBytes`() async throws {
+        #expect(MediaTextExtractor.isVideoFile(fileName: "Aryas First Swim.MOV"))
+        #expect(MediaTextExtractor.isVideoFile(fileName: "clip.mp4"))
+        #expect(MediaTextExtractor.isVideoFile(fileName: "movie.m4v"))
+        #expect(!MediaTextExtractor.isVideoFile(fileName: "voice.m4a"))
+
+        try await MediaTextExtractor.withAudioTranscription({ _ in
+            "Is that Daddy?"
+        }) {
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("large-video-\(UUID().uuidString).mov")
+            let oversizedBytes = Data(repeating: 0xAB, count: 1024)
+            try oversizedBytes.write(to: tempURL)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            // Even with a tiny 16-byte cap, .video and .audio files bypass the raw byte guard
+            // so their audio track can be demuxed and transcribed.
+            let extractor = DocumentTextExtractor(maxFileBytes: 16)
+            let result = await extractor.extract(fileURL: tempURL)
+            #expect(result.format == .video)
+            #expect(result.status == .extracted)
+            #expect(!result.truncated)
+            #expect(result.text.contains("Is that Daddy?"))
+        }
+    }
 }

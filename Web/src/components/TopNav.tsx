@@ -240,6 +240,11 @@ export default function TopNav({
           );
         } else if (status === "ready") {
           pushSuccessToast("Local embeddings ready (Metal GPU accelerated).", 4000);
+        } else if (status === "idle") {
+          pushSuccessToast(
+            message ?? "Local embedding engine entered standby to save power.",
+            4000,
+          );
         } else if (status === "error") {
           pushErrorToast(
             error ?? "Failed to initialize embedding engine.",

@@ -109,6 +109,12 @@ public struct MediaTextExtractor: Sendable {
         return supportedAudioExtensions.contains(ext) || supportedVideoExtensions.contains(ext)
     }
 
+    /// Checks if a filename has a recognized video container extension.
+    public static func isVideoFile(fileName: String) -> Bool {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return supportedVideoExtensions.contains(ext)
+    }
+
     /// Performs on-device text recognition (OCR) synchronously on image data using Apple Vision.
     public static func recognizeTextSync(in imageData: Data) -> String {
         if let custom = customImageOCR {
@@ -179,14 +185,42 @@ public struct MediaTextExtractor: Sendable {
         #endif
     }
 
+    /// Extracts the audio track from a video container into a temporary `.m4a` file.
+    /// - Parameter videoURL: Local URL to the video file.
+    /// - Returns: Temporary `.m4a` file URL when an audio track was exported, or `nil`.
+    public static func extractAudioTrack(from videoURL: URL) async -> URL? {
+        #if canImport(AVFoundation)
+            let asset = AVURLAsset(url: videoURL)
+            guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty else {
+                return nil
+            }
+            guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+                return nil
+            }
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rw-speech-\(UUID().uuidString).m4a")
+            do {
+                try await session.export(to: tempURL, as: .m4a)
+                return tempURL
+            } catch {
+                try? FileManager.default.removeItem(at: tempURL)
+                return nil
+            }
+        #else
+            return nil
+        #endif
+    }
+
     /// Transcribes speech from an audio or video file URL using Apple Speech.framework.
     ///
     /// Speech authorization is checked without prompting so background indexing
     /// never surfaces a consent dialog; a non-authorized state degrades to an
-    /// empty transcript. Recognition resumes exactly once: errors degrade to an
-    /// empty string, a final result returns its transcript, and a callback with
-    /// neither result nor error terminates instead of hanging the indexer.
-    /// Cancellation cooperatively stops the underlying recognition task.
+    /// empty transcript. Video containers have their audio track exported to a
+    /// temporary `.m4a` file before recognition and cleaned up on exit.
+    /// Recognition resumes exactly once: errors degrade to an empty string, a
+    /// final result returns its transcript, and a callback with neither result
+    /// nor error terminates instead of hanging the indexer. Cancellation
+    /// cooperatively stops the underlying recognition task.
     /// - Parameter fileURL: Local URL to the audio/video file.
     /// - Returns: Transcribed text, or empty string if unavailable.
     public static func transcribeAudio(fileURL: URL) async throws -> String {
@@ -200,9 +234,25 @@ public struct MediaTextExtractor: Sendable {
             }
             try Task.checkCancellation()
 
+            let ext = fileURL.pathExtension.lowercased()
+            var targetURL = fileURL
+            var cleanupURL: URL?
+            if supportedVideoExtensions.contains(ext),
+               let extracted = await extractAudioTrack(from: fileURL)
+            {
+                targetURL = extracted
+                cleanupURL = extracted
+            }
+            defer {
+                if let cleanupURL {
+                    try? FileManager.default.removeItem(at: cleanupURL)
+                }
+            }
+            try Task.checkCancellation()
+
             let coordinator = AudioTranscriptionCoordinator()
             return try await withTaskCancellationHandler {
-                try await coordinator.start(fileURL: fileURL)
+                try await coordinator.start(fileURL: targetURL)
             } onCancel: {
                 Task {
                     await coordinator.cancel()

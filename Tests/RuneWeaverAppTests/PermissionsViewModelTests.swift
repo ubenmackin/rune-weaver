@@ -84,6 +84,7 @@ struct PermissionsViewModelTests {
             .contacts: .granted,
             .calendars: .granted,
             .reminders: .denied,
+            .speechRecognition: .notDetermined,
             .accessibility: .notDetermined,
             .screenRecording: .deferred,
             .messagesAutomation: .unavailable
