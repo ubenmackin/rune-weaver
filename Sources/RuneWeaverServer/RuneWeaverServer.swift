@@ -147,6 +147,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSchedulerRunRoute(app)
     registerScheduledSendRoutes(app)
     registerSovereignReattestRoute(app)
+    registerSovereignRebaselineRoute(app)
     registerRunRoutes(app)
     registerGoalRoutes(app)
     registerIdeaRoutes(app)
@@ -361,6 +362,8 @@ private struct HealthPulseUpdatedFrame: Encodable {
     let probeVerdict: String?
     /// Bounded backing reasons for a non-green status.
     let degradedReasons: [String]?
+    /// Mapped recovery action for a red pulse.
+    let remediation: String?
 }
 
 /// Publishes a changed pulse value to live dashboards, best-effort.
@@ -370,7 +373,8 @@ func publishHealthPulse(_ value: HealthSnapshotValue, hub: WSHub) async {
         ledgerVerifiedAt: value.ledgerVerifiedAt?.timeIntervalSince1970,
         policyVerified: value.policyVerified,
         probeVerdict: value.probeVerdict?.rawValue,
-        degradedReasons: value.degradedReasons.isEmpty ? nil : value.degradedReasons
+        degradedReasons: value.degradedReasons.isEmpty ? nil : value.degradedReasons,
+        remediation: PulseRemediation(value.remediation).rawValue
     )
     guard let data = try? JSONEncoder().encode(frame),
           let text = String(data: data, encoding: .utf8)
@@ -686,7 +690,8 @@ private func registerHealthRoute(_ app: Application) {
             policyVerified: pulseValue.policyVerified,
             probeVerdict: pulseValue.probeVerdict?.rawValue,
             degradedReasons: pulseValue.degradedReasons.isEmpty ? nil : pulseValue.degradedReasons,
-            infoNotes: pulseValue.infoNotes.isEmpty ? nil : pulseValue.infoNotes
+            infoNotes: pulseValue.infoNotes.isEmpty ? nil : pulseValue.infoNotes,
+            remediation: PulseRemediation(pulseValue.remediation)
         )
         // Advertise the authoritative turn cap alongside the JSON body so the dashboard prefers the
         // server value over its fallback constant; a header keeps the JSON contract stable while
@@ -895,6 +900,8 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
         // preventing interleaving fetches while semantic rows, profile, and index remain untouched.
         do {
             let result = try await req.application.runeWeaver.memoryEngine.clearEpisodicWithRemaining()
+            // Owner-approved delete re-baselines inline so the pulse stays green.
+            _ = await rebaselineAfterOwnerDelete(sink: sovereignCeremonySink(app: req.application))
             return EpisodicClearResponse(deletedCount: result.deleted, episodeCount: result.remaining)
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
@@ -918,6 +925,8 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
+        // Owner-approved delete re-baselines inline so the pulse stays green.
+        _ = await rebaselineAfterOwnerDelete(sink: sovereignCeremonySink(app: req.application))
         return .noContent
     }
 
@@ -934,9 +943,31 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
+        // Owner-approved delete re-baselines inline so the pulse stays green.
+        _ = await rebaselineAfterOwnerDelete(sink: sovereignCeremonySink(app: req.application))
         // A missing row is a successful no-op: deletes stay idempotent so
         // retries and stale dashboard rows converge without a 404.
         return .noContent
+    }
+}
+
+/// Registers the owner-authenticated sovereign re-baseline route.
+private func registerSovereignRebaselineRoute(_ app: Application) {
+    app.post(
+        PathComponent.constant(ServerPaths.health),
+        PathComponent.constant(ServerPaths.sovereign),
+        PathComponent.constant(ServerPaths.rebaseline)
+    ) { req async throws -> SovereignRebaselineResponse in
+        // Denied stays denied when authenticated: without the owner credential
+        // the route refuses instead of re-baselining to a smaller head.
+        if req.application.runeWeaverAuth != nil, !req.runeWeaverAuthenticated {
+            throw Abort(.unauthorized, reason: "Owner authentication required.")
+        }
+        let sink = sovereignCeremonySink(app: req.application)
+        guard let verdict = await rebaselineAfterOwnerDelete(sink: sink) else {
+            throw Abort(.internalServerError, reason: "Sovereign re-baseline failed; pulse parked red.")
+        }
+        return SovereignRebaselineResponse(verdict: verdict)
     }
 }
 

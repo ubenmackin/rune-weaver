@@ -25,6 +25,18 @@ public enum HealthProbeVerdict: String, Sendable, Codable, Equatable {
     case fail
 }
 
+/// Mapped recovery action for a red pulse. Exactly one remedy per red.
+public enum HealthRemediation: String, Sendable, Codable, Equatable {
+    /// No recovery action; green or degraded only.
+    case none
+    /// Re-run verification from the current chain.
+    case rebaseline
+    /// Open the approvals inbox card.
+    case openInbox
+    /// Open the policy surface.
+    case openPolicy
+}
+
 // MARK: - Probe Outcomes
 
 /// One subsystem probe completion recorded into the pulse. Search reachability is intentionally
@@ -143,6 +155,8 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     public let degradedReasons: [String]
     /// Bounded info notes that never move the dot.
     public let infoNotes: [String]
+    /// Mapped recovery action for a red pulse.
+    public let remediation: HealthRemediation
 
     /// Creates a snapshot value. status: Closed pulse status.
     public init(
@@ -153,7 +167,8 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         policyVerified: Bool = false,
         probeVerdict: HealthProbeVerdict? = nil,
         degradedReasons: [String] = [],
-        infoNotes: [String] = []
+        infoNotes: [String] = [],
+        remediation: HealthRemediation = .none
     ) {
         self.status = status
         self.ledgerTip = Self.normalizedTip(ledgerTip)
@@ -163,6 +178,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         self.probeVerdict = probeVerdict
         self.degradedReasons = Self.normalizedReasons(degradedReasons)
         self.infoNotes = Self.normalizedInfoNotes(infoNotes)
+        self.remediation = remediation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -174,6 +190,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         case probeVerdict
         case degradedReasons
         case infoNotes
+        case remediation
     }
 
     /// Decodes tolerantly so values persisted before info notes still parse.
@@ -187,6 +204,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         probeVerdict = try container.decodeIfPresent(HealthProbeVerdict.self, forKey: .probeVerdict)
         degradedReasons = try Self.normalizedReasons(container.decodeIfPresent([String].self, forKey: .degradedReasons))
         infoNotes = try Self.normalizedInfoNotes(container.decodeIfPresent([String].self, forKey: .infoNotes))
+        remediation = try container.decodeIfPresent(HealthRemediation.self, forKey: .remediation) ?? .none
     }
 
     /// Encodes every field so deep equality covers info notes.
@@ -200,6 +218,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         try container.encodeIfPresent(probeVerdict, forKey: .probeVerdict)
         try container.encode(degradedReasons, forKey: .degradedReasons)
         try container.encode(infoNotes, forKey: .infoNotes)
+        try container.encode(remediation, forKey: .remediation)
     }
 
     /// Normalizes a tip or hash digest: trims, lowercases, and accepts hex of up to `maxTipLength`.
@@ -452,6 +471,7 @@ public actor SystemHealthSnapshot {
         }
         var policyHash: String?
         var policyVerified = false
+        var policyFailed = false
         if let policyStore {
             let read = await policyStore.readSnapshot()
             if read.violations.isEmpty {
@@ -461,6 +481,7 @@ public actor SystemHealthSnapshot {
                 }
             } else {
                 status = .red
+                policyFailed = true
                 reasons.append(contentsOf: read.violations)
             }
         }
@@ -487,6 +508,19 @@ public actor SystemHealthSnapshot {
         } else {
             .pass
         }
+        // One remedy per red: mismatch outranks brake outranks policy
+        // outranks probe failure; green plus yellow carry none.
+        let remediation: HealthRemediation = if parkedMismatch {
+            .rebaseline
+        } else if watchdogHealth == .red {
+            .openInbox
+        } else if policyFailed {
+            .openPolicy
+        } else if failedClosed {
+            .openInbox
+        } else {
+            .none
+        }
         return HealthSnapshotValue(
             status: status,
             ledgerTip: ledgerTip,
@@ -495,7 +529,8 @@ public actor SystemHealthSnapshot {
             policyVerified: policyVerified,
             probeVerdict: verdict,
             degradedReasons: HealthSnapshotValue.normalizedReasons(reasons),
-            infoNotes: HealthSnapshotValue.normalizedInfoNotes(notes)
+            infoNotes: HealthSnapshotValue.normalizedInfoNotes(notes),
+            remediation: remediation
         )
     }
 

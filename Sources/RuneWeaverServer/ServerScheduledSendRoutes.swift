@@ -70,6 +70,33 @@ public struct SovereignReattestResponse: Content, Sendable {
     }
 }
 
+/// Re-baseline response mirroring the ceremony verdict.
+public struct SovereignRebaselineResponse: Content, Sendable {
+    /// Closed outcome of the ceremony.
+    public let outcome: String
+    /// Recomputed primary ledger head.
+    public let primaryTip: String
+    /// Sovereign head under test, if any.
+    public let sovereignTip: String?
+    /// Tip of the last signed checkpoint, if any.
+    public let checkpointTip: String?
+    /// Episodes the recomputed chain covered.
+    public let episodeCount: Int
+    /// How the signed vote resolved a disagreement.
+    public let decision: String
+
+    /// Creates a response from a ceremony verdict.
+    /// - Parameter verdict: Ceremony verdict to project.
+    public init(verdict: SovereignVerdict) {
+        outcome = verdict.outcome.rawValue
+        primaryTip = verdict.primaryTip
+        sovereignTip = verdict.sovereignTip
+        checkpointTip = verdict.checkpointTip
+        episodeCount = verdict.episodeCount
+        decision = verdict.decision.rawValue
+    }
+}
+
 /// List response for `GET /scheduler/sends`.
 public struct ScheduledSendsResponse: Content, Sendable {
     /// Every booked send, earliest fire time first.

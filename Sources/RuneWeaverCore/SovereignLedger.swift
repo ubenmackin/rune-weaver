@@ -513,6 +513,24 @@ public actor SovereignLedger {
         return checkpoint
     }
 
+    /// Rewrites the copy plus checkpoint from the current chain. Owner-approved deletes
+    /// shrink the ledger, so this is the single path that re-baselines to a smaller head.
+    public func rebaselineToCurrentChain() async throws -> SovereignVerdict {
+        let episodes = try await episodeStore.orderedEpisodesForVerification()
+        let chain = Self.recomputeChain(episodes)
+        let primaryTip = chain.last?.hash ?? SovereignVerdict.emptyTip
+        try writeSovereignCopy(chain)
+        try writeCheckpoint(tip: primaryTip, episodeCount: episodes.count)
+        return SovereignVerdict(
+            outcome: episodes.isEmpty ? .empty : .verified,
+            primaryTip: primaryTip,
+            sovereignTip: primaryTip,
+            checkpointTip: primaryTip,
+            episodeCount: episodes.count,
+            decision: .verified
+        )
+    }
+
     /// Pure tiebreaker for a head disagreement.
     public func adjudicate(primaryTip: String, sovereignTip: String, checkpointTip: String) -> SovereignDecision {
         guard let primary = HealthSnapshotValue.normalizedTip(primaryTip),

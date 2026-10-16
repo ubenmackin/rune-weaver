@@ -65,6 +65,10 @@ export interface HealthResponse {
   // alongside reasons. Optional because older engines predate the countdown;
   // absent means no info to disclose.
   infoNotes?: string[];
+  // Mapped recovery for a red pulse ("none", "rebaseline", "openInbox", "openPolicy").
+  // Optional because older engines predate the mapping; absent means the card
+  // derives it from the reason text under the same priority.
+  remediation?: string | null;
   // Authoritative turn cap advertised by the engine on GET /health. Optional because older
   // engines predate the advertisement and because getHealth injects it from the response
   // header when the JSON body carries none; absent degrades to MAX_CONCURRENT_CHAT_TURNS.
@@ -1886,6 +1890,88 @@ export async function getHealth(): Promise<HealthResponse> {
     data.maxConcurrentChatTurns = fromHeader;
   }
   return data;
+}
+
+// Closed recovery mapping for a red pulse: exactly one primary action.
+export type PulseRemediation = "none" | "rebaseline" | "openInbox" | "openPolicy";
+
+// Re-baseline verdict mirroring the sovereign ceremony shape.
+export interface RebaselineResponse {
+  outcome: string;
+  primaryTip: string;
+  sovereignTip?: string | null;
+  checkpointTip?: string | null;
+  episodeCount: number;
+  decision: string;
+}
+
+// Sole POST client for the sovereign re-baseline ceremony. Card and view
+// delegate here so no second fetch path can drift the endpoint or payload.
+export function postSovereignRebaseline(): Promise<RebaselineResponse> {
+  return fetchJson<RebaselineResponse>("/health/sovereign/rebaseline", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Single recovery: mismatch above brake above policy above probe failure.
+// Server value wins when known; reason text decides otherwise, unmatched
+// reds park at openInbox so every red renders one action.
+export function resolvePulseRemediation(
+  health: HealthResponse | null | undefined,
+): PulseRemediation {
+  const raw =
+    typeof health?.remediation === "string" ? health.remediation.trim() : "";
+  if (
+    raw === "none" ||
+    raw === "rebaseline" ||
+    raw === "openInbox" ||
+    raw === "openPolicy"
+  ) {
+    return raw;
+  }
+  if (!health || health.status !== "red") return "none";
+  const reasons = Array.isArray(health.degradedReasons)
+    ? health.degradedReasons
+    : [];
+  const haystack = reasons
+    .filter((entry): entry is string => typeof entry === "string")
+    .join("\n")
+    .toLowerCase();
+  if (
+    haystack.includes("sovereign") ||
+    haystack.includes("ledger") ||
+    haystack.includes("mismatch") ||
+    haystack.includes("re-verification") ||
+    haystack.includes("reverification")
+  ) {
+    return "rebaseline";
+  }
+  if (
+    haystack.includes("brake") ||
+    haystack.includes("anomaly") ||
+    haystack.includes("trusted-tool")
+  ) {
+    return "openInbox";
+  }
+  if (
+    haystack.includes("policy") ||
+    haystack.includes("invariant") ||
+    haystack.includes("blocked") ||
+    haystack.includes("allowlist") ||
+    haystack.includes("credential")
+  ) {
+    return "openPolicy";
+  }
+  if (
+    haystack.includes("probe") ||
+    haystack.includes("fail") ||
+    haystack.includes("suite") ||
+    haystack.includes("verifier")
+  ) {
+    return "openInbox";
+  }
+  return "openInbox";
 }
 
 export function postChat(

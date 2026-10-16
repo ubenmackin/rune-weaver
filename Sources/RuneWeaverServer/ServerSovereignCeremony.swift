@@ -85,3 +85,35 @@ func reattestSovereign(sink: SovereignCeremonySink) async -> SovereignVerdict? {
     }
     return await runSovereignCeremony(sink: sink, reason: "reattest")
 }
+
+/// Re-baselines after an owner-approved delete. Rewrites the copy plus checkpoint
+/// from the post-delete chain, then records the fresh verdict into the pulse.
+@discardableResult
+func rebaselineAfterOwnerDelete(sink: SovereignCeremonySink) async -> SovereignVerdict? {
+    do {
+        let verdict = try await sink.ledger.rebaselineToCurrentChain()
+        await sink.pulse.recordSovereign(verdict)
+        let value = await sink.pulse.snapshot()
+        if sink.lastServed.updateIfChanged(value) {
+            await publishHealthPulse(value, hub: sink.hub)
+        }
+        RuneWeaverLog.server.info("Sovereign re-baseline after owner delete: \(verdict.outcome.rawValue) at \(verdict.primaryTip).")
+        return verdict
+    } catch {
+        RuneWeaverLog.server.warning("Sovereign re-baseline after owner delete failed: \(error.localizedDescription)")
+        await sink.pulse.recordSovereignFailure()
+        let value = await sink.pulse.snapshot()
+        if sink.lastServed.updateIfChanged(value) {
+            await publishHealthPulse(value, hub: sink.hub)
+        }
+        if let approvals = sink.approvals {
+            await approvals.enqueue(
+                toolName: SovereignCeremonySink.inboxToolName,
+                description: "Sovereign re-baseline after owner delete could not verify history: \(error.localizedDescription). "
+                    + "The system pulse stays fail-closed until a passing re-verification.",
+                input: ToolInput(toolName: SovereignCeremonySink.inboxToolName, argumentsJSON: "{}")
+            )
+        }
+        return nil
+    }
+}
