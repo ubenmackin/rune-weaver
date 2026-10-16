@@ -333,7 +333,9 @@ extension FilesIndexer {
             return .finished(outcome)
         }
         let size = values.fileSize ?? 0
-        guard size <= resolved.maxBytes else {
+        let candidateFormat = DocumentTextExtractor.detectFormat(fileName: resolved.filename, contentType: nil)
+        let isMediaCandidate = candidateFormat == .audio || candidateFormat == .video
+        guard isMediaCandidate || size <= resolved.maxBytes else {
             return .finished(skippedOutcome(relative: resolved.relative))
         }
         let decision = services.accessGuard.evaluate(
@@ -397,7 +399,9 @@ extension FilesIndexer {
         if state.cancellation.isSet || Task.isCancelled {
             return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
         }
-        guard data.count <= resolved.maxBytes else {
+        let payloadFormat = DocumentTextExtractor.detectFormat(fileName: resolved.filename, contentType: nil)
+        let isMediaPayload = payloadFormat == .audio || payloadFormat == .video
+        guard isMediaPayload || data.count <= resolved.maxBytes else {
             return .finished(skippedOutcome(relative: resolved.relative))
         }
         let hash = Self.contentHash(for: data)
@@ -752,9 +756,16 @@ extension FilesIndexer {
         fileName: String,
         byteCount: Int
     ) async throws -> (vectors: [[Float]]?, visualSucceeded: Bool) {
-        let shouldAttempt: Bool = if extraction.format == .image {
-            services.vectorPolicy.enabled && byteCount <= services.vectorPolicy.maxBytes
-        } else {
+        let imageMaxBytes = services.vectorPolicy.maxBytes == FilesVectorPolicy.defaultMaxBytes
+            ? 30 * 1024 * 1024
+            : services.vectorPolicy.maxBytes
+        let transcriptBytes = extraction.chunks.reduce(0) { $0 + $1.text.utf8.count }
+        let shouldAttempt: Bool = switch extraction.format {
+        case .image:
+            services.vectorPolicy.enabled && byteCount <= imageMaxBytes
+        case .audio, .video:
+            services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: transcriptBytes)
+        default:
             services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: byteCount)
         }
         guard shouldAttempt else {

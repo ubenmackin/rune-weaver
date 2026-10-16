@@ -262,7 +262,8 @@ public actor LlamaEmbeddingSupervisor {
                 "--ctx-size", String(ctxSize),
                 "--batch-size", String(ctxSize),
                 "--ubatch-size", String(ctxSize),
-                "--n-gpu-layers", String(gpuLayers)
+                "--n-gpu-layers", String(gpuLayers),
+                "--sleep-idle-seconds", "60"
             ]
 
             if let mmprojURL, FileManager.default.fileExists(atPath: mmprojURL.path) {
@@ -347,9 +348,15 @@ public actor LlamaEmbeddingSupervisor {
         try? FileManager.default.removeItem(at: resolvedPIDURL)
         let code = proc.terminationStatus
         if status == .ready || status == .starting {
-            let msg = "llama-server process exited unexpectedly with code \(code)"
-            RuneWeaverLog.stores.error("LlamaEmbeddingSupervisor: \(msg)")
-            await updateStatus(.error, message: msg, error: msg)
+            if code == 0 {
+                let msg = "Local embedding engine entered standby to save power."
+                RuneWeaverLog.stores.info("LlamaEmbeddingSupervisor: \(msg)")
+                await updateStatus(.idle, message: msg)
+            } else {
+                let msg = "llama-server process exited unexpectedly with code \(code)"
+                RuneWeaverLog.stores.error("LlamaEmbeddingSupervisor: \(msg)")
+                await updateStatus(.error, message: msg, error: msg)
+            }
         }
     }
 

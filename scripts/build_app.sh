@@ -127,6 +127,8 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <string>Rune Weaver uses your calendars to index events and answer your questions about upcoming events when you enable calendar access.</string>
     <key>NSRemindersUsageDescription</key>
     <string>Rune Weaver uses your reminders to index tasks and answer your questions about to-dos when you enable reminders access.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Rune Weaver uses speech recognition to transcribe audio recordings, voice memos, and video audio tracks during local file indexing.</string>
     <key>NSUserNotificationAlertStyle</key>
     <string>banner</string>
     <key>NSAppleEventsUsageDescription</key>

@@ -27,6 +27,7 @@ import Contacts
 import Foundation
 @testable import RuneWeaverApp
 import RuneWeaverCore
+import Speech
 import Testing
 
 @Suite("Permissions onboarding store and mappings")
@@ -93,6 +94,14 @@ struct PermissionsOnboardingStoreTests {
         #expect(PermissionStatusMapping.contacts(limited) == .denied)
         // Untouched prompt keeps the Enable affordance.
         #expect(PermissionStatusMapping.contacts(.notDetermined) == .notDetermined)
+    }
+
+    @Test
+    func `speech recognition mapping matches authorization states`() {
+        #expect(PermissionStatusMapping.speechRecognition(.authorized) == .granted)
+        #expect(PermissionStatusMapping.speechRecognition(.denied) == .denied)
+        #expect(PermissionStatusMapping.speechRecognition(.restricted) == .denied)
+        #expect(PermissionStatusMapping.speechRecognition(.notDetermined) == .notDetermined)
     }
 
     @Test
@@ -165,7 +174,12 @@ struct PermissionsOnboardingStoreTests {
         // Declaration order is the presentation order; a reorder here would
         // silently reshuffle the window, so the suite pins it.
         let kinds = PermissionKind.allCases.map(\.rawValue)
-        #expect(kinds == ["fullDiskAccess", "contacts", "calendars", "reminders", "accessibility", "screenRecording", "messagesAutomation"])
+        #expect(
+            kinds == [
+                "fullDiskAccess", "contacts", "calendars", "reminders",
+                "speechRecognition", "accessibility", "screenRecording", "messagesAutomation"
+            ]
+        )
     }
 
     @Test

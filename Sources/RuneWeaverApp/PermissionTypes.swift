@@ -19,6 +19,7 @@ import Contacts
 import EventKit
 import Foundation
 import RuneWeaverCore
+import Speech
 
 /// Ordered capabilities surfaced in the Permissions window.
 ///
@@ -30,6 +31,7 @@ public enum PermissionKind: String, CaseIterable, Sendable {
     case contacts
     case calendars
     case reminders
+    case speechRecognition
     case accessibility
     case screenRecording
     case messagesAutomation
@@ -70,6 +72,7 @@ public enum PermissionPane: String, Sendable {
     case contacts
     case calendars
     case reminders
+    case speechRecognition
     case accessibility
     case screenCapture
     case automation
@@ -89,6 +92,8 @@ public enum PermissionPane: String, Sendable {
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
         case .reminders:
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")
+        case .speechRecognition:
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
         case .accessibility:
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         case .screenCapture:
@@ -111,6 +116,8 @@ extension PermissionKind {
             "Calendars"
         case .reminders:
             "Reminders"
+        case .speechRecognition:
+            "Speech Recognition"
         case .accessibility:
             "Desktop Control"
         case .screenRecording:
@@ -136,6 +143,8 @@ extension PermissionKind {
             "Lets Rune Weaver search your calendars and create events when you ask it to."
         case .reminders:
             "Lets Rune Weaver search your reminders and create tasks when you ask it to."
+        case .speechRecognition:
+            "Lets Rune Weaver transcribe speech from audio recordings, voice memos, and videos during indexing."
         case .accessibility:
             "Lets Rune Weaver move the mouse, click, and type during approved desktop tasks."
         case .screenRecording:
@@ -156,6 +165,8 @@ extension PermissionKind {
             "calendar"
         case .reminders:
             "checklist"
+        case .speechRecognition:
+            "waveform"
         case .accessibility:
             "cursorarrow.motionlines"
         case .screenRecording:
@@ -176,6 +187,8 @@ extension PermissionKind {
             .calendars
         case .reminders:
             .reminders
+        case .speechRecognition:
+            .speechRecognition
         case .accessibility:
             .accessibility
         case .screenRecording:
@@ -226,6 +239,20 @@ enum PermissionStatusMapping {
             .notDetermined
         @unknown default:
             // Unknown future cases fail closed to denied so no layer claims access it has not verified.
+            .denied
+        }
+    }
+
+    /// Interprets the Speech Recognition authorization state.
+    static func speechRecognition(_ status: SFSpeechRecognizerAuthorizationStatus) -> PermissionStatus {
+        switch status {
+        case .authorized:
+            .granted
+        case .denied, .restricted:
+            .denied
+        case .notDetermined:
+            .notDetermined
+        @unknown default:
             .denied
         }
     }

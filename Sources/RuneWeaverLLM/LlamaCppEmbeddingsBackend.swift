@@ -6,6 +6,9 @@ import RuneWeaverCore
 #if canImport(Darwin)
     import Darwin
 #endif
+#if canImport(UniformTypeIdentifiers)
+    import UniformTypeIdentifiers
+#endif
 
 /// Embeddings backend running Google DeepMind's EmbeddingGemma 2 locally via `llama-server`.
 public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
@@ -191,7 +194,7 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
             let imageSocketTask = Task.detached {
                 try Self.sendHTTPRequestOverUnixSocket(
                     socketPath: expandedPath,
-                    path: "/embedding",
+                    path: "/v1/embeddings",
                     body: jsonData
                 )
             }
@@ -207,7 +210,7 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
             }
         }
         if let httpURL {
-            var request = URLRequest(url: httpURL.appendingPathComponent("embedding"))
+            var request = URLRequest(url: httpURL.appendingPathComponent("v1/embeddings"))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = jsonData
@@ -220,8 +223,18 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
         throw EmbeddingsError.unavailable
     }
 
-    /// Extracts a dimension-matching embedding vector from native or OpenAI-compatible responses.
-    private func parseEmbeddingVector(from responseData: Data, expectedDim: Int) -> [Float]? {
+    /// Extracts a dimension-matching embedding vector from OpenAI-compatible or native responses.
+    nonisolated func parseEmbeddingVector(from responseData: Data, expectedDim: Int) -> [Float]? {
+        if let parsed = try? JSONDecoder().decode(EmbeddingResponsePayload.self, from: responseData),
+           let vector = parsed.data.first?.embedding, vector.count == expectedDim
+        {
+            return vector
+        }
+        if let parsedArray = try? JSONDecoder().decode([NativeEmbeddingArrayItem].self, from: responseData),
+           let vector = parsedArray.first?.embedding.first, vector.count == expectedDim
+        {
+            return vector
+        }
         if let parsed = try? JSONDecoder().decode(NativeEmbeddingResponse.self, from: responseData) {
             if let vector = parsed.embedding?.first, vector.count == expectedDim {
                 return vector
@@ -230,12 +243,29 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
                 return vector
             }
         }
-        if let parsed = try? JSONDecoder().decode(EmbeddingResponsePayload.self, from: responseData),
-           let vector = parsed.data.first?.embedding, vector.count == expectedDim
-        {
-            return vector
-        }
         return nil
+    }
+
+    /// Resolves an `image/*` MIME type for a given image file URL.
+    static func imageMIMEType(for url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        #if canImport(UniformTypeIdentifiers)
+            if !ext.isEmpty,
+               let utType = UTType(filenameExtension: ext),
+               let mime = utType.preferredMIMEType,
+               mime.hasPrefix("image/")
+            {
+                return mime
+            }
+        #endif
+        switch ext {
+        case "png": return "image/png"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "heic", "heif": return "image/heic"
+        case "bmp": return "image/bmp"
+        default: return "image/jpeg"
+        }
     }
 
     /// Direct multimodal image embedding for an image file at the specified URL.
@@ -258,10 +288,21 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
 
         let rawImageData = try await readBoundedImageData(at: imageURL)
         let base64String = rawImageData.base64EncodedString()
+        let mimeType = Self.imageMIMEType(for: imageURL)
+        let dataURI = "data:\(mimeType);base64,\(base64String)"
 
         let payload = MultimodalEmbeddingRequest(
-            content: "Image: [img-1]\n",
-            imageData: [MultimodalImageItem(id: 1, data: base64String)]
+            model: modelID,
+            input: [
+                MultimodalEmbeddingInput(
+                    content: [
+                        MultimodalContentPart(
+                            type: "image_url",
+                            imageURL: MultimodalImageURL(url: dataURI)
+                        )
+                    ]
+                )
+            ]
         )
         let jsonData = try JSONEncoder().encode(payload)
         let responseData = try await sendEmbeddingRequest(jsonData: jsonData)
@@ -322,19 +363,32 @@ private struct EmbeddingResponsePayload: Decodable {
     let data: [Item]
 }
 
-private struct MultimodalImageItem: Encodable {
-    let id: Int
-    let data: String
+private struct MultimodalImageURL: Encodable {
+    let url: String
+}
+
+private struct MultimodalContentPart: Encodable {
+    let type: String
+    let imageURL: MultimodalImageURL
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case imageURL = "image_url"
+    }
+}
+
+private struct MultimodalEmbeddingInput: Encodable {
+    let content: [MultimodalContentPart]
 }
 
 private struct MultimodalEmbeddingRequest: Encodable {
-    let content: String
-    let imageData: [MultimodalImageItem]
+    let model: String
+    let input: [MultimodalEmbeddingInput]
+}
 
-    enum CodingKeys: String, CodingKey {
-        case content
-        case imageData = "image_data"
-    }
+private struct NativeEmbeddingArrayItem: Decodable {
+    let index: Int?
+    let embedding: [[Float]]
 }
 
 private struct NativeEmbeddingResponse: Decodable {

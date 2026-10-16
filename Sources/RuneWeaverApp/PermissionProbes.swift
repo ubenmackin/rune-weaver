@@ -22,6 +22,7 @@ import EventKit
 import Foundation
 import RuneWeaverCore
 import RuneWeaverTools
+import Speech
 
 /// Silent reads plus explicit requests behind one seam for tests.
 public protocol PermissionProbing: Sendable {
@@ -85,6 +86,9 @@ struct LivePermissionProbes: PermissionProbing {
             // Silent EventKit read; never prompts, so safe on appear
             // and on activation refresh.
             return eventKitStatus(for: .reminder)
+        case .speechRecognition:
+            let current = SFSpeechRecognizer.authorizationStatus()
+            return PermissionStatusMapping.speechRecognition(current)
         case .accessibility:
             // Silent trust query on the main actor because the underlying
             // TCC call expects main-thread execution.
@@ -124,6 +128,13 @@ struct LivePermissionProbes: PermissionProbing {
             // Prompting full-access variant reserved for the explicit Enable
             // press, then re-read so the row reflects the recorded grant.
             return await requestEventKitAccess(for: .reminder)
+        case .speechRecognition:
+            let authStatus = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { result in
+                    continuation.resume(returning: result)
+                }
+            }
+            return PermissionStatusMapping.speechRecognition(authStatus)
         case .accessibility:
             // Prompting variant reserved for the explicit Enable press; the
             // return reflects trust at call time, so map it directly.

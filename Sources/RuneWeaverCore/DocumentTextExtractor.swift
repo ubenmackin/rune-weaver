@@ -232,7 +232,8 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
         let fileName = fileURL.lastPathComponent
         let format = Self.detectFormat(fileName: fileName, contentType: contentType)
         let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
-        if let size, size > maxFileBytes {
+        let isMedia = format == .audio || format == .video
+        if !isMedia, let size, size > maxFileBytes {
             return makeResult(
                 status: .partial,
                 format: format,

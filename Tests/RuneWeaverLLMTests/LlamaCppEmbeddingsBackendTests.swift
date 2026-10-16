@@ -174,4 +174,25 @@ struct LlamaCppEmbeddingsBackendTests {
             try await backend.embedImage(at: testFile)
         }
     }
+
+    @Test
+    func `imageMIMEType resolves standard image extensions accurately`() {
+        #expect(LlamaCppEmbeddingsBackend.imageMIMEType(for: URL(fileURLWithPath: "/tmp/photo.jpg")) == "image/jpeg")
+        #expect(LlamaCppEmbeddingsBackend.imageMIMEType(for: URL(fileURLWithPath: "/tmp/photo.JPEG")) == "image/jpeg")
+        #expect(LlamaCppEmbeddingsBackend.imageMIMEType(for: URL(fileURLWithPath: "/tmp/diagram.png")) == "image/png")
+        #expect(LlamaCppEmbeddingsBackend.imageMIMEType(for: URL(fileURLWithPath: "/tmp/shot.heic")) == "image/heic")
+        #expect(LlamaCppEmbeddingsBackend.imageMIMEType(for: URL(fileURLWithPath: "/tmp/web.webp")) == "image/webp")
+    }
+
+    @Test
+    func `parseEmbeddingVector decodes OpenAI v1 embeddings response payload`() throws {
+        let backend = LlamaCppEmbeddingsBackend(socketPath: "/tmp/mock.sock", supervisor: nil)
+        let floats = [Float](repeating: 0.25, count: 768)
+        let floatStrings = floats.map { String($0) }.joined(separator: ",")
+        let payload = Data(#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[\#(floatStrings)]}]}"#.utf8)
+
+        let parsed = try #require(backend.parseEmbeddingVector(from: payload, expectedDim: 768))
+        #expect(parsed.count == 768)
+        #expect(parsed[0] == 0.25)
+    }
 }
