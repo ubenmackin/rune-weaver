@@ -12,6 +12,8 @@ public enum ServerPaths {
     public static let sovereign = "sovereign"
     /// Re-attestation subpath under `/health/sovereign`.
     public static let reattest = "reattest"
+    /// Re-baseline subpath under `/health/sovereign`.
+    public static let rebaseline = "rebaseline"
     /// Chat turn.
     public static let chat = "chat"
     /// Per-tool cancellation subpath under `/chat`.
@@ -187,6 +189,28 @@ public enum ServerPaths {
     /// and providers cannot drift.
     public static var apiVersion: String {
         RuneWeaverVersion.current
+    }
+}
+
+/// Mapped recovery action for a red pulse. Exactly one remedy per red.
+public enum PulseRemediation: String, Content, Sendable, Equatable {
+    /// No recovery action; green or degraded only.
+    case none
+    /// Re-run verification from the current chain.
+    case rebaseline
+    /// Open the approvals inbox card.
+    case openInbox
+    /// Open the policy surface.
+    case openPolicy
+
+    /// Maps a core snapshot remedy onto the served contract.
+    public init(_ core: HealthRemediation) {
+        switch core {
+        case .none: self = .none
+        case .rebaseline: self = .rebaseline
+        case .openInbox: self = .openInbox
+        case .openPolicy: self = .openPolicy
+        }
     }
 }
 

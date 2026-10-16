@@ -406,7 +406,14 @@ export default function DashboardView({
             onOpenStagedDrawer={onOpenStagedDrawer}
             onOpenSettings={() => onSelectTab("settings")}
             onOpenInbox={() => onSelectTab("approvals")}
-            onOpenPolicy={() => onSelectTab("settings")}
+            onOpenPolicy={() => {
+              // Deep link lands on Access through the settings hash sync
+              // with no reload; the shell keeps the settings tab selected.
+              onSelectTab("settings");
+              if (typeof window !== "undefined") {
+                window.location.hash = "#settings/access";
+              }
+            }}
           />
 
           <GoalsCockpit

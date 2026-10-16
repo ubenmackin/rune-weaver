@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import {
   getHealth,
   getStagedFiles,
+  postSovereignRebaseline,
+  resolvePulseRemediation,
   type HealthResponse,
 } from "../../api";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
@@ -23,6 +25,11 @@ interface SystemPulseCardProps {
 // still reads as degraded.
 type PulseState = "green" | "yellow" | "red";
 
+// Display bound mirroring the engine snapshot so an uncapped payload
+// never widens the disclosure.
+const MAX_PULSE_REASONS = 8;
+const MAX_PULSE_REASON_LENGTH = 160;
+
 function resolvePulseReasons(health: HealthResponse | null): string[] {
   const raw = health?.degradedReasons;
   if (!Array.isArray(raw)) return [];
@@ -31,7 +38,8 @@ function resolvePulseReasons(health: HealthResponse | null): string[] {
     if (typeof entry !== "string") continue;
     const trimmed = entry.trim();
     if (!trimmed) continue;
-    out.push(trimmed);
+    out.push(trimmed.slice(0, MAX_PULSE_REASON_LENGTH));
+    if (out.length >= MAX_PULSE_REASONS) break;
   }
   return out;
 }
@@ -46,7 +54,8 @@ function resolvePulseInfoNotes(health: HealthResponse | null): string[] {
     if (typeof entry !== "string") continue;
     const trimmed = entry.trim();
     if (!trimmed) continue;
-    out.push(trimmed);
+    out.push(trimmed.slice(0, MAX_PULSE_REASON_LENGTH));
+    if (out.length >= MAX_PULSE_REASONS) break;
   }
   return out;
 }
@@ -69,9 +78,10 @@ export default function SystemPulseCard({
 }: SystemPulseCardProps) {
   const [liveHealth, setLiveHealth] = useState<HealthResponse | null>(health);
   const [liveStagedCount, setLiveStagedCount] = useState<number>(stagedFilesCount);
-  // Retry busy flag so double-clicks cannot stack verification probes; the
-  // heartbeat and socket paths share the refresh below without the flag.
-  const [retrying, setRetrying] = useState(false);
+  // Re-baseline busy flag plus server reason: double-clicks cannot stack
+  // ceremonies, and a refused ceremony stays visible instead of vanishing.
+  const [rebasing, setRebasing] = useState(false);
+  const [rebaselineError, setRebaselineError] = useState<string | null>(null);
 
   useEffect(() => {
     if (health) setLiveHealth(health);
@@ -96,14 +106,23 @@ export default function SystemPulseCard({
     }
   }, []);
 
-  const handleRetryVerification = useCallback(async () => {
-    setRetrying(true);
+  const handleRebaseline = useCallback(async () => {
+    if (rebasing) return;
+    setRebasing(true);
+    setRebaselineError(null);
     try {
+      await postSovereignRebaseline();
       await refreshTelemetry();
+    } catch (error) {
+      setRebaselineError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Re-baseline failed.",
+      );
     } finally {
-      setRetrying(false);
+      setRebasing(false);
     }
-  }, [refreshTelemetry]);
+  }, [rebasing, refreshTelemetry]);
 
   const handleWSFrame = useCallback(
     (frame: WSIncomingFrame) => {
@@ -149,6 +168,7 @@ export default function SystemPulseCard({
   const pulse = resolvePulseState(effectiveHealth);
   const reasons = resolvePulseReasons(effectiveHealth);
   const infoNotes = resolvePulseInfoNotes(effectiveHealth);
+  const remediation = resolvePulseRemediation(effectiveHealth);
   const modelName = effectiveHealth?.model || "Configured LLM";
   const provider = effectiveHealth?.provider || effectiveHealth?.engine || "RuneWeaver";
 
@@ -158,6 +178,23 @@ export default function SystemPulseCard({
     pulse === "green" ? "pill-ok" : pulse === "yellow" ? "pill-amber" : "pill-red";
   const pillLabel =
     pulse === "green" ? "Operational" : pulse === "yellow" ? "Degraded" : "Needs action";
+
+  // Details stay visible for every non-green pulse so red and yellow alike
+  // expose their backing reasons; green opens only with info notes to show.
+  const showDetails =
+    pulse !== "green" || reasons.length > 0 || infoNotes.length > 0;
+  // Exactly one mapped recovery per red: inbox falls back to the settings
+  // surface and every action still renders disabled with no opener, so a red
+  // never lands with zero buttons.
+  const inboxOpener = onOpenInbox ?? onOpenSettings;
+  const policyOpener = onOpenPolicy ?? onOpenSettings;
+  const showInboxAction = remediation === "openInbox";
+  const showPolicyAction = remediation === "openPolicy";
+  const showRebaselineAction = remediation === "rebaseline";
+  const showRedActions =
+    pulse === "red" &&
+    remediation !== "none" &&
+    (showRebaselineAction || showInboxAction || showPolicyAction);
 
   return (
     <section className="dashboard-section system-pulse-section" aria-label="System status & telemetry">
@@ -189,7 +226,7 @@ export default function SystemPulseCard({
           </div>
         </div>
 
-        {(pulse === "yellow" || infoNotes.length > 0) && pulse !== "red" && (
+        {showDetails && (
           <details className="pulse-details">
             <summary>Details</summary>
             {effectiveHealth ? (
@@ -219,30 +256,45 @@ export default function SystemPulseCard({
           </details>
         )}
 
-        {pulse === "red" && (
+        {showRedActions && (
           <div className="pulse-actions">
-            <button
-              type="button"
-              className="btn pulse-inbox-btn"
-              onClick={onOpenInbox ?? onOpenSettings}
-            >
-              Open inbox
-            </button>
-            <button
-              type="button"
-              className="btn pulse-retry-btn"
-              onClick={() => void handleRetryVerification()}
-              disabled={retrying}
-            >
-              {retrying ? "Retrying…" : "Retry verification"}
-            </button>
-            <button
-              type="button"
-              className="btn pulse-policy-btn"
-              onClick={onOpenPolicy ?? onOpenSettings}
-            >
-              Open Policy
-            </button>
+            {showRebaselineAction && (
+              <>
+                <button
+                  type="button"
+                  className="btn pulse-rebaseline-btn pulse-primary-btn"
+                  onClick={() => void handleRebaseline()}
+                  disabled={rebasing}
+                >
+                  {rebasing ? "Re-baselining…" : "Re-baseline & re-verify"}
+                </button>
+                {rebaselineError && (
+                  <p className="pulse-error text-xs" role="alert">
+                    {rebaselineError}
+                  </p>
+                )}
+              </>
+            )}
+            {showInboxAction && (
+              <button
+                type="button"
+                className="btn pulse-inbox-btn pulse-primary-btn"
+                onClick={inboxOpener}
+                disabled={inboxOpener == null}
+              >
+                Open inbox
+              </button>
+            )}
+            {showPolicyAction && (
+              <button
+                type="button"
+                className="btn pulse-policy-btn pulse-primary-btn"
+                onClick={policyOpener}
+                disabled={policyOpener == null}
+              >
+                Open Policy
+              </button>
+            )}
           </div>
         )}
 

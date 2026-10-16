@@ -65,6 +65,8 @@ public struct HealthResponse: Content, Equatable {
     /// Bounded info notes that never move the dot, driving the dashboard
     /// Details disclosure alongside reasons. Nil when none or on pre-pulse payloads.
     public let infoNotes: [String]?
+    /// Mapped recovery action for a red pulse.
+    public let remediation: PulseRemediation
 
     /// Creates a health response.
     public init(
@@ -88,7 +90,8 @@ public struct HealthResponse: Content, Equatable {
         policyVerified: Bool? = nil,
         probeVerdict: String? = nil,
         degradedReasons: [String]? = nil,
-        infoNotes: [String]? = nil
+        infoNotes: [String]? = nil,
+        remediation: PulseRemediation = .none
     ) {
         self.status = Self.normalizedStatus(status)
         self.engine = engine
@@ -133,6 +136,7 @@ public struct HealthResponse: Content, Equatable {
         self.degradedReasons = reasons.isEmpty ? nil : reasons
         let notes = HealthSnapshotValue.normalizedInfoNotes(infoNotes)
         self.infoNotes = notes.isEmpty ? nil : notes
+        self.remediation = remediation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -140,6 +144,7 @@ public struct HealthResponse: Content, Equatable {
         case searchReachable, searchURL, searchStatus, searchStage, searchStartedAt
         case serverHostname, serverPort, serverAllowedHosts
         case ledgerTip, ledgerVerifiedAt, policyHash, policyVerified, probeVerdict, degradedReasons, infoNotes
+        case remediation
     }
 
     /// Decodes tolerantly so payloads from engines that predate staged Start progress still parse
@@ -192,6 +197,8 @@ public struct HealthResponse: Content, Equatable {
         degradedReasons = rawReasons.isEmpty ? nil : rawReasons
         let rawNotes = try HealthSnapshotValue.normalizedInfoNotes(container.decodeIfPresent([String].self, forKey: .infoNotes))
         infoNotes = rawNotes.isEmpty ? nil : rawNotes
+        let rawRemediation = try container.decodeIfPresent(String.self, forKey: .remediation)
+        remediation = PulseRemediation(rawValue: rawRemediation ?? "") ?? .none
     }
 
     /// Normalizes a pulse status against its closed vocabulary.
@@ -243,5 +250,6 @@ public struct HealthResponse: Content, Equatable {
         try container.encodeIfPresent(probeVerdict, forKey: .probeVerdict)
         try container.encodeIfPresent(degradedReasons, forKey: .degradedReasons)
         try container.encodeIfPresent(infoNotes, forKey: .infoNotes)
+        try container.encode(remediation, forKey: .remediation)
     }
 }
