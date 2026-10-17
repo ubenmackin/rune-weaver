@@ -638,11 +638,29 @@ extension Orchestrator {
 /// Holds episodic flushing, remember handling, token totals, and LLM
 /// collection helpers so no single type body exceeds the length budget.
 extension Orchestrator {
+    /// Episodic attribution for background goal work: a background session
+    /// linked to a goal stamps that link so the trigger bridge can reject the
+    /// goal's own mirrored episodes instead of re-arming its triggers.
+    private func goalAttributionMetadata(for sessionID: UUID) async -> [String: String] {
+        guard let session = await conversations.session(id: sessionID),
+              let goalID = session.goalID,
+              Self.isBackgroundSource(session.source)
+        else { return [:] }
+        return [GoalTriggerBridge.goalAttributionKey: goalID.uuidString]
+    }
+
     /// Flushes buffered episodic mirrors without throwing.
     func flushEpisodic(_ pending: [(content: String, role: Message.Role)], sessionID: UUID) async {
         guard let memoryEngine else { return }
+        let attribution = await goalAttributionMetadata(for: sessionID)
         for entry in pending {
-            await memoryEngine.mirrorTurn(content: entry.content, sessionID: sessionID, role: entry.role, failurePolicy: .silent)
+            await memoryEngine.mirrorTurn(
+                content: entry.content,
+                sessionID: sessionID,
+                role: entry.role,
+                metadata: attribution,
+                failurePolicy: .silent
+            )
         }
     }
 
@@ -652,11 +670,13 @@ extension Orchestrator {
         sessionID: UUID
     ) async {
         guard let memoryEngine else { return }
+        let attribution = await goalAttributionMetadata(for: sessionID)
         for entry in pending {
             await memoryEngine.mirrorTurnUncancellable(
                 content: entry.content,
                 sessionID: sessionID,
-                role: entry.role
+                role: entry.role,
+                metadata: attribution
             )
         }
     }

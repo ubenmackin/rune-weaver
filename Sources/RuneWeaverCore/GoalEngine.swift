@@ -353,20 +353,35 @@ public actor GoalEngine {
         await decompose(goal: goal, runID: runID)
     }
 
-    /// Composes the per-run advancement prompt as user text.
+    /// Composes the per-run advancement prompt as user text, surfacing only completed context and
+    /// the single next actionable step so the agent works on one task per turn and stops.
     public nonisolated func advancePrompt(goal: Goal, steps: [GoalStep], events: [GoalEvent]) -> String {
         let ordered = steps.sorted { $0.ordinal < $1.ordinal }
+        let nextActionable = ordered.first { $0.status == .pending || $0.status == .inProgress }
+        let priorSteps = ordered.filter { $0.status == .done || $0.status == .blocked || $0.status == .skipped }
         var lines: [String] = []
         lines.append("Goal: \(goal.title)")
         lines.append("Statement: \(goal.statement)")
-        lines.append("")
-        lines.append("Plan:")
-        if ordered.isEmpty {
-            lines.append("No steps yet.")
-        } else {
-            for step in ordered {
-                lines.append("\(step.ordinal + 1). [\(step.status.rawValue)] \(step.title)")
+        if !priorSteps.isEmpty {
+            lines.append("")
+            lines.append("Completed steps:")
+            for step in priorSteps {
+                if let notes = step.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
+                    lines.append("- Step \(step.ordinal) [\(step.status.rawValue)] \(step.title) — \(notes)")
+                } else {
+                    lines.append("- Step \(step.ordinal) [\(step.status.rawValue)] \(step.title)")
+                }
             }
+        }
+        lines.append("")
+        lines.append("Current task:")
+        if let nextActionable {
+            lines.append("Step \(nextActionable.ordinal) (stepOrdinal: \(nextActionable.ordinal)) [\(nextActionable.status.rawValue)]: \(nextActionable.title)")
+            if let notes = nextActionable.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
+                lines.append("Notes: \(notes)")
+            }
+        } else {
+            lines.append("No steps yet.")
         }
         lines.append("")
         lines.append("Recent events:")
@@ -379,8 +394,16 @@ public actor GoalEngine {
             }
         }
         lines.append("")
-        lines.append("Advance exactly the next actionable step and no further.")
-        lines.append("When you complete a step, call goal.progress on completion with its outcome.")
+        if let nextActionable {
+            lines.append("Advance ONLY this single current task (stepOrdinal: \(nextActionable.ordinal)) and stop immediately after.")
+            lines.append(
+                "When you complete this step, call goal.progress with stepOrdinal: \(nextActionable.ordinal),"
+                    + " status: \"done\", and a note with its outcome, then conclude your turn."
+            )
+        } else {
+            lines.append("Advance exactly the next actionable step and no further.")
+            lines.append("When you complete a step, call goal.progress on completion with its outcome.")
+        }
         lines.append("Record blockers honestly instead of marking blocked work done.")
         lines.append("Do not rush later steps; leave them pending until their turn.")
         return lines.joined(separator: "\n")
@@ -620,6 +643,9 @@ public struct GoalTriggerBridge: Sendable {
     /// Upper bound on events read from each source per poll, so one noisy
     /// stream cannot fan the settle work out without bound.
     public static let maxEventsPerPoll = 200
+    /// Episode metadata key stamping the mirroring session's linked goal, so a
+    /// background goal turn's episodes attribute to that goal at trigger time.
+    public static let goalAttributionKey = "goal_id"
 
     /// Maximum age of an event a poll may still consider.
     public let lookback: TimeInterval
@@ -682,6 +708,10 @@ public struct GoalTriggerBridge: Sendable {
         } else {
             GoalTriggerEventKind.episode
         }
-        return GoalObservedEvent(kind: kind, message: episode.content, occurredAt: episode.timestamp)
+        // The episode row carries no goal link of its own, so a background
+        // goal turn stamps one at mirror time and the matcher's unchanged
+        // self-goal rejection drops the goal's own episodes.
+        let attributedGoalID = episode.metadata[Self.goalAttributionKey].flatMap(UUID.init(uuidString:))
+        return GoalObservedEvent(kind: kind, message: episode.content, occurredAt: episode.timestamp, goalID: attributedGoalID)
     }
 }

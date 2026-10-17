@@ -339,12 +339,22 @@ struct GoalWorkerTests {
         let sessionID = try #require(parked.sessionID)
         #expect(await orchestrator.isSessionParked(sessionID) == true)
 
-        // While the goal turn is parked awaiting approval, a subsequent tick
-        // skips instead of starting a concurrent duplicate execution.
-        let busyTickResults = await worker.tick(now: Date())
+        // Claiming the turn bumps next_due_at by the goal cadence immediately, so
+        // 1-minute ticks during the cadence window stay completely silent instead
+        // of spamming "already running" every minute.
+        let withinCadenceTickResults = await worker.tick(now: Date())
+        #expect(withinCadenceTickResults.isEmpty)
+
+        // If the cadence window elapses while the goal turn is still parked
+        // awaiting approval, the next due tick skips once with "already running"
+        // and suppresses duplicate skips on subsequent minutes for that due date.
+        let pastCadenceNow = Date().addingTimeInterval(3601)
+        let busyTickResults = await worker.tick(now: pastCadenceNow)
         #expect(busyTickResults.count == 1)
         #expect(busyTickResults.first?.fired == false)
         #expect(busyTickResults.first?.skippedReason == "already running")
+        let repeatedBusyTick = await worker.tick(now: pastCadenceNow.addingTimeInterval(60))
+        #expect(repeatedBusyTick.isEmpty)
 
         let pending = await approvals.list().first
         let approvalID = try #require(pending?.id)
@@ -578,5 +588,147 @@ struct GoalWorkerTests {
         #expect(results.first?.skippedReason == "already running")
         #expect(await runs.count() == 1)
         #expect(await runs.list(limit: 1).first?.status == "skipped")
+
+        // Subsequent 1-minute ticks while the turn is still running for the same
+        // due date do not emit duplicate "already running" skip entries.
+        let secondTick = await worker.tick(now: Date().addingTimeInterval(60))
+        #expect(secondTick.isEmpty)
+        #expect(await runs.count() == 1)
+    }
+
+    @Test
+    func `Deleted goal skip suppression entry is pruned on the next tick`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = GoalStore(dbPath: dbPath)
+        let goal = try await persistGoal(store: store, nextDueAt: Date().addingTimeInterval(-60))
+
+        let stub = GoalFireStubLLM(answer: "should not run")
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let engine = makeEnabledGoalEngine(store: store, llm: stub)
+        let runs = RunLogStore()
+        let goalLock = SchedulerRunLock()
+        let acquired = await goalLock.tryAcquire(id: goal.id, name: goal.title)
+        #expect(acquired == true)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: runs,
+            hub: WSHub(),
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: store,
+            goalEngine: engine,
+            goalRunLock: goalLock
+        )
+
+        // The contended tick records the skip-suppression high-water mark.
+        let first = await worker.tick(now: Date())
+        #expect(first.count == 1)
+        #expect(first.first?.skippedReason == "already running")
+        let marked = await worker.lastSkippedGoalDueAt
+        #expect(marked[goal.id] != nil)
+
+        // Once the goal is gone the entry has no live counterpart, so the next
+        // tick prunes it instead of pinning it in the long-lived worker.
+        try await store.delete(goalID: goal.id)
+        let second = await worker.tick(now: Date().addingTimeInterval(60))
+        #expect(second.isEmpty)
+        let remaining = await worker.lastSkippedGoalDueAt
+        #expect(remaining.isEmpty)
+        #expect(await runs.count() == 1)
+        await goalLock.release(id: goal.id, name: goal.title)
+    }
+
+    @Test
+    func `Settled goal skip suppression entries are pruned on the next tick`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = GoalStore(dbPath: dbPath)
+        let achievedGoal = try await persistGoal(store: store, title: "Finish the album", nextDueAt: Date().addingTimeInterval(-60))
+        let abandonedGoal = try await persistGoal(store: store, title: "Learn the accordion", nextDueAt: Date().addingTimeInterval(-45))
+
+        let stub = GoalFireStubLLM(answer: "should not run")
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let engine = makeEnabledGoalEngine(store: store, llm: stub)
+        let runs = RunLogStore()
+        let goalLock = SchedulerRunLock()
+        #expect(await goalLock.tryAcquire(id: achievedGoal.id, name: achievedGoal.title) == true)
+        #expect(await goalLock.tryAcquire(id: abandonedGoal.id, name: abandonedGoal.title) == true)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: runs,
+            hub: WSHub(),
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: store,
+            goalEngine: engine,
+            goalRunLock: goalLock
+        )
+
+        let first = await worker.tick(now: Date())
+        #expect(first.count == 2)
+        #expect(first.allSatisfy { $0.skippedReason == "already running" })
+
+        // Terminal goals keep no suppression entry: the next tick prunes both.
+        try await store.setStatus(goalID: achievedGoal.id, status: .achieved)
+        try await store.setStatus(goalID: abandonedGoal.id, status: .abandoned)
+        let second = await worker.tick(now: Date().addingTimeInterval(60))
+        #expect(second.isEmpty)
+        let remaining = await worker.lastSkippedGoalDueAt
+        #expect(remaining.isEmpty)
+        #expect(await runs.count() == 2)
+        await goalLock.release(id: achievedGoal.id, name: achievedGoal.title)
+        await goalLock.release(id: abandonedGoal.id, name: abandonedGoal.title)
+    }
+
+    @Test
+    func `Active busy goal keeps its skip suppression entry across ticks`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = GoalStore(dbPath: dbPath)
+        let goal = try await persistGoal(store: store, nextDueAt: Date().addingTimeInterval(-60))
+
+        let stub = GoalFireStubLLM(answer: "should not run")
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let engine = makeEnabledGoalEngine(store: store, llm: stub)
+        let runs = RunLogStore()
+        let goalLock = SchedulerRunLock()
+        let acquired = await goalLock.tryAcquire(id: goal.id, name: goal.title)
+        #expect(acquired == true)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: runs,
+            hub: WSHub(),
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: store,
+            goalEngine: engine,
+            goalRunLock: goalLock
+        )
+
+        let first = await worker.tick(now: Date())
+        #expect(first.count == 1)
+        #expect(first.first?.skippedReason == "already running")
+
+        // The goal is still active and due, so pruning leaves the entry in
+        // place and the duplicate skip row stays suppressed.
+        let second = await worker.tick(now: Date().addingTimeInterval(60))
+        #expect(second.isEmpty)
+        let marked = await worker.lastSkippedGoalDueAt
+        #expect(marked[goal.id] != nil)
+        #expect(await runs.count() == 1)
+        await goalLock.release(id: goal.id, name: goal.title)
     }
 }

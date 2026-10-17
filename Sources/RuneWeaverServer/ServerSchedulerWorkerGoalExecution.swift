@@ -9,6 +9,9 @@ import RuneWeaverCore
 extension ServerSchedulerWorker {
     /// Records an audit run entry for a goal that skipped firing because it is already running.
     func recordGoalSkipped(goal: Goal, startTime: Date) async -> SchedulerRunResult {
+        if let dueAt = goal.nextDueAt {
+            lastSkippedGoalDueAt[goal.id] = dueAt
+        }
         let skipMsg = "Skipped goal '\(goal.title)': already running"
         await logger?(skipMsg)
         // Skipped goals create no conversation, so the audit entry stays
@@ -204,6 +207,32 @@ extension ServerSchedulerWorker {
         return false
     }
 
+    /// Drops skip-suppression entries whose goal was deleted or reached a terminal state, keeping
+    /// the in-memory high-water mark bounded. Goals already known active-and-due skip the store
+    /// read, and a failed lookup keeps its entry so transient store errors never clear suppression.
+    func pruneStaleGoalSkips(store: GoalStore, liveActiveDueIDs: Set<UUID>) async {
+        guard !lastSkippedGoalDueAt.isEmpty else { return }
+        let staleIDs = lastSkippedGoalDueAt.keys.filter { !liveActiveDueIDs.contains($0) }
+        for goalID in staleIDs {
+            let snapshot: Goal?
+            do {
+                snapshot = try await store.goal(id: goalID)
+            } catch is CancellationError {
+                return
+            } catch {
+                // Fail-open: an unreadable lookup must not clear live suppression.
+                continue
+            }
+            guard let snapshot else {
+                lastSkippedGoalDueAt.removeValue(forKey: goalID)
+                continue
+            }
+            if snapshot.status == .achieved || snapshot.status == .abandoned {
+                lastSkippedGoalDueAt.removeValue(forKey: goalID)
+            }
+        }
+    }
+
     func advanceGoalTurn(
         goal: Goal,
         store: GoalStore,
@@ -273,6 +302,9 @@ extension ServerSchedulerWorker {
         guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
             return await recordGoalSkipped(goal: goal, startTime: startTime)
         }
+        lastSkippedGoalDueAt.removeValue(forKey: goal.id)
+        let claimedNextDue = startTime.addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
+        try? await store.markAdvanced(goalID: goal.id, nextDueAt: claimedNextDue)
 
         let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
 
@@ -321,8 +353,10 @@ extension ServerSchedulerWorker {
             if let registration {
                 await activeTurns?.unregister(sessionID: sessionID, token: registration.token)
             }
-            // Cancelled turns did not advance, so they stay due: mark the run
-            // cancelled (never error), release the lock, then propagate.
+            // Cancelled turns did not advance, so they stay due: restore the
+            // pre-claim due date, mark the run cancelled (never error), release
+            // the lock, then propagate.
+            try? await store.markAdvanced(goalID: goal.id, nextDueAt: goal.nextDueAt)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
             if let entry = await runs.update(
                 id: initialEntry.id,
@@ -379,6 +413,9 @@ extension ServerSchedulerWorker {
             _ = await recordGoalSkipped(goal: goal, startTime: startTime)
             throw GoalBusyError()
         }
+        lastSkippedGoalDueAt.removeValue(forKey: goal.id)
+        let claimedNextDue = startTime.addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
+        try? await store.markAdvanced(goalID: goal.id, nextDueAt: claimedNextDue)
         let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
         let initialEntry = await runs.append(
             kind: "goal",
@@ -419,6 +456,7 @@ extension ServerSchedulerWorker {
             if let registration {
                 await activeTurns?.unregister(sessionID: sessionID, token: registration.token)
             }
+            try? await store.markAdvanced(goalID: goal.id, nextDueAt: goal.nextDueAt)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
             if let entry = await runs.update(
                 id: initialEntry.id,

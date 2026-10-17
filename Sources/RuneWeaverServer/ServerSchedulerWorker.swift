@@ -62,6 +62,7 @@ public actor ServerSchedulerWorker {
     private var runningTask: Task<Void, Never>?
     var seenPollIDs: [UUID: Set<String>] = [:]
     var lastPollCheck: [UUID: Date] = [:]
+    var lastSkippedGoalDueAt: [UUID: Date] = [:]
     private var isStarted = false
 
     /// Creates a server scheduler worker.
@@ -243,7 +244,17 @@ public actor ServerSchedulerWorker {
                     await logger?("Goals due scan failed: \(error.localizedDescription)")
                     dueGoals = []
                 }
+                // Deleted or settled goals would otherwise pin skip-suppression
+                // entries here forever, so prune before firing; goals still
+                // active and due skip the store read and keep suppression.
+                await pruneStaleGoalSkips(store: goalStore, liveActiveDueIDs: Set(dueGoals.map(\.id)))
                 for goal in dueGoals {
+                    if let dueAt = goal.nextDueAt,
+                       lastSkippedGoalDueAt[goal.id] == dueAt,
+                       await isGoalBusy(id: goal.id)
+                    {
+                        continue
+                    }
                     do {
                         let outcome = try await executeGoal(goal, store: goalStore, engine: goalEngine)
                         results.append(outcome)

@@ -857,6 +857,15 @@ public struct GoalProgressTool: Tool, Sendable {
                 let hint = known.isEmpty ? "this goal has no steps yet" : "known ordinals: \(known)"
                 return .failure("No step \(stepOrdinal) for goal \(goalID.uuidString) (\(hint)).", callID: input.callID)
             }
+            if let rejection = validateStepTransition(
+                step: step,
+                steps: steps,
+                status: ledgerStatus,
+                conversationID: context.conversationID,
+                callID: input.callID
+            ) {
+                return rejection
+            }
             if context.dryRun {
                 return .success("Dry run: would mark step \(stepOrdinal) ('\(step.title)') as \(ledgerStatus.rawValue).", callID: input.callID)
             }
@@ -907,6 +916,40 @@ public struct GoalProgressTool: Tool, Sendable {
         } catch {
             return .failure("Could not record goal progress: \(error.localizedDescription)", callID: input.callID)
         }
+    }
+
+    /// Validates that only one step is completed per turn and that earlier steps are not skipped out of order.
+    private func validateStepTransition(
+        step: GoalStep,
+        steps: [GoalStep],
+        status: StepStatus,
+        conversationID: UUID,
+        callID: String?
+    ) -> ToolOutput? {
+        if status == .done || status == .skipped,
+           steps.contains(where: {
+               $0.id != step.id
+                   && $0.lastRunID == conversationID
+                   && ($0.status == .done || $0.status == .skipped)
+           })
+        {
+            return .failure(
+                "Only one step can be completed per turn. Stop and summarize the completed step.",
+                callID: callID
+            )
+        }
+        if status == .done || status == .inProgress,
+           let earlier = steps
+           .sorted(by: { $0.ordinal < $1.ordinal })
+           .first(where: { $0.ordinal < step.ordinal && ($0.status == .pending || $0.status == .inProgress) })
+        {
+            return .failure(
+                "Cannot advance step \(step.ordinal) while earlier step \(earlier.ordinal)"
+                    + " ('\(earlier.title)') is still \(earlier.status.rawValue). Advance step \(earlier.ordinal) first.",
+                callID: callID
+            )
+        }
+        return nil
     }
 
     /// Resolves the explicit goal or the session-linked and single-goal defaults.

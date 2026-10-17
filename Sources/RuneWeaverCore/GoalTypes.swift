@@ -233,6 +233,9 @@ public struct GoalTrigger: Sendable, Codable, Equatable, Identifiable {
 
     /// Whether this trigger matches one observed event at `now`.
     public func matches(event: GoalObservedEvent, now: Date) -> Bool {
+        if let eventGoalID = event.goalID, eventGoalID == goalID {
+            return false
+        }
         let kind = trimmedEventKind
         guard !kind.isEmpty, event.kind.caseInsensitiveCompare(kind) == .orderedSame else {
             return false

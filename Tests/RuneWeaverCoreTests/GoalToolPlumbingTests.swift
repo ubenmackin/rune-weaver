@@ -502,4 +502,63 @@ struct GoalToolPlumbingTests {
         #expect(capture.receivedSteps.count == 1)
         #expect(capture.receivedSteps.first?.status == .done)
     }
+
+    @Test
+    func `Progress enforces sequential steps and single step completion per turn`() async throws {
+        let (path, base) = makeGoalToolDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let llm = GoalToolStubLLM(texts: ["[]"])
+        let config = makeGoalToolEnabledConfig()
+        let (engine, store) = makeGoalToolStack(dbPath: path, llm: llm, config: config)
+        let goal = try await persistGoalToolFixture(
+            store: store,
+            title: "Multi-step goal",
+            steps: [("First step", .pending), ("Second step", .pending)]
+        )
+        let tools = GoalTools.makeTools(engine: engine, store: store, goalsConfig: config)
+        let progress = try #require(tools.first { $0.name == "goal.progress" })
+        let turnSessionID = UUID()
+
+        // Advancing step 1 while step 0 is still pending is rejected.
+        let outOfOrder = try await progress.execute(
+            input: ToolInput(
+                toolName: "goal.progress",
+                argumentsJSON: #"{"goalID":"\#(goal.id.uuidString)","stepOrdinal":1,"status":"done"}"#
+            ),
+            context: ToolContext(conversationID: turnSessionID)
+        )
+        #expect(outOfOrder.isError == true)
+        #expect(outOfOrder.content.contains("Advance step 0 first"))
+
+        // Completing step 0 in this turn succeeds.
+        let step0Done = try await progress.execute(
+            input: ToolInput(
+                toolName: "goal.progress",
+                argumentsJSON: #"{"goalID":"\#(goal.id.uuidString)","stepOrdinal":0,"status":"done"}"#
+            ),
+            context: ToolContext(conversationID: turnSessionID)
+        )
+        #expect(step0Done.isError == false)
+
+        // Completing a second step (step 1) in the same turn/session is rejected.
+        let secondInSameTurn = try await progress.execute(
+            input: ToolInput(
+                toolName: "goal.progress",
+                argumentsJSON: #"{"goalID":"\#(goal.id.uuidString)","stepOrdinal":1,"status":"done"}"#
+            ),
+            context: ToolContext(conversationID: turnSessionID)
+        )
+        #expect(secondInSameTurn.isError == true)
+        #expect(secondInSameTurn.content.contains("Only one step can be completed per turn"))
+
+        // A subsequent turn (new session ID) can complete step 1.
+        let nextTurnDone = try await progress.execute(
+            input: ToolInput(
+                toolName: "goal.progress",
+                argumentsJSON: #"{"goalID":"\#(goal.id.uuidString)","stepOrdinal":1,"status":"done"}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(nextTurnDone.isError == false)
+    }
 }
