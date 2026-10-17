@@ -197,10 +197,9 @@ export default function WorkingNowStream({
                 </div>
 
                 <div className="working-task-actions">
-                  {/* Run kinds with a live chat thread: chat, scheduler, goal,
-                      fanout, and fanout_worker sessions all carry a sessionID
-                      (matching the sidebar's background-session support); index
-                      runs have no chat thread. */}
+                  {/* Run kinds with a live chat thread: chat, scheduler, goal, fanout, and
+                      fanout_worker sessions all carry a sessionID (matching the sidebar's
+                      background-session support); index runs have no chat thread. */}
                   {run.sessionID &&
                     run.sessionID.trim() &&
                     run.kind !== "index" && (

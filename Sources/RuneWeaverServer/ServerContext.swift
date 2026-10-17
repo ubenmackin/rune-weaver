@@ -1215,6 +1215,12 @@ private func finalizeServerContext(
         workspaceStore: context.workspaceStore,
         onApprovalRequested: onApprovalRequested
     )
+    // System-notice filings broadcast from inside the queue's insert hop through this hook, so a
+    // settle racing a filing can never strand a phantom notice card behind a late caller-side frame.
+    let noticeHub = context.hub
+    await context.approvals.setOnNoticeFiled { request in
+        await noticeHub.broadcastApproval(request)
+    }
     // Stored toggles win over fresh registration defaults so restarts
     // restore operator intent; tools registered after `make` (builtin
     // plugins in the serve path) re-apply via `restoreToolStates`.

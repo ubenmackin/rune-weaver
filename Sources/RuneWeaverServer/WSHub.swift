@@ -176,6 +176,24 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts one approval decision to every connected socket. The single owner of the
+    /// `WSApprovalDecidedFrame` encoding so every decision path — the decide route's resume and
+    /// automatic system-notice settlements — fans out the same wire shape.
+    public func broadcastApprovalDecided(id: UUID, approved: Bool, sessionID: UUID?) async {
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(
+                WSApprovalDecidedFrame(id: id, approved: approved, sessionID: sessionID)
+            )
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode approval_decided frame: \(error.localizedDescription)")
+            return
+        }
+        await fanOut(text)
+    }
+
     /// Broadcasts a run log event (started or completed) to every connected socket.
     public func broadcastRun(_ run: RunLogEntry) async {
         struct WSRunEvent: Codable {

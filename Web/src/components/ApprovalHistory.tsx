@@ -11,8 +11,9 @@ import {
 } from "../api";
 import { truncateTarget } from "../approvalsShared";
 import { formatRelativeAgo } from "../relativeTime";
+import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import Modal from "./Modal";
-import { CloseIcon, RefreshIcon } from "./icons";
+import { CloseIcon } from "./icons";
 
 type ActionFilter = "all" | ApprovalHistoryAction;
 
@@ -66,8 +67,8 @@ export default function ApprovalHistory() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  // Monotonic request token so the debounced commit, the Refresh bump, and the post-clear refetch
-  // all race through the same gate: a slower earlier response can never overwrite the view with rows
+  // Monotonic request token so the debounced commit and the post-clear refetch
+  // race through the same gate: a slower earlier response can never overwrite the view with rows
   // that disagree with the committed filters, and a response outliving the pane is discarded too.
   const requestSeq = useRef(0);
 
@@ -103,9 +104,9 @@ export default function ApprovalHistory() {
         ...(trimmedTool ? { tool: trimmedTool } : {}),
         ...(action === "allowed" || action === "denied" ? { action } : {}),
       });
-      // A superseded read (a newer filter commit, a Refresh, or a clear
-      // refetch already in flight) is dropped whole: rows, error, and the
-      // loading flag all stay owned by the newest request.
+      // A superseded read (a newer filter commit or a clear refetch already
+      // in flight) is dropped whole: rows, error, and the loading flag all
+      // stay owned by the newest request.
       if (seq !== requestSeq.current) return;
       setEntries(Array.isArray(response.entries) ? response.entries : []);
     } catch (failure) {
@@ -119,21 +120,53 @@ export default function ApprovalHistory() {
     }
   }, []);
 
-  // Initial load plus every committed filter change: the list always
-  // reflects the query params above instead of filtering client-side. The
-  // refresh key lets an identical filter set refetch on demand.
+  // Initial load plus every committed filter change: the list always reflects the query params
+  // above instead of filtering client-side. The refresh key re-runs an identical read after a
+  // clear so the emptied list refetches without a filter change.
   useEffect(() => {
     void fetchHistory(appliedTool, appliedAction);
   }, [fetchHistory, appliedTool, appliedAction, refreshKey]);
 
-  // Refresh bypasses the settle window: it commits the inputs' current values and bumps the key so
-  // the read fires immediately — even when the committed filters already match — while a pending
-  // debounce becomes a no-op because it would commit the same values.
-  function refreshNow() {
-    setAppliedTool(toolFilter);
-    setAppliedAction(actionFilter);
-    setRefreshKey((key) => key + 1);
-  }
+  // Mirror of the committed filters so the live refresh paths below re-run the
+  // exact read the list effect serves without re-subscribing per commit.
+  const appliedRef = useRef({ tool: "", action: "all" as ActionFilter });
+  useEffect(() => {
+    appliedRef.current = { tool: appliedTool, action: appliedAction };
+  }, [appliedTool, appliedAction]);
+
+  const resync = useCallback(() => {
+    void fetchHistory(appliedRef.current.tool, appliedRef.current.action);
+  }, [fetchHistory]);
+
+  // Resolution frames are the one live refresh path: only an approval_decided or
+  // approval_resolved frame proves a history row was written, so a new-prompt
+  // approval frame leaves the list alone instead of triggering a wasted read.
+  const handleWSFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      const type = (frame as { type?: string }).type;
+      if (type === "approval_decided" || type === "approval_resolved") {
+        resync();
+      }
+    },
+    [resync],
+  );
+
+  // Socket reopen is the second path: a decision recorded while the shared
+  // connection was down lands on the next dial instead of a manual refresh.
+  useSharedWebSocket(handleWSFrame, undefined, resync);
+
+  // Visibility resync is the third: returning to the tab refetches the log so
+  // decisions made elsewhere appear without waiting for the next live frame.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        resync();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibility);
+  }, [resync]);
 
   async function confirmClear() {
     setClearing(true);
@@ -141,7 +174,7 @@ export default function ApprovalHistory() {
     try {
       await clearApprovalHistory();
       setClearOpen(false);
-      refreshNow();
+      setRefreshKey((key) => key + 1);
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Clear failed",
@@ -186,15 +219,6 @@ export default function ApprovalHistory() {
             <option value="denied">Denied</option>
           </select>
         </label>
-        <button
-          type="button"
-          className="ghost icon-text-btn"
-          onClick={refreshNow}
-          disabled={loading}
-        >
-          <RefreshIcon size={14} className={loading ? "spin" : ""} />
-          <span>{loading ? "Refreshing…" : "Refresh"}</span>
-        </button>
         <button
           type="button"
           className="ghost icon-text-btn"

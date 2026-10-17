@@ -16,6 +16,19 @@ export const EGRESS_DURATIONS: TrustDuration[] = [
   "forever",
 ];
 
+// Fixed tool names the engine files system notices under: surfacing-only items that resolve
+// through their mapped remedy, never through an approve/deny decision. The parity test pins this
+// list to the engine's exact registry spellings (SystemNoticeTools.toolNames).
+export const SYSTEM_NOTICE_TOOL_NAMES: string[] = [
+  "sovereign.mismatch",
+  "security.probe",
+];
+
+// Reports whether a request is an engine-filed system notice.
+export function isSystemNoticeTool(toolName: string): boolean {
+  return SYSTEM_NOTICE_TOOL_NAMES.includes(toolName);
+}
+
 // Visible target length before the shared ellipsis cut. Rendering truncates
 // here with the full value on the title tooltip while the full arguments
 // stay in the View arguments disclosure.

@@ -37,6 +37,9 @@ public actor ApprovalQueue {
     private var enrichmentTasks: [UUID: Task<Void, Never>] = [:]
     /// Rebroadcast hook invoked with the enriched request on identical id.
     private var enrichmentBroadcast: (@Sendable (PermissionRequest) async -> Void)?
+    /// Broadcast hook carrying a newly filed system notice to live dashboards, fired inside
+    /// `enqueueSystemNoticeIfAbsent` so the filed frame rides the insert's actor hop.
+    private var noticeBroadcast: (@Sendable (PermissionRequest) async -> Void)?
     /// Graduated-trust gate receiving approved durations.
     private let permissionGate: PermissionGate?
 
@@ -72,6 +75,19 @@ public actor ApprovalQueue {
     /// - Parameter handler: Hook receiving the updated request on identical id.
     public func setOnEnriched(_ handler: (@Sendable (PermissionRequest) async -> Void)?) {
         enrichmentBroadcast = handler
+    }
+
+    /// Broadcast hook for newly filed system notices. Nil until installed; a nil hook files the
+    /// notice silently (headless hosts and tests).
+    public var onNoticeFiled: (@Sendable (PermissionRequest) async -> Void)? {
+        get { noticeBroadcast }
+        set { noticeBroadcast = newValue }
+    }
+
+    /// Installs the broadcast hook for newly filed system notices.
+    /// - Parameter handler: Hook receiving the filed request on the insert hop.
+    public func setOnNoticeFiled(_ handler: (@Sendable (PermissionRequest) async -> Void)?) {
+        noticeBroadcast = handler
     }
 
     /// Enqueues a prebuilt request, replacing any same-id entry.
@@ -177,6 +193,9 @@ public actor ApprovalQueue {
         intent: String?,
         perRequestHandler: (@Sendable (PermissionRequest) async -> Void)?
     ) {
+        // System notices are surfacing-only: the registry, not a name prefix,
+        // decides they never schedule a safety assessment.
+        guard !SystemNoticeTools.isSystemNotice(toolName) else { return }
         enrichmentTasks[id]?.cancel()
         enrichmentTasks[id] = Task { [perRequestHandler] in
             let assessed = await AppleIntelligenceAssessor.shared.assess(
@@ -278,6 +297,60 @@ public actor ApprovalQueue {
         pending[id]
     }
 
+    /// Whether any pending request carries one tool name.
+    /// - Parameter toolName: Tool name to match.
+    /// - Returns: True when at least one pending request carries the name.
+    public func hasPending(toolName: String) -> Bool {
+        pending.values.contains { $0.toolName == toolName }
+    }
+
+    /// Files a system notice only when no pending notice carries the tool name, so dedup, insert,
+    /// and the filed-frame broadcast are one atomic actor hop. Returns the filed request, or nil
+    /// when one is already parked for the tool or the name is not a registered system-notice tier.
+    @discardableResult
+    public func enqueueSystemNoticeIfAbsent(toolName: String, description: String) async -> PermissionRequest? {
+        guard SystemNoticeTools.isSystemNotice(toolName) else { return nil }
+        guard !pending.values.contains(where: { $0.toolName == toolName }) else { return nil }
+        let request = enqueue(
+            toolName: toolName,
+            description: description,
+            input: ToolInput(toolName: toolName, argumentsJSON: "{}")
+        )
+        // The filed frame rides this same actor hop, so any settle that observes the entry does so
+        // only after the frame is already in flight: a settle racing a filing can never strand a
+        // phantom notice card behind a late caller-side broadcast.
+        if let broadcast = noticeBroadcast {
+            await broadcast(request)
+        }
+        return request
+    }
+
+    /// Removes every pending item for one system-notice tool, returning them for the settle
+    /// broadcast; the caller owns carrying the recovery note into the decision history.
+    /// - Returns: Every removed request in no guaranteed order.
+    public func settleSystemNotice(toolName: String) -> [PermissionRequest] {
+        let settled = pending.values.filter { $0.toolName == toolName }
+        for request in settled {
+            // Cancel in-flight enrichment so a late assessment cannot
+            // resurrect a settled card.
+            enrichmentTasks.removeValue(forKey: request.id)?.cancel()
+            timeoutTasks.removeValue(forKey: request.id)?.cancel()
+            timedOutIDs.remove(request.id)
+            earlyDecisions.removeValue(forKey: request.id)
+            pending.removeValue(forKey: request.id)
+            // A defensively filed waiter releases with the recovery verdict
+            // instead of staying suspended; one arriving after the settle
+            // parks the same verdict so it cannot read the miss as a denial.
+            let recovery = ApprovalQueueDecision(approved: true, duration: nil)
+            if let waiter = waiters.removeValue(forKey: request.id) {
+                waiter.resume(returning: recovery)
+            } else {
+                earlyDecisions[request.id] = recovery
+            }
+        }
+        return settled
+    }
+
     /// Resolves one pending request. id: Request identifier.
     @discardableResult
     public func decide(
@@ -286,6 +359,11 @@ public actor ApprovalQueue {
         duration: TrustDuration = .thisTime,
         scope: AccessScope? = nil
     ) async -> Bool {
+        // Resolution is never a decision: a system notice settles only through its mapped
+        // remedy, so a decide call cannot resolve one or mint durable trust on it.
+        if let request = pending[id], SystemNoticeTools.isSystemNotice(request.toolName) {
+            return false
+        }
         // Cancel the enrichment child first so a model result landing in the
         // gap cannot resurrect the entry or rebroadcast after the decision.
         enrichmentTasks.removeValue(forKey: id)?.cancel()
@@ -337,6 +415,46 @@ public actor ApprovalQueue {
         return true
     }
 
+    /// Removes every pending request and parks denials for waiters.
+    public func clear() {
+        for (_, task) in timeoutTasks {
+            task.cancel()
+        }
+        timeoutTasks.removeAll()
+        for (_, task) in enrichmentTasks {
+            task.cancel()
+        }
+        enrichmentTasks.removeAll()
+        let suspended = waiters
+        waiters.removeAll()
+        pending.removeAll()
+        earlyDecisions.removeAll()
+        timedOutIDs.removeAll()
+        for (_, waiter) in suspended {
+            waiter.resume(returning: ApprovalQueueDecision(approved: false, duration: nil))
+        }
+    }
+
+    /// Headless approval handler for scheduler tool buses.
+    public func headlessApprovalHandler() -> ToolApprovalHandler {
+        { [queue = self] tool, call, context in
+            let bashConfig = await queue.stampedBashConfig()
+            let workspaceRoot = await queue.stampedWorkspaceRoot()
+            await queue.fileRequest(
+                tool: tool,
+                call: call,
+                sessionID: context.conversationID,
+                bashConfig: bashConfig,
+                workspaceRoot: workspaceRoot
+            )
+            return false
+        }
+    }
+}
+
+// MARK: - Decision Waiting
+
+extension ApprovalQueue {
     /// Default seconds a service approval handler waits before denying.
     public static var defaultDecisionTimeoutSeconds: Double {
         300
@@ -420,42 +538,6 @@ public actor ApprovalQueue {
         pending.removeValue(forKey: id)
         guard let waiter = waiters.removeValue(forKey: id) else { return }
         waiter.resume(returning: ApprovalQueueDecision(approved: false, duration: nil))
-    }
-
-    /// Removes every pending request and parks denials for waiters.
-    public func clear() {
-        for (_, task) in timeoutTasks {
-            task.cancel()
-        }
-        timeoutTasks.removeAll()
-        for (_, task) in enrichmentTasks {
-            task.cancel()
-        }
-        enrichmentTasks.removeAll()
-        let suspended = waiters
-        waiters.removeAll()
-        pending.removeAll()
-        earlyDecisions.removeAll()
-        timedOutIDs.removeAll()
-        for (_, waiter) in suspended {
-            waiter.resume(returning: ApprovalQueueDecision(approved: false, duration: nil))
-        }
-    }
-
-    /// Headless approval handler for scheduler tool buses.
-    public func headlessApprovalHandler() -> ToolApprovalHandler {
-        { [queue = self] tool, call, context in
-            let bashConfig = await queue.stampedBashConfig()
-            let workspaceRoot = await queue.stampedWorkspaceRoot()
-            await queue.fileRequest(
-                tool: tool,
-                call: call,
-                sessionID: context.conversationID,
-                bashConfig: bashConfig,
-                workspaceRoot: workspaceRoot
-            )
-            return false
-        }
     }
 }
 

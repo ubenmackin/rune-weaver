@@ -25,6 +25,8 @@ enum ApprovalDecisionOutcome: Equatable {
     case unknown
     /// The approval is an operator question and must ride the respond route.
     case questionRequiresRespond
+    /// The approval is an engine-filed system notice and settles only through its mapped remedy.
+    case systemNoticeRequiresRemedy
     /// A required side effect failed, so nothing was approved or recorded.
     case sideEffectFailed(reason: String)
 }
@@ -72,6 +74,12 @@ func applyApprovalDecision(
     // choice cannot synthesize an empty acknowledgement.
     if pending.toolName == "question.ask" {
         return .questionRequiresRespond
+    }
+    // A system notice is surfacing-only: its resolution is never a decision,
+    // so the shared contract refuses it here and the notice stays parked for
+    // its mapped remedy instead of resolving or minting trust.
+    if SystemNoticeTools.isSystemNotice(pending.toolName) {
+        return .systemNoticeRequiresRemedy
     }
     let effectiveApproved: Bool
     if let host = pending.egressHost, !host.isEmpty {
@@ -265,6 +273,13 @@ func registerApprovalRoutes(_ app: Application) {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
             case .questionRequiresRespond:
                 throw Abort(.badRequest, reason: "Use /respond for question.ask")
+            case .systemNoticeRequiresRemedy:
+                // The inbox is a surfacing channel for notices, not a second
+                // gate: the refusal keeps the notice parked for its remedy.
+                throw Abort(
+                    .badRequest,
+                    reason: "System notices settle through their mapped remedy, not a decision"
+                )
             case let .sideEffectFailed(reason):
                 // Persistence or grant failures never approve a call the
                 // policy did not record: the request stays parked so the

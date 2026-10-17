@@ -178,6 +178,60 @@ describe("ApprovalsInbox", () => {
     ]);
   });
 
+  it("renders engine-filed system notices under a System header with no decision controls", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "notice-1",
+          toolName: "sovereign.mismatch",
+          description: "Sovereign ceremony could not verify history.",
+          input: {
+            toolName: "sovereign.mismatch",
+            argumentsJSON: "{}",
+            callID: "call-notice",
+          },
+        }),
+        pendingRequest({ id: "req-plain" }),
+      ],
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByTestId("system-notice-notice-1")).toBeInTheDocument();
+    });
+    // The notice groups under its own System header, not Unattributed.
+    const systemGroup = container.querySelector(
+      '[data-testid="approvals-group-__system__"]',
+    );
+    expect(systemGroup).not.toBeNull();
+    expect(
+      within(systemGroup as HTMLElement).getByText("System"),
+    ).toBeInTheDocument();
+    expect(
+      within(systemGroup as HTMLElement).getByTestId("system-notice-chip-notice-1"),
+    ).toBeInTheDocument();
+    // Surfacing-only: the whole action is the mapped remedy, so no allow,
+    // deny, duration, or scope control rides the notice card.
+    expect(
+      within(systemGroup as HTMLElement).getByRole("button", {
+        name: "Re-baseline & re-verify",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(systemGroup as HTMLElement).queryByRole("button", { name: "Allow" }),
+    ).toBeNull();
+    expect(
+      within(systemGroup as HTMLElement).queryByRole("button", { name: "Deny" }),
+    ).toBeNull();
+    expect(
+      within(systemGroup as HTMLElement).queryByRole("combobox"),
+    ).toBeNull();
+    expect(
+      within(systemGroup as HTMLElement).queryByRole("radio"),
+    ).toBeNull();
+    // The ordinary approval still renders its decision controls beside the notice.
+    expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
+  });
+
   it("orders cards within a group by severity then filing time descending", async () => {
     stubEngine({
       approvals: [
@@ -1199,26 +1253,19 @@ describe("ApprovalsInbox", () => {
     });
   });
 
-  it("refetches approvals and sessions on manual refresh", async () => {
-    const user = userEvent.setup();
-    const paths: string[] = [];
-    stubEngine({
-      approvals: [pendingRequest()],
-      onCall: (path) => {
-        paths.push(path);
-      },
-    });
+  it("keeps no Refresh button in the Pending header", async () => {
+    stubEngine({ approvals: [pendingRequest()] });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
-    const before = paths.length;
-    await user.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => {
-      expect(paths.length).toBeGreaterThan(before);
-    });
-    expect(paths).toContain("/approvals");
-    expect(paths).toContain("/sessions");
+    // Live frames, socket reopen, and visibility resync are the only refresh
+    // paths, so the Pending header carries no manual control and keeps the
+    // pending count.
+    expect(
+      screen.queryByRole("button", { name: "Refresh" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
   });
 
   it("upserts identical-id approval frames so enrichment swaps pending for valued", async () => {

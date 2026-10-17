@@ -551,6 +551,40 @@ describe("NeedsActionQueue", () => {
     expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime", surface: "dashboard" });
   });
 
+  it("renders a filed system notice as the shared surfacing-only card with its mapped remedy", async () => {
+    const user = userEvent.setup();
+    const { fetchCalls, decideCalls } = stubApi([
+      makeApproval({
+        id: "notice-1",
+        toolName: "sovereign.mismatch",
+        description: "Sovereign ceremony could not verify history.",
+        sessionID: null,
+      }),
+    ]);
+
+    render(<NeedsActionQueue />);
+
+    // The notice mounts the shared card beside the queue's approval cards.
+    expect(await screen.findByTestId("system-notice-notice-1")).toBeInTheDocument();
+    expect(screen.getByTestId("system-notice-chip-notice-1")).toBeInTheDocument();
+    // Surfacing-only: no approve or deny control and no duration picker ride
+    // the notice, and its whole action is the mapped remedy.
+    expect(screen.queryByRole("button", { name: /Approve once/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Deny/i })).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Re-baseline & re-verify" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Re-baseline & re-verify" }));
+    // The one ceremony POST is the whole action; the remedy never rides a
+    // decision call, and the queue refetches only through its own onRemedy.
+    await waitFor(() =>
+      expect(fetchCalls).toContain("POST /health/sovereign/rebaseline"),
+    );
+    expect(decideCalls).toHaveLength(0);
+  });
+
   it("orders cards by severity descending then filing time descending", async () => {
     // Payload position is the wire's only filing signal, so the stub order is
     // the filing order (oldest first) and a later position is the newer filing.

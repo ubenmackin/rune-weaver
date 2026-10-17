@@ -4933,6 +4933,14 @@ a.ghost.icon-text-btn:hover {
   border: 1px solid rgba(59, 130, 246, 0.35);
 }
 
+/* System notice chip on engine-filed cards: one quiet violet mark that is
+ * neither a severity tier nor a decision control. */
+.system-notice-chip {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+
 .inline-approval-deciding {
   display: inline-flex;
   align-items: center;
@@ -8415,7 +8423,10 @@ button.ghost.staged-expand-all-btn {
   color: var(--text-muted);
 }
 
-.pulse-reasons {
+/* Disclosure bullets: degraded reasons and info notes share identical
+ * styling at the same font size and margins. */
+.pulse-reasons,
+.pulse-info-notes {
   margin: 6px 0 0;
   padding-left: 18px;
   font-size: 12px;
