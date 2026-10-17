@@ -2635,6 +2635,140 @@ struct MailIndexerTests {
     }
 
     @Test
+    func `Unchanged mail resolves from the preloaded fingerprint map`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let messages = [
+            makeMessage(id: "1", body: "preload stable body one"),
+            makeMessage(id: "2", body: "preload stable body two")
+        ]
+
+        // Builds a page context sharing the seeded store. credentials: Fixed
+        // test credentials; the unchanged path never dials the gateway.
+        func makeContext() -> MailIndexer.MailboxContext {
+            MailIndexer.MailboxContext(
+                account: testAccount,
+                mailbox: "INBOX",
+                credentials: MailIndexCredentials(
+                    accountName: "mailtest",
+                    host: "imap.example.com",
+                    port: 993,
+                    username: "user@example.com",
+                    password: "test-secret"
+                ),
+                window: MailVectorWindow(token: "2y"),
+                runDate: Date(),
+                attachmentCap: 20 * 1_048_576
+            )
+        }
+
+        try await withTestPassword {
+            let seed = makeIndexer(gateway: StubMailGateway(messages: messages), store: store, checkpoints: checkpoints)
+            let seedReport = try await seed.run()
+            #expect(seedReport.messagesIndexed == 2)
+
+            // Fresh checkpoints lose the dedupe hashes while the store keeps its
+            // rows, so every message below must settle via the unchanged path.
+            // Direct preparation reads checkpoints without writing them, so the
+            // probes run before the rerun while the hashes are still absent.
+            let rerunCheckpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp-rerun.json").path)
+            let preloaded = try await store.storedFingerprints(source: .mail)
+            let probe = makeIndexer(gateway: StubMailGateway(messages: []), store: store, checkpoints: rerunCheckpoints)
+            let context = makeContext()
+            // A stored hash plus a clean extract status resolves unchanged from
+            // the preloaded map alone, with no per-message store round trip.
+            var seen: Set<String> = []
+            let unchanged = try await probe.prepareMailMessage(
+                message: makeMessage(id: "1", body: "preload stable body one"),
+                context: context,
+                seenBatchHashes: &seen,
+                preloadedFingerprints: preloaded
+            )
+            #expect(unchanged.outcome.unchanged)
+            #expect(unchanged.document == nil)
+            // A changed body re-indexes even though the row exists.
+            let changed = try await probe.prepareMailMessage(
+                message: makeMessage(id: "1", body: "preload edited body one"),
+                context: context,
+                seenBatchHashes: &seen,
+                preloadedFingerprints: preloaded
+            )
+            #expect(!changed.outcome.unchanged)
+            #expect(changed.document != nil)
+            // A missing map entry never counts as unchanged.
+            let missing = try await probe.prepareMailMessage(
+                message: makeMessage(id: "9", body: "preload unknown body"),
+                context: context,
+                seenBatchHashes: &seen,
+                preloadedFingerprints: preloaded
+            )
+            #expect(!missing.outcome.unchanged)
+            #expect(missing.document != nil)
+
+            let rerun = makeIndexer(
+                gateway: StubMailGateway(messages: messages),
+                store: store,
+                checkpoints: rerunCheckpoints
+            )
+            let rerunReport = try await rerun.run()
+            #expect(rerunReport.messagesUnchanged == 2)
+            #expect(rerunReport.messagesIndexed == 0)
+        }
+    }
+
+    @Test
+    func `Nil preloaded map falls back to the per-message store lookup`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+
+        try await withTestPassword {
+            let seed = makeIndexer(
+                gateway: StubMailGateway(messages: [makeMessage(id: "1", body: "fallback stable body")]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let seedReport = try await seed.run()
+            #expect(seedReport.messagesIndexed == 1)
+
+            // Fresh checkpoints plus a nil map model a failed preload: the
+            // unchanged decision must still come from the per-message lookup.
+            let fallbackCheckpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp-fallback.json").path)
+            let indexer = makeIndexer(
+                gateway: StubMailGateway(messages: []),
+                store: store,
+                checkpoints: fallbackCheckpoints
+            )
+            let context = MailIndexer.MailboxContext(
+                account: testAccount,
+                mailbox: "INBOX",
+                credentials: MailIndexCredentials(
+                    accountName: "mailtest",
+                    host: "imap.example.com",
+                    port: 993,
+                    username: "user@example.com",
+                    password: "test-secret"
+                ),
+                window: MailVectorWindow(token: "2y"),
+                runDate: Date(),
+                attachmentCap: 20 * 1_048_576
+            )
+            var seen: Set<String> = []
+            let unchanged = try await indexer.prepareMailMessage(
+                message: makeMessage(id: "1", body: "fallback stable body"),
+                context: context,
+                seenBatchHashes: &seen,
+                preloadedFingerprints: nil
+            )
+            #expect(unchanged.outcome.unchanged)
+            #expect(unchanged.document == nil)
+        }
+    }
+
+    @Test
     func `Streaming backfill indexes page-by-page and clears backfill floor when complete`() async throws {
         let base = makeTempBase()
         defer { try? FileManager.default.removeItem(at: base) }

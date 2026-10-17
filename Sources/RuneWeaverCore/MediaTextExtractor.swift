@@ -84,17 +84,17 @@ public struct MediaTextExtractor: Sendable {
 
     /// Supported image file extensions.
     public static let supportedImageExtensions: Set<String> = [
-        "png", "jpg", "jpeg", "heic", "heif", "tiff", "tif", "webp", "gif", "bmp", "svg"
+        "png", "jpg", "jpeg", "heic", "heif", "tiff", "tif", "webp"
     ]
 
     /// Supported audio file extensions.
     public static let supportedAudioExtensions: Set<String> = [
-        "mp3", "m4a", "wav", "aac", "flac", "caf", "aiff"
+        "mp3", "m4a", "wav", "aac", "flac"
     ]
 
     /// Supported video file extensions.
     public static let supportedVideoExtensions: Set<String> = [
-        "mp4", "mov", "m4v", "mkv", "avi", "webm"
+        "mp4", "mov", "m4v"
     ]
 
     /// Checks if a filename has a recognized image extension.

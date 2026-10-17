@@ -41,11 +41,11 @@ public enum DocumentFormat: String, Sendable, Codable, Equatable, CaseIterable {
     case eml
     /// Hypertext Markup Language.
     case html
-    /// Image document (PNG, JPEG, HEIC, TIFF, WebP, GIF, BMP, SVG).
+    /// Image document (PNG, JPEG, HEIC, TIFF, WebP).
     case image
-    /// Audio file (MP3, M4A, WAV, AAC, FLAC, CAF).
+    /// Audio file (MP3, M4A, WAV, AAC, FLAC).
     case audio
-    /// Video file (MP4, MOV, M4V, MKV, AVI, WebM).
+    /// Video file (MP4, MOV, M4V).
     case video
     /// Format outside the supported set.
     case unsupported
@@ -433,22 +433,14 @@ extension DocumentTextExtractor {
         "tiff": .image,
         "tif": .image,
         "webp": .image,
-        "gif": .image,
-        "bmp": .image,
-        "svg": .image,
         "mp3": .audio,
         "m4a": .audio,
         "wav": .audio,
         "aac": .audio,
         "flac": .audio,
-        "caf": .audio,
-        "aiff": .audio,
         "mp4": .video,
         "mov": .video,
-        "m4v": .video,
-        "mkv": .video,
-        "avi": .video,
-        "webm": .video
+        "m4v": .video
     ]
 
     /// MIME type and UTI-to-format map used when the extension is unknown.
@@ -484,19 +476,12 @@ extension DocumentTextExtractor {
         "image/heic": .image,
         "image/tiff": .image,
         "image/webp": .image,
-        "image/gif": .image,
-        "image/bmp": .image,
-        "image/svg+xml": .image,
         "audio/mpeg": .audio,
         "audio/mp4": .audio,
         "audio/wav": .audio,
         "audio/x-m4a": .audio,
-        "audio/x-caf": .audio,
-        "audio/aiff": .audio,
         "video/mp4": .video,
-        "video/quicktime": .video,
-        "video/x-matroska": .video,
-        "video/webm": .video
+        "video/quicktime": .video
     ]
 
     /// Developer source code and configuration extensions recognized from DigUp catalog.
@@ -602,6 +587,21 @@ extension DocumentTextExtractor {
         }
     #endif
 
+    /// Reports whether an extension belongs to the media routing allowlist for its
+    /// family, the single gate keeping removed containers out of OCR and speech lanes.
+    private static func isAllowlistedMediaExtension(_ fileExtension: String, format: DocumentFormat) -> Bool {
+        switch format {
+        case .image:
+            MediaTextExtractor.supportedImageExtensions.contains(fileExtension)
+        case .audio:
+            MediaTextExtractor.supportedAudioExtensions.contains(fileExtension)
+        case .video:
+            MediaTextExtractor.supportedVideoExtensions.contains(fileExtension)
+        default:
+            true
+        }
+    }
+
     /// Resolves document format from MIME type or UTI string.
     private static func detectContentTypeFormat(_ contentType: String) -> DocumentFormat? {
         let normalized = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -617,6 +617,9 @@ extension DocumentTextExtractor {
             if let resolvedType = UTType(mimeType: normalized) ?? UTType(normalized),
                let format = detectUTTypeFormat(resolvedType)
             {
+                // Media dispatch is extension-allowlist only; the MIME fallback
+                // must never re-admit a removed container.
+                guard format != .image, format != .audio, format != .video else { return nil }
                 return format
             }
         #endif
@@ -655,6 +658,13 @@ extension DocumentTextExtractor {
             if !fileExtension.isEmpty, let utType = UTType(filenameExtension: fileExtension),
                let format = detectUTTypeFormat(utType)
             {
+                // Media families admit allowlisted extensions only; anything
+                // else fails closed instead of reaching OCR or transcription.
+                if format == .image || format == .audio || format == .video,
+                   !Self.isAllowlistedMediaExtension(fileExtension, format: format)
+                {
+                    return .unsupported
+                }
                 return format
             }
         #endif

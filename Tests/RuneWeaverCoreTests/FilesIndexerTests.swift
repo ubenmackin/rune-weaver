@@ -1455,4 +1455,136 @@ struct FilesIndexerTests {
         #expect(chunks[0].embedding.count == 768)
         #expect(chunks[0].embedding[0] == 42.0)
     }
+
+    @Test
+    func `Modality queues partition keyword data and fast text before image OCR and media speech`() throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let videoFile = base.appendingPathComponent("clip.mov")
+        let imageFile = base.appendingPathComponent("scan.png")
+        let pdfFile = base.appendingPathComponent("paper.pdf")
+        let oldTextFile = base.appendingPathComponent("old.md")
+        let newTextFile = base.appendingPathComponent("new.md")
+        let jsonFile = base.appendingPathComponent("config.json")
+
+        for url in [videoFile, imageFile, pdfFile, oldTextFile, newTextFile, jsonFile] {
+            writeFile("sample content", at: url)
+        }
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+            ofItemAtPath: oldTextFile.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_800_000_000)],
+            ofItemAtPath: newTextFile.path
+        )
+
+        let rawCandidates: [(file: URL, root: URL)] = [
+            (videoFile, base),
+            (imageFile, base),
+            (oldTextFile, base),
+            (pdfFile, base),
+            (newTextFile, base),
+            (jsonFile, base)
+        ]
+
+        let ordered = FilesIndexer.partitionIntoModalityQueues(
+            candidates: rawCandidates,
+            maxVectorBytes: FilesVectorPolicy.defaultMaxBytes
+        )
+        let orderedNames = ordered.map(\.file.lastPathComponent)
+
+        // Lane 0 (.keywordData): config.json
+        // Lane 1 (.fastText, newest first): new.md, old.md
+        // Lane 2 (.imageOCR): scan.png, paper.pdf
+        // Lane 3 (.mediaSpeech): clip.mov
+        #expect(orderedNames[0] == "config.json")
+        #expect(orderedNames[1] == "new.md")
+        #expect(orderedNames[2] == "old.md")
+        #expect(Set(orderedNames[3 ... 4]) == ["scan.png", "paper.pdf"])
+        #expect(orderedNames[5] == "clip.mov")
+    }
+
+    @Test
+    func `Keyword-only structured data files index into FTS5 without calling the embedder`() async throws {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        writeFile("{\"feature\": \"keywordonlyjsonmarker\"}", at: base.appendingPathComponent("settings.json"))
+        writeFile("environment: keywordonlyyamlmarker\n", at: base.appendingPathComponent("deploy.yaml"))
+        writeFile("prose document with semanticvectorprose", at: base.appendingPathComponent("notes.md"))
+
+        let embedder = FilesIndexerBatchRecordingEmbedder()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            embedder: embedder
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 3)
+        #expect(report.vectorsWritten == 1)
+        #expect(report.chunksWritten == 3)
+        // Only notes.md should be sent to the embedder; .json and .yaml bypass llama-server.
+        #expect(embedder.batchSizes == [1])
+
+        let jsonHits = try await store.searchKeyword(query: "keywordonlyjsonmarker", limit: 5)
+        #expect(jsonHits.count == 1)
+        #expect(jsonHits[0].isVector == false)
+
+        let yamlHits = try await store.searchKeyword(query: "keywordonlyyamlmarker", limit: 5)
+        #expect(yamlHits.count == 1)
+        #expect(yamlHits[0].isVector == false)
+    }
+
+    @Test
+    func `Cross-file batching groups multiple text files into batched embedder calls`() async {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let fileCount = 10
+        for index in 0 ..< fileCount {
+            writeFile("crossfilebatchmarker body \(index)", at: base.appendingPathComponent("doc-\(index).txt"))
+        }
+
+        let embedder = FilesIndexerBatchRecordingEmbedder()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            embedder: embedder,
+            workerCountOverride: 4
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == fileCount)
+        #expect(report.vectorsWritten == fileCount)
+        // Cross-file batching must issue fewer embed calls than the total number of files,
+        // with at least one multi-file batch (> 1 chunk in a single call).
+        let sizes = embedder.batchSizes
+        #expect(sizes.reduce(0, +) == fileCount)
+        #expect(sizes.count < fileCount)
+        #expect(sizes.contains { $0 > 1 })
+    }
+}
+
+private final class FilesIndexerBatchRecordingEmbedder: EmbeddingsBackend, Sendable {
+    let modelID = "batch-recorder"
+    let dimension: Int? = 4
+    private let lock = OSAllocatedUnfairLock(initialState: [Int]())
+
+    var batchSizes: [Int] {
+        lock.withLock { $0 }
+    }
+
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        lock.withLock { $0.append(texts.count) }
+        return texts.map { _ in [0.5, 0.5, 0.5, 0.5] }
+    }
 }

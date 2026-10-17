@@ -111,4 +111,61 @@ public struct FilesVectorPolicy: Sendable, Equatable {
         guard cap > 0, texts.count > cap else { return texts }
         return Array(texts.prefix(cap))
     }
+
+    /// File extensions representing structured data, configuration, or machine logs that are
+    /// indexed into FTS5 keyword search directly without spending `llama-server` vector passes.
+    public static let keywordOnlyExtensions: Set<String> = [
+        "json", "jsonl", "yaml", "yml", "toml", "xml", "plist",
+        "csv", "tsv", "lock", "ini", "cfg", "conf", "env", "log"
+    ]
+
+    /// Reports whether a filename belongs to the structured keyword-only fast lane.
+    public static func isKeywordOnlyFile(fileName: String) -> Bool {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return false }
+        return keywordOnlyExtensions.contains(ext)
+    }
+
+    /// Classifies a discovered file into its modality processing queue.
+    public static func modalityLane(
+        fileName: String,
+        byteCount: Int,
+        maxVectorBytes: Int = defaultMaxBytes
+    ) -> FilesModalityLane {
+        let format = DocumentTextExtractor.detectFormat(fileName: fileName, contentType: nil)
+        switch format {
+        case .audio, .video:
+            // The speech lane admits allowlisted containers only; anything else
+            // stays keyword-only instead of reaching the transcriber.
+            return MediaTextExtractor.isAudioOrVideoFile(fileName: fileName) ? .mediaSpeech : .keywordData
+        case .image:
+            // The OCR lane admits allowlisted images only; anything else stays
+            // keyword-only instead of reaching Vision.
+            return MediaTextExtractor.isImageFile(fileName: fileName) ? .imageOCR : .keywordData
+        case .pdf:
+            return .imageOCR
+        default:
+            if isKeywordOnlyFile(fileName: fileName) || byteCount > maxVectorBytes {
+                return .keywordData
+            }
+            return .fastText
+        }
+    }
+}
+
+/// Modality priority lane used to queue discovered file candidates so slow media
+/// and image/OCR files never head-of-line block fast text files.
+public enum FilesModalityLane: Int, Sendable, Comparable, CaseIterable {
+    /// Structured data and oversized text indexed via FTS5 keyword-only without calling llama-server.
+    case keywordData = 0
+    /// Prose and source-code text documents embedded in cross-file batches.
+    case fastText = 1
+    /// Image and PDF files processed through Vision OCR + visual embeddings.
+    case imageOCR = 2
+    /// Audio and video files processed through SFSpeechRecognizer.
+    case mediaSpeech = 3
+
+    public static func < (lhs: FilesModalityLane, rhs: FilesModalityLane) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
 }

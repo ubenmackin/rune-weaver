@@ -97,7 +97,7 @@ public struct IndexedDocument: Sendable, Codable, Equatable, Identifiable {
     }
 }
 
-/// Stored size, modification time, and extraction outcome for one indexed document.
+/// Stored size, modification time, content hash, and extraction outcome for one indexed document.
 public struct DocStoredFingerprint: Sendable, Codable, Equatable {
     /// Last modification time of the source at index time, when known.
     public let mtime: Date?
@@ -105,13 +105,46 @@ public struct DocStoredFingerprint: Sendable, Codable, Equatable {
     public let sizeBytes: Int64?
     /// How completely the body was extracted.
     public let extractStatus: ExtractStatus
+    /// Stored content hash for fast in-memory reindex checks, when loaded.
+    public let contentHash: String?
 
     /// Creates a stored fingerprint. mtime: Last modification time at index time,
     /// when known.
-    public init(mtime: Date? = nil, sizeBytes: Int64? = nil, extractStatus: ExtractStatus) {
+    public init(
+        mtime: Date? = nil,
+        sizeBytes: Int64? = nil,
+        extractStatus: ExtractStatus,
+        contentHash: String? = nil
+    ) {
         self.mtime = mtime
         self.sizeBytes = sizeBytes
         self.extractStatus = extractStatus
+        self.contentHash = contentHash
+    }
+}
+
+/// One document and its chunks queued for a batched SQLite commit.
+public struct DocBatchUpsertEntry: Sendable, Equatable {
+    /// Document metadata to insert or update.
+    public let document: IndexedDocument
+    /// Chunks belonging to `document`.
+    public let chunks: [IndexedChunk]
+    /// Optional run identifier stamped into `last_seen_run` when non-nil.
+    public let runID: String?
+    /// When true, replaces chunks even if `contentHash` matches an existing non-failed row.
+    public let replaceChunksWhenUnchanged: Bool
+
+    /// Creates a batched document-and-chunks upsert entry.
+    public init(
+        document: IndexedDocument,
+        chunks: [IndexedChunk],
+        runID: String? = nil,
+        replaceChunksWhenUnchanged: Bool = false
+    ) {
+        self.document = document
+        self.chunks = chunks
+        self.runID = runID
+        self.replaceChunksWhenUnchanged = replaceChunksWhenUnchanged
     }
 }
 

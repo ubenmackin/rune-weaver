@@ -937,42 +937,45 @@ private enum EmailIMAPBridgeScriptTail {
                     uids = (data[0] or b"").split() if data else []
                     wanted = [u.decode("utf-8", errors="replace") for u in uids[-limit:]]
                     wanted.reverse()
+                    raw_by_uid = {}
+                    for i in range(0, len(wanted), 25):
+                        sub = [u for u in wanted[i:i + 25] if re.fullmatch(r"\d+", u)]
+                        if not sub: continue
+                        try:
+                            ftyp, fdata = conn.uid("fetch", ",".join(sub), "(BODY.PEEK[])")
+                            if ftyp == "OK" and fdata:
+                                for chunk in fdata:
+                                    if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[0], bytes) and isinstance(chunk[1], bytes):
+                                        m = re.search(rb"\bUID\s+(\d+)\b", chunk[0], re.I)
+                                        if m: raw_by_uid[m.group(1).decode("ascii")] = chunk[1]
+                                        elif len(sub) == 1: raw_by_uid[sub[0]] = chunk[1]
+                        except Exception: pass
+                        for uid in sub:
+                            if uid in raw_by_uid: continue
+                            try:
+                                ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                                if ftyp == "OK" and fdata:
+                                    for chunk in fdata:
+                                        if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
+                                            raw_by_uid[uid] = chunk[1]
+                                            break
+                            except Exception: continue
                     messages = []
                     for uid in wanted:
                         try:
-                            ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
-                            if ftyp != "OK" or not fdata:
-                                continue
-                            raw = None
-                            for chunk in fdata:
-                                if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
-                                    raw = chunk[1]
-                                    break
-                            if not raw:
-                                continue
+                            raw = raw_by_uid.get(uid)
+                            if not raw: continue
                             msg = email.message_from_bytes(raw, policy=policy.default)
-                            text = body_text(msg)
                             seen = attachments_of(msg)
                             deferred = len(seen) > 0
-                            note = None
-                            if deferred:
-                                if len(seen) == 1:
-                                    note = "1 attachment available; use email.attachment to download."
-                                else:
-                                    note = "%d attachments available; use email.attachment to download." % len(seen)
+                            suffix = "available; use email.attachment to download."
+                            note = ("1 attachment " + suffix if len(seen) == 1 else "%d attachments %s" % (len(seen), suffix)) if deferred else None
                             messages.append({
-                                "id": uid,
-                                "subject": decode_value(msg["Subject"]),
-                                "from": decode_value(msg["From"]),
-                                "to": decode_value(msg["To"]),
-                                "date": str(msg["Date"] or ""),
-                                "body": text or "",
-                                "attachments": seen,
-                                "attachmentsDeferred": deferred,
-                                "attachmentsNote": note,
+                                "id": uid, "subject": decode_value(msg["Subject"]), "from": decode_value(msg["From"]),
+                                "to": decode_value(msg["To"]), "date": str(msg["Date"] or ""), "body": body_text(msg) or "",
+                                "attachments": seen, "attachmentsDeferred": deferred, "attachmentsNote": note,
                             })
-                        except Exception:
-                            continue
+                        except Exception: continue
                     sys.stdout.write(json.dumps({"ok": True, "messages": messages}))
                     sys.stdout.flush()
                 except Exception as exc:

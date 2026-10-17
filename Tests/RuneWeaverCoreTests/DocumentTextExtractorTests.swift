@@ -120,12 +120,27 @@ struct DocumentTextExtractorTests {
     }
 
     @Test
-    func `UTType image formats classify as image`() {
-        let imageFiles = ["icon.gif", "graphic.bmp", "vector.svg", "photo.webp"]
-        for name in imageFiles {
-            let format = DocumentTextExtractor.detectFormat(fileName: name)
-            #expect(format == .image, "Expected \(name) to classify as .image")
+    func `Removed image formats reject while webp stays accepted`() {
+        #expect(DocumentTextExtractor.detectFormat(fileName: "photo.webp") == .image)
+        for name in ["icon.gif", "graphic.bmp", "vector.svg"] {
+            #expect(DocumentTextExtractor.detectFormat(fileName: name) == .unsupported, "Expected \(name) to reject as unsupported")
+            let result = extractor.extract(data: Data("bytes".utf8), fileName: name)
+            #expect(result.format == .unsupported, "Expected \(name) to extract no format")
+            #expect(result.status == .unsupported, "Expected \(name) to extract as unsupported")
         }
+    }
+
+    @Test
+    func `Removed audio and video containers reject while documented ones keep their lanes`() {
+        for name in ["note.caf", "note.aiff", "clip.mkv", "clip.avi", "clip.webm"] {
+            #expect(DocumentTextExtractor.detectFormat(fileName: name) == .unsupported, "Expected \(name) to reject as unsupported")
+            let result = extractor.extract(data: Data("bytes".utf8), fileName: name)
+            #expect(result.format == .unsupported, "Expected \(name) to extract no format")
+            #expect(result.status == .unsupported, "Expected \(name) to extract as unsupported")
+        }
+        #expect(DocumentTextExtractor.detectFormat(fileName: "memo.mp3") == .audio)
+        #expect(DocumentTextExtractor.detectFormat(fileName: "voice.m4a") == .audio)
+        #expect(DocumentTextExtractor.detectFormat(fileName: "clip.mov") == .video)
     }
 
     @Test

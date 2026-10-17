@@ -87,7 +87,7 @@ public actor DocIndexStore {
     }
 
     /// Clears the status cache and advances the write generation.
-    private func invalidateStatusCache() {
+    func invalidateStatusCache() {
         cachedStatus = nil
         statusGeneration &+= 1
         aggregatesDirty = true

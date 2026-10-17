@@ -340,7 +340,7 @@ extension FilesIndexer {
         return buildReport(from: counters, retiredCount: retiredCount, cancelled: settledCancelled)
     }
 
-    /// Collects candidate files across all configured roots.
+    /// Collects candidate files across all configured roots and partitions them into modality queues.
     private func collectAllCandidates(workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
         var candidates: [(file: URL, root: URL)] = []
         for root in config.roots {
@@ -365,10 +365,13 @@ extension FilesIndexer {
             let rootURL = resolvedRootURL(root)
             await candidates.append(contentsOf: collectCandidates(rootURL: rootURL, rawRoot: root, workers: workers, budget: budget, counters: &counters))
         }
-        return candidates
+        return Self.partitionIntoModalityQueues(
+            candidates: candidates,
+            maxVectorBytes: vectorPolicy.maxBytes
+        )
     }
 
-    /// Dispatches candidate processing to a bounded task group.
+    /// Dispatches candidate processing through the multi-queue modality and batching pipeline.
     private func runParallelGroup(
         candidates: [(file: URL, root: URL)],
         workers: Int,
@@ -377,87 +380,14 @@ extension FilesIndexer {
         start: ContinuousClock.Instant,
         counters: inout Counters
     ) async {
-        let store = self.store
-        let extractor = self.extractor
-        let embedder = self.embedder
-        let embeddingsPool = self.embeddingsPool
-        let accessGuard = self.accessGuard
-        let vectorPolicy = self.vectorPolicy
-        let config = self.config
-        let homeDirectoryURL = self.homeDirectoryURL
-        let evictedCheck = self.evictedCheck
-        let downloadStarter = self.downloadStarter
-        let fileReader = self.fileReader
-        let cancellation = self.cancelBox
-        await withTaskGroup(of: FileOutcome.self) { group in
-            var next = 0
-            var inFlight = 0
-            while next < candidates.count {
-                if isCancelled || cancelBox.isSet || Task.isCancelled {
-                    break
-                }
-                if await budget.isExhausted {
-                    // Reaching here means the walk stopped before every file
-                    // was visited; recorded distinctly like the sequential
-                    // path so a budget stop never retires.
-                    if !isCancelled, !cancelBox.isSet, !Task.isCancelled {
-                        counters.budgetStoppedEarly = true
-                    }
-                    break
-                }
-                let allowed = currentWorkerLimit(base: workers)
-                if allowed <= 0 {
-                    // Thermal `.critical` or Low Power Mode: in-flight files finish their current
-                    // file while no new work launches, so cancellation-style overrun stays within
-                    // one batch.
-                    counters.thermalStoppedEarly = true
-                    if config.pauseOnBattery, lowPowerModeProvider() {
-                        counters.warnings.append("Paused new work: Low Power Mode is on")
-                    } else {
-                        counters.warnings.append("Paused new work: thermal state is critical")
-                    }
-                    break
-                }
-                if inFlight >= allowed {
-                    guard let outcome = await group.next() else { break }
-                    inFlight -= 1
-                    await foldOutcome(outcome, counters: &counters, start: start)
-                    continue
-                }
-                let candidate = candidates[next]
-                next += 1
-                group.addTask(priority: .utility) {
-                    await FilesIndexer.processCandidate(
-                        identity: CandidateIdentity(
-                            fileURL: candidate.file,
-                            root: candidate.root,
-                            runID: runID
-                        ),
-                        services: CandidateServices(
-                            store: store,
-                            extractor: extractor,
-                            embedder: embedder,
-                            embeddingsPool: embeddingsPool,
-                            accessGuard: accessGuard,
-                            vectorPolicy: vectorPolicy
-                        ),
-                        policy: CandidatePolicy(
-                            config: config,
-                            homeDirectoryURL: homeDirectoryURL,
-                            evictedCheck: evictedCheck,
-                            downloadStarter: downloadStarter,
-                            fileReader: fileReader
-                        ),
-                        state: CandidateRunState(budget: budget, cancellation: cancellation)
-                    )
-                }
-                inFlight += 1
-            }
-            for await outcome in group {
-                inFlight -= 1
-                await foldOutcome(outcome, counters: &counters, start: start)
-            }
-        }
+        await runQueuedModalityPipeline(
+            candidates: candidates,
+            workers: workers,
+            budget: budget,
+            runID: runID,
+            start: start,
+            counters: &counters
+        )
     }
 
     /// Enumerates one root sequentially, collecting committable file candidates.

@@ -10,12 +10,17 @@ struct MediaTextExtractorTests {
         #expect(MediaTextExtractor.isImageFile(fileName: "photo.jpg"))
         #expect(MediaTextExtractor.isImageFile(fileName: "scan.png"))
         #expect(MediaTextExtractor.isImageFile(fileName: "receipt.HEIC"))
-        #expect(MediaTextExtractor.isImageFile(fileName: "animation.gif"))
+        #expect(MediaTextExtractor.isImageFile(fileName: "photo.webp"))
+        #expect(!MediaTextExtractor.isImageFile(fileName: "animation.gif"))
+        #expect(!MediaTextExtractor.isImageFile(fileName: "graphic.bmp"))
+        #expect(!MediaTextExtractor.isImageFile(fileName: "vector.svg"))
         #expect(!MediaTextExtractor.isImageFile(fileName: "document.pdf"))
 
         #expect(MediaTextExtractor.isAudioOrVideoFile(fileName: "memo.m4a"))
         #expect(MediaTextExtractor.isAudioOrVideoFile(fileName: "recording.mp3"))
         #expect(MediaTextExtractor.isAudioOrVideoFile(fileName: "clip.mp4"))
+        #expect(!MediaTextExtractor.isAudioOrVideoFile(fileName: "note.caf"))
+        #expect(!MediaTextExtractor.isAudioOrVideoFile(fileName: "note.aiff"))
         #expect(!MediaTextExtractor.isAudioOrVideoFile(fileName: "notes.txt"))
     }
 
@@ -72,6 +77,9 @@ struct MediaTextExtractorTests {
         #expect(MediaTextExtractor.isVideoFile(fileName: "Aryas First Swim.MOV"))
         #expect(MediaTextExtractor.isVideoFile(fileName: "clip.mp4"))
         #expect(MediaTextExtractor.isVideoFile(fileName: "movie.m4v"))
+        #expect(!MediaTextExtractor.isVideoFile(fileName: "clip.mkv"))
+        #expect(!MediaTextExtractor.isVideoFile(fileName: "clip.avi"))
+        #expect(!MediaTextExtractor.isVideoFile(fileName: "clip.webm"))
         #expect(!MediaTextExtractor.isVideoFile(fileName: "voice.m4a"))
 
         try await MediaTextExtractor.withAudioTranscription({ _ in
