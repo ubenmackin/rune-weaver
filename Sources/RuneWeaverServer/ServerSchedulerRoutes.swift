@@ -109,14 +109,7 @@ public func resumeNarratedApproval(
 
     // Decision broadcasts use the shared `WSApprovalDecidedFrame` wire shape so
     // REST, WebSocket, and dashboard inbox views stay in sync on one encoding.
-    do {
-        let data = try JSONEncoder().encode(WSApprovalDecidedFrame(id: id, approved: approved, sessionID: targetSessionID))
-        if let text = String(data: data, encoding: .utf8) {
-            await context.hub.broadcast(text: text)
-        }
-    } catch {
-        RuneWeaverLog.server.error("ServerSchedulerRoutes: failed to encode WSApprovalDecidedFrame: \(error.localizedDescription)")
-    }
+    await context.hub.broadcastApprovalDecided(id: id, approved: approved, sessionID: targetSessionID)
 
     // If approving, immediately transition the run row to "running" and broadcast run_started
     // so Working Right Now stream and Chat history badge immediately reflect active execution.

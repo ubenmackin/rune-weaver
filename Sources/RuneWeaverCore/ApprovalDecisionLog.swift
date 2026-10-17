@@ -19,7 +19,8 @@ public struct ApprovalDecisionEntry: Sendable, Codable, Equatable {
     public let allowed: Bool
     /// Duration tier raw value carried at decision time.
     public let duration: String
-    /// Surface tag (`chat`, `inbox`, `dashboard`, `websocket`, `question`, or `unknown`).
+    /// Surface tag (`chat`, `inbox`, `dashboard`, `websocket`, `question`, `settled`, or
+    /// `unknown`); `settled` marks an automatic mapped-remedy resolution of a system notice.
     public let surface: String
     /// Owning session identifier when tagged.
     public let sessionID: String?
@@ -52,7 +53,7 @@ public struct ApprovalDecisionEntry: Sendable, Codable, Equatable {
         self.duration = ApprovalDecisionLog.bounded(duration, limit: ApprovalDecisionLog.maxDurationChars) ?? ""
         // The surface tag rides client-supplied decide bodies, so it is
         // bounded like the other free-form fields even though the closed
-        // vocabulary (`chat`…`unknown`) keeps real values short.
+        // vocabulary (`chat`…`unknown`, plus engine-internal `settled`) is short.
         self.surface = ApprovalDecisionLog.bounded(surface, limit: ApprovalDecisionLog.maxSurfaceChars) ?? ""
         self.sessionID = ApprovalDecisionLog.bounded(sessionID, limit: ApprovalDecisionLog.maxSessionIDChars)
         self.displayTarget = ApprovalDecisionLog.bounded(displayTarget, limit: ApprovalDecisionLog.maxDisplayTargetChars)

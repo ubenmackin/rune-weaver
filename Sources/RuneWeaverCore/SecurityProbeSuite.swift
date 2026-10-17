@@ -181,8 +181,9 @@ private enum ProbeName {
     static let zeroSocket = "zero-socket"
     static let vaultRoundTrip = "vault-round-trip"
 
-    /// Tool name the replay verifier parks in its throwaway queue.
-    static let probeToolName = "security.probe"
+    /// Ordinary approval-gated tool name the replay verifier parks in its throwaway queue: a
+    /// system-notice name would refuse decide by contract and defeat the replay check.
+    static let probeToolName = "files.write"
 
     /// Vault key the redaction verifier sweeps under.
     static let firewallProbeKey = "firewall_probe"

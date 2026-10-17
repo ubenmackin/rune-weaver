@@ -402,6 +402,8 @@ struct SecurityProbeSink: Sendable {
     let approvals: ApprovalQueue?
     /// Trusted-tool anomaly watchdog evaluated on the same cadence.
     let watchdog: BehaviorWatchdog?
+    /// Decision history recording automatic settlements, nil when unwired.
+    let decisionLog: (any ApprovalDecisionRecording)?
 }
 
 /// Recorded probe-report hash gate suppressing identical re-records.
@@ -455,7 +457,8 @@ func securityProbeSink(app: Application) -> SecurityProbeSink {
         gate: gate,
         lastServed: lastServed,
         approvals: app.runeWeaver.approvals,
-        watchdog: app.runeWeaver.watchdog
+        watchdog: app.runeWeaver.watchdog,
+        decisionLog: app.runeWeaver.approvalDecisions
     )
 }
 
@@ -490,16 +493,27 @@ func runSecurityProbes(sink: SecurityProbeSink, reason: String) async -> ProbeRe
         .filter { !$0.passed && $0.failClosed }
         .map(\.name)
         .sorted()
-    if let approvals = sink.approvals, !critical.isEmpty {
-        // The parked item carries no decision to make: deciding it stores no
-        // grant, so the inbox is a surfacing channel for a fail-closed
-        // posture, not a second gate the owner must re-run.
-        await approvals.enqueue(
-            toolName: SecurityProbeSink.inboxToolName,
-            description: "Security probes failed: \(critical.joined(separator: ", ")). "
-                + "The system pulse stays fail-closed until a passing re-check.",
-            input: ToolInput(toolName: SecurityProbeSink.inboxToolName, argumentsJSON: "{}")
-        )
+    if let approvals = sink.approvals {
+        if !critical.isEmpty {
+            // The parked item carries no decision to make: the inbox is a surfacing channel, not
+            // a second gate. Pending existence dedups beside the report-hash gate in one actor
+            // hop, and the filing broadcast rides the queue's insert hop.
+            await approvals.enqueueSystemNoticeIfAbsent(
+                toolName: SecurityProbeSink.inboxToolName,
+                description: "Security probes failed: \(critical.joined(separator: ", ")). "
+                    + "The system pulse stays fail-closed until a passing re-check."
+            )
+        } else {
+            // A suite with no fail-closed failures is the mapped remedy
+            // resolving a parked probe notice: one settle broadcast per item.
+            await settleSystemNotice(
+                toolName: SecurityProbeSink.inboxToolName,
+                note: "Security probes recovered after \(reason): no fail-closed verifiers failing.",
+                approvals: approvals,
+                hub: sink.hub,
+                decisionLog: sink.decisionLog
+            )
+        }
     }
     if !critical.isEmpty {
         RuneWeaverLog.server.warning("Security probe suite (\(reason)): fail-closed verifiers failed (\(critical.joined(separator: ", "))).")

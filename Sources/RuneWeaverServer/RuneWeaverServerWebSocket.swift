@@ -857,6 +857,15 @@ func handleWebSocketDecision(
             context: context,
             sessionID: pending?.sessionID
         )
+    case .systemNoticeRequiresRemedy:
+        // Resolution is never a decision for a system notice: the triage
+        // reports the refusal instead of resolving or minting trust.
+        await sendWSError(
+            "System notices settle through their mapped remedy, not a decision",
+            connectionID: connectionID,
+            context: context,
+            sessionID: pending?.sessionID
+        )
     case let .sideEffectFailed(reason):
         // The requester learns the decision could not be applied instead of
         // the approval silently resolving as approved.

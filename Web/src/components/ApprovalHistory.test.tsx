@@ -1,5 +1,6 @@
 // Rune Weaver Dashboard — Component tests for ApprovalHistory listing,
-// filters, debounce settling, truncation, the two-step clear flow, and empty
+// filters, debounce settling, truncation, the two-step clear flow, the empty
+// state, and the three live refresh paths (lifecycle frames, reopen, visibility).
 
 import {
   act,
@@ -13,6 +14,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ApprovalHistory from "./ApprovalHistory";
 import { jsonResponse } from "../test-utils/http";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+  dispatchFrameOrThrow,
+  resetSharedSocket,
+} from "../test-utils/mockWebSocket";
 
 function historyEntry(
   overrides: Record<string, unknown> = {},
@@ -57,14 +64,53 @@ function stubHistory(
   );
 }
 
+// Stubs the shared socket so a mounted pane dials the mock instead of a real
+// connection, returning the capture its inbound frames dispatch through.
+function stubSharedSocket() {
+  const capture = createMockWebSocketCapture();
+  vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+  return capture;
+}
+
+// Records every dialed socket instance so reopen tests can close the live
+// handle and count the backoff redial on the real singleton path.
+function stubCountingSocket(): { instances: WebSocket[] } {
+  const capture = createMockWebSocketCapture();
+  const BaseSocket = createMockWebSocket(capture) as unknown as new (
+    url?: string,
+  ) => WebSocket;
+  const instances: WebSocket[] = [];
+  class CountingSocket extends BaseSocket {
+    constructor(url?: string) {
+      super(url);
+      instances.push(this);
+    }
+  }
+  vi.stubGlobal("WebSocket", CountingSocket);
+  return { instances };
+}
+
+// Drains one mocked fetch round inside act so assertions read the settled
+// list instead of a mid-flight chain.
+async function flushAsyncWork() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 describe("ApprovalHistory", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    // The pane subscribes to the shared socket, so every test starts from a
+    // detached singleton instead of inheriting a previous test's listeners.
+    resetSharedSocket();
   });
 
   afterEach(() => {
     // A debounced timer must never leak a late commit into the next test.
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
   });
 
   it("renders every column with truncation plus full title and the session link", async () => {
@@ -201,7 +247,7 @@ describe("ApprovalHistory", () => {
     ]);
   });
 
-  it("refetches immediately through the Refresh button while a debounce is pending", async () => {
+  it("carries no Refresh button and settles filters through the debounce alone", async () => {
     vi.useFakeTimers();
     const seen: string[] = [];
     stubHistory([historyEntry()], (url) => {
@@ -211,24 +257,22 @@ describe("ApprovalHistory", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    expect(seen).toEqual(["/approvals/history"]);
+    // The debounced commit is the only filter path, so the toolbar carries
+    // no manual Refresh control.
+    expect(
+      screen.queryByRole("button", { name: "Refresh" }),
+    ).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter by tool"), {
       target: { value: "api.request" },
     });
-    // Refresh bypasses the settle window and reads the current input value.
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(300);
     });
     expect(seen).toEqual([
       "/approvals/history",
       `/approvals/history?tool=${encodeURIComponent("api.request")}`,
     ]);
-    // The pending debounce commits the same values, so it never doubles the
-    // read after Refresh already fetched them.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(300);
-    });
-    expect(seen).toHaveLength(2);
   });
 
   it("drops a stale response that lands after a newer filtered read", async () => {
@@ -365,5 +409,190 @@ describe("ApprovalHistory", () => {
     });
     const error = document.querySelector("p.error");
     expect(error).not.toBeNull();
+  });
+});
+
+describe("ApprovalHistory approval lifecycle frame refresh", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("resyncs the list when an approval_decided frame lands", async () => {
+    const capture = stubSharedSocket();
+    const seen: string[] = [];
+    stubHistory([historyEntry()], (url) => seen.push(url));
+    render(<ApprovalHistory />);
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    // The mount read plus the open-driven resync both settle into the baseline.
+    await flushAsyncWork();
+    const baseline = seen.length;
+    expect(baseline).toBeGreaterThan(0);
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_decided",
+      id: "req-1",
+      approved: true,
+    });
+    await waitFor(() => expect(seen.length).toBe(baseline + 1));
+  });
+
+  it("resyncs the list when an approval_resolved frame lands", async () => {
+    const capture = stubSharedSocket();
+    const seen: string[] = [];
+    stubHistory([historyEntry()], (url) => seen.push(url));
+    render(<ApprovalHistory />);
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await flushAsyncWork();
+    const baseline = seen.length;
+
+    // A recovery settlement rides the same decided-frame wire shape as an
+    // owner decision, so it refetches through the identical gated read.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_resolved",
+      id: "req-1",
+    });
+    await waitFor(() => expect(seen.length).toBe(baseline + 1));
+  });
+
+  it("keeps the list still on frames that write no history row", async () => {
+    const capture = stubSharedSocket();
+    const seen: string[] = [];
+    stubHistory([historyEntry()], (url) => seen.push(url));
+    render(<ApprovalHistory />);
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await flushAsyncWork();
+    const baseline = seen.length;
+
+    // A filed prompt and a pending-row removal both leave the recorded log
+    // untouched, so neither may trigger a read.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval",
+      request: {
+        id: "req-2",
+        toolName: "files.write",
+        description: "Stage a report",
+        input: {
+          toolName: "files.write",
+          argumentsJSON: "{}",
+          callID: "call-2",
+        },
+      },
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_removed",
+      id: "req-2",
+    });
+    await flushAsyncWork();
+    expect(seen.length).toBe(baseline);
+  });
+});
+
+describe("ApprovalHistory socket reopen refresh", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("resyncs after the shared socket drops and the backoff redials", async () => {
+    vi.useFakeTimers();
+    const { instances } = stubCountingSocket();
+    const seen: string[] = [];
+    stubHistory([historyEntry()], (url) => seen.push(url));
+    render(<ApprovalHistory />);
+    // The first dial attaches its handler and fires the open-driven resync.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    const baseline = seen.length;
+    expect(baseline).toBeGreaterThan(0);
+
+    // Dropping the live handle schedules the shared client's backoff redial.
+    await act(async () => {
+      instances[instances.length - 1].close();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const afterClose = seen.length;
+
+    // The redial lands a fresh socket whose open fires the resync read, so a
+    // decision recorded while the connection was down appears without a
+    // manual refresh.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000 + 10);
+    });
+    expect(instances.length).toBe(2);
+    expect(seen.length).toBeGreaterThan(afterClose);
+  });
+});
+
+describe("ApprovalHistory visibility resync", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("refetches when the tab turns visible and stays still while hidden", async () => {
+    const capture = stubSharedSocket();
+    const seen: string[] = [];
+    stubHistory([historyEntry()], (url) => seen.push(url));
+    render(<ApprovalHistory />);
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await flushAsyncWork();
+    const baseline = seen.length;
+
+    // The override must not leak into later cases: jsdom ships no own
+    // visibilityState descriptor (the accessor lives on the prototype), so an
+    // unremoved override would pin every visibility-gated refetch open.
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    try {
+      // A hidden transition writes no rows and must not refetch.
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await flushAsyncWork();
+      expect(seen.length).toBe(baseline);
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      // Returning to the tab refetches the log without waiting for a frame.
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await flushAsyncWork();
+      expect(seen.length).toBe(baseline + 1);
+    } finally {
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    }
   });
 });

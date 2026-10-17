@@ -313,10 +313,9 @@ export default function RecentReports({
                     <span>Inspect Run</span>
                   </button>
 
-                  {/* Run kinds with a live chat thread: chat, scheduler, goal,
-                      fanout, and fanout_worker sessions all carry a sessionID
-                      (matching the sidebar's background-session support); index
-                      runs have no chat thread. */}
+                  {/* Run kinds with a live chat thread: chat, scheduler, goal, fanout, and
+                      fanout_worker sessions all carry a sessionID (matching the sidebar's
+                      background-session support); index runs have no chat thread. */}
                   {report.sessionID &&
                     report.sessionID.trim() &&
                     report.kind !== "index" && (

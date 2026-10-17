@@ -15,6 +15,7 @@ import {
 import {
   deriveRequestTarget,
   durationOptionsFor,
+  isSystemNoticeTool,
   truncateTarget,
 } from "../approvalsShared";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
@@ -25,6 +26,7 @@ import {
 } from "../approvalsSession";
 import { isRecord } from "../typeGuards";
 import InlineQuestionCard from "./InlineQuestionCard";
+import SystemNoticeCard from "./SystemNoticeCard";
 import ApprovalHistory from "./ApprovalHistory";
 import BashTierLine from "./BashTierLine";
 import EphemeralTrustChip from "./EphemeralTrustChip";
@@ -35,6 +37,11 @@ import { ApprovalsIcon, CloseIcon, RefreshIcon } from "./icons";
 // Watchdog brake card identity, mirroring the engine's brake tool name: the
 // one card whose complete decision is releasing the parked turns.
 const BRAKE_TOOL_NAME = "behavior.brake";
+
+// Group key and header for the system notices: engine-filed items carry no
+// session, so they read under System instead of Unattributed.
+const SYSTEM_NOTICE_KEY = "__system__";
+const SYSTEM_NOTICE_TITLE = "System";
 
 // Group key and header for requests no session claims: the brake card, older
 // payloads without a session tag, and headless filings all read here.
@@ -202,9 +209,11 @@ interface ApprovalGroup {
   newestIndex: number;
 }
 
-// The brake card parks every running turn rather than one session's call, so
-// it always reads under Unattributed even when the watchdog tagged a session.
+// System notices file under their own System header, the brake card parks every running turn
+// rather than one session's call so it always reads under Unattributed even when the watchdog
+// tagged a session, and everything else groups by its owning session.
 function groupKeyFor(request: PermissionRequest): string {
+  if (isSystemNoticeTool(request.toolName)) return SYSTEM_NOTICE_KEY;
   if (request.toolName === BRAKE_TOOL_NAME) return UNATTRIBUTED_KEY;
   return normalizeSessionID(approvalSessionID(request)) || UNATTRIBUTED_KEY;
 }
@@ -248,9 +257,11 @@ function buildGroups(
     groups.push({
       key,
       title:
-        key === UNATTRIBUTED_KEY
-          ? UNATTRIBUTED_TITLE
-          : titled || bucket.rawID || UNATTRIBUTED_TITLE,
+        key === SYSTEM_NOTICE_KEY
+          ? SYSTEM_NOTICE_TITLE
+          : key === UNATTRIBUTED_KEY
+            ? UNATTRIBUTED_TITLE
+            : titled || bucket.rawID || UNATTRIBUTED_TITLE,
       requests: ordered.map((entry) => entry.request),
       newestIndex: Math.max(...bucket.entries.map((entry) => entry.index)),
     });
@@ -375,7 +386,8 @@ export default function ApprovalsInbox({
   }, [refreshSessions]);
 
   // Live approval prompts arrive over the shared socket; same-id frames merge in place so
-  // enrichment swaps the pending badge for the valued one without remounting the card.
+  // enrichment swaps the pending badge for the valued one without remounting the card. Socket
+  // reopen resyncs the whole list, so a notice decided while offline still settles here.
   const handleWSApproval = useCallback((data: unknown) => {
     if (isRecord(data)) {
       const frame = data as Record<string, unknown>;
@@ -405,7 +417,21 @@ export default function ApprovalsInbox({
     );
   }, []);
 
-  useSharedWebSocket(handleWSApproval);
+  useSharedWebSocket(handleWSApproval, undefined, refresh);
+
+  // Visibility resync: returning to the tab refetches the pending list so
+  // decisions and settlements made elsewhere appear without waiting for the
+  // next live frame.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void refresh();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibility);
+  }, [refresh]);
 
   const groups = useMemo(
     () => buildGroups(approvals, sessionTitles),
@@ -591,6 +617,20 @@ export default function ApprovalsInbox({
           onRespond={(id, answer, cancelled) =>
             void handleQuestionResponse(id, answer, cancelled)
           }
+        />
+      );
+    }
+
+    // System notices are surfacing-only: the shared card renders the mapped
+    // remedy, and a settled notice drops through the owner refetch plus the
+    // approval_decided frame, never through an approve/deny decision.
+    if (isSystemNoticeTool(request.toolName)) {
+      return (
+        <SystemNoticeCard
+          key={request.id}
+          request={request}
+          variant="inbox"
+          onRemedy={() => void refresh()}
         />
       );
     }
@@ -930,18 +970,9 @@ export default function ApprovalsInbox({
             <span>Manage standing rules</span>
           </a>
           {view === "pending" ? (
-            <>
-              <button
-                type="button"
-                className="ghost icon-text-btn"
-                onClick={() => void refresh()}
-                disabled={loading}
-              >
-                <RefreshIcon size={14} className={loading ? "spin" : ""} />
-                <span>{loading ? "Refreshing…" : "Refresh"}</span>
-              </button>
-              <span className="muted text-sm">{approvals.length} pending</span>
-            </>
+            // Live frames, socket reopen, and visibility resync are the only
+            // refresh paths, so the Pending header carries no manual control.
+            <span className="muted text-sm">{approvals.length} pending</span>
           ) : null}
         </div>
       </div>

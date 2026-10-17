@@ -19,6 +19,8 @@ struct SovereignCeremonySink: Sendable {
     let ledger: SovereignLedger
     /// Inbox an unverifiable ceremony parks an item in, nil when unwired.
     let approvals: ApprovalQueue?
+    /// Decision history recording automatic settlements, nil when unwired.
+    let decisionLog: (any ApprovalDecisionRecording)?
 }
 
 /// Resolves the sovereign ceremony sink, seeding application storage on first use so every ceremony
@@ -30,8 +32,39 @@ func sovereignCeremonySink(app: Application) -> SovereignCeremonySink {
         hub: app.runeWeaver.hub,
         lastServed: app.healthPulseLastServed,
         ledger: app.runeWeaver.sovereignLedger,
-        approvals: app.runeWeaver.approvals
+        approvals: app.runeWeaver.approvals,
+        decisionLog: app.runeWeaver.approvalDecisions
     )
+}
+
+/// Settles every pending system notice for one tool: one `approval_decided` frame per settled item
+/// through the same hub publish path the decide route uses, plus one decision-history row carrying
+/// the settle note so the audit trail records the automatic resolution.
+func settleSystemNotice(
+    toolName: String,
+    note: String,
+    approvals: ApprovalQueue,
+    hub: WSHub,
+    decisionLog: (any ApprovalDecisionRecording)?
+) async {
+    let settled = await approvals.settleSystemNotice(toolName: toolName)
+    for request in settled {
+        // Recovery settlement rides the same decided-frame path as an owner decision so
+        // every dashboard view drops the settled card through one encoding.
+        await hub.broadcastApprovalDecided(id: request.id, approved: true, sessionID: request.sessionID)
+        // The settle note rides the row's display target: the only free-form
+        // field the history renders, so recovery reads without a second channel.
+        await decisionLog?.append(ApprovalDecisionEntry(
+            toolName: request.toolName,
+            scope: nil,
+            allowed: true,
+            duration: TrustDuration.thisTime.rawValue,
+            surface: "settled",
+            sessionID: request.sessionID?.uuidString,
+            displayTarget: note,
+            decidedAt: Date()
+        ))
+    }
 }
 
 /// Runs one sovereign verification ceremony and records it into the pulse.
@@ -50,11 +83,13 @@ func runSovereignCeremony(sink: SovereignCeremonySink, reason: String) async -> 
             await publishHealthPulse(value, hub: sink.hub)
         }
         if let approvals = sink.approvals {
-            await approvals.enqueue(
+            // Dedup keys on pending existence in one actor hop, so concurrent ceremonies cannot
+            // double-park and a changed failure reason updates nothing until it resolves; the
+            // filing broadcast rides the queue's insert hop, not a caller-side frame.
+            await approvals.enqueueSystemNoticeIfAbsent(
                 toolName: SovereignCeremonySink.inboxToolName,
                 description: "Sovereign ceremony (\(reason)) could not verify history: \(error.localizedDescription). "
-                    + "The system pulse stays fail-closed until a passing re-verification.",
-                input: ToolInput(toolName: SovereignCeremonySink.inboxToolName, argumentsJSON: "{}")
+                    + "The system pulse stays fail-closed until a passing re-verification."
             )
         }
         return nil
@@ -67,6 +102,16 @@ func runSovereignCeremony(sink: SovereignCeremonySink, reason: String) async -> 
     switch verdict.outcome {
     case .verified, .empty:
         RuneWeaverLog.server.info("Sovereign ceremony (\(reason)): \(verdict.outcome.rawValue) at \(verdict.primaryTip).")
+        // A passing verdict is the mapped remedy resolving a parked mismatch card.
+        if let approvals = sink.approvals {
+            await settleSystemNotice(
+                toolName: SovereignCeremonySink.inboxToolName,
+                note: "Sovereign ceremony (\(reason)) recovered: \(verdict.outcome.rawValue) at \(verdict.primaryTip).",
+                approvals: approvals,
+                hub: sink.hub,
+                decisionLog: sink.decisionLog
+            )
+        }
     case .mismatch:
         RuneWeaverLog.server.warning("Sovereign ceremony (\(reason)): mismatch parked red; primary \(verdict.primaryTip).")
     case .orphaned:
@@ -100,6 +145,16 @@ func rebaselineAfterOwnerDelete(sink: SovereignCeremonySink) async -> SovereignV
             await publishHealthPulse(value, hub: sink.hub)
         }
         RuneWeaverLog.server.info("Sovereign re-baseline after owner delete: \(verdict.outcome.rawValue) at \(verdict.primaryTip).")
+        // Re-baseline is the mapped remedy resolving a parked mismatch card.
+        if let approvals = sink.approvals {
+            await settleSystemNotice(
+                toolName: SovereignCeremonySink.inboxToolName,
+                note: "Sovereign re-baseline after owner delete recovered: \(verdict.outcome.rawValue) at \(verdict.primaryTip).",
+                approvals: approvals,
+                hub: sink.hub,
+                decisionLog: sink.decisionLog
+            )
+        }
         return verdict
     } catch {
         RuneWeaverLog.server.warning("Sovereign re-baseline after owner delete failed: \(error.localizedDescription)")
@@ -109,11 +164,13 @@ func rebaselineAfterOwnerDelete(sink: SovereignCeremonySink) async -> SovereignV
             await publishHealthPulse(value, hub: sink.hub)
         }
         if let approvals = sink.approvals {
-            await approvals.enqueue(
+            // Dedup keys on pending existence in one actor hop, so a persistent re-baseline
+            // failure parks one card and the filing broadcast rides the queue's insert hop
+            // instead of a caller-side frame.
+            await approvals.enqueueSystemNoticeIfAbsent(
                 toolName: SovereignCeremonySink.inboxToolName,
                 description: "Sovereign re-baseline after owner delete could not verify history: \(error.localizedDescription). "
-                    + "The system pulse stays fail-closed until a passing re-verification.",
-                input: ToolInput(toolName: SovereignCeremonySink.inboxToolName, argumentsJSON: "{}")
+                    + "The system pulse stays fail-closed until a passing re-verification."
             )
         }
         return nil

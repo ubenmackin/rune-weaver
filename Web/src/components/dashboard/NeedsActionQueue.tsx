@@ -21,11 +21,13 @@ import {
 import { formatRelativeIn } from "../../relativeTime";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import InlineQuestionCard from "../InlineQuestionCard";
+import SystemNoticeCard from "../SystemNoticeCard";
 import BashTierLine from "../BashTierLine";
 import { resolveSandboxSummary } from "../InlineApprovalBanner";
 import {
   deriveRequestTarget,
   durationOptionsFor,
+  isSystemNoticeTool,
   truncateTarget,
 } from "../../approvalsShared";
 import { useSplitMenu } from "../../useSplitMenu";
@@ -492,6 +494,19 @@ export default function NeedsActionQueue({
           {orderedApprovals.map((req) => {
             const isBusy = decidingId === req.id;
             const severity = requestSeverity(req);
+            // System notices are surfacing-only: they render the shared card
+            // with their mapped remedy instead of the generic approval
+            // banner, and a settled notice drops on the refetch.
+            if (isSystemNoticeTool(req.toolName)) {
+              return (
+                <SystemNoticeCard
+                  key={req.id}
+                  request={req}
+                  variant="queue"
+                  onRemedy={() => void fetchActionItems()}
+                />
+              );
+            }
             if (req.toolName === "question.ask") {
               return (
                 <InlineQuestionCard
@@ -660,10 +675,9 @@ export default function NeedsActionQueue({
             );
           })}
 
-          {/* Booked scheduled sends awaiting their fire time. Monitoring only:
-              each card carries its own Cancel and nothing else — no approve or
-              deny pair, no duration or scope control, no bulk action, no
-              collapse, no edit. */}
+          {/* Booked scheduled sends awaiting their fire time. Monitoring only: each card carries
+              its own Cancel and nothing else — no approve or deny pair, no duration or scope
+              control, no bulk action, no collapse, no edit. */}
           {orderedSends.length > 0 ? (
             <section className="scheduled-sends-group" aria-label="Scheduled sends">
               <div className="scheduled-sends-header">
