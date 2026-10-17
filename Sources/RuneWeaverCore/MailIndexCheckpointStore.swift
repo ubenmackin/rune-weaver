@@ -90,9 +90,8 @@ public actor MailIndexCheckpointStore {
         return false
     }
 
-    /// Records progress for one mailbox, persisting immediately. account: Account
-    /// nickname.
-    public func record(account: String, mailbox: String, watermark: Int, contentHash: String?) throws {
+    /// Updates the in-memory watermark and content hash set without immediately writing to disk.
+    public func recordInMemory(account: String, mailbox: String, watermark: Int, contentHash: String?) {
         loadIfNeeded()
         let mailboxKey = Self.key(account: account, mailbox: mailbox)
         if watermark > (checkpoint.watermarks[mailboxKey] ?? 0) {
@@ -104,6 +103,18 @@ public actor MailIndexCheckpointStore {
                 checkpoint.contentHashes.removeFirst(checkpoint.contentHashes.count - Self.maxTrackedHashes)
             }
         }
+    }
+
+    /// Persists the current in-memory checkpoint to disk atomically.
+    public func flush() throws {
+        loadIfNeeded()
+        try persist()
+    }
+
+    /// Records progress for one mailbox, persisting immediately. account: Account
+    /// nickname.
+    public func record(account: String, mailbox: String, watermark: Int, contentHash: String?) throws {
+        recordInMemory(account: account, mailbox: mailbox, watermark: watermark, contentHash: contentHash)
         try persist()
     }
 

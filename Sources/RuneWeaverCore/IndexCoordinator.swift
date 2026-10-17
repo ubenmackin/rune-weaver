@@ -487,14 +487,13 @@ extension IndexCoordinator {
         }.map(\.element)
     }
 
-    /// Runs every enabled stage, overlapping files plus mail plus messages and sequencing the rest.
+    /// Runs every enabled stage concurrently when multiple sources are active and merges reports in canonical order.
     private func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
         // Selection re-derives every run from the live `policy` snapshot via the single
         // kind-to-flag mapping, so a save applied via `updateConfig` takes effect on the next run
         // with no rebuild; the in-flight snapshot stays fixed for the whole run.
         let enabled = orderedStages.filter { $0.kind.isEnabled(in: policy) }
-        let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail || $0.kind == .messages }
-        let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail && $0.kind != .messages }
+        let overlapStages = enabled
         guard overlapStages.count >= 2 else {
             var ranAny = false
             for stage in enabled {
@@ -511,7 +510,7 @@ extension IndexCoordinator {
         }
         var ranAny = false
         // The shared snapshot arrives as `policy` from the run entry, so a
-        // save landing mid-overlap cannot split the trio across policies;
+        // save landing mid-overlap cannot split the peers across policies;
         // the next run picks it up instead.
         let runPolicy = policy
         let baseScanned = totals.scanned
@@ -530,7 +529,7 @@ extension IndexCoordinator {
         let overlapBaseCount = activeStages.count
         activeStages.append(contentsOf: overlapStages)
         livePhase = .extracting
-        // Nil stage marks the mixed trio: the single cumulative frame carries
+        // Nil stage marks the overlapped group: the single cumulative frame carries
         // summed counts rather than attributing to one peer.
         liveStage = nil
         await emit(phase: .extracting, totals: totals, startedAt: startedAt, force: true)
@@ -570,19 +569,6 @@ extension IndexCoordinator {
         liveKeywordChunks = totals.keywordChunks
         if let item = totals.lastItem {
             liveCurrent = item
-        }
-        if cancelFlag.isSet || Task.isCancelled {
-            return ranAny
-        }
-        for stage in remainder {
-            if cancelFlag.isSet || Task.isCancelled {
-                break
-            }
-            let didRun = await executeStage(stage, totals: &totals, startedAt: startedAt, policy: runPolicy)
-            ranAny = ranAny || didRun
-            if cancelFlag.isSet || Task.isCancelled {
-                break
-            }
         }
         return ranAny
     }

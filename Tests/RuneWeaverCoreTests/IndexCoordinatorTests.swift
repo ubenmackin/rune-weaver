@@ -383,7 +383,7 @@ struct IndexCoordinatorTests {
         func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
             IndexClosureStage(kind: kind, isEnabled: true) { _, _, _ in
                 await calls.record(kind)
-                return IndexSourceRunReport(kind: kind)
+                return IndexSourceRunReport(kind: kind, warnings: ["\(kind.rawValue)-warn"])
             }
         }
 
@@ -404,11 +404,11 @@ struct IndexCoordinatorTests {
 
         #expect(summary.status == .ok)
         let recorded = await calls.snapshot()
-        // Files plus mail plus messages overlap, so their start order races while
-        // calendars stays sequential after the join in canonical order.
+        // All enabled sources overlap concurrently so fast local sources never wait behind files/mail,
+        // while the post-group join merges reports in canonical order regardless of declaration order.
         #expect(recorded.count == 4)
-        #expect(Set(recorded.prefix(3)) == [.files, .mail, .messages])
-        #expect(Array(recorded.suffix(1)) == [.calendars])
+        #expect(Set(recorded) == [.files, .mail, .messages, .calendars])
+        #expect(summary.warnings == ["files-warn", "mail-warn", "messages-warn", "calendars-warn"])
     }
 
     @Test
@@ -1210,9 +1210,8 @@ struct IndexCoordinatorTests {
 
     @Test
     func `Files plus mail plus messages overlap with messages finishing before mail and vision after peers`() async {
-        // CPU-bound files, network-bound mail, and light local messages wait on different
-        // resources, so the trio overlaps while vision stays sequential after the join; staggered
-        // sleeps make the light local messages peer finish before mail deterministically without.
+        // CPU-bound files, network-bound mail, and light local sources (messages, calendars)
+        // overlap concurrently so fast local peers finish before files and mail without waiting.
         let probe = IndexOverlapProbe()
         let started = IndexStageCallRecorder()
         let finished = IndexStageCallRecorder()
@@ -1239,7 +1238,7 @@ struct IndexCoordinatorTests {
                 staged(.files, delay: 300_000_000),
                 staged(.mail, delay: 600_000_000),
                 staged(.messages, delay: 100_000_000),
-                staged(.calendars, delay: 0)
+                staged(.calendars, delay: 50_000_000)
             ]
         )
 
@@ -1248,17 +1247,18 @@ struct IndexCoordinatorTests {
         #expect(summary.status == .ok)
         #expect(summary.scanned == 4)
         #expect(summary.documentsIndexed == 4)
-        #expect(await probe.maxObserved() == 3)
+        #expect(await probe.maxObserved() >= 3)
         let starts = await started.snapshot()
         #expect(starts.count == 4)
-        #expect(Set(starts.prefix(3)) == [.files, .mail, .messages])
-        #expect(starts.last == .calendars)
+        #expect(Set(starts) == [.files, .mail, .messages, .calendars])
         let completions = await finished.snapshot()
         #expect(completions.count == 4)
-        #expect(completions.last == .calendars)
-        // The light local peer completes while the network-bound peer still runs.
+        // Light local peers complete while the file and network-bound peers still run.
+        let calendarsIndex = completions.firstIndex(of: .calendars)
         let messagesIndex = completions.firstIndex(of: .messages)
+        let filesIndex = completions.firstIndex(of: .files)
         let mailIndex = completions.firstIndex(of: .mail)
+        #expect(calendarsIndex != nil && filesIndex != nil && calendarsIndex! < filesIndex!)
         #expect(messagesIndex != nil && mailIndex != nil && messagesIndex! < mailIndex!)
     }
 

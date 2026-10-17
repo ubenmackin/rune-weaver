@@ -24,25 +24,25 @@ public actor MailIndexer {
     public static let interPagePauseSeconds: TimeInterval = 1.0
 
     /// Configured mail accounts.
-    private let emailConfig: EmailConfig
+    let emailConfig: EmailConfig
     /// Index policy: enablement, source toggles, caps, budget, and vector window.
-    private let indexConfig: IndexConfig
+    let indexConfig: IndexConfig
     /// Read-only gateway seam.
-    private let gateway: any MailIndexGateway
+    let gateway: any MailIndexGateway
     /// Document store the index writes into.
-    private let store: DocIndexStore
+    let store: DocIndexStore
     /// Optional embeddings backend for vector-eligible chunks.
-    private let embedder: (any EmbeddingsBackend)?
+    let embedder: (any EmbeddingsBackend)?
     /// Text extractor shared with the rest of the index pipeline.
-    private let extractor: any DocumentTextExtracting
+    let extractor: any DocumentTextExtracting
     /// Incremental watermark and dedupe checkpoint store.
-    private let checkpoints: MailIndexCheckpointStore
+    let checkpoints: MailIndexCheckpointStore
     /// Test-injectable staging root; nil uses Seatbelt-confined temp.
-    private let stagingRoot: URL?
+    let stagingRoot: URL?
     /// Clock seam so tests can pin the vector-window reference time.
-    private let now: @Sendable () -> Date
+    let now: @Sendable () -> Date
     /// Secrets manager used to resolve account passwords at execution time.
-    private let secrets: SecretsManager
+    let secrets: SecretsManager
 
     /// Creates a mail indexer. emailConfig: Configured mail accounts.
     public init(
@@ -156,7 +156,7 @@ public actor MailIndexer {
     }
 
     /// Mutable per-run budget, progress throttle, and report bundle.
-    private struct MailRunCursor: Sendable {
+    struct MailRunCursor: Sendable {
         /// Counts accumulated across mailboxes.
         var report: MailIndexRunReport
         /// Remaining items before the nightly cap stops the run.
@@ -166,7 +166,7 @@ public actor MailIndexer {
     }
 
     /// One mailbox window ready for per-message indexing.
-    private struct MailboxBatch: Sendable {
+    struct MailboxBatch: Sendable {
         /// Per-mailbox indexing context.
         var context: MailboxContext
         /// Sorted messages above the watermark.
@@ -385,40 +385,25 @@ public actor MailIndexer {
         return nil
     }
 
-    /// Indexes one sorted mailbox window, recording watermarks and progress.
+    /// Indexes one sorted mailbox window in page-sized batches, recording watermarks and progress.
     private func indexFreshMessages(
         batch: MailboxBatch,
         cursor: inout MailRunCursor,
         reporter: ToolProgressReporter
     ) async throws {
-        for message in batch.fresh {
+        var offset = 0
+        while offset < batch.fresh.count, cursor.budget > 0 {
             try Task.checkCancellation()
-            guard cursor.budget > 0 else { break }
-            cursor.budget -= 1
-            cursor.report.messagesSeen += 1
-            let outcome = try await index(message: message, context: batch.context)
-            cursor.report.messagesIndexed += outcome.indexed ? 1 : 0
-            cursor.report.messagesUnchanged += outcome.unchanged ? 1 : 0
-            cursor.report.messagesDeduplicated += outcome.deduplicated ? 1 : 0
-            cursor.report.attachmentsStaged += outcome.staged
-            cursor.report.attachmentsSkippedOversize += outcome.oversize
-            cursor.report.attachmentsMetadataOnly += outcome.metadataOnly
-            cursor.report.chunksWritten += outcome.chunks
-            cursor.report.vectorsWritten += outcome.vectors
-            let uid = Self.uid(of: message.id)
-            if uid > 0 {
-                try await checkpoints.record(
-                    account: batch.context.account.name,
-                    mailbox: batch.context.mailbox,
-                    watermark: batch.holdsWatermark ? batch.watermark : uid,
-                    contentHash: outcome.contentHash
-                )
-            }
-            let stamp = DispatchTime.now().uptimeNanoseconds
-            if stamp &- cursor.lastReport >= ToolProgress.minimumReportIntervalNanoseconds {
-                cursor.lastReport = stamp
-                await reporter(Self.progress(report: cursor.report, account: batch.context.account.name, mailbox: batch.context.mailbox, messageID: message.id))
-            }
+            let end = min(offset + Self.pageLimit, batch.fresh.count)
+            let pageSlice = Array(batch.fresh[offset ..< end])
+            try await indexMailPageBatch(
+                page: pageSlice,
+                context: batch.context,
+                watermarkMode: batch.holdsWatermark ? .fixedFresh(batch.watermark) : .advancePerUID,
+                cursor: &cursor,
+                reporter: reporter
+            )
+            offset = end
         }
     }
 }
@@ -643,40 +628,13 @@ extension MailIndexer {
         cursor: inout MailRunCursor,
         reporter: ToolProgressReporter
     ) async throws {
-        for message in page {
-            try Task.checkCancellation()
-            guard cursor.budget > 0 else { break }
-            cursor.budget -= 1
-            cursor.report.messagesSeen += 1
-            let outcome = try await index(message: message, context: context)
-            cursor.report.messagesIndexed += outcome.indexed ? 1 : 0
-            cursor.report.messagesUnchanged += outcome.unchanged ? 1 : 0
-            cursor.report.messagesDeduplicated += outcome.deduplicated ? 1 : 0
-            cursor.report.attachmentsStaged += outcome.staged
-            cursor.report.attachmentsSkippedOversize += outcome.oversize
-            cursor.report.attachmentsMetadataOnly += outcome.metadataOnly
-            cursor.report.chunksWritten += outcome.chunks
-            cursor.report.vectorsWritten += outcome.vectors
-
-            if let hash = outcome.contentHash.isEmpty ? nil : outcome.contentHash {
-                try await checkpoints.record(
-                    account: context.account.name,
-                    mailbox: context.mailbox,
-                    watermark: watermark,
-                    contentHash: hash
-                )
-            }
-            let stamp = DispatchTime.now().uptimeNanoseconds
-            if stamp &- cursor.lastReport >= ToolProgress.minimumReportIntervalNanoseconds {
-                cursor.lastReport = stamp
-                await reporter(Self.progress(
-                    report: cursor.report,
-                    account: context.account.name,
-                    mailbox: context.mailbox,
-                    messageID: message.id
-                ))
-            }
-        }
+        try await indexMailPageBatch(
+            page: page,
+            context: context,
+            watermarkMode: .backfill(watermark),
+            cursor: &cursor,
+            reporter: reporter
+        )
     }
 
     /// Fetches one page with retry up to `maxFetchAttempts`, backing off on retryable errors.
@@ -735,7 +693,7 @@ extension MailIndexer {
 
 extension MailIndexer {
     /// Per-mailbox indexing context, bundling the run-scoped policy.
-    private struct MailboxContext: Sendable {
+    struct MailboxContext: Sendable {
         /// Account being walked.
         let account: EmailAccount
         /// Mailbox being walked, stored trimmed so pool, watermark, and document identity agree.
@@ -751,7 +709,7 @@ extension MailIndexer {
     }
 
     /// Counts produced while indexing one message.
-    private struct MessageOutcome {
+    struct MessageOutcome: Sendable {
         /// Whether the message was written.
         var indexed = false
         /// Whether the stored body hash was already current.
@@ -770,6 +728,20 @@ extension MailIndexer {
         var vectors = 0
         /// Content hash of the message body.
         var contentHash = ""
+    }
+
+    /// Mutable attachment accumulation for one message.
+    struct AttachmentStaging {
+        /// Body plus attachment chunks.
+        var chunks: [DocumentChunk]
+        /// Precomputed vectors for multimodal attachments (e.g., visual image vectors).
+        var precomputedVectors: [Int: [Float]]
+        /// Document metadata to annotate.
+        var metadata: [String: String]
+        /// Counts for staged, oversize, and vision parts.
+        var outcome: MessageOutcome
+        /// Whether any part degraded.
+        var degraded: Bool
     }
 
     /// Fetches the newest window covering every UID above the watermark by paging downward.
@@ -863,7 +835,7 @@ extension MailIndexer {
 
     /// Resolves account credentials at execution time. The password is read from the environment or
     /// Keychain and never logged.
-    private func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
+    func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
         let envVar = account.passwordEnvVar
         let password: String?
         do {
@@ -887,292 +859,12 @@ extension MailIndexer {
     }
 
     /// Builds an advisory progress line for a message.
-    private static func progress(report: MailIndexRunReport, account: String, mailbox: String, messageID: String) -> ToolProgress {
+    static func progress(report: MailIndexRunReport, account: String, mailbox: String, messageID: String) -> ToolProgress {
         ToolProgress(
             message: "Indexing mail: \(report.messagesIndexed) indexed, \(report.messagesSeen) scanned",
             scanned: report.messagesSeen,
             matched: report.messagesIndexed,
             current: "\(account) - \(mailbox)/\(messageID)"
         )
-    }
-
-    /// Indexes one message and its stageable attachments. message: Message to
-    /// index.
-    private func index(message: MailIndexMessage, context: MailboxContext) async throws -> MessageOutcome {
-        var outcome = MessageOutcome()
-        let bodyText = Self.messageText(subject: message.subject, body: message.body)
-        let contentHash = Self.contentHash(bodyText)
-        outcome.contentHash = contentHash
-
-        // Forwarded duplicates share a body hash even though their UIDs differ,
-        // so the dedupe check runs before the per-document reindex check.
-        if await checkpoints.containsContentHash(contentHash) {
-            outcome.deduplicated = true
-            return outcome
-        }
-        let externalID = Self.documentExternalID(
-            account: context.account.name,
-            mailbox: context.mailbox,
-            messageID: message.id
-        )
-        if try await !(store.needsReindex(source: .mail, externalID: externalID, contentHash: contentHash)) {
-            outcome.unchanged = true
-            return outcome
-        }
-
-        let bodyExtraction = extractor.extract(
-            data: Data(bodyText.utf8),
-            fileName: "message.txt",
-            contentType: "text/plain"
-        )
-        var chunks = bodyExtraction.chunks
-        var metadata = ["account": context.account.name]
-        var degraded = bodyExtraction.status != .extracted
-
-        let eligible = context.window.includes(date: message.date, now: context.runDate)
-        var staging = AttachmentStaging(
-            chunks: chunks,
-            precomputedVectors: [:],
-            metadata: metadata,
-            outcome: outcome,
-            degraded: degraded
-        )
-        try await collectAttachmentChunks(
-            message: message,
-            context: context,
-            eligible: eligible,
-            staging: &staging
-        )
-        chunks = staging.chunks
-        metadata = staging.metadata
-        outcome = staging.outcome
-        degraded = staging.degraded
-
-        let embeddings = try await embeddings(
-            for: chunks,
-            title: message.subject,
-            eligible: eligible,
-            precomputed: staging.precomputedVectors
-        )
-        let document = IndexedDocument(
-            source: .mail,
-            externalID: externalID,
-            displayName: Self.displayName(subject: message.subject),
-            messageID: message.id,
-            mailbox: context.mailbox,
-            mtime: message.date,
-            sizeBytes: message.sizeBytes.map { Int64($0) },
-            contentHash: contentHash,
-            mime: "message/rfc822",
-            extractStatus: Self.extractStatus(hasText: !chunks.isEmpty, degraded: degraded),
-            indexedAt: context.runDate,
-            metadata: metadata
-        )
-        let stored = try await store.upsertDocument(document)
-        let indexedChunks = chunks.enumerated().map { index, chunk in
-            IndexedChunk(documentID: stored.id, ordinal: index, text: chunk.text, embedding: embeddings[index])
-        }
-        _ = try await store.upsertChunks(documentID: stored.id, chunks: indexedChunks)
-        outcome.indexed = true
-        outcome.chunks = indexedChunks.count
-        outcome.vectors = indexedChunks.reduce(0) { $0 + ($1.isVector ? 1 : 0) }
-        return outcome
-    }
-
-    /// Mutable attachment accumulation for one message.
-    private struct AttachmentStaging {
-        /// Body plus attachment chunks.
-        var chunks: [DocumentChunk]
-        /// Precomputed vectors for multimodal attachments (e.g., visual image vectors).
-        var precomputedVectors: [Int: [Float]]
-        /// Document metadata to annotate.
-        var metadata: [String: String]
-        /// Counts for staged, oversize, and vision parts.
-        var outcome: MessageOutcome
-        /// Whether any part degraded.
-        var degraded: Bool
-    }
-
-    /// Stages and extracts attachment bodies into shared chunks. message: Message
-    /// whose attachments are processed.
-    private func collectAttachmentChunks(
-        message: MailIndexMessage,
-        context: MailboxContext,
-        eligible: Bool,
-        staging: inout AttachmentStaging
-    ) async throws {
-        for (index, info) in message.attachments.enumerated() {
-            // Honor cancellation per attachment so a large attachment list
-            // stops within one fetch instead of draining the whole message.
-            try Task.checkCancellation()
-            // The body structure reports a size before any bytes move, so an
-            // oversized part is skipped without a fetch.
-            if (info.sizeBytes ?? 0) > context.attachmentCap {
-                staging.outcome.oversize += 1
-                staging.metadata["attachment.\(index).skipped"] = "oversize"
-                staging.degraded = true
-                continue
-            }
-            let attachmentData: MailIndexAttachmentData
-            do {
-                attachmentData = try await gateway.attachment(
-                    credentials: context.credentials,
-                    mailbox: context.mailbox,
-                    messageID: message.id,
-                    attachmentIndex: index,
-                    mode: .peek
-                )
-            } catch let cancel as CancellationError {
-                throw cancel
-            } catch {
-                staging.degraded = true
-                continue
-            }
-            guard attachmentData.data.count <= context.attachmentCap else {
-                staging.outcome.oversize += 1
-                staging.metadata["attachment.\(index).skipped"] = "oversize"
-                staging.degraded = true
-                continue
-            }
-            let filename = NormalizedText.value(info.filename) ?? attachmentData.filename
-            let staged: (directory: URL, file: URL)
-            do {
-                staged = try stage(bytes: attachmentData.data, filename: filename)
-            } catch {
-                staging.degraded = true
-                continue
-            }
-            defer { discardStaged(at: staged.directory) }
-
-            let contentType = NormalizedText.value(info.contentType) ?? attachmentData.contentType
-            let extraction = await extractor.extract(
-                fileURL: staged.file,
-                contentType: contentType
-            )
-            staging.outcome.staged += 1
-
-            // Multimodal image path: if format is image, attempt visual embedding before discarding staged file
-            if extraction.format == .image, eligible, let embedder {
-                let dim = await embedder.dimension
-                if let visual = try? await FilesIndexer.embedImageVisualVector(
-                    fileURL: staged.file,
-                    fileName: filename,
-                    expectedDimension: dim,
-                    embedImage: { try await embedder.embedImage(at: staged.file) }
-                ), let vector = visual.first {
-                    let chunkIndex = staging.chunks.count
-                    let chunkText = extraction.chunks.first?.text ?? filename
-                    let chunk = DocumentChunk(
-                        index: chunkIndex,
-                        text: chunkText,
-                        estimatedTokens: max(1, chunkText.count / 4)
-                    )
-                    staging.chunks.append(chunk)
-                    staging.precomputedVectors[chunkIndex] = vector
-                    continue
-                }
-            }
-
-            // An empty text layer (scanned or password-protected PDF) yields
-            // metadata only, so the original bytes are flagged for the vision path.
-            if extraction.status == .metadataOnly || extraction.status == .failed || extraction.status == .unsupported {
-                staging.outcome.metadataOnly += 1
-                staging.metadata["attachment.\(index).vision"] = extraction.status.rawValue
-                staging.degraded = true
-                continue
-            }
-            if extraction.status == .partial {
-                staging.degraded = true
-            }
-            for chunk in extraction.chunks {
-                staging.chunks.append(DocumentChunk(index: staging.chunks.count, text: chunk.text, estimatedTokens: chunk.estimatedTokens))
-            }
-        }
-    }
-
-    /// Embeds chunk text when the message is inside the vector window. Embedding failure degrades
-    /// the affected chunks to keyword-only, matching the shared fallback contract; cancellation
-    /// still propagates.
-    private func embeddings(
-        for chunks: [DocumentChunk],
-        title: String? = nil,
-        eligible: Bool,
-        precomputed: [Int: [Float]] = [:]
-    ) async throws -> [[Float]] {
-        guard !chunks.isEmpty else { return [] }
-        guard eligible, let embedder else {
-            var result: [[Float]] = Array(repeating: [], count: chunks.count)
-            for (idx, vec) in precomputed where idx < chunks.count {
-                result[idx] = vec
-            }
-            return result
-        }
-        try Task.checkCancellation()
-        var expanded: [[Float]] = Array(repeating: [], count: chunks.count)
-        for (idx, vec) in precomputed where idx < chunks.count {
-            expanded[idx] = vec
-        }
-
-        let maxChunks = indexConfig.maxVectorChunksPerDocument
-        var indicesToEmbed: [Int] = []
-        var textsToEmbed: [String] = []
-
-        for index in 0 ..< min(chunks.count, maxChunks) where expanded[index].isEmpty {
-            indicesToEmbed.append(index)
-            textsToEmbed.append(EmbeddingGemmaPrompts.document(title: title, text: chunks[index].text))
-        }
-
-        if !textsToEmbed.isEmpty {
-            do {
-                let vectors = try await embedder.embed(textsToEmbed)
-                if vectors.count == textsToEmbed.count {
-                    for (pos, chunkIndex) in indicesToEmbed.enumerated() {
-                        expanded[chunkIndex] = vectors[pos].isEmpty ? [] : vectors[pos]
-                    }
-                }
-            } catch let cancel as CancellationError {
-                throw cancel
-            } catch {
-                RuneWeaverLog.stores.info("MailIndexer: embedding failed for message: \(error.localizedDescription)")
-            }
-        }
-        return expanded
-    }
-
-    /// Writes attachment bytes into Seatbelt-confined temp. bytes: Attachment
-    /// bytes.
-    private func stage(bytes: Data, filename: String) throws -> (directory: URL, file: URL) {
-        let directory: URL
-        if let stagingRoot {
-            let candidate = stagingRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(
-                at: candidate,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            directory = candidate
-        } else {
-            directory = try SeatbeltProfileBuilder.makeConfinedTempDirectory(prefix: "runeweaver-mail-index-")
-        }
-        try requireConfinedTempAllow(directory)
-        let file = directory.appendingPathComponent(Self.sanitizedFilename(filename, fallback: "attachment"))
-        try bytes.write(to: file, options: .atomic)
-        return (directory, file)
-    }
-
-    /// Fails closed unless the Seatbelt profile permits the staging temp.
-    /// - Parameter directory: Confined temp directory.
-    /// - Throws: `MailIndexError.stagingFailed` when the profile omits it.
-    private func requireConfinedTempAllow(_ directory: URL) throws {
-        let profile = SeatbeltProfileBuilder(allowedTempPaths: [directory.path]).buildProfile()
-        guard profile.contains(directory.path) else {
-            throw MailIndexError.stagingFailed("Attachment staging confined temp rejected by the Seatbelt profile")
-        }
-    }
-
-    /// Deletes a staging directory and its staged binary.
-    /// - Parameter directory: Confined temp directory to remove.
-    private func discardStaged(at directory: URL) {
-        try? FileManager.default.removeItem(at: directory)
     }
 }

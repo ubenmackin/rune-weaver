@@ -208,6 +208,7 @@ public actor RemindersIndexer {
         indexedAt: Date,
         report: inout ReminderIndexReport
     ) async throws -> [ReminderPending] {
+        let storedFingerprints = await (try? index.storedFingerprints(source: .reminders)) ?? [:]
         var prepared: [ReminderPending] = []
         for row in rows {
             try Task.checkCancellation()
@@ -232,7 +233,7 @@ public actor RemindersIndexer {
                 listName: listName,
                 isCompleted: row.isCompleted
             )
-            if let existing = try await index.document(source: .reminders, externalID: row.identifier),
+            if let existing = storedFingerprints[row.identifier],
                existing.contentHash == contentHash
             {
                 report.skipped += 1
@@ -264,33 +265,60 @@ public actor RemindersIndexer {
         return prepared
     }
 
-    /// Embeds and upserts pending reminder documents.
+    /// Embeds and upserts pending reminder documents in a single SQLite transaction.
     private func upsertPrepared(_ prepared: [ReminderPending], runID: String, report: inout ReminderIndexReport) async throws {
+        guard !prepared.isEmpty else { return }
         var embeddings: [[Float]] = []
-        if let embedder, !prepared.isEmpty {
-            do {
-                embeddings = try await embedder.embed(prepared.map(\.chunkText))
-            } catch let cancelled as CancellationError {
-                throw cancelled
-            } catch {
-                embeddings = []
+        if let embedder {
+            let texts = prepared.map(\.chunkText)
+            embeddings.reserveCapacity(texts.count)
+            var offset = 0
+            while offset < texts.count {
+                try Task.checkCancellation()
+                let end = min(offset + 64, texts.count)
+                let subBatch = Array(texts[offset ..< end])
+                do {
+                    let subVectors = try await embedder.embed(subBatch)
+                    if subVectors.count == subBatch.count {
+                        embeddings.append(contentsOf: subVectors)
+                    } else {
+                        embeddings = []
+                        break
+                    }
+                } catch let cancelled as CancellationError {
+                    throw cancelled
+                } catch {
+                    embeddings = []
+                    break
+                }
+                offset = end
             }
         }
+        var entries: [DocBatchUpsertEntry] = []
+        entries.reserveCapacity(prepared.count)
+        var vectorCount = 0
         for (offset, item) in prepared.enumerated() {
             try Task.checkCancellation()
             let vector = offset < embeddings.count ? embeddings[offset] : []
+            if !vector.isEmpty {
+                vectorCount += 1
+            }
             let chunk = IndexedChunk(
                 documentID: item.document.id,
                 ordinal: 0,
                 text: item.chunkText,
                 embedding: vector
             )
-            _ = try await index.upsertDocumentWithChunks(document: item.document, chunks: [chunk], runID: runID)
-            report.indexed += 1
-            if !vector.isEmpty {
-                report.vectorsWritten += 1
-            }
+            entries.append(DocBatchUpsertEntry(
+                document: item.document,
+                chunks: [chunk],
+                runID: runID
+            ))
         }
+        try Task.checkCancellation()
+        _ = try await index.upsertDocumentsWithChunks(entries)
+        report.indexed += entries.count
+        report.vectorsWritten += vectorCount
     }
 
     /// Deletes stored reminder documents absent from the live fetch.

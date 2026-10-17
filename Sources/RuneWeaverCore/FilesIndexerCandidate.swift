@@ -30,6 +30,8 @@ extension FilesIndexer {
         /// Whether the worker observed cancellation that the run must propagate
         /// even though the outcome otherwise counts normally.
         var propagateCancel = false
+        /// Canonical path to stamp in the batched `markSeenBatch` queue when resolved via preloaded fingerprints.
+        var pendingSeenPath: String?
     }
 
     /// Result of stamping one visited file as seen by the current run.
@@ -98,6 +100,8 @@ extension FilesIndexer {
         let accessGuard: any FilesIndexAccessGuard
         /// Which extracted documents are vectorized.
         let vectorPolicy: FilesVectorPolicy
+        /// Bulk-preloaded stored fingerprints for `.files`, eliminating per-file SQLite queries.
+        var preloadedFingerprints: [String: DocStoredFingerprint]?
     }
 
     /// Per-run policy and test seams for one candidate. Keeps walk caps, home boundary, and
@@ -139,41 +143,6 @@ extension FilesIndexer {
         let maxBytes: Int
     }
 
-    /// Extracted body plus the values needed to commit it.
-    struct CandidatePayload: Sendable {
-        /// Source modification time, when known.
-        let modificationDate: Date?
-        /// File bytes that were hashed and extracted.
-        let data: Data
-        /// Content hash gating re-indexing.
-        let contentHash: String
-        /// Extracted document body.
-        let extraction: DocumentExtraction
-        /// One vector per embedded chunk, or nil when keyword-only.
-        let vectors: [[Float]]?
-        /// Whether the visual multimodal path produced the vectors.
-        let visualSucceeded: Bool
-
-        /// Creates a committable payload, defaulting visual success to false
-        /// so keyword-only and text-embedded rows keep the interim image
-        /// outcome unless the visual path explicitly succeeded.
-        init(
-            modificationDate: Date?,
-            data: Data,
-            contentHash: String,
-            extraction: DocumentExtraction,
-            vectors: [[Float]]?,
-            visualSucceeded: Bool = false
-        ) {
-            self.modificationDate = modificationDate
-            self.data = data
-            self.contentHash = contentHash
-            self.extraction = extraction
-            self.vectors = vectors
-            self.visualSucceeded = visualSucceeded
-        }
-    }
-
     /// Prerequisites resolved during preflight for candidate reading and extraction.
     struct CandidatePreflight: Sendable {
         /// Source modification time, when known.
@@ -189,70 +158,11 @@ extension FilesIndexer {
         /// Candidate processing resolved early (skipped, unchanged, unreadable, or cancelled).
         case finished(FileOutcome)
     }
-
-    /// Outcome of preparing an extracted candidate payload.
-    enum CandidatePayloadOutcome: Sendable {
-        /// Extracted candidate payload ready for commit.
-        case ready(CandidatePayload)
-        /// Candidate processing resolved early.
-        case finished(FileOutcome)
-    }
 }
 
 // MARK: - Candidate worker
 
 extension FilesIndexer {
-    /// Processes one candidate file on a parallel worker, mirroring `indexFile` plus
-    /// `persistExtraction`.
-    static func processCandidate(
-        identity: CandidateIdentity,
-        services: CandidateServices,
-        policy: CandidatePolicy,
-        state: CandidateRunState
-    ) async -> FileOutcome {
-        let resolved = resolveCandidate(identity: identity, policy: policy)
-        let preflight: CandidatePreflight
-        switch await preflightCandidate(
-            identity: identity,
-            services: services,
-            policy: policy,
-            state: state,
-            resolved: resolved
-        ) {
-        case let .ready(ready):
-            preflight = ready
-        case let .finished(outcome):
-            return outcome
-        }
-
-        let payload: CandidatePayload
-        switch await prepareCandidatePayload(
-            identity: identity,
-            services: services,
-            policy: policy,
-            state: state,
-            resolved: resolved,
-            preflight: preflight
-        ) {
-        case let .ready(ready):
-            payload = ready
-        case let .finished(outcome):
-            return outcome
-        }
-
-        if state.cancellation.isSet || Task.isCancelled {
-            return FileOutcome(kind: .cancelled, relative: resolved.relative)
-        }
-        return await commitCandidateDocument(
-            identity: identity,
-            services: services,
-            policy: policy,
-            state: state,
-            resolved: resolved,
-            payload: payload
-        )
-    }
-
     /// Evaluates pre-read metadata and policies for a candidate.
     static func preflightCandidate(
         identity: CandidateIdentity,
@@ -310,104 +220,6 @@ extension FilesIndexer {
             modificationDate: values.contentModificationDate,
             resolvedPath: decision.resolvedPath
         ))
-    }
-
-    /// Reads, hashes, extracts, and vectorizes candidate bytes into a committable payload. -
-    /// Parameters: - identity: Per-file URLs plus the run stamp.
-    static func prepareCandidatePayload(
-        identity: CandidateIdentity,
-        services: CandidateServices,
-        policy: CandidatePolicy,
-        state: CandidateRunState,
-        resolved: ResolvedCandidate,
-        preflight: CandidatePreflight
-    ) async -> CandidatePayloadOutcome {
-        if state.cancellation.isSet || Task.isCancelled {
-            return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-        }
-        let data: Data
-        do {
-            data = try readCandidateBytes(policy: policy, resolvedPath: preflight.resolvedPath)
-        } catch {
-            if state.cancellation.isSet || Task.isCancelled {
-                return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-            }
-            let stamp = await stampCandidate(
-                store: services.store,
-                canonicalPath: resolved.canonicalPath,
-                runID: identity.runID
-            )
-            return .finished(stamped(stamp, onto: failedOutcome(relative: resolved.relative, reason: "unreadable")))
-        }
-        if state.cancellation.isSet || Task.isCancelled {
-            return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-        }
-        let payloadFormat = DocumentTextExtractor.detectFormat(fileName: resolved.filename, contentType: nil)
-        let isMediaPayload = payloadFormat == .audio || payloadFormat == .video
-        guard isMediaPayload || data.count <= resolved.maxBytes else {
-            return .finished(skippedOutcome(relative: resolved.relative))
-        }
-        let hash = Self.contentHash(for: data)
-        if let settled = await checkContentCurrent(
-            identity: identity,
-            services: services,
-            resolved: resolved,
-            hash: hash
-        ) {
-            if state.cancellation.isSet || Task.isCancelled {
-                return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-            }
-            return .finished(settled)
-        }
-        if state.cancellation.isSet || Task.isCancelled {
-            return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-        }
-        let extraction = await services.extractor.extract(
-            fileURL: identity.fileURL,
-            contentType: nil
-        )
-        if let terminal = await checkExtractionTerminal(
-            identity: identity,
-            services: services,
-            resolved: resolved,
-            extraction: extraction
-        ) {
-            if state.cancellation.isSet || Task.isCancelled {
-                return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-            }
-            return .finished(terminal)
-        }
-        if state.cancellation.isSet || Task.isCancelled {
-            return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-        }
-        let vectors: [[Float]]?
-        let visualSucceeded: Bool
-        do {
-            let embedded = try await resolveCandidateVectors(
-                services: services,
-                policy: policy,
-                extraction: extraction,
-                fileURL: identity.fileURL,
-                fileName: resolved.filename,
-                byteCount: data.count
-            )
-            vectors = embedded.vectors
-            visualSucceeded = embedded.visualSucceeded
-        } catch is CancellationError {
-            return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
-        } catch {
-            vectors = nil
-            visualSucceeded = false
-        }
-        let payload = CandidatePayload(
-            modificationDate: preflight.modificationDate,
-            data: data,
-            contentHash: hash,
-            extraction: extraction,
-            vectors: vectors,
-            visualSucceeded: visualSucceeded
-        )
-        return .ready(payload)
     }
 
     /// Derives one stable identity for a candidate before any I/O.
@@ -513,6 +325,22 @@ extension FilesIndexer {
             return FileOutcome(kind: .cancelled, relative: resolved.relative)
         }
         let size = values.fileSize ?? 0
+        if let preloaded = services.preloadedFingerprints {
+            if let fingerprint = preloaded[resolved.canonicalPath],
+               FilesIndexer.fingerprintMatchesStored(
+                   fingerprint,
+                   size: size,
+                   currentMtime: values.contentModificationDate
+               )
+            {
+                return FileOutcome(
+                    kind: .unchanged,
+                    relative: resolved.relative,
+                    pendingSeenPath: resolved.canonicalPath
+                )
+            }
+            return nil
+        }
         do {
             if let fingerprint = try await services.store.storedFingerprint(
                 source: .files,
@@ -564,6 +392,19 @@ extension FilesIndexer {
     ) async -> FileOutcome? {
         if Task.isCancelled {
             return FileOutcome(kind: .cancelled, relative: resolved.relative)
+        }
+        if let preloaded = services.preloadedFingerprints {
+            if let existing = preloaded[resolved.canonicalPath],
+               existing.contentHash == hash,
+               existing.extractStatus != .failed
+            {
+                return FileOutcome(
+                    kind: .unchanged,
+                    relative: resolved.relative,
+                    pendingSeenPath: resolved.canonicalPath
+                )
+            }
+            return nil
         }
         do {
             let needsReindex = try await services.store.needsReindex(
@@ -617,126 +458,6 @@ extension FilesIndexer {
         default:
             return nil
         }
-    }
-
-    /// Embeds one candidate's chunks inside the vector policy. A policy miss or missing backend
-    /// stays keyword-only; embedding failures degrade the same way through the shared helper instead
-    /// of failing the file.
-    static func resolveCandidateVectors(
-        services: CandidateServices,
-        policy: CandidatePolicy,
-        extraction: DocumentExtraction,
-        fileURL: URL,
-        fileName: String,
-        byteCount: Int
-    ) async throws -> (vectors: [[Float]]?, visualSucceeded: Bool) {
-        let imageMaxBytes = services.vectorPolicy.maxBytes == FilesVectorPolicy.defaultMaxBytes
-            ? 30 * 1024 * 1024
-            : services.vectorPolicy.maxBytes
-        let transcriptBytes = extraction.chunks.reduce(0) { $0 + $1.text.utf8.count }
-        let shouldAttempt: Bool = switch extraction.format {
-        case .image:
-            services.vectorPolicy.enabled && byteCount <= imageMaxBytes
-        case .audio, .video:
-            services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: transcriptBytes)
-        default:
-            services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: byteCount)
-        }
-        guard shouldAttempt else {
-            return (nil, false)
-        }
-        guard services.embedder != nil || services.embeddingsPool != nil else {
-            return (nil, false)
-        }
-        return try await embedCandidateWithVisual(
-            extraction: extraction,
-            fileURL: fileURL,
-            fileName: fileName,
-            config: policy.config,
-            embedder: services.embedder,
-            embeddingsPool: services.embeddingsPool
-        )
-    }
-
-    /// Commits one extracted candidate under the atomic nightly budget. The budget is claimed just
-    /// before the write so concurrent finishers can never overshoot it, and released when the commit
-    /// fails or cancels.
-    static func commitCandidateDocument(
-        identity: CandidateIdentity,
-        services: CandidateServices,
-        policy: CandidatePolicy,
-        state: CandidateRunState,
-        resolved: ResolvedCandidate,
-        payload: CandidatePayload
-    ) async -> FileOutcome {
-        guard await state.budget.tryClaim() else {
-            return FileOutcome(kind: .overBudget, relative: resolved.relative)
-        }
-        if state.cancellation.isSet || Task.isCancelled {
-            await state.budget.release()
-            return FileOutcome(kind: .cancelled, relative: resolved.relative)
-        }
-        let document = IndexedDocument(
-            source: .files,
-            externalID: resolved.canonicalPath,
-            displayName: resolved.filename,
-            path: resolved.canonicalPath,
-            mtime: payload.modificationDate,
-            sizeBytes: Int64(payload.data.count),
-            contentHash: payload.contentHash,
-            mime: nil,
-            extractStatus: FilesIndexer.effectiveImageStatus(
-                extraction: payload.extraction,
-                visualSucceeded: payload.visualSucceeded
-            ),
-            indexedAt: Date()
-        )
-        // Chunks bind the fresh identifier up front; the atomic commit remaps
-        // them onto the stable row when the path was already indexed.
-        let chunks = Self.makeChunks(
-            extraction: payload.extraction,
-            documentID: document.id,
-            vectors: payload.vectors,
-            fallbackDisplayName: resolved.filename,
-            fallbackPath: resolved.relative
-        )
-        do {
-            _ = try await services.store.upsertDocumentWithChunks(
-                document: document,
-                chunks: chunks,
-                runID: identity.runID
-            )
-        } catch is CancellationError {
-            await state.budget.release()
-            return FileOutcome(kind: .cancelled, relative: resolved.relative)
-        } catch {
-            await state.budget.release()
-            let stamp = await stampCandidate(
-                store: services.store,
-                canonicalPath: resolved.canonicalPath,
-                runID: identity.runID
-            )
-            return stamped(stamp, onto: failedOutcome(relative: resolved.relative, reason: "store write failed"))
-        }
-        let truncated = FilesIndexer.isVectorTruncated(
-            vectors: payload.vectors,
-            chunkCount: payload.extraction.chunks.count,
-            cap: policy.config.maxVectorChunksPerDocument
-        )
-        var outcome = FileOutcome(
-            kind: .indexed(
-                chunks: chunks.count,
-                vectors: chunks.reduce(0) { $0 + ($1.isVector ? 1 : 0) },
-                truncated: truncated
-            ),
-            relative: resolved.relative
-        )
-        // A stop landing during the commit still marks the run so parallel
-        // workers within one batch observe cancel without dropping the row.
-        if state.cancellation.isSet || Task.isCancelled {
-            outcome.propagateCancel = true
-        }
-        return outcome
     }
 
     /// Stamps one visited file as seen by the current run without touching indexer state. -

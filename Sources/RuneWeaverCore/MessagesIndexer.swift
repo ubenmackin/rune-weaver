@@ -524,49 +524,64 @@ public actor MessagesIndexer {
 
             var embeddings: [[Float]] = []
             if let embedder, !prepared.isEmpty {
-                do {
-                    let texts = prepared.map { item in
-                        EmbeddingGemmaPrompts.document(
-                            title: item.payload.document.displayName,
-                            text: item.payload.combinedText
-                        )
+                let texts = prepared.map { item in
+                    EmbeddingGemmaPrompts.document(
+                        title: item.payload.document.displayName,
+                        text: item.payload.combinedText
+                    )
+                }
+                embeddings.reserveCapacity(texts.count)
+                var offset = 0
+                while offset < texts.count {
+                    try Task.checkCancellation()
+                    let end = min(offset + 64, texts.count)
+                    let subBatch = Array(texts[offset ..< end])
+                    do {
+                        let subVectors = try await embedder.embed(subBatch)
+                        if subVectors.count == subBatch.count {
+                            embeddings.append(contentsOf: subVectors)
+                        } else {
+                            embeddings.append(contentsOf: Array(repeating: [], count: subBatch.count))
+                        }
+                    } catch let cancel as CancellationError {
+                        throw cancel
+                    } catch {
+                        embeddings = []
+                        break
                     }
-                    embeddings = try await embedder.embed(texts)
-                } catch let cancel as CancellationError {
-                    throw cancel
-                } catch {
-                    embeddings = []
+                    offset = end
                 }
             }
 
-            var indexed = 0
             var vectorChunks = 0
+            var entries: [DocBatchUpsertEntry] = []
+            entries.reserveCapacity(prepared.count)
             for (index, item) in prepared.enumerated() {
-                try Task.checkCancellation()
-                let stored = try await store.upsertDocument(item.payload.document)
                 let vector = (index < embeddings.count) ? embeddings[index] : []
                 let isVector = !vector.isEmpty
-                let chunks = [
-                    IndexedChunk(
-                        documentID: stored.id,
-                        ordinal: 0,
-                        text: item.payload.combinedText,
-                        embedding: vector,
-                        isVector: isVector
-                    )
-                ]
-                _ = try await store.upsertChunks(
-                    documentID: stored.id,
-                    chunks: chunks
-                )
-                indexed += 1
                 if isVector {
                     vectorChunks += 1
                 }
+                let chunk = IndexedChunk(
+                    documentID: item.payload.document.id,
+                    ordinal: 0,
+                    text: item.payload.combinedText,
+                    embedding: vector,
+                    isVector: isVector
+                )
+                entries.append(DocBatchUpsertEntry(
+                    document: item.payload.document,
+                    chunks: [chunk],
+                    replaceChunksWhenUnchanged: true
+                ))
+            }
+            if !entries.isEmpty {
+                try Task.checkCancellation()
+                _ = try await store.upsertDocumentsWithChunks(entries)
             }
             return MessagesIndexResult(
                 scanned: rows.count,
-                indexed: indexed,
+                indexed: entries.count,
                 vectorChunks: vectorChunks,
                 lastRowID: lastRowID,
                 hasMore: rows.count == limit

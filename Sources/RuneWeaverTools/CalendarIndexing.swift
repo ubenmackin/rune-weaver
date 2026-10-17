@@ -312,6 +312,7 @@ extension CalendarIndexer {
         liveIDs: inout Set<String>,
         report: inout CalendarIndexReport
     ) async throws -> [CalendarPending] {
+        let storedFingerprints = await (try? index.storedFingerprints(source: .calendars)) ?? [:]
         var pendings: [CalendarPending] = []
         pendings.reserveCapacity(selected.count)
         for event in selected {
@@ -349,7 +350,7 @@ extension CalendarIndexer {
             )
             let contentHash = Self.contentHash(for: fingerprint)
             report.scanned += 1
-            if let stored = try await index.document(source: .calendars, externalID: externalID),
+            if let stored = storedFingerprints[externalID],
                stored.contentHash == contentHash
             {
                 report.skipped += 1
@@ -387,12 +388,19 @@ extension CalendarIndexer {
         return pendings
     }
 
-    /// Embeds and upserts pending calendar documents.
+    /// Embeds and upserts pending calendar documents in a single SQLite transaction.
     private func upsertPendings(_ pendings: [CalendarPending], runID: String, report: inout CalendarIndexReport) async throws {
+        guard !pendings.isEmpty else { return }
         let vectors = try await embeddings(for: pendings.map(\.chunkText))
+        var entries: [DocBatchUpsertEntry] = []
+        entries.reserveCapacity(pendings.count)
+        var vectorCount = 0
         for (offset, pending) in pendings.enumerated() {
             try Task.checkCancellation()
             let vector = offset < vectors.count ? vectors[offset] : []
+            if !vector.isEmpty {
+                vectorCount += 1
+            }
             let chunk = IndexedChunk(
                 documentID: pending.document.id,
                 ordinal: 0,
@@ -400,12 +408,16 @@ extension CalendarIndexer {
                 embedding: vector,
                 isVector: !vector.isEmpty
             )
-            _ = try await index.upsertDocumentWithChunks(document: pending.document, chunks: [chunk], runID: runID)
-            report.indexed += 1
-            if !vector.isEmpty {
-                report.vectorsWritten += 1
-            }
+            entries.append(DocBatchUpsertEntry(
+                document: pending.document,
+                chunks: [chunk],
+                runID: runID
+            ))
         }
+        try Task.checkCancellation()
+        _ = try await index.upsertDocumentsWithChunks(entries)
+        report.indexed += entries.count
+        report.vectorsWritten += vectorCount
     }
 
     /// Deletes stored calendar documents absent from the live fetch.
@@ -429,18 +441,27 @@ extension CalendarIndexer {
         guard !texts.isEmpty, let embedder else {
             return Array(repeating: [], count: texts.count)
         }
-        try Task.checkCancellation()
-        do {
-            let vectors = try await embedder.embed(texts)
-            guard vectors.count == texts.count else {
+        var allVectors: [[Float]] = []
+        allVectors.reserveCapacity(texts.count)
+        var offset = 0
+        while offset < texts.count {
+            try Task.checkCancellation()
+            let end = min(offset + 64, texts.count)
+            let subBatch = Array(texts[offset ..< end])
+            do {
+                let vectors = try await embedder.embed(subBatch)
+                guard vectors.count == subBatch.count else {
+                    return Array(repeating: [], count: texts.count)
+                }
+                allVectors.append(contentsOf: vectors)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
                 return Array(repeating: [], count: texts.count)
             }
-            return vectors
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            return Array(repeating: [], count: texts.count)
+            offset = end
         }
+        return allVectors
     }
 
     /// Reads persisted known identifiers, defaulting to empty when absent.

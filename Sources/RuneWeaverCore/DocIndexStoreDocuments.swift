@@ -331,7 +331,7 @@ import Foundation
             return row.extractStatus == .failed
         }
 
-        /// Reads the stored size, modification time, and extraction outcome.
+        /// Reads the stored size, modification time, content hash, and extraction outcome.
         static func storedFingerprint(
             source: IndexSource,
             externalID: String,
@@ -342,7 +342,7 @@ import Foundation
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
-            let sql = "SELECT mtime, size_bytes, extract_status FROM indexed_documents "
+            let sql = "SELECT mtime, size_bytes, extract_status, content_hash FROM indexed_documents "
                 + "WHERE source = ? AND external_id = ?;"
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare fingerprint read")
@@ -356,7 +356,149 @@ import Foundation
             guard let statusText = SQLiteHelpers.columnText(statement, index: 2),
                   let extractStatus = ExtractStatus(rawValue: statusText)
             else { return nil }
-            return DocStoredFingerprint(mtime: mtime, sizeBytes: sizeBytes, extractStatus: extractStatus)
+            let contentHash = SQLiteHelpers.columnText(statement, index: 3)
+            return DocStoredFingerprint(
+                mtime: mtime,
+                sizeBytes: sizeBytes,
+                extractStatus: extractStatus,
+                contentHash: contentHash
+            )
+        }
+
+        /// Loads all stored fingerprints for a source in a single query.
+        static func storedFingerprints(
+            source: IndexSource,
+            dbPath: String
+        ) throws -> [String: DocStoredFingerprint] {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [:] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            let sql = "SELECT external_id, mtime, size_bytes, extract_status, content_hash "
+                + "FROM indexed_documents WHERE source = ?;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare bulk fingerprint read")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: source.rawValue)
+            var result: [String: DocStoredFingerprint] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let externalID = SQLiteHelpers.columnText(statement, index: 0),
+                      let statusText = SQLiteHelpers.columnText(statement, index: 3),
+                      let extractStatus = ExtractStatus(rawValue: statusText)
+                else { continue }
+                let mtime = optionalDouble(statement, index: 1).map { Date(timeIntervalSince1970: $0) }
+                let sizeBytes = SQLiteHelpers.columnInt64(statement, index: 2)
+                let contentHash = SQLiteHelpers.columnText(statement, index: 4)
+                result[externalID] = DocStoredFingerprint(
+                    mtime: mtime,
+                    sizeBytes: sizeBytes,
+                    extractStatus: extractStatus,
+                    contentHash: contentHash
+                )
+            }
+            return result
+        }
+
+        /// Stamps a batch of documents as seen by the current run in a single transaction.
+        static func markSeenBatch(
+            source: IndexSource,
+            externalIDs: [String],
+            runID: String,
+            dbPath: String
+        ) throws {
+            guard !externalIDs.isEmpty else { return }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                var statement: OpaquePointer?
+                let sql = "UPDATE indexed_documents SET last_seen_run = ? WHERE source = ? AND external_id = ?;"
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare batch seen stamp")
+                }
+                defer { sqlite3_finalize(statement) }
+                for externalID in externalIDs {
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                    SQLiteHelpers.bindText(statement, index: 1, value: runID)
+                    SQLiteHelpers.bindText(statement, index: 2, value: source.rawValue)
+                    SQLiteHelpers.bindText(statement, index: 3, value: externalID)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DocIndexError.persistenceFailed("Could not stamp seen for \(externalID)")
+                    }
+                }
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+        }
+
+        /// Commits a batch of documents and their chunks inside a single SQLite transaction.
+        static func upsertDocumentsWithChunks(
+            _ entries: [DocBatchUpsertEntry],
+            dbPath: String
+        ) throws -> [IndexedDocument] {
+            guard !entries.isEmpty else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                var results: [IndexedDocument] = []
+                results.reserveCapacity(entries.count)
+                for entry in entries {
+                    let stored = try commitEntryInTransaction(entry, handle: handle)
+                    results.append(stored)
+                }
+                try exec(handle: handle, sql: "COMMIT;")
+                return results
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+        }
+
+        /// Commits one document-and-chunks entry inside an already-open transaction.
+        private static func commitEntryInTransaction(
+            _ entry: DocBatchUpsertEntry,
+            handle: OpaquePointer?
+        ) throws -> IndexedDocument {
+            let document = entry.document
+            let existing = try existingRow(
+                handle: handle,
+                source: document.source,
+                externalID: document.externalID
+            )
+            if let existing, existing.contentHash == document.contentHash, existing.extractStatus != .failed {
+                if entry.replaceChunksWhenUnchanged {
+                    try deleteChunks(documentID: existing.id, handle: handle)
+                    try insertChunkRows(documentID: existing.id, chunks: entry.chunks, handle: handle)
+                }
+                if let runID = entry.runID, !runID.isEmpty {
+                    try stampDocument(handle: handle, documentID: existing.id, runID: runID)
+                }
+                return try loadDocument(
+                    handle: handle,
+                    source: document.source,
+                    externalID: document.externalID
+                ) ?? replacingID(of: document, with: existing.id)
+            }
+            let resolvedID: UUID
+            if let existing {
+                try updateDocument(document, id: existing.id, handle: handle)
+                try deleteChunks(documentID: existing.id, handle: handle)
+                resolvedID = existing.id
+            } else {
+                try insertDocument(document, handle: handle)
+                resolvedID = document.id
+            }
+            try insertChunkRows(documentID: resolvedID, chunks: entry.chunks, handle: handle)
+            if let runID = entry.runID, !runID.isEmpty {
+                try stampDocument(handle: handle, documentID: resolvedID, runID: runID)
+            }
+            return resolvedID == document.id ? document : replacingID(of: document, with: resolvedID)
         }
 
         /// Encodes metadata as a JSON object string.
@@ -398,3 +540,66 @@ import Foundation
         }
     }
 #endif
+
+// MARK: - Batch Document Operations
+
+extension DocIndexStore {
+    /// Loads all stored fingerprints for a source in a single query so indexers can preflight
+    /// unchanged items in memory without per-item SQLite round-trips.
+    public func storedFingerprints(source: IndexSource) async throws -> [String: DocStoredFingerprint] {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.storedFingerprints(source: source, dbPath: dbPath)
+        }
+    }
+
+    /// Stamps a batch of documents as seen by the current run in a single transaction.
+    public func markSeenBatch(source: IndexSource, externalIDs: [String], runID: String) async throws {
+        guard !externalIDs.isEmpty else { return }
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.markSeenBatch(source: source, externalIDs: externalIDs, runID: runID, dbPath: dbPath)
+        }
+    }
+
+    /// Commits a batch of documents and their chunks inside a single SQLite transaction.
+    @discardableResult
+    public func upsertDocumentsWithChunks(_ entries: [DocBatchUpsertEntry]) async throws -> [IndexedDocument] {
+        guard !entries.isEmpty else { return [] }
+        let dbPath = self.dbPath
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.upsertDocumentsWithChunks(entries, dbPath: dbPath)
+        }
+        invalidateStatusCache()
+        return result
+    }
+}
+
+extension DocIndexStoreIO {
+    /// Loads all stored fingerprints for a source in a single query.
+    static func storedFingerprints(source: IndexSource, dbPath: String) throws -> [String: DocStoredFingerprint] {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.storedFingerprints(source: source, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Stamps a batch of documents as seen by the current run in a single transaction.
+    static func markSeenBatch(source: IndexSource, externalIDs: [String], runID: String, dbPath: String) throws {
+        #if canImport(SQLite3)
+            try SQLiteDocIndexStore.markSeenBatch(source: source, externalIDs: externalIDs, runID: runID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Commits a batch of documents and their chunks inside a single SQLite transaction.
+    static func upsertDocumentsWithChunks(_ entries: [DocBatchUpsertEntry], dbPath: String) throws -> [IndexedDocument] {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.upsertDocumentsWithChunks(entries, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+}

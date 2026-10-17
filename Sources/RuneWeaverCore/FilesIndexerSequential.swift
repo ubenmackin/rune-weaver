@@ -360,7 +360,8 @@ extension FilesIndexer {
         case .audio, .video:
             vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: transcriptBytes)
         default:
-            vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount)
+            !FilesVectorPolicy.isKeywordOnlyFile(fileName: filename)
+                && vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount)
         }
         if shouldAttemptVectors,
            embedder != nil || embeddingsPool != nil

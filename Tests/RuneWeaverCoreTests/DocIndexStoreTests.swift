@@ -488,14 +488,6 @@ private func seedAggregateFixture(store: DocIndexStore) async throws {
     ])
 }
 
-/// Path guard allowing every candidate, so atomic-commit tests exercise the
-/// store without policy interference.
-private struct AtomicAllowGuard: FilesIndexAccessGuard {
-    func evaluate(path: String, homeDirectoryURL _: URL?) -> FilesIndexAccessDecision {
-        FilesIndexAccessDecision(allowed: true, resolvedPath: path)
-    }
-}
-
 @Suite("Document Index Store")
 struct DocIndexStoreTests {
     @Test
@@ -1346,102 +1338,6 @@ struct DocIndexStoreTests {
         #expect(keptRetire == 0)
         let staleRetire = try await store.retireUnseenFiles(runID: failedRun)
         #expect(staleRetire == 1)
-    }
-
-    @Test
-    func `Candidate write failure still stamps the pre-existing row`() async throws {
-        let (path, base) = makeIndexPath()
-        defer { try? FileManager.default.removeItem(at: base) }
-        let store = DocIndexStore(dbPath: path)
-        let canonicalPath = base.appendingPathComponent("note.txt").path
-
-        // Seed a live row so the failed rewrite has a prior revision to keep.
-        let seedRun = "run-candidate-seed-\(UUID().uuidString)"
-        let seedDoc = makeDocument(
-            externalID: canonicalPath,
-            displayName: "note.txt",
-            contentHash: "hash-old",
-            path: canonicalPath
-        )
-        _ = try await store.upsertDocumentWithChunks(
-            document: seedDoc,
-            chunks: [IndexedChunk(documentID: seedDoc.id, ordinal: 0, text: "seeded candidate body")],
-            runID: seedRun
-        )
-
-        // Fail only the new body so parallel stores writing other text stay green.
-        let marker = "candidate-fallback-\(UUID().uuidString)"
-        #if canImport(SQLite3)
-            SQLiteDocIndexStore.chunkInsertFailureHook = { $0.text.contains(marker) }
-            defer { SQLiteDocIndexStore.chunkInsertFailureHook = nil }
-        #endif
-        let runID = "run-candidate-\(UUID().uuidString)"
-        let identity = FilesIndexer.CandidateIdentity(
-            fileURL: URL(fileURLWithPath: canonicalPath),
-            root: base,
-            runID: runID
-        )
-        let services = FilesIndexer.CandidateServices(
-            store: store,
-            extractor: DocumentTextExtractor(),
-            embedder: nil,
-            embeddingsPool: nil,
-            accessGuard: AtomicAllowGuard(),
-            vectorPolicy: FilesVectorPolicy()
-        )
-        let policy = FilesIndexer.CandidatePolicy(
-            config: IndexConfig(enabled: true, files: true, roots: [base.path]),
-            homeDirectoryURL: base,
-            evictedCheck: nil,
-            downloadStarter: nil,
-            fileReader: nil
-        )
-        let state = FilesIndexer.CandidateRunState(
-            budget: FilesIndexer.FileIndexBudget(limit: 0),
-            cancellation: IndexCancellationFlag()
-        )
-        let resolved = FilesIndexer.ResolvedCandidate(
-            canonicalURL: URL(fileURLWithPath: canonicalPath),
-            canonicalPath: canonicalPath,
-            relative: "note.txt",
-            filename: "note.txt",
-            maxBytes: 20 * 1024 * 1024
-        )
-        let payload = FilesIndexer.CandidatePayload(
-            modificationDate: nil,
-            data: Data("new body".utf8),
-            contentHash: "hash-new",
-            extraction: DocumentExtraction(
-                status: .extracted,
-                format: .plainText,
-                chunks: [DocumentChunk(index: 0, text: "\(marker) new body", estimatedTokens: 1)],
-                reason: nil,
-                byteCount: 8,
-                truncated: false
-            ),
-            vectors: nil
-        )
-        let outcome = await FilesIndexer.commitCandidateDocument(
-            identity: identity,
-            services: services,
-            policy: policy,
-            state: state,
-            resolved: resolved,
-            payload: payload
-        )
-        switch outcome.kind {
-        case .error:
-            break
-        default:
-            #expect(Bool(false), "Expected an error outcome for the failed write")
-        }
-
-        // The fallback stamp kept the prior revision live for this run.
-        let stored = try await store.document(source: .files, externalID: canonicalPath)
-        #expect(stored != nil)
-        #expect(stored?.contentHash == "hash-old")
-        let retired = try await store.retireUnseenFiles(runID: runID)
-        #expect(retired == 0)
     }
 
     @Test
@@ -2341,5 +2237,64 @@ struct DocIndexStoreTests {
             #expect(breakdown.textBytes == stats.bytes)
             #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
         #endif
+    }
+
+    @Test
+    func `Bulk upsertDocumentsWithChunks, storedFingerprints, and markSeenBatch operate in single transactions`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+
+        let docA = IndexedDocument(
+            source: .files,
+            externalID: "/tmp/doc-a.md",
+            displayName: "doc-a.md",
+            path: "/tmp/doc-a.md",
+            mtime: Date(timeIntervalSince1970: 1_700_000_000),
+            sizeBytes: 120,
+            contentHash: "hash-a"
+        )
+        let docB = IndexedDocument(
+            source: .files,
+            externalID: "/tmp/doc-b.md",
+            displayName: "doc-b.md",
+            path: "/tmp/doc-b.md",
+            mtime: Date(timeIntervalSince1970: 1_700_000_500),
+            sizeBytes: 240,
+            contentHash: "hash-b"
+        )
+        let entries = [
+            DocBatchUpsertEntry(
+                document: docA,
+                chunks: [IndexedChunk(documentID: docA.id, ordinal: 0, text: "bulkbatchalpha", embedding: [1.0, 0.0])],
+                runID: "run-1"
+            ),
+            DocBatchUpsertEntry(
+                document: docB,
+                chunks: [IndexedChunk(documentID: docB.id, ordinal: 0, text: "bulkbatchbeta")],
+                runID: "run-1"
+            )
+        ]
+
+        let saved = try await store.upsertDocumentsWithChunks(entries)
+        #expect(saved.count == 2)
+
+        let fingerprints = try await store.storedFingerprints(source: .files)
+        #expect(fingerprints["/tmp/doc-a.md"]?.contentHash == "hash-a")
+        #expect(fingerprints["/tmp/doc-a.md"]?.sizeBytes == 120)
+        #expect(fingerprints["/tmp/doc-b.md"]?.contentHash == "hash-b")
+        #expect(fingerprints["/tmp/doc-b.md"]?.sizeBytes == 240)
+
+        let alphaHits = try await store.searchKeyword(query: "bulkbatchalpha", limit: 5)
+        #expect(alphaHits.count == 1)
+        #expect(alphaHits[0].isVector == true)
+
+        // Advance run-2 seen stamp only on doc-a.md via markSeenBatch; retireUnseenFiles should retire doc-b.md only.
+        try await store.markSeenBatch(source: .files, externalIDs: ["/tmp/doc-a.md"], runID: "run-2")
+        let retired = try await store.retireUnseenFiles(runID: "run-2")
+        #expect(retired == 1)
+
+        let remainingFingerprints = try await store.storedFingerprints(source: .files)
+        #expect(remainingFingerprints.keys.sorted() == ["/tmp/doc-a.md"])
     }
 }
