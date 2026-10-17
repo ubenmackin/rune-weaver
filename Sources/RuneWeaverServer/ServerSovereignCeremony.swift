@@ -69,6 +69,8 @@ func runSovereignCeremony(sink: SovereignCeremonySink, reason: String) async -> 
         RuneWeaverLog.server.info("Sovereign ceremony (\(reason)): \(verdict.outcome.rawValue) at \(verdict.primaryTip).")
     case .mismatch:
         RuneWeaverLog.server.warning("Sovereign ceremony (\(reason)): mismatch parked red; primary \(verdict.primaryTip).")
+    case .orphaned:
+        RuneWeaverLog.server.warning("Sovereign ceremony (\(reason)): orphaned anchor parked red; primary \(verdict.primaryTip).")
     }
     return verdict
 }

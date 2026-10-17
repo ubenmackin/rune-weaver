@@ -191,6 +191,43 @@ struct SurrogateResolutionTests {
     }
 
     @Test
+    func `Reserved sovereign accounts refuse every surrogate resolution point`() async throws {
+        let secrets = SecretsManager(
+            service: "com.runeweaver.test.sovereign.reserve.\(UUID().uuidString)",
+            inMemory: true
+        )
+        let reserved = EnclaveHMACSigner.signingKeyAccount
+        // Stored exactly as the ledger stores it, bypassing route validation,
+        // so the refusal below can only come from the resolution surface.
+        try await secrets.storeKeychain(key: reserved, secret: "attestation-key-material")
+        for value in ["rwsecret:\(reserved)", "Bearer rwsecret:\(reserved)"] {
+            do {
+                _ = try await secrets.resolveValueContainingSurrogates(value)
+                Issue.record("Expected the reserved account to refuse embedded resolution")
+            } catch let error as SecretsError {
+                guard case let .unknownSurrogate(key) = error else {
+                    Issue.record("Expected unknownSurrogate, got \(error)")
+                    return
+                }
+                #expect(key == reserved)
+            } catch {
+                Issue.record("Expected SecretsError, got \(error)")
+            }
+        }
+        do {
+            _ = try await secrets.resolveSurrogate("rwsecret:\(reserved)")
+            Issue.record("Expected the reserved account to refuse exact resolution")
+        } catch let error as SecretsError {
+            guard case .unknownSurrogate = error else {
+                Issue.record("Expected unknownSurrogate, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected SecretsError, got \(error)")
+        }
+    }
+
+    @Test
     func `Plain env names keep the historical nil-when-absent shape`() async throws {
         let secrets = SecretsManager()
         let missing = "RW_TEST_DEFINITELY_ABSENT_PLAIN_KEY"

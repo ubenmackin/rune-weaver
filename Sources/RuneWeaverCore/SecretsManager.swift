@@ -23,6 +23,11 @@ public actor SecretsManager {
     /// Default Keychain service namespace for all RuneWeaver secrets.
     public static let defaultService = "com.runeweaver.secrets"
 
+    /// Account prefix reserved for sovereign ledger material: the secrets routes
+    /// reject it so operator secrets never overwrite or delete it, and surrogate
+    /// resolution reports it unknown so agent-composed headers never read it.
+    public static let reservedAccountPrefix = "sovereign."
+
     /// Keychain service namespace used when callers omit `service`.
     public let service: String
 
@@ -35,11 +40,99 @@ public actor SecretsManager {
         self.inMemory = inMemory
     }
 
+    private var fallbackStore: FallbackStore = .init()
+
+    /// Reads the live process environment for `key`.
+    private nonisolated func liveEnvironmentValue(for key: String) -> String? {
+        key.withCString { cKey in
+            guard let cValue = getenv(cKey) else { return nil }
+            return String(validatingCString: cValue)
+        }
+    }
+
     // MARK: - Store / retrieve
 
     /// Stores a secret in the Keychain, updating any existing item.
     public func store(key: String, service: String? = nil, secret: String) throws {
         let namespace = service ?? self.service
+        let data = try Self.validatedStoreData(key: key, namespace: namespace, secret: secret)
+        try upsertSecret(data, key: key, service: namespace)
+    }
+
+    /// Retrieves a secret, checking the environment first.
+    public func retrieve(key: String, service: String? = nil) throws -> String? {
+        guard !key.isEmpty else {
+            throw SecretsError.invalidInput(reason: "key must not be empty")
+        }
+        if let live = liveEnvironmentValue(for: key), !live.isEmpty {
+            return live
+        }
+        if let injected = ProcessInfo.processInfo.environment[key], !injected.isEmpty {
+            return injected
+        }
+        let namespace = service ?? self.service
+        guard let stored = try readSecret(key: key, service: namespace) else { return nil }
+        backfillLabelIfNeeded(stored.label, key: key, service: namespace)
+        return stored.secret
+    }
+
+    /// Stores a secret directly in the Keychain without consulting the
+    /// environment. Used for operator-owned material that must never be
+    /// shadowed by an injected variable.
+    public func storeKeychain(key: String, secret: String) throws {
+        let data = try Self.validatedStoreData(key: key, namespace: self.service, secret: secret)
+        try upsertSecret(data, key: key, service: self.service)
+    }
+
+    /// Retrieves a secret directly from the Keychain without consulting the
+    /// environment. A locked Keychain surfaces as a keychain error so the
+    /// caller can fail closed with an unlock remedy.
+    public func retrieveKeychain(key: String) throws -> String? {
+        guard !key.isEmpty else {
+            throw SecretsError.invalidInput(reason: "key must not be empty")
+        }
+        guard let stored = try readSecret(key: key, service: self.service) else { return nil }
+        return stored.secret
+    }
+
+    /// Adds a secret only when the key holds no item yet, giving fresh
+    /// material a single creator: `errSecDuplicateItem` leaves the stored
+    /// winner untouched instead of clobbering it with a second write.
+    /// - Parameters:
+    ///   - key: Keychain account name.
+    ///   - secret: Secret to store when the key is absent.
+    /// - Returns: Whether this call created the item.
+    public func storeKeychainIfAbsent(key: String, secret: String) throws -> Bool {
+        let data = try Self.validatedStoreData(key: key, namespace: self.service, secret: secret)
+        #if canImport(Security)
+            if !inMemory {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: self.service,
+                    kSecAttrAccount as String: key,
+                    kSecValueData as String: data,
+                    kSecAttrLabel as String: "Rune Weaver: \(key)",
+                    kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+                ]
+                let status = SecItemAdd(query as CFDictionary, nil)
+                if status == errSecDuplicateItem {
+                    return false
+                }
+                guard status == errSecSuccess else {
+                    throw SecretsError.keychainError(status: status)
+                }
+                return true
+            }
+        #endif
+        if fallbackStore[keyed: key, service: self.service] != nil {
+            return false
+        }
+        fallbackStore[keyed: key, service: self.service] = data
+        return true
+    }
+
+    /// Validates the shared store inputs and encodes the secret as UTF-8.
+    private static func validatedStoreData(key: String, namespace: String, secret: String) throws -> Data {
         guard !key.isEmpty else {
             throw SecretsError.invalidInput(reason: "key must not be empty")
         }
@@ -52,6 +145,12 @@ public actor SecretsManager {
         guard let data = secret.data(using: .utf8) else {
             throw SecretsError.encodingError
         }
+        return data
+    }
+
+    /// Adds or updates one generic-password item, or lands in the in-memory
+    /// stand-in when `inMemory` is set or the Security framework is absent.
+    private func upsertSecret(_ data: Data, key: String, service namespace: String) throws {
         #if canImport(Security)
             if !inMemory {
                 let query: [String: Any] = [
@@ -77,18 +176,9 @@ public actor SecretsManager {
         fallbackStore[keyed: key, service: namespace] = data
     }
 
-    /// Retrieves a secret, checking the environment first.
-    public func retrieve(key: String, service: String? = nil) throws -> String? {
-        guard !key.isEmpty else {
-            throw SecretsError.invalidInput(reason: "key must not be empty")
-        }
-        if let live = liveEnvironmentValue(for: key), !live.isEmpty {
-            return live
-        }
-        if let injected = ProcessInfo.processInfo.environment[key], !injected.isEmpty {
-            return injected
-        }
-        let namespace = service ?? self.service
+    /// Reads one item as UTF-8 without consulting the environment, carrying
+    /// the stored label so the env-consulting path can decide to backfill.
+    private func readSecret(key: String, service namespace: String) throws -> (secret: String, label: String?)? {
         #if canImport(Security)
             if !inMemory {
                 let query: [String: Any] = [
@@ -113,24 +203,31 @@ public actor SecretsManager {
                 else {
                     throw SecretsError.encodingError
                 }
-                let currentLabel = dict[kSecAttrLabel as String] as? String
-                if currentLabel == nil || currentLabel == namespace {
-                    let updateQuery: [String: Any] = [
-                        kSecClass as String: kSecClassGenericPassword,
-                        kSecAttrService as String: namespace,
-                        kSecAttrAccount as String: key
-                    ]
-                    let updateAttrs: [String: Any] = [
-                        kSecAttrLabel as String: "Rune Weaver: \(key)",
-                        kSecAttrDescription as String: "Rune Weaver credential for \(key)"
-                    ]
-                    _ = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
-                }
-                return secret
+                return (secret, dict[kSecAttrLabel as String] as? String)
             }
         #endif
-        guard let data = fallbackStore[keyed: key, service: namespace] else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let data = fallbackStore[keyed: key, service: namespace],
+              let secret = String(data: data, encoding: .utf8)
+        else { return nil }
+        return (secret, nil)
+    }
+
+    /// Backfills a readable label on items written before labels were set.
+    /// Applies only to real Keychain items; the in-memory store needs none.
+    private func backfillLabelIfNeeded(_ currentLabel: String?, key: String, service namespace: String) {
+        #if canImport(Security)
+            guard !inMemory, currentLabel == nil || currentLabel == namespace else { return }
+            let updateQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: namespace,
+                kSecAttrAccount as String: key
+            ]
+            let updateAttrs: [String: Any] = [
+                kSecAttrLabel as String: "Rune Weaver: \(key)",
+                kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+            ]
+            _ = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+        #endif
     }
 
     /// Deletes a secret from the Keychain. Missing items are a no-op.
@@ -205,7 +302,10 @@ public actor SecretsManager {
         }
         return names
     }
+}
 
+/// Surrogate references stay beside the manager so Keychain reads keep one owner.
+extension SecretsManager {
     // MARK: - Surrogates (agent-visible references)
 
     /// Prefix marking an agent-visible surrogate for a stored secret.
@@ -287,6 +387,11 @@ public actor SecretsManager {
         return key.allSatisfy { isSurrogateKeyChar($0) }
     }
 
+    /// Whether a key name collides with a reserved sovereign account.
+    public static func isReservedAccount(_ rawKey: String) -> Bool {
+        rawKey.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(reservedAccountPrefix)
+    }
+
     /// Whether a character may appear in a surrogate key name.
     /// - Parameter character: Candidate key character.
     /// - Returns: True for secret-name characters; everything else ends the key.
@@ -303,6 +408,12 @@ public actor SecretsManager {
     public func resolveSurrogate(_ surrogate: String, service: String? = nil) throws -> String {
         guard let key = Self.surrogateKey(from: surrogate) else {
             throw SecretsError.invalidInput(reason: "value is not a secret surrogate (expected rwsecret:<key>)")
+        }
+        guard !Self.isReservedAccount(key) else {
+            // Reserved sovereign material refuses resolution and reports as
+            // unknown, so the surrogate surface can never read the signing key
+            // or anchor and a probe cannot confirm the account exists.
+            throw SecretsError.unknownSurrogate(key: key)
         }
         guard let secret = try retrieve(key: key, service: service), !secret.isEmpty else {
             throw SecretsError.unknownSurrogate(key: key)
@@ -326,6 +437,10 @@ public actor SecretsManager {
         var secrets: [String] = []
         secrets.reserveCapacity(keys.count)
         for key in keys {
+            // Same reservation refusal as the exact-reference path.
+            guard !Self.isReservedAccount(key) else {
+                throw SecretsError.unknownSurrogate(key: key)
+            }
             guard let secret = try retrieve(key: key, service: service), !secret.isEmpty else {
                 throw SecretsError.unknownSurrogate(key: key)
             }
@@ -385,16 +500,6 @@ public actor SecretsManager {
         }
         return try retrieve(key: envVar, service: service)
     }
-
-    /// Reads the live process environment for `key`.
-    private nonisolated func liveEnvironmentValue(for key: String) -> String? {
-        key.withCString { cKey in
-            guard let cValue = getenv(cKey) else { return nil }
-            return String(validatingCString: cValue)
-        }
-    }
-
-    private var fallbackStore: FallbackStore = .init()
 }
 
 /// In-memory stand-in used when inMemory is enabled or where the Security framework is

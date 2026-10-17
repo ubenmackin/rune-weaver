@@ -377,12 +377,15 @@ extension SecurityProbeSuite {
         }
         defer { ProbeScratch.remove(scratch) }
         let copyPath = scratch.root.appendingPathComponent("ledger.sovereign.jsonl").path
+        let checkpointPath = scratch.root.appendingPathComponent("sovereign-checkpoint.json").path
         let store = EpisodeStore(dbPath: scratch.root.appendingPathComponent("episodes.db").path)
+        let probeSecrets = SecretsManager(service: "com.runeweaver.probe.\(UUID().uuidString)", inMemory: true)
         let ledger = SovereignLedger(
             episodeStore: store,
             sovereignCopyPath: copyPath,
-            checkpointPath: scratch.root.appendingPathComponent("sovereign-checkpoint.json").path,
+            checkpointPath: checkpointPath,
             signer: ProbeSigner(),
+            secrets: probeSecrets,
             now: { Date() }
         )
         do {
@@ -532,11 +535,11 @@ private struct ProbeSigner: SovereignSigner {
     /// Throwaway 256-bit HMAC key for one probe run.
     private let key = SymmetricKey(data: Data((0 ..< 32).map { _ in UInt8.random(in: .min ... .max) }))
 
-    func sign(challenge: String) throws -> String {
+    func sign(challenge: String) async throws -> String {
         EnclaveHMACSigner.hex(Data(HMAC<SHA256>.authenticationCode(for: Data(challenge.utf8), using: key)))
     }
 
-    func verify(challenge: String, signature: String) -> Bool {
+    func verify(challenge: String, signature: String) async -> Bool {
         let candidate = signature.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let expected = EnclaveHMACSigner.hex(Data(HMAC<SHA256>.authenticationCode(for: Data(challenge.utf8), using: key)))
         return EnclaveHMACSigner.constantTimeEquals(expected, candidate)
