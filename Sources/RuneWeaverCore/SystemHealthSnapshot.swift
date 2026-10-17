@@ -292,6 +292,10 @@ public actor SystemHealthSnapshot {
     /// Reason served while the behavior brake parks the pulse red.
     private static let watchdogBrakeReason =
         "Trusted-tool anomaly brake is engaged; turns are parked until the brake card is resumed."
+    /// Reason served while an orphaned anchor parks the pulse red. Names
+    /// both missing sidecars so the operator knows prior attestation lost.
+    private static let orphanedAnchorReason =
+        "Sovereign anchor orphaned: ledger.sovereign.jsonl and sovereign-checkpoint.json missing; re-baseline to re-verify."
 
     /// Builds the gestation countdown info note, clamped to the 1...14 bound.
     private static func gestationNote(days: Int) -> String {
@@ -310,6 +314,9 @@ public actor SystemHealthSnapshot {
     /// Latched sovereign mismatch: set by a failed ceremony, cleared only
     /// by a freshly recorded passing one.
     private var parkedMismatch = false
+    /// Latched orphaned anchor: sidecars gone while the anchor survives.
+    /// Cleared only by a fresh passing ceremony.
+    private var orphanedAnchor = false
     /// Last recorded watchdog health, nil before the first evaluation.
     /// Absence constrains nothing: the brake narrows the pulse only once it
     /// reports, mirroring every other verifier family.
@@ -368,6 +375,9 @@ public actor SystemHealthSnapshot {
             recordedAt: recordedAt
         )
         parkedMismatch = !matched
+        if matched {
+            orphanedAnchor = false
+        }
     }
 
     /// Records one sovereign verification verdict. The verification instant stamps only on a
@@ -397,6 +407,19 @@ public actor SystemHealthSnapshot {
                 checkpointVote: nil,
                 decision: verdict.decision
             )
+        case .orphaned:
+            if let primary = HealthSnapshotValue.normalizedTip(verdict.primaryTip) {
+                ledgerTip = primary
+            }
+            ceremony = SovereignCeremony(
+                primaryTip: HealthSnapshotValue.normalizedTip(verdict.primaryTip),
+                sovereignTip: HealthSnapshotValue.normalizedTip(verdict.sovereignTip),
+                vote: nil,
+                matched: false,
+                decision: verdict.decision,
+                recordedAt: Date()
+            )
+            orphanedAnchor = true
         }
     }
 
@@ -458,6 +481,10 @@ public actor SystemHealthSnapshot {
             status = .red
             reasons.append(Self.sovereignParkedReason)
         }
+        if orphanedAnchor {
+            status = .red
+            reasons.append(Self.orphanedAnchorReason)
+        }
         switch watchdogHealth {
         case .red:
             status = .red
@@ -508,9 +535,9 @@ public actor SystemHealthSnapshot {
         } else {
             .pass
         }
-        // One remedy per red: mismatch outranks brake outranks policy
-        // outranks probe failure; green plus yellow carry none.
-        let remediation: HealthRemediation = if parkedMismatch {
+        // One remedy per red: mismatch plus orphan outrank brake outranks
+        // policy outranks probe failure; green plus yellow carry none.
+        let remediation: HealthRemediation = if parkedMismatch || orphanedAnchor {
             .rebaseline
         } else if watchdogHealth == .red {
             .openInbox

@@ -423,7 +423,7 @@ public final class ServerContext: Sendable {
         // Verified-pulse collaborators resolve through the helpers below so the
         // body stays within the type-length budget; behavior is unchanged.
         self.watchdog = Self.resolveWatchdog(watchdog: watchdog, approvals: approvals, steeringQueue: steeringQueue, activeTurns: activeTurns)
-        self.sovereignLedger = Self.resolveLedger(sovereignLedger, dbPath: defaultDBPath)
+        self.sovereignLedger = Self.resolveLedger(sovereignLedger, dbPath: defaultDBPath, secrets: secrets)
         wireVerifiedPulse(goalEngine: resolvedEngine)
     }
 
@@ -457,8 +457,8 @@ public final class ServerContext: Sendable {
 
     /// Resolves the sovereign ledger over the primary episode ledger file, so the copy corroborates
     /// live truth; an injected instance wins untouched for tests.
-    private static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String) -> SovereignLedger {
-        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath))
+    private static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String, secrets: SecretsManager? = nil) -> SovereignLedger {
+        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath), secrets: secrets ?? SecretsManager())
     }
 
     /// Fans the shared semantic answer cache out to the goal engine, the policy store, and the tool
@@ -858,6 +858,43 @@ extension ServerContext {
         return egressSupervisor
     }
 
+    /// Resolves the sovereign ledger for boot, preloading its signing key.
+    /// Keeps the fresh-install versus injected choice beside boot wiring.
+    private static func resolveSovereignLedger(
+        sovereignLedger: SovereignLedger?,
+        dbPath: String,
+        secrets: SecretsManager?
+    ) async throws -> SovereignLedger {
+        let ledger = resolveLedger(sovereignLedger, dbPath: dbPath, secrets: secrets)
+        do {
+            try await ledger.preloadSigningKey()
+        } catch {
+            // localizedDescription carries the authored reason whose remedy
+            // already matches the failure class, so no unconditional remedy
+            // is appended here.
+            throw Abort(.internalServerError, reason: "Sovereign signing key unavailable: \(error.localizedDescription)")
+        }
+        return ledger
+    }
+
+    /// Prepares the scratch workspace root before any shell turn runs.
+    /// Failures stay best-effort with a log; the quota gate still fails closed.
+    private static func prepareWorkspaceStore(
+        workspaceStore: WorkspaceStore?,
+        workspaceConfig: WorkspaceConfig,
+        permissionGate: PermissionGate
+    ) async -> WorkspaceStore {
+        let store = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+        await permissionGate.updateWorkspaceRoot(store.root())
+        do {
+            _ = try await store.ensure()
+            _ = try await store.pruneTmp()
+        } catch {
+            RuneWeaverLog.server.warning("ServerContext: workspace boot skipped: \(error.localizedDescription)")
+        }
+        return store
+    }
+
     /// Builds a context wired for live approval prompts over WebSocket.
     /// - Parameter policyStore: The one security policy store for this process.
     public static func make(
@@ -921,17 +958,9 @@ extension ServerContext {
         // `[files]` policy reaches it here: a `write_mode` change then behaves
         // identically in the verdict and in the tool that executes the call.
         await permissionGate.updateFilesConfig(filesConfig)
-        // Scratch workspace boots beside the other durable stores so a fresh boot creates the 0700
-        // root and clears expired `tmp/` before any shell turn runs; failures stay best-effort with
-        // a log because the per-turn quota gate still fails closed when the directory is missing.
-        let resolvedWorkspaceStore = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
-        await permissionGate.updateWorkspaceRoot(resolvedWorkspaceStore.root())
-        do {
-            _ = try await resolvedWorkspaceStore.ensure()
-            _ = try await resolvedWorkspaceStore.pruneTmp()
-        } catch {
-            RuneWeaverLog.server.warning("ServerContext: workspace boot skipped: \(error.localizedDescription)")
-        }
+        let resolvedWorkspaceStore = await prepareWorkspaceStore(
+            workspaceStore: workspaceStore, workspaceConfig: workspaceConfig, permissionGate: permissionGate
+        )
         let services = await bootstrapServices(
             permissionGate: permissionGate,
             config: BootstrapConfig(
@@ -960,12 +989,7 @@ extension ServerContext {
         )
         let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
-        // The sovereign ceremony recomputes from the configured episode ledger
-        // file, so a custom path still corroborates live truth; an injected
-        // instance wins untouched for tests.
-        let resolvedSovereignLedger = sovereignLedger ?? SovereignLedger(
-            episodeStore: EpisodeStore(dbPath: dbPath)
-        )
+        let resolvedSovereignLedger = try await resolveSovereignLedger(sovereignLedger: sovereignLedger, dbPath: dbPath, secrets: secrets)
         // Execution engines build before tool registration so the fan-out engine can ride the live
         // orchestrator into the fanout.run tool; engine construction is side-effect free, so the
         // earlier position changes nothing else about boot.

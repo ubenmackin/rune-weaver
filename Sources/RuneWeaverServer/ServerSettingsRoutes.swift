@@ -168,15 +168,20 @@ private let maxSecretStoreBytes = 16 * 1024
 /// Maximum keys accepted per status lookup.
 let maxSecretStatusKeys = 500
 
-/// Validates a raw secret key for the secrets routes. Delegates the shape rule to the core single
-/// owner so store, status, and delete agree without duplicating the alphabet or the length bound.
-private func validateSecretKey(_ rawKey: String) throws -> String {
+/// Validates a raw secret key for the secrets routes. Delegates the shape rule and the sovereign
+/// reservation to the core single owner so store, status, and delete agree without duplicating
+/// the alphabet, the length bound, or the reserved prefix. Internal so the route contract stays
+/// pinned by the server tests.
+func validateSecretKey(_ rawKey: String) throws -> String {
     let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
     guard SecretsManager.isValidSurrogateKey(rawKey) else {
         if key.count > SecretsManager.maxSurrogateKeyLength {
             throw Abort(.badRequest, reason: "Key must not exceed \(SecretsManager.maxSurrogateKeyLength) characters.")
         }
         throw Abort(.badRequest, reason: "Key must not be empty and must contain only alphanumeric characters, underscores, hyphens, and periods.")
+    }
+    guard !SecretsManager.isReservedAccount(key) else {
+        throw Abort(.badRequest, reason: "Keys prefixed '\(SecretsManager.reservedAccountPrefix)' are reserved for sovereign ledger material.")
     }
     return key
 }
