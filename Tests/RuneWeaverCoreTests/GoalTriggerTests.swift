@@ -66,6 +66,20 @@ private func makeTriggerStack(dbPath: String, maxTriggersPerGoal: Int? = nil) ->
     return (engine, store)
 }
 
+/// Builds a conversation manager plus memory engine over an isolated temporary directory.
+private func makeAttributionStack() -> (conversations: ConversationManager, memory: MemoryEngine, base: URL) {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("runeweaver-goal-attribution-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let conversations = ConversationManager(episodesDBPath: base.appendingPathComponent("episodes.db").path)
+    let memory = MemoryEngine(
+        episodesDBPath: base.appendingPathComponent("episodes.db").path,
+        vectorDBPath: base.appendingPathComponent("vectors").path,
+        profilePath: base.appendingPathComponent("profile.json").path
+    )
+    return (conversations, memory, base)
+}
+
 @Suite("Goal Triggers")
 struct GoalTriggerTests {
     @Test
@@ -485,5 +499,182 @@ struct GoalTriggerTests {
         var tooMany = GoalsConfig()
         tooMany.maxTriggersPerGoal = 99
         #expect(tooMany.clamped().maxTriggersPerGoal == GoalsConfig.maxTriggersPerGoalBound)
+    }
+
+    @Test
+    func `Trigger ignores self-originated goal events`() {
+        let ownGoalID = UUID()
+        let otherGoalID = UUID()
+        let trigger = GoalTrigger(
+            goalID: ownGoalID,
+            eventKind: "step_done",
+            pattern: nil,
+            cooldownMinutes: 15
+        )
+        let now = Date()
+        let selfEvent = GoalObservedEvent(kind: "step_done", message: "Completed step 0", occurredAt: now, goalID: ownGoalID)
+        let otherEvent = GoalObservedEvent(kind: "step_done", message: "Completed step 0", occurredAt: now, goalID: otherGoalID)
+        #expect(trigger.matches(event: selfEvent, now: now) == false)
+        #expect(trigger.matches(event: otherEvent, now: now) == true)
+    }
+
+    @Test
+    func `Bridge rejects a goal's own stamped episodes`() async throws {
+        let (path, base) = makeTriggerDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: path)
+        let episodeStore = EpisodeStore(dbPath: path)
+        let future = Date().addingTimeInterval(3600)
+        let goal = try await makeTriggerGoal(store: goalStore, nextDueAt: future)
+        _ = try await goalStore.addTrigger(
+            goalID: goal.id,
+            eventKind: GoalTriggerEventKind.episode,
+            pattern: nil,
+            cooldownMinutes: 30
+        )
+
+        // The episode row carries no goal link of its own; attribution arrives
+        // via the stamp background goal sessions write at mirror time.
+        try await episodeStore.store(
+            sessionID: UUID(),
+            role: .user,
+            content: "Goal: Watch the inbox\nStatement: Follow up when the watched event arrives",
+            metadata: [GoalTriggerBridge.goalAttributionKey: goal.id.uuidString]
+        )
+        let stored = try await episodeStore.recent(limit: 1)
+        let observed = try GoalTriggerBridge.observedEvent(for: #require(stored.first))
+        #expect(observed.kind == GoalTriggerEventKind.episode)
+        #expect(observed.goalID == goal.id)
+        let triggers = try await goalStore.triggers(for: goal.id)
+        let trigger = try #require(triggers.first)
+        #expect(trigger.matches(event: observed, now: Date()) == false)
+
+        let bridge = GoalTriggerBridge()
+        let fires = await bridge.poll(
+            store: goalStore,
+            episodeStore: episodeStore,
+            now: Date(),
+            since: Date().addingTimeInterval(-60)
+        )
+        #expect(fires.isEmpty)
+        let loadedOption = try await goalStore.goal(id: goal.id)
+        let loaded = try #require(loadedOption)
+        let due = try #require(loaded.nextDueAt)
+        #expect(abs(due.timeIntervalSince(future)) < 0.001)
+    }
+
+    @Test
+    func `Bridge rejects a goal's own stamped tool episodes`() async throws {
+        let (path, base) = makeTriggerDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: path)
+        let episodeStore = EpisodeStore(dbPath: path)
+        let future = Date().addingTimeInterval(3600)
+        let goal = try await makeTriggerGoal(store: goalStore, nextDueAt: future)
+        _ = try await goalStore.addTrigger(
+            goalID: goal.id,
+            eventKind: GoalTriggerEventKind.tool,
+            pattern: nil,
+            cooldownMinutes: 30
+        )
+
+        try await episodeStore.store(
+            sessionID: UUID(),
+            role: .tool,
+            content: "email.search found 2 messages about the inbox",
+            metadata: [
+                "tool_call_id": "call_fixture_goal111",
+                GoalTriggerBridge.goalAttributionKey: goal.id.uuidString
+            ]
+        )
+        let stored = try await episodeStore.recent(limit: 1)
+        let observed = try GoalTriggerBridge.observedEvent(for: #require(stored.first))
+        #expect(observed.kind == GoalTriggerEventKind.tool)
+        #expect(observed.goalID == goal.id)
+
+        let bridge = GoalTriggerBridge()
+        let fires = await bridge.poll(
+            store: goalStore,
+            episodeStore: episodeStore,
+            now: Date(),
+            since: Date().addingTimeInterval(-60)
+        )
+        #expect(fires.isEmpty)
+        let loadedOption = try await goalStore.goal(id: goal.id)
+        let loaded = try #require(loadedOption)
+        let due = try #require(loaded.nextDueAt)
+        #expect(abs(due.timeIntervalSince(future)) < 0.001)
+    }
+
+    @Test
+    func `Bridge still arms matching triggers from non-goal episodes`() async throws {
+        let (path, base) = makeTriggerDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: path)
+        let episodeStore = EpisodeStore(dbPath: path)
+        let future = Date().addingTimeInterval(3600)
+        let goal = try await makeTriggerGoal(store: goalStore, nextDueAt: future)
+        _ = try await goalStore.addTrigger(
+            goalID: goal.id,
+            eventKind: GoalTriggerEventKind.episode,
+            pattern: nil,
+            cooldownMinutes: 30
+        )
+
+        // Identical content without the attribution stamp stays trigger-eligible.
+        try await episodeStore.store(
+            sessionID: UUID(),
+            role: .user,
+            content: "Goal: Watch the inbox\nStatement: Follow up when the watched event arrives"
+        )
+        let stored = try await episodeStore.recent(limit: 1)
+        #expect(try GoalTriggerBridge.observedEvent(for: #require(stored.first)).goalID == nil)
+
+        let bridge = GoalTriggerBridge()
+        let fires = await bridge.poll(
+            store: goalStore,
+            episodeStore: episodeStore,
+            now: Date(),
+            since: Date().addingTimeInterval(-60)
+        )
+        #expect(fires.count == 1)
+        let loadedOption = try await goalStore.goal(id: goal.id)
+        let loaded = try #require(loadedOption)
+        let due = try #require(loaded.nextDueAt)
+        #expect(due < future)
+    }
+
+    @Test
+    func `Background goal turns stamp their mirrored episodes with the goal link`() async throws {
+        let (conversations, memory, base) = makeAttributionStack()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: ToolBus(),
+            llm: GoalTriggerStubLLM(),
+            memoryEngine: memory
+        )
+        let goalID = UUID()
+        let sessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(
+            text: "Goal: Watch the inbox\nStatement: Follow up when the watched event arrives",
+            sessionID: sessionID,
+            source: "goal",
+            goalID: goalID
+        ))
+        let episodes = try await memory.episodes(for: sessionID)
+        try #require(!episodes.isEmpty)
+        for episode in episodes {
+            #expect(episode.metadata[GoalTriggerBridge.goalAttributionKey] == goalID.uuidString)
+        }
+
+        // Interactive chat in a goal-free session stays unattributed.
+        let chatSessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(text: "hello there", sessionID: chatSessionID, source: "text"))
+        let chatEpisodes = try await memory.episodes(for: chatSessionID)
+        try #require(!chatEpisodes.isEmpty)
+        for episode in chatEpisodes {
+            #expect(episode.metadata[GoalTriggerBridge.goalAttributionKey] == nil)
+        }
     }
 }

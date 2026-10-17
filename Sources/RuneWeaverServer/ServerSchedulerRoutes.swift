@@ -255,6 +255,27 @@ private func recordResumedRun(
         if finalStatus == "ok", let jobID = awaiting.jobID, awaiting.kind == "scheduler" {
             await context.scheduler.recordSuccessfulRun(id: jobID)
         }
+        if awaiting.kind == "goal", let goalID = awaiting.goalID {
+            if finalStatus == "ok" || resumed.isBudgetExceeded {
+                let ideas = await (try? GoalAdvancementRunner.completeAfterTurn(
+                    goalID: goalID,
+                    engine: context.goalEngine,
+                    runID: awaiting.id,
+                    isParked: false,
+                    isBudgetExceeded: resumed.isBudgetExceeded
+                )) ?? []
+                for idea in ideas {
+                    await context.schedulerWorker.broadcastIdeaProposed(idea)
+                }
+            } else {
+                _ = try? await GoalAdvancementRunner.completeAfterFailure(
+                    goalID: goalID,
+                    engine: context.goalEngine,
+                    runID: awaiting.id
+                )
+            }
+            await context.schedulerWorker.broadcastGoalSnapshot(goalID: goalID, store: context.goals)
+        }
         return
     }
     let startLabel = approved ? "Approved" : "Denied"

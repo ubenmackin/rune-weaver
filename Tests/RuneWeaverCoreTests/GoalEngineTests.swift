@@ -292,7 +292,7 @@ struct GoalEngineTests {
         }())
         let goal = makeEngineGoal(title: "Run daily", statement: "Run every morning")
         let steps = [
-            makeEngineStep(goalID: goal.id, ordinal: 0, title: "Lace shoes", status: .done),
+            GoalStep(goalID: goal.id, ordinal: 0, title: "Lace shoes", status: .done, notes: "Double knotted"),
             makeEngineStep(goalID: goal.id, ordinal: 1, title: "Out the door", status: .inProgress),
             makeEngineStep(goalID: goal.id, ordinal: 2, title: "Cool down", status: .pending)
         ]
@@ -302,14 +302,17 @@ struct GoalEngineTests {
         let prompt = engine.advancePrompt(goal: goal, steps: steps, events: events)
         #expect(prompt.contains("Run daily"))
         #expect(prompt.contains("Run every morning"))
-        #expect(prompt.contains("1. [done] Lace shoes"))
-        #expect(prompt.contains("2. [in_progress] Out the door"))
-        #expect(prompt.contains("3. [pending] Cool down"))
+        #expect(prompt.contains("- Step 0 [done] Lace shoes — Double knotted"))
+        #expect(prompt.contains("Current task:"))
+        #expect(prompt.contains("Step 1 (stepOrdinal: 1) [in_progress]: Out the door"))
+        // Future pending steps are withheld so the model cannot one-shot the entire plan.
+        #expect(!prompt.contains("Cool down"))
         // Only the last five events travel so long trails do not crowd the turn.
         #expect(prompt.contains("event 6"))
         #expect(!prompt.contains("event 0"))
         #expect(!prompt.contains("event 1"))
         #expect(prompt.contains("goal.progress"))
+        #expect(prompt.contains("stepOrdinal: 1"))
         #expect(prompt.contains("blockers"))
         #expect(prompt.contains("not rush later steps"))
     }

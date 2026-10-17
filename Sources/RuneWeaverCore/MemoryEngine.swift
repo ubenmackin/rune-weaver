@@ -832,14 +832,15 @@ extension MemoryEngine {
         content: String,
         sessionID: UUID,
         role: Message.Role = .user,
-        toolCallID: String? = nil
+        toolCallID: String? = nil,
+        metadata: [String: String]? = nil
     ) async -> Bool {
         do {
-            var metadata: [String: String] = [:]
+            var episodeMetadata = metadata ?? [:]
             if let toolCallID, !toolCallID.isEmpty {
-                metadata["tool_call_id"] = toolCallID
+                episodeMetadata["tool_call_id"] = toolCallID
             }
-            try await storeEpisodic(content: content, metadata: metadata, sessionID: sessionID, role: role)
+            try await storeEpisodic(content: content, metadata: episodeMetadata, sessionID: sessionID, role: role)
             return true
         } catch {
             return false
@@ -856,6 +857,7 @@ extension MemoryEngine {
         sessionID: UUID,
         role: Message.Role = .user,
         toolCallID: String? = nil,
+        metadata: [String: String]? = nil,
         failurePolicy: MirrorFailurePolicy = .silent,
         onFailure: (@Sendable (String) -> Void)? = nil
     ) async -> Bool {
@@ -863,7 +865,8 @@ extension MemoryEngine {
             content: content,
             sessionID: sessionID,
             role: role,
-            toolCallID: toolCallID
+            toolCallID: toolCallID,
+            metadata: metadata
         )
         if !stored, failurePolicy == .report {
             onFailure?(Self.mirrorFailureMessage)
@@ -876,7 +879,8 @@ extension MemoryEngine {
     public func mirrorTurnUncancellable(
         content: String,
         sessionID: UUID,
-        role: Message.Role = .user
+        role: Message.Role = .user,
+        metadata: [String: String] = [:]
     ) async -> Bool {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
@@ -885,7 +889,8 @@ extension MemoryEngine {
         return await episodeStore.storeUncancellable(
             sessionID: sessionID,
             role: role,
-            content: content
+            content: content,
+            metadata: metadata
         )
     }
 
