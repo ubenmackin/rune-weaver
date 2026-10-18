@@ -1,0 +1,650 @@
+/* Rune Weaver Dashboard — index status live pipeline card: animated 4-stage
+ * pipeline track, modality queue lanes, source chips, and activity bar. */
+
+.index-live-progress {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.index-live-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.index-live-current {
+  max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+  border: 1px solid var(--border-color);
+}
+
+.index-live-activity {
+  margin-top: 2px;
+}
+
+.index-pipeline-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+
+@media (max-width: 640px) {
+  .index-pipeline-track {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.index-pipeline-step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+}
+
+.index-pipeline-node {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+  flex-shrink: 0;
+}
+
+.index-pipeline-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-pipeline-step.done {
+  color: var(--text-main);
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.index-pipeline-step.done .index-pipeline-node {
+  background: var(--status-green, #10b981);
+}
+
+.index-pipeline-step.active {
+  color: var(--text-main);
+  font-weight: 600;
+  border-color: rgba(99, 102, 241, 0.65);
+  background: rgba(99, 102, 241, 0.14);
+}
+
+.index-pipeline-step.active .index-pipeline-node {
+  background: #6366f1;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.22);
+  animation: indexPipelinePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes indexPipelinePulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.78;
+  }
+}
+
+.index-queue-lanes-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .index-queue-lanes-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.index-queue-lane-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.28);
+  border: 1px solid var(--border-color);
+}
+
+.index-queue-lane-card.active {
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+.index-queue-lane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.index-queue-lane-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-queue-lane-counts {
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.index-queue-lane-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.index-queue-lane-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #14b8a6);
+  transition: width 220ms ease;
+}
+
+.index-live-sources-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.index-live-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid var(--border-color);
+}
+
+.index-live-source-chip.running {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.index-live-source-chip.completed {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.index-live-source-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.6);
+}
+
+.index-live-source-chip.running .index-live-source-dot {
+  background: #6366f1;
+}
+
+.index-live-source-chip.completed .index-live-source-dot {
+  background: var(--status-green, #10b981);
+}
+
+.index-live-source-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* Bento dashboard layout for Index Status */
+.index-bento-header {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+}
+
+.index-bento-header-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.index-bento-header-top h3 {
+  margin: 0;
+}
+
+.index-status-section {
+  margin-top: 14px;
+}
+
+.index-status-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+}
+
+.index-status-banner-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.index-status-banner-left h3 {
+  margin: 0;
+}
+
+.index-effort-badge {
+  margin: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--border-color);
+}
+
+.index-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+@media (max-width: 820px) {
+  .index-stat-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .index-stat-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.index-stat-card {
+  padding: 14px;
+  margin-bottom: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.index-stat-label {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.index-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.index-stat-live-delta {
+  display: inline-flex;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  color: #818cf8;
+  background: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.index-watermark-card {
+  border-left: 3px solid #6366f1;
+}
+
+.index-storage-meter,
+.index-chunks-meter {
+  display: flex;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.2);
+  margin-top: 4px;
+}
+
+.index-storage-seg.text {
+  background: #38bdf8;
+}
+
+.index-storage-seg.vector,
+.index-chunks-seg.vector {
+  background: #6366f1;
+}
+
+.index-storage-seg.fts,
+.index-chunks-seg.keyword {
+  background: #14b8a6;
+}
+
+.index-storage-seg.free {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.index-charts-section {
+  margin-top: 16px;
+}
+
+.index-bento-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+
+@media (max-width: 780px) {
+  .index-bento-charts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.index-bento-card {
+  padding: 16px;
+  margin-bottom: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.index-bento-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.index-bento-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.index-donut-showcase {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.24);
+  border: 1px solid var(--border-color);
+}
+
+/* Index run actions stay inside narrow cards: the row wraps to a second line
+ * on a 320px card instead of pushing the shortest label off the edge, and
+ * buttons keep touch size because flex-grow stays zero. */
+.index-actions-section {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.index-actions-section .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.index-actions-section .row button {
+  min-height: 44px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Index last-errors block: a collapsed header toggle keeps a noisy pass from
+ * pushing surrounding content, while the expanded list reads inside a fixed
+ * inset scroll so ten-plus rows never grow the page. */
+.index-errors {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.index-errors-header-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+}
+
+.index-errors-scroll {
+  max-height: 18rem;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.index-errors-scroll ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.index-error-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.index-error-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--status-amber);
+}
+
+.index-error-text-wrap {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Per-call cancel control. It sits beside the toggle in the pill header and
+ * opens a reason popover; the optimistic "Cancelling…" mark replaces it until
+ * the engine's terminal frame confirms the stop. */
+.chat-tool-cancel {
+  position: relative;
+  flex-shrink: 0;
+  padding-right: 8px;
+}
+
+.chat-tool-cancel-btn {
+  padding: 2px 6px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-tool-cancel-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.chat-tool-cancelling {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--status-amber);
+}
+
+.tool-cancel-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 220px;
+  padding: 10px;
+  background: #1c1c25;
+  border: 1px solid #2c2c38;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.tool-cancel-reason-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.tool-cancel-reason-input {
+  padding: 5px 7px;
+  background: #0f0f14;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-main);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.tool-cancel-reason-input:focus {
+  outline: none;
+  border-color: var(--accent-purple);
+}
+
+.tool-cancel-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chat-tool-cancel-confirm {
+  padding: 3px 8px;
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-tool-cancel-confirm:hover {
+  background: rgba(239, 68, 68, 0.32);
+  color: #ffffff;
+}
+
+.tool-cancel-dismiss {
+  font-size: 11px;
+}
+
+.chat-tool-details {
+  padding: 8px;
+  border-top: 1px solid #2c2c38;
+  font-size: 11px;
+}
+
+.chat-tool-detail-section {
+  margin-bottom: 6px;
+}
+
+.chat-tool-detail-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.chat-tool-code {
+  margin: 4px 0 0 0;
+  padding: 6px;
+  background: #0f0f14;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+}
+
+
+/* ==========================================================================
+   Index Policy Custom Workers Stepper
+   ========================================================================== */
+
+/* Compact stepper row for the Custom workers control: the custom Decrease /
+ * Increase buttons stay the visible steppers, keeping a single left-aligned
+ * flex line instead of stretching the numeric field across the form. */
+.index-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* Compact field for stepper row; textfield appearance removes Firefox
+ * spinners while matching standard appearance spec. */
+.index-stepper .index-stepper-input {
+  flex: none;
+  width: 4.75rem;
+  max-width: 6rem;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Native spinners stay hidden inside the stepper so only the custom Decrease /
+ * Increase buttons act as steppers; the typed entry keeps its numeric value. */
+.index-stepper .index-stepper-input::-webkit-outer-spin-button,
+.index-stepper .index-stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+

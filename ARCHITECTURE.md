@@ -25,7 +25,7 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 
 - **Swift first** for native macOS integration, memory safety, and Swift concurrency (actors, async/await) for LLM inference and tool orchestration.
 - **Python** for the ML ecosystem (Whisper, Playwright, mail parsing) and out-of-process plugin isolation.
-- **Root `Makefile`** is the single build entrypoint: `make build`, `make test` (Vitest + Swift Testing), `make lint` (`tsc --noEmit`, `swiftformat --lint`, `swiftlint`), `make audit` (`npm audit`, `osv-scanner` over `Package.resolved`).
+- **Root `Makefile`** is the single build entrypoint: `make build`, `make test` (Vitest + Swift Testing), `make lint` (`tsc --noEmit`, `eslint` over dashboard TS/TSX + CSS plus the file-size budget check, `swiftformat --lint`, `swiftlint`), `make audit` (`npm audit`, `osv-scanner` over `Package.resolved`).
 
 ---
 

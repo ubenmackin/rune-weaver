@@ -388,13 +388,14 @@ function BrowserDetails({ browser }: { browser: BrowserNavigate }) {
       }
     };
     document.addEventListener("keydown", onKeyDown, true);
+    const thumbnailBtn = thumbnailBtnRef.current;
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       const prev = prevFocusRef.current as HTMLElement | null;
       if (prev && typeof prev.focus === "function") {
         prev.focus();
       } else {
-        thumbnailBtnRef.current?.focus();
+        thumbnailBtn?.focus();
       }
     };
   }, [lightboxOpen]);

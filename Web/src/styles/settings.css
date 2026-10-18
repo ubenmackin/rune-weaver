@@ -1,0 +1,669 @@
+/* Rune Weaver Dashboard — settings manager: section rail and panel layout. */
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 40px;
+}
+
+.settings-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 40px;
+}
+
+/* Standalone Settings Window (macOS native window wrapper) */
+.standalone-settings {
+  min-height: 100vh;
+  background: var(--bg-main);
+  overflow-y: auto;
+}
+
+.standalone-settings .app-main-content {
+  padding: 16px 20px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.standalone-settings .panel {
+  min-height: calc(100vh - 32px);
+  margin-bottom: 0;
+}
+
+.settings-config-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  width: fit-content;
+}
+
+.settings-config-badge code {
+  color: #c084fc;
+  font-family: monospace;
+}
+
+/* Settings vertical layout: left sidenav beside the content pane keeps every
+ * category visible without horizontal scrolling. */
+.settings-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+/* Fixed-width rail owning the sidenav's desktop footprint and the handheld
+ * drawer transform: the section finder and the tab list slide as one unit on
+ * narrow widths instead of the finder stranding in the page flow. */
+.settings-nav-column {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Section finder mirrors the tools pane search: overlaid icon with a 32px left
+ * text inset (10px offset + 14px icon + 8px gap) so queries never slide under
+ * the icon, and the attribute selector outranks the global search padding. */
+.settings-nav-search-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.settings-nav-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-secondary, #a0aec0);
+  pointer-events: none;
+}
+
+input.settings-nav-search-input[type="search"] {
+  width: 100%;
+  padding: 8px 12px 8px 32px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  background-color: var(--bg-card, #1e2533);
+  border: 1px solid var(--border-color, #2d3748);
+  color: var(--text-primary, #ffffff);
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.settings-nav-search-input:focus {
+  border-color: var(--accent-purple, #9f7aea);
+}
+
+/* Sits inside the sidenav card so a starved query reads as part of the list
+ * rather than a stray paragraph between rails. */
+.settings-nav-empty {
+  padding: 8px 6px;
+  margin: 0;
+}
+
+.settings-sidenav {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  background: #111118;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.settings-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.settings-tab-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-tab-btn.active {
+  background: #1e1e2d;
+  color: #c084fc;
+  border-color: rgba(168, 85, 247, 0.3);
+  font-weight: 600;
+}
+
+/* Keyboard focus stays visible on the stacked nav without relying on the
+ * hover background alone. */
+.settings-tab-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.settings-tab-badge {
+  font-size: 11px;
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Narrow viewports stack the sidenav above the content pane so neither
+ * column squeezes below a usable width. */
+@media (max-width: 800px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-nav-column {
+    width: 100%;
+  }
+
+  .settings-sidenav {
+    width: 100%;
+  }
+
+  .settings-content {
+    width: 100%;
+  }
+}
+
+/* Settings drawer trigger sits top-left of the panel header: hidden by default
+ * so desktop keeps the inline sidenav, and the handheld query below is the sole
+ * reveal path. The 44px box stays above the minimum touch size. */
+.settings-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.settings-menu-btn:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-menu-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Dim layer behind the handheld settings drawer. Hidden by default so the
+ * desktop inline sidenav keeps zero backdrop; the mobile query below is the
+ * sole path that reveals it while the drawer is open. */
+.settings-backdrop {
+  display: none;
+  border: none;
+  padding: 0;
+}
+
+/* Handheld settings drawer sits between the 52px top nav and the 64px bottom
+ * bar sliding in above a dim backdrop; the transform lives on the column so the
+ * finder docks with its tabs, and the width bound keeps the backdrop dismissable. */
+@media (max-width: 640px) {
+  .settings-menu-btn {
+    display: inline-flex;
+  }
+
+  .settings-nav-column {
+    position: fixed;
+    top: 52px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    left: 0;
+    width: min(300px, 85vw);
+    z-index: 50;
+    overflow-y: auto;
+    padding: 6px;
+    background: #111118;
+    border-right: 1px solid var(--border-color);
+    transform: translateX(-100%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 200ms ease, visibility 200ms ease;
+  }
+
+  /* Open drawer rests flush with the viewport edge with the same 200ms ease
+   * as the close path so both directions feel symmetric. */
+  .settings-nav-column.open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  /* The tab list renders statically inside the drawer column; the drawer
+   * chrome (offsets, slide, border) belongs to the column alone. */
+  .settings-nav-column .settings-sidenav {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  /* Tab rows keep the minimum touch size once the drawer narrows the column
+   * so thumb targets never shrink below the handheld floor. */
+  .settings-sidenav .settings-tab-btn {
+    min-height: 44px;
+  }
+
+  /* Dim sibling behind the drawer. One layer below the drawer but above the
+   * content so a tap anywhere outside the drawer dismisses it; the drawer
+   * itself never bubbles into this layer because the two are siblings. */
+  .settings-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+}
+
+/* Wide viewports keep the settings list as a static flex child with zero
+ * backdrop; the explicit query mirrors the handheld ceiling above so exactly
+ * one layout owns the 640px boundary and the drawer rules never leak to desktop. */
+@media (min-width: 641px) {
+  .settings-menu-btn {
+    display: none;
+  }
+
+  .settings-layout {
+    flex-direction: row;
+  }
+
+  .settings-nav-column {
+    position: static;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .settings-sidenav {
+    position: static;
+    width: 100%;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .settings-content {
+    width: auto;
+  }
+
+  .settings-backdrop {
+    display: none;
+  }
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.settings-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.settings-section-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-section h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settings-section-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Subsection header mirrors the section header at a smaller scale so Allowed
+ * Roots Reset/Add sit in the same Reset-then-Add order with identical ghost
+ * hover and alignment as the Files & Access header above it. */
+.settings-subsection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.settings-subsection-header .row {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Blocked-paths textarea keeps long guard lists compact: monospace preserves
+ * glob alignment while the min-height shows the default boundary without
+ * scrolling on first paint. */
+.deny-patterns-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  min-height: 160px;
+  resize: vertical;
+  white-space: pre;
+}
+
+.allowed-origins-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  height: auto;
+  min-height: 140px;
+  resize: vertical;
+  white-space: pre;
+}
+
+.form-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary, #cbd5e1);
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: default;
+}
+
+.form-group-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Network egress editors keep a single 16px rhythm between the heading, hint
+   paragraphs, and field groups; zeroing the inner margins keeps the gap from doubling. */
+.policy-network-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.policy-network-section h4 {
+  margin: 0;
+}
+.policy-network-section .settings-section-hint {
+  margin: 0;
+}
+
+.flex-1 { flex: 1; min-width: 200px; }
+.flex-2 { flex: 2; min-width: 300px; }
+
+/* Providers Grid & Card */
+.providers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.provider-card {
+  background: #111116;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transition: border-color 0.15s ease;
+}
+
+.provider-card:hover {
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.provider-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 10px;
+  gap: 10px;
+}
+
+.provider-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.provider-name-input {
+  background: transparent;
+  border: 1px dashed transparent;
+  border-radius: 4px;
+  color: #f3f4f6;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 2px 6px;
+  max-width: 160px;
+  transition: all 0.15s ease;
+}
+
+.provider-name-input:focus,
+.provider-name-input:hover {
+  background: #1e1e27;
+  border-color: var(--accent-purple);
+  outline: none;
+}
+
+.provider-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.provider-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Email Accounts */
+.email-accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.email-account-card {
+  background: #111116;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.email-account-card:hover {
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.email-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 10px;
+}
+
+.email-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.email-card-title h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.email-card-type-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.email-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.email-env-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px dashed var(--border-color);
+}
+
+.email-env-hint code {
+  color: #c084fc;
+  font-family: monospace;
+}
+
+
+.settings-footer {
+  position: sticky;
+  bottom: 0;
+  background: rgba(10, 10, 15, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 16px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  z-index: 10;
+}
+
+/* Policy pane footer keeps the staged-save hint left and Save right at any width. */
+section[data-testid="policy-pane"] .settings-footer {
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Shared Save presentation for Settings footers: both footers consume these
+ * classes so enabled Saves stay solid theme blue in one place. `.save-button`
+ * keeps padding and typography while `.primary-button` owns the blue fill. */
+.primary-button {
+  background: var(--accent-blue);
+  border: 0;
+  color: white;
+  cursor: pointer;
+}
+
+.primary-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.primary-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.save-button {
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.success-banner {
+  padding: 10px 14px;
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: #86efac;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+

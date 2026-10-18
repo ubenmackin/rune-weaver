@@ -1,0 +1,845 @@
+/* Rune Weaver Dashboard — chat main panel: conversation column, input row, and status bar. */
+
+.chat-main-panel {
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chat-panel-title h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.open-sidebar-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.session-id-tag {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chat-empty-state {
+  margin: auto;
+  text-align: center;
+  max-width: 400px;
+}
+
+.chat-empty-state h3 {
+  margin-bottom: 6px;
+}
+
+.message {
+  max-width: 82%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.message.user {
+  background: #272738;
+  align-self: flex-end;
+  border-bottom-right-radius: 2px;
+  white-space: pre-wrap;
+}
+
+.message.assistant {
+  background: #1c1c24;
+  border: 1px solid var(--border-color);
+  align-self: flex-start;
+  border-bottom-left-radius: 2px;
+  white-space: normal;
+}
+
+
+/* Message Bubble Footer & Copy Button */
+
+.message-bubble-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  white-space: normal;
+}
+
+.message.user .message-bubble-footer {
+  justify-content: flex-end;
+}
+
+.message.assistant .message-bubble-footer {
+  justify-content: space-between;
+}
+
+.message-completed-footer {
+  font-size: 11px;
+  color: var(--text-muted, #8e8e9f);
+  user-select: none;
+}
+
+.message-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-muted, #8e8e9f);
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.message:hover .message-copy-btn,
+.message-copy-btn:focus-visible,
+.message-copy-btn.copied {
+  opacity: 1;
+}
+
+.message-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main, #ffffff);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.message-copy-btn.copied {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.copy-icon-success {
+  color: #10b981;
+}
+
+.copy-status-text {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* Animated Typing Indicator */
+
+.message.assistant.pending-bubble {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+}
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--accent-purple);
+  border-radius: 50%;
+  animation: typingBounce 1.4s infinite ease-in-out both;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes typingBounce {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.typing-text {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Thought / Reasoning Display in Chat */
+
+.chat-thought-container {
+  margin-bottom: 10px;
+  background: rgba(147, 51, 234, 0.05);
+  border: 1px solid rgba(147, 51, 234, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  transition: border-color 0.15s ease;
+}
+
+.chat-thought-container[open] {
+  border-color: rgba(147, 51, 234, 0.35);
+}
+
+.chat-thought-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #c084fc;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.chat-thought-heading::-webkit-details-marker {
+  display: none;
+}
+
+.chat-thought-heading::after {
+  content: "▾";
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+
+.chat-thought-container:not([open]) .chat-thought-heading::after {
+  transform: rotate(-90deg);
+}
+
+.chat-thought-content {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(147, 51, 234, 0.2);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-style: italic;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.chat-thought-content pre,
+.chat-thought-content code {
+  font-style: normal;
+}
+
+/* Per-turn recall chip above the first assistant message. Muted and collapsed
+ * by default so absent diagnostics render nothing and cause no layout shift. */
+.recall-chip {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #8e8e9f);
+}
+
+.recall-chip-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  opacity: 0.85;
+}
+
+.recall-chip-summary::-webkit-details-marker {
+  display: none;
+}
+
+.recall-chip-summary::before {
+  content: "▸ ";
+}
+
+.recall-chip[open] .recall-chip-summary::before {
+  content: "▾ ";
+}
+
+.recall-chip-details {
+  margin-top: 4px;
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recall-chip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  opacity: 0.85;
+}
+
+/* Distinct Tool Activity Display in Chat */
+
+.chat-tool-container {
+  margin-bottom: 10px;
+  background: #14141a;
+  border: 1px solid #282833;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.chat-tool-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.chat-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-tool-pill {
+  border-radius: 6px;
+  background: #1c1c25;
+  border: 1px solid #2c2c38;
+}
+
+.chat-tool-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+/* The live header pairs the toggle with a per-call cancel control; the toggle
+ * yields its full width so the actions share one row. The right inset lives on
+ * the cancel control so a row with no cancel keeps the toggle's 8px padding. */
+.chat-tool-pill-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-tool-pill-header .chat-tool-toggle {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-tool-icon {
+  color: var(--accent-purple);
+}
+
+.chat-tool-name {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  flex: 1;
+}
+
+/* Visible but truncated call identifier for debug correlation: the full
+ * value stays available via `title` while the row keeps a compact width. */
+.chat-tool-call-id {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
+.chat-tool-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.chat-tool-status.ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.chat-tool-status.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.chat-tool-status.invalid-tool {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.chat-tool-status.invalid-syntax {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.chat-tool-status.running {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  animation: pulseTool 1.5s infinite ease-in-out;
+}
+
+/* Static pending state for completed turns awaiting a result: shares the
+ * amber status token with the running state but stays solid so honesty
+ * (pending vs genuinely executing) never depends on inline styles. */
+.chat-tool-status.pending {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--status-amber);
+}
+
+.chat-tool-status.warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+@keyframes pulseTool {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* Live per-tool progress under the Running pill. The engine publishes counters
+ * and a relative tail only, so the bar stays an indeterminate shimmer rather
+ * than a percent track it cannot fill honestly. */
+.chat-tool-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px 8px;
+}
+
+.chat-tool-progress-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-main);
+}
+
+.tool-progress-scope-warning {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.tool-progress-stats {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.tool-progress-current {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Live per-tool progress under the Running pill: counters arrive but no percent
+ * does, so the bar stays an indeterminate shimmer. One shared token drives the
+ * chat rows and the index strip; the highlight slides with transform only. */
+.tool-progress-shimmer {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--tool-progress-track, var(--border-color));
+  overflow: hidden;
+  position: relative;
+}
+
+.tool-progress-shimmer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    45deg,
+    var(--tool-progress-stripe-high),
+    var(--tool-progress-stripe-high) 8px,
+    var(--tool-progress-stripe-low) 8px,
+    var(--tool-progress-stripe-low) 16px
+  );
+  animation: toolProgressSlide 1.6s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes toolProgressSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-progress-shimmer::after {
+    animation: none;
+  }
+}
+
+
+/* Chat Footer & Attached Status Bar */
+
+.chat-footer-box {
+  background: #141419;
+  border-top: 1px solid var(--border-color);
+  padding: 12px 16px 8px;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.chat-input-row textarea {
+  flex: 1;
+  min-height: 68px;
+  max-height: 240px;
+  padding: 10px 14px;
+  background: #1a1a24;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.5;
+  resize: none;
+  overflow-y: auto;
+  font-family: inherit;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.chat-input-row textarea:focus {
+  outline: none;
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 2px rgba(147, 51, 234, 0.2);
+}
+
+.chat-input-row textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-input-row .chat-send-btn {
+  height: 42px;
+  padding: 0 18px;
+  align-self: flex-end;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+}
+
+.chat-input-row .chat-cancel-btn {
+  height: 42px;
+  padding: 0 18px;
+  align-self: flex-end;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-input-row .chat-cancel-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.chat-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px 0;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.status-bar-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-bullet {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.status-bullet.green {
+  background: var(--status-green);
+}
+
+.status-bar-label {
+  font-weight: 500;
+}
+
+.status-bar-value {
+  color: var(--text-main);
+  font-family: ui-monospace, monospace;
+}
+
+.status-bar-value.status-warning {
+  color: var(--status-amber);
+}
+
+.status-bar-divider {
+  color: #383848;
+}
+
+
+/* ==========================================================================
+   Session goal chip & chat goal drawer
+   ========================================================================== */
+
+/* Compact pursuit pill beside the session id in the chat header. It reads at a
+ * glance (target, title, finished/planned tally) while the title truncates so a
+ * long goal never pushes the header controls off a narrow row. */
+.goal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary, #ffffff);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.goal-chip:hover {
+  border-color: var(--border-focus);
+}
+
+.goal-chip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-chip-progress {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status color language shared with the goal cards: active and parked-on-owner
+ * read amber, achieved green, abandoned red, paused muted. */
+.goal-chip.running,
+.goal-chip.awaiting_approval {
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #fbbf24;
+}
+
+.goal-chip.ok {
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #34d399;
+}
+
+.goal-chip.error {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #f87171;
+}
+
+.goal-chip.skipped {
+  color: var(--text-muted);
+}
+
+/* Right-side panel over the chat column. Fixed so it never reflows the
+ * conversation behind it, anchored below the top nav on wide viewports. */
+.goal-drawer {
+  position: fixed;
+  top: 60px;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  max-width: 100vw;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.35);
+}
+
+.goal-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.goal-drawer-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.goal-drawer-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.goal-drawer-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-drawer-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin: 0 16px 8px;
+}
+
+.goal-drawer-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent-purple, #8b5cf6);
+}
+
+.goal-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.goal-drawer-body h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+}
+
+.goal-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.goal-plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.goal-plan-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Completed step titles strike through so the checklist reads at a glance;
+ * skipped steps keep their text legible because the status label names it. */
+.goal-plan-step-title.done {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.goal-step-skip {
+  font-size: 11px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+.goal-event-item {
+  display: block;
+}
+
+.goal-drawer-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+/* Full-height overlay on handheld widths so the panel owns the screen instead
+ * of squeezing the conversation into a sliver beside it. */
+@media (max-width: 640px) {
+  .goal-drawer {
+    top: 0;
+    right: 0;
+    left: 0;
+    width: auto;
+    z-index: 70;
+    border-left: none;
+  }
+}
+

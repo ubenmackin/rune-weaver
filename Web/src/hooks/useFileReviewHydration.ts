@@ -88,6 +88,7 @@ export function useFileReviewHydration(
     // `targets` is intentionally not a dependency: `requestKey` is its canonical projection, so a
     // re-render that merely rebuilds the array (streaming text, unrelated state) never re-requests
     // while the rendered card set itself is unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey]);
 
   // Report states only for the batch matching the rendered card set: a stale resolved map from an

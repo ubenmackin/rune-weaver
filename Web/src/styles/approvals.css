@@ -1,0 +1,742 @@
+/* Rune Weaver Dashboard — approvals inbox: pending request cards, severity and
+ * session grouping, decision history, and split allow/deny controls. */
+
+
+.approvals-panel {
+  gap: 16px;
+}
+
+/* Pending | History segmented control: a joined pill pair whose aria-pressed
+ * state (not an .active class) carries the selected view, so the toggle stays
+ * honest with the buttons' accessibility contract. */
+.approvals-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.approvals-view-toggle button {
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.approvals-view-toggle button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.approvals-view-toggle button[aria-pressed="true"] {
+  background: var(--accent-purple, #8b5cf6);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.approvals-view-toggle button:focus-visible {
+  outline: 2px solid var(--accent-purple, #8b5cf6);
+  outline-offset: 1px;
+}
+
+.approvals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.approval-card {
+  padding: 18px 20px;
+  background: #181822;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.approval-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.approval-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.approval-tool-badge {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-family: monospace;
+}
+
+.approval-desc {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.approval-severity-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.3px;
+}
+
+.approval-severity-badge.severity-safe {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.approval-severity-badge.severity-moderate {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.approval-severity-badge.severity-dangerous {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Pending safety-check badge: muted slate tone distinct from the valued
+ * safe/moderate/dangerous tiers, shared by the inline banner and the inbox
+ * card so both surfaces read identically with no local style duplication. */
+.approval-severity-badge.severity-pending {
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+/* Pending spinner dot inside the severity-pending badge: indeterminate
+ * rotation signals the background assessment is still running while the
+ * pending copy stays in the muted tone above. */
+.approval-assessment-pending,
+.approval-assessment-pending-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(203, 213, 225, 0.35);
+  border-top-color: #cbd5e1;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: approvalAssessmentSpin 0.9s linear infinite;
+}
+
+@keyframes approvalAssessmentSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approval-assessment-pending,
+  .approval-assessment-pending-spinner {
+    animation: none;
+  }
+}
+
+.approval-narrative {
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text-color, #e2e8f0);
+}
+
+.approval-tier {
+  margin-top: 4px;
+}
+
+.approval-section-label {
+  font-weight: 600;
+  color: var(--text-muted, #94a3b8);
+  margin-right: 4px;
+}
+
+.approval-warnings {
+  margin: 6px 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-warning-item {
+  font-size: 12.5px;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.08);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.approval-args-details {
+  margin: 4px 0;
+}
+
+.approval-args-summary {
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 4px;
+}
+
+.approval-args-summary:hover {
+  color: var(--text-color, #e2e8f0);
+}
+
+.approval-args-wrapper {
+  background: #121218;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-args-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.approval-args-code {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.approval-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.approval-duration-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approval-widen-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.approval-decision-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Session groups: every card renders beneath a sticky header with no collapse
+ * and no group-level control, so no group can hide a pending decision or
+ * decide several cards at once. */
+.approvals-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.approvals-group-header {
+  position: sticky;
+  /* Sits below the 52px sticky top nav so a scrolled group never slides
+   * under the navigation chrome. */
+  top: 52px;
+  z-index: 5;
+  margin: 0 0 10px 0;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted, #94a3b8);
+  background: rgba(10, 10, 15, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+/* Scope line: three mutually exclusive choices plus the editor entry point,
+ * wrapping under the narratives so a long target never stretches the card. */
+.approval-scope-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.approval-scope-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.approval-scope-radios {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.approval-scope-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+}
+
+.approval-scope-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-purple, #a78bfa);
+  overflow-wrap: anywhere;
+}
+
+.approval-scope-summary {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+/* Scope editor inside the shared modal: monospace so a path, host, or handle
+ * list reads exactly as it will ship on the wire. */
+.approval-scope-editor {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+/* Brake card: red accent marks the watchdog park, whose only decisions are
+ * releasing it or holding it — no duration or scope control belongs here. */
+.approval-brake-card {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+/* Standing-rules deep link wears the ghost button treatment so the header
+ * row reads as one control set instead of a bare inline anchor. */
+a.ghost.icon-text-btn {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: inherit;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+a.ghost.icon-text-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-focus);
+}
+
+/* ==========================================================================
+   Approval Decision History (Inbox → History)
+   ========================================================================== */
+
+/* Decision history pane: the filter row reuses the shared ghost button treatment
+ * and the table follows the app's other tables (hairline separators, muted
+ * headers) so the History view does not drift from the design system. */
+.approval-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.approval-history-filters {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.approval-history-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.approval-history-filter input,
+.approval-history-filter select {
+  font-size: 13px;
+}
+
+.approval-history-empty {
+  padding: 24px 16px;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+}
+
+.approval-history-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.approval-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.approval-history-table th {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.approval-history-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
+  word-break: break-word;
+}
+
+.approval-history-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-purple, #a78bfa);
+  overflow-wrap: anywhere;
+}
+
+.approval-history-decision-allowed {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.approval-history-decision-denied {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* ==========================================================================
+   Inline Session Approval Banner (Chat)
+   ========================================================================== */
+
+/* Non-modal list pinned between the parked waiting text and the chat input:
+ * shares the inbox card tokens so session decisions look identical inline
+ * and in the global queue, while staying compact enough for the footer. */
+.inline-approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 16px 0;
+  background: #141419;
+  border-top: 1px solid var(--border-color);
+}
+
+.inline-approval-banner {
+  padding: 12px 14px;
+  background: #181822;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inline-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inline-approval-args {
+  margin: 0;
+  padding: 8px 10px;
+  background: #121218;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inline-approval-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Split Allow control: the main face takes ~80% for one-click grants while
+ * the chevron takes ~20% to expose graduated trust, joined as one control
+ * with a shared menu anchor. */
+.split-allow-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 220px;
+  flex: 1 1 auto;
+  max-width: 340px;
+}
+
+.split-allow-main {
+  flex: 4 1 80%;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.25) !important;
+}
+
+.split-allow-chevron {
+  flex: 1 1 20%;
+  min-width: 40px;
+  max-width: 56px;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+
+.split-allow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  max-height: min(340px, calc(100vh - 120px));
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: #14141d;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.split-allow-menu.split-allow-menu-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.split-allow-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #d1d5db;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.split-allow-menu-item:hover,
+.split-allow-menu-item:focus-visible {
+  background: rgba(139, 92, 246, 0.15);
+  color: #ffffff;
+  outline: none;
+}
+
+.split-allow-menu-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.split-allow-menu-item-danger {
+  color: #fca5a5;
+}
+
+.split-allow-menu-item-danger:hover,
+.split-allow-menu-item-danger:focus-visible {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ffffff;
+  outline: none;
+}
+
+/* Split Deny control mirrors the split Allow geometry so Deny reads as one
+ * joined control. The group is the positioned anchor the shared duration menu
+ * resolves against; without it the menu would attach to a clipping ancestor. */
+.split-deny-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 180px;
+  flex: 0 1 auto;
+  max-width: 340px;
+}
+
+.split-deny-main {
+  flex: 4 1 80%;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.25) !important;
+}
+
+.split-deny-chevron {
+  flex: 1 1 20%;
+  min-width: 40px;
+  max-width: 56px;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+
+.approval-egress-badge {
+  background: rgba(59, 130, 246, 0.18);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+/* System notice chip on engine-filed cards: one quiet violet mark that is
+ * neither a severity tier nor a decision control. */
+.system-notice-chip {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+
+.inline-approval-deciding {
+  display: inline-flex;
+  align-items: center;
+}
+
+button.danger {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+
+/* ==========================================================================
+   Ephemeral Session Trust Chip — chat footer and approvals inbox
+   ========================================================================== */
+
+/* Compact muted strip carrying one line per live session trust. Absent trust
+ * renders no element, so the chip never claims space it has nothing to say
+ * about; both mounts share this block. */
+.ephemeral-trust-chip {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 8px 0 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ephemeral-trust-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ephemeral-trust-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Row keeps the trust line and its revoke on one line where width allows and
+ * wraps between them where it does not. */
+.ephemeral-trust-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ephemeral-trust-line {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ephemeral-trust-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.ephemeral-trust-revoke {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+

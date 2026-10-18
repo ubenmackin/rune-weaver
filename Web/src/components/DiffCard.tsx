@@ -175,7 +175,7 @@ export default function DiffCard({
     setExpanded(defaultExpanded);
   }, [defaultExpanded]);
 
-  const payload = useMemo(() => parseFilesWritePayload(result), [result.content]);
+  const payload = useMemo(() => parseFilesWritePayload(result), [result]);
 
   // Hydrate the stored outcome once per card so a reload shows Accepted, Discarded, or another
   // terminal state instead of a fresh actionable card.

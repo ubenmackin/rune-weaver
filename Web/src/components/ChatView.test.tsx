@@ -4910,7 +4910,9 @@ describe("missed-terminal settle requires a closed socket", () => {
     } finally {
       nowSpy.mockRestore();
     }
-  });
+    // The settle-then-close dance runs many real timers; loaded CI bursts past
+    // the 5s default, so this test alone carries headroom.
+  }, 15000);
 });
 
 describe("done frame clears pending state without a render hop", () => {

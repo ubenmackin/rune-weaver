@@ -119,7 +119,6 @@ export function validateBindingHostEntry(entry: string): string | null {
   // exactly (double quote plus C0 controls plus DEL). The shared gate owns
   // the refusal while the branches below keep distinct repair messages.
   if (containsTOMLBreakingScalar(trimmed)) {
-    // eslint-disable-next-line no-control-regex
     if (/[\u0000-\u001F\u007F]/.test(trimmed)) {
       return `must not contain control characters (got '${entry}')`;
     }
@@ -265,7 +264,6 @@ export function validateBindingPrefix(entry: string): string | null {
   // exactly (double quote plus C0 controls plus DEL). The shared gate owns
   // the refusal while the branches below keep distinct repair messages.
   if (containsTOMLBreakingScalar(trimmed)) {
-    // eslint-disable-next-line no-control-regex
     if (/[\u0000-\u001F\u007F]/.test(trimmed)) {
       return `must not contain control characters (got '${entry}')`;
     }
@@ -460,8 +458,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   // The key this modal opened for, so an unchanged edit can be told apart from
   // a rename onto another binding's key when checking for duplicates.
   const originalKey = normalizeSecretKey(props.editingKey ?? props.initialKey ?? props.initialBinding?.key ?? "");
-  const existingBindingKeys = props.existingBindingKeys ?? [];
-
   // Key shape gates resolution; an existing binding key is refused unless it is
   // the row being edited, because saving a rename onto a live key would silently
   // discard that binding before the pane ever sees the conflict.
@@ -470,11 +466,12 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     if (!isValidBindingKey(keyTrimmed)) {
       return "Key must use only letters, numbers, _, -, . (max 256 characters).";
     }
-    if (keyTrimmed !== originalKey && existingBindingKeys.includes(keyTrimmed)) {
+    const existingKeys = props.existingBindingKeys ?? [];
+    if (keyTrimmed !== originalKey && existingKeys.includes(keyTrimmed)) {
       return `A binding for '${keyTrimmed}' already exists. Edit that binding instead of renaming onto it.`;
     }
     return null;
-  }, [keyTrimmed, originalKey, existingBindingKeys]);
+  }, [keyTrimmed, originalKey, props.existingBindingKeys]);
 
   // Per-line confinement errors stay inline with the hosts editor so the
   // offending line is repairable without leaving the modal.

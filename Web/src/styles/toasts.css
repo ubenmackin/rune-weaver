@@ -1,0 +1,127 @@
+/* Rune Weaver Dashboard — transient toast stack: fixed top-right column so
+ * success and error toasts stack with a gap instead of overlapping. */
+
+.toast-stack {
+  position: fixed;
+  top: 64px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+/* Transient toast: in-flow item rendered only inside `.toast-stack` so action
+ * feedback never blocks the form. Auto-dismiss timing lives in the Toast
+ * component; contextual errors stay as persistent inline banners. */
+.toast {
+  position: static;
+  padding: 10px 14px;
+  background: #142318;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  color: #86efac;
+  border-radius: 8px;
+  font-size: 13px;
+  max-width: 360px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: toast-slide-down 0.25s ease-out;
+}
+
+/* Error variant: red/orange tones matching the error-banner palette so
+   transient failures look distinct from success toasts at a glance. */
+.toast.toast-error {
+  background: #2a1417;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+/* Slide down smoothly from just below the navbar into stacked position. */
+@keyframes toast-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 0 0 4px;
+  font-size: 13px;
+}
+
+/* Centered persistent reconnect toast: fixed and top-center so a socket outage
+ * stays visible without shifting or wrapping the chat header. It leaves only on
+ * socket recovery or an explicit retry/dismiss, keeping the chat usable. */
+.connection-toast {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  background: rgba(20,20,30,0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(245,158,11,0.45);
+  border-radius: 12px;
+  color: #fde68a;
+  font-size: 13px;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  animation: toast-slide-down 0.25s ease-out;
+}
+
+.connection-toast-message {
+  flex: 1 1 auto;
+}
+
+.connection-toast-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.connection-toast-actions button {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connection-toast-actions button:hover {
+  background: rgba(255,255,255,0.14);
+}
+
+.connection-toast-actions button:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .connection-toast {
+    top: 56px;
+    max-width: calc(100vw - 16px);
+    flex-wrap: wrap;
+    justify-content: center;
+    text-align: center;
+  }
+}
+

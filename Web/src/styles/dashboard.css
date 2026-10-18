@@ -1,0 +1,629 @@
+/* Rune Weaver Dashboard — executive operations dashboard: landing surface
+ * layout for the system pulse, action queue, and metric widget grid. */
+
+
+.dashboard-root {
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 24px 24px 64px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* Hero Header & Greeting */
+.dashboard-hero-header {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 8px 0;
+}
+
+.dashboard-greeting-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-main);
+}
+
+.dashboard-greeting-subtitle {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* Greeting-row identity cluster: the app's sole avatar image, right-aligned on
+ * the welcome headline, pairing the 112px Wisp with a name-plus-caption stack
+ * that reuses the muted, border, and accent-purple tokens; no new color tokens. */
+.dashboard-greeting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.dashboard-greeting-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dashboard-greeting-identity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.dashboard-greeting-identity-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+  text-align: right;
+}
+
+.dashboard-greeting-assistant {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.dashboard-greeting-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+/* Attention caption reuses the pill-button language from the dashboard chips:
+ * subtle panel background, bordered pill, accent hover — a button that reads
+ * as navigation without minting a new token. */
+.dashboard-greeting-caption-button {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-purple);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dashboard-greeting-caption-button:hover {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.dashboard-greeting-caption-button:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Narrow viewports stack the identity below the headline so the 112px Wisp
+ * never squeezes the greeting title; the text stack left-aligns to match the
+ * headline it now sits under. */
+@media (max-width: 640px) {
+  .dashboard-greeting-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .dashboard-greeting-identity {
+    margin-left: 0;
+  }
+
+  .dashboard-greeting-identity-text {
+    align-items: flex-start;
+    text-align: left;
+  }
+}
+
+/* Dashboard Prompt Bar */
+.dashboard-prompt-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 14px 18px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dashboard-prompt-bar-wrap:focus-within {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25), 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.dashboard-prompt-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dashboard-prompt-icon {
+  color: var(--accent-purple);
+  display: flex;
+  align-items: center;
+}
+
+.dashboard-prompt-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font-size: 15px;
+  outline: none;
+  min-width: 0;
+}
+
+.dashboard-prompt-input::placeholder {
+  color: #6c6c7d;
+}
+
+.dashboard-prompt-submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent-purple);
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.dashboard-prompt-submit:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.dashboard-prompt-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dashboard-quick-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-chips-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.dashboard-chip-btn {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.dashboard-chip-btn:hover {
+  color: var(--text-main);
+  border-color: var(--accent-purple);
+  background: rgba(139, 92, 246, 0.1);
+}
+
+/* Morning Recommendations */
+.dashboard-recommendations-section {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(23, 23, 29, 0.95) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 14px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.08);
+}
+
+.dashboard-recommendations-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.dashboard-recommendation-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.recommendation-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.recommendation-kind-badge {
+  background: rgba(139, 92, 246, 0.2);
+  color: #c4b5fd;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.recommendation-status-pill {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.recommendation-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.recommendation-body {
+  font-size: 13px;
+  color: #c7c7d4;
+  line-height: 1.5;
+}
+
+.recommendation-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.recommendation-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+
+.recommendation-actions .accept-btn {
+  background: var(--status-green);
+  color: #ffffff;
+}
+
+.recommendation-actions .accept-btn:hover {
+  filter: brightness(1.1);
+}
+
+.recommendation-actions .chat-btn {
+  background: var(--bg-subtle);
+  border-color: var(--border-color);
+  color: var(--text-main);
+}
+
+.recommendation-actions .chat-btn:hover {
+  background: var(--border-color);
+}
+
+.recommendation-actions .dismiss-btn {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.recommendation-actions .dismiss-btn:hover {
+  color: var(--text-main);
+}
+
+/* Dashboard Main Grid Layout */
+.dashboard-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(320px, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.dashboard-stream-column,
+.dashboard-cockpit-column {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+/* Shared Dashboard Section Styles */
+.dashboard-section {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dashboard-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dashboard-section-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dashboard-section-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+}
+
+.dashboard-section-subtitle {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dashboard-count-badge {
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+}
+
+.dashboard-count-badge.attention {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.dashboard-count-badge.running {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+/* Dashboard section icons and status accent colors. Scoped to the shared
+ * dashboard section header so no app-wide color rule is created or overridden. */
+.dashboard-section-icon {
+  flex-shrink: 0;
+}
+
+.dashboard-section-icon.accent-blue {
+  color: var(--accent-blue);
+}
+
+.dashboard-section-icon.accent-purple {
+  color: var(--accent-purple);
+}
+
+.dashboard-section-icon.status-amber {
+  color: var(--status-amber);
+}
+
+.dashboard-section-icon.status-green {
+  color: var(--status-green);
+}
+
+.dashboard-empty-card {
+  padding: 20px;
+  text-align: center;
+  background: var(--bg-card);
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+}
+
+.all-clear-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  border-style: solid;
+  border-color: rgba(16, 185, 129, 0.25);
+  background: rgba(16, 185, 129, 0.04);
+}
+
+.all-clear-icon {
+  font-size: 24px;
+}
+
+.all-clear-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--status-green);
+}
+
+.all-clear-desc {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  color: var(--accent-purple, #a855f7);
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-link:hover {
+  color: var(--accent-purple-hover, #c084fc);
+  text-decoration: underline;
+}
+
+.btn-link.view-all-link {
+  font-weight: 500;
+}
+
+.btn-link.inspect-report-link {
+  color: var(--accent-purple, #a855f7);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.btn-link.inspect-report-link:hover {
+  color: var(--accent-purple-hover, #c084fc);
+  text-decoration: underline;
+}
+
+.btn-link.open-session-link {
+  color: var(--text-muted);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-link.open-session-link:hover {
+  color: var(--text-main);
+  text-decoration: underline;
+}
+
+/* Approvals Inbox route off every dashboard card. Same muted inline treatment
+   as the thread link so the full duration and scope editors read as a peer
+   destination rather than as a primary decision action. */
+.btn-link.open-inbox-link {
+  color: var(--text-muted);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-link.open-inbox-link:hover {
+  color: var(--accent-purple);
+  text-decoration: underline;
+}
+
+.inline-question-header-link {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* Consequence line under a dashboard card's quick actions: names what the
+   one-shot decision covers and points at the Inbox for anything durable. */
+.action-card-once-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.4;
+}
+
+.empty-goals-card,
+.empty-schedules-card,
+.empty-reports-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  gap: 6px;
+}
+
+.empty-goals-title,
+.empty-schedules-title {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.empty-goals-desc,
+.empty-schedules-desc,
+.empty-reports-desc {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 340px;
+  line-height: 1.4;
+}
+
+.new-goal-btn,
+.new-schedule-btn,
+.open-goal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.new-goal-btn,
+.new-schedule-btn {
+  background: var(--bg-surface-elevated, #1e222b);
+  color: var(--text-main, #f3f4f6);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+}
+
+.new-goal-btn:hover,
+.new-schedule-btn:hover {
+  background: var(--bg-hover, #282e3a);
+  border-color: var(--border-focus, rgba(255, 255, 255, 0.25));
+}
+
+.open-goal-btn {
+  background: var(--accent-blue, #3b82f6);
+  color: #ffffff;
+  border: 1px solid transparent;
+}
+
+.open-goal-btn:hover {
+  background: var(--accent-blue-hover, #2563eb);
+}
+

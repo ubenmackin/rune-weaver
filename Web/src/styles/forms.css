@@ -1,0 +1,254 @@
+/* Rune Weaver Dashboard — shared form controls and buttons: input, select,
+ * and button treatments reused across settings, modals, and editors. */
+
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="password"],
+input[type="search"],
+.input-field,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  height: 42px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: #0f0f13;
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 20px;
+}
+
+select,
+select.input-field {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+  padding-right: 36px;
+  cursor: pointer;
+}
+
+.row select {
+  width: auto;
+}
+
+textarea,
+textarea.input-field {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: #0f0f13;
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.5;
+  height: auto;
+  min-height: 80px;
+}
+
+.server-allowed-hosts-textarea {
+  min-height: 120px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  resize: vertical;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 2px var(--accent-purple-glow);
+}
+
+button.primary {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent-purple);
+  color: white;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+button.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+/* Secondary action carries the same button affordance as Revoke so the Widen
+ * control reads as a button; the blue outline pairs with the red danger variant
+ * and Disabled inherits the global button:disabled dimming above. */
+button.secondary {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.15);
+  color: #bfdbfe;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: #60a5fa;
+  color: #fff;
+}
+
+button.secondary:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+button.ghost {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-focus);
+}
+
+/* Dark-mode only accent-ghost for Tools Configure actions: blue border and
+ * blue text on a ghost background with a primary-blue hover. No light-mode
+ * variant; the dashboard ships a dark theme only. */
+button.accent-ghost {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-blue);
+  background: transparent;
+  color: var(--accent-blue);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.accent-ghost:hover:not(:disabled) {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spin {
+  animation: spinAnimation 1s linear infinite;
+}
+
+@keyframes spinAnimation {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.error {
+  color: #ff9d9d;
+}
+
+.muted {
+  opacity: 0.7;
+  font-size: 13px;
+}
+
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.text-xs { font-size: 11px; }
+.text-sm { font-size: 13px; }
+.mt-3 { margin-top: 12px; }
+.mt-4 { margin-top: 16px; }
+
+.empty-state-box {
+  padding: 32px 16px;
+  text-align: center;
+  background: #111116;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  margin: 12px 0;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.notice-banner {
+  padding: 10px 14px;
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: #c4b5fd;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.error-banner {
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+
+/* ==========================================================================
+   Mobile Input Auto-Zoom Guard (max-width 640px)
+   ========================================================================== */
+
+/* iOS Safari auto-zooms the viewport when a focused field renders below 16px
+ * and the zoom sticks after blur on chat-length flows; raising only the type
+ * size on handhelds keeps focus at 1:1 scale while desktop keeps 14px. */
+@media (max-width: 640px) {
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  .input-field,
+  select,
+  textarea,
+  textarea.input-field {
+    font-size: 16px;
+    line-height: 24px;
+  }
+}
+

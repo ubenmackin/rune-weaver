@@ -1,0 +1,654 @@
+/* Rune Weaver Dashboard — tools configuration: mobile-style enable switches,
+ * dense tool grid, navigate rows, and search. */
+
+
+/* Label wrapper keeps the native checkbox in the tab order while the
+ * track/thumb render the visual switch, so keyboard and screen-reader users
+ * keep real checkbox semantics with a mobile toggle affordance. */
+.tool-switch {
+  position: relative;
+}
+
+/* Visually hidden but focusable: transparent overlay over the track so
+ * pointer and keyboard interaction still land on the native control. */
+.tool-switch-input {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 22px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tool-switch-input:disabled {
+  cursor: wait;
+}
+
+.tool-switch-track {
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(160, 174, 192, 0.35);
+  border: 1px solid var(--border-color);
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.tool-switch-track[data-on="true"] {
+  background: var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+.tool-switch-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+  transform: translateX(0);
+}
+
+.tool-switch-track[data-on="true"] .tool-switch-thumb {
+  transform: translateX(18px);
+}
+
+.tool-switch-input:focus-visible + .tool-switch-track {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.tool-switch-state {
+  font-size: 0.85rem;
+  min-width: 62px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-switch-track,
+  .tool-switch-thumb {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .tool-switch-track {
+    border: 1px solid ButtonText;
+  }
+  .tool-switch-track[data-on="true"] {
+    background: Highlight;
+    border-color: Highlight;
+  }
+  .tool-switch-thumb {
+    background: ButtonFace;
+    border: 1px solid ButtonText;
+  }
+  .tool-switch-input:focus-visible + .tool-switch-track {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* ==========================================================================
+   Built-in Engine Tools Cards Grid
+   ========================================================================== */
+
+/* Dense grid replaces the full-width row list so a dozen engine tools fit
+ * without long scrolling: auto-fill yields 3–4 cards per row on desktop
+ * panes while collapsing to a single column on narrow viewports. */
+.builtin-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 600px) {
+  .builtin-tools-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.builtin-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--bg-card, #1e2533);
+  border: 1px solid var(--border-color, #2d3748);
+  transition: border-color 0.15s ease;
+}
+
+.builtin-tool-card:hover {
+  border-color: rgba(72, 187, 120, 0.4);
+}
+
+.builtin-tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Long names truncate with an ellipsis (full name stays in title) so one
+ * verbose identifier never stretches its card or breaks the grid. */
+.builtin-tool-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #48bb78;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.builtin-tool-permission {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background-color: #2d3748;
+  color: #a0aec0;
+  white-space: nowrap;
+}
+
+/* One-line clamp keeps every card the same height; the title tooltip plus
+ * the Details disclosure below carry the complete wording. */
+.builtin-tool-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary, #a0aec0);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Native disclosure keeps the full description keyboard-operable without
+ * extra state: summary stays in the tab order and announces expanded. */
+.builtin-tool-details {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #a0aec0);
+}
+
+.builtin-tool-details summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.builtin-tool-details summary:hover {
+  color: #ffffff;
+}
+
+.builtin-tool-details summary:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.builtin-tool-details-body {
+  margin: 6px 0 0 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.builtin-tool-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color, #2d3748);
+}
+
+/* Split variant for rows pairing the enable switch with a Configure action:
+ * keeps the switch left and the action right without inline style overrides
+ * so the footer layout stays in the stylesheet. */
+.builtin-tool-footer--split {
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* ==========================================================================
+   Browser Navigate Extras (final URL, redirects, auth, snapshot, thumbnail)
+   ========================================================================== */
+
+/* Compact navigate summary sits below the row header so the final URL and
+ * redirect count stay visible without expanding arguments and outputs. */
+.browser-navigate-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.chat-tool-pill .browser-navigate-summary {
+  padding: 6px 8px;
+  border-top: 1px solid #2c2c38;
+}
+
+.browser-final-url-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.browser-final-url-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.browser-final-url {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-redirect-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* AUTH REQUIRED reuses the pending-approval amber tokens so gated navigations
+ * and parked approvals share one visual language without inline styles. */
+.auth-required-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  width: fit-content;
+}
+
+.tool-action-badge .auth-required-badge {
+  margin-left: 6px;
+  font-size: 10px;
+}
+
+.chat-tool-toggle .auth-required-badge {
+  margin-left: 6px;
+  font-size: 10px;
+}
+
+.browser-navigate-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+/* Collapsed redirect chain and text snapshot use native details so the row
+ * stays compact until the reader explicitly expands each section. */
+.browser-chain-details,
+.browser-snapshot-details {
+  background: #0f0f14;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.browser-chain-details summary,
+.browser-snapshot-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.browser-chain-details summary:hover,
+.browser-snapshot-details summary:hover {
+  color: #ffffff;
+}
+
+.browser-chain-list {
+  margin: 6px 0 2px 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.browser-chain-item {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #cfcfe0;
+  word-break: break-all;
+}
+
+.browser-chain-url {
+  overflow-wrap: anywhere;
+}
+
+.browser-chain-status {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.browser-snapshot-body {
+  margin: 6px 0 2px 0;
+  padding: 8px;
+  background: #0d0d12;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.browser-screenshot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.browser-thumbnail-btn {
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.browser-thumbnail-btn:hover {
+  border-color: var(--border-focus);
+}
+
+.browser-thumbnail {
+  width: 120px;
+  height: 68px;
+  object-fit: cover;
+  display: block;
+  background: #0d0d12;
+}
+
+.browser-screenshot-hash {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.browser-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 24px;
+}
+
+.browser-lightbox-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px;
+  max-width: min(880px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.browser-lightbox-close {
+  align-self: flex-end;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.browser-lightbox-close:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+}
+
+.browser-lightbox-image {
+  max-width: 100%;
+  max-height: calc(100vh - 140px);
+  border-radius: 8px;
+  object-fit: contain;
+  background: #0d0d12;
+}
+
+/* Index stat flash: brief accent on committed-growth updates. Applied only to
+ * the Size/Documents/Chunks values when their totals change, then cleared
+ * after a short window so idle cards never hold the accent. */
+.index-stat-value-flash {
+  color: var(--accent-purple);
+  animation: indexStatFlash 1.2s ease-out;
+}
+
+@keyframes indexStatFlash {
+  0% {
+    color: var(--accent-purple);
+    text-shadow: 0 0 10px var(--accent-purple-glow);
+  }
+  100% {
+    color: inherit;
+    text-shadow: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .index-stat-value-flash {
+    animation: none;
+  }
+}
+
+
+/* ==========================================================================
+   Tool Categories, Filter Pills & Search in Settings
+   ========================================================================== */
+
+.tools-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 16px 0 24px 0;
+}
+
+.tools-search-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.tools-search-icon {
+  position: absolute;
+  left: 12px;
+  color: var(--text-secondary, #a0aec0);
+  pointer-events: none;
+}
+
+/* Tools search reserves room for its overlaid icon: the element-plus-attribute
+ * selector outranks the global search padding, and the inset equals the icon
+ * offset plus icon plus gap so typed text never slides under the icon. */
+input.tools-search-input[type="search"] {
+  width: 100%;
+  padding: 8px 12px 8px 36px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  background-color: var(--bg-card, #1e2533);
+  border: 1px solid var(--border-color, #2d3748);
+  color: var(--text-primary, #ffffff);
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.tools-search-input:focus {
+  border-color: var(--accent-purple, #9f7aea);
+}
+
+.tools-category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.tools-category-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  border: 1px solid var(--border-color, #2d3748);
+  background-color: var(--bg-card, #1e2533);
+  color: var(--text-secondary, #a0aec0);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tools-category-pill:hover {
+  background-color: var(--bg-hover, #2d3748);
+  color: var(--text-primary, #ffffff);
+}
+
+.tools-category-pill.active {
+  background-color: rgba(159, 122, 234, 0.2);
+  border-color: var(--accent-purple, #9f7aea);
+  color: #d6bcfa;
+}
+
+.tools-category-pill-count {
+  font-size: 0.72rem;
+  opacity: 0.8;
+  padding: 0 4px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tool-category-section {
+  margin-bottom: 28px;
+}
+
+.tool-category-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color, #2d3748);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tool-category-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-category-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary, #ffffff);
+}
+
+.tool-category-badge {
+  font-size: 0.72rem;
+  padding: 2px 7px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+
+.tool-category-badge.all-enabled {
+  background-color: rgba(72, 187, 120, 0.2);
+  color: #68d391;
+  border: 1px solid rgba(72, 187, 120, 0.3);
+}
+
+.tool-category-badge.partial {
+  background-color: rgba(237, 137, 54, 0.2);
+  color: #f6ad55;
+  border: 1px solid rgba(237, 137, 54, 0.3);
+}
+
+.tool-category-badge.all-disabled {
+  background-color: rgba(160, 174, 192, 0.15);
+  color: #a0aec0;
+  border: 1px solid rgba(160, 174, 192, 0.25);
+}
+
+.tool-category-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-category-action-btn {
+  padding: 3px 8px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color, #2d3748);
+  background: transparent;
+  color: var(--text-secondary, #a0aec0);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.tool-category-action-btn:hover {
+  background: var(--bg-hover, #2d3748);
+  color: var(--text-primary, #ffffff);
+}
+
+.tool-category-action-btn.configure {
+  border-color: rgba(159, 122, 234, 0.4);
+  color: #d6bcfa;
+}
+
+.tool-category-action-btn.configure:hover {
+  background: rgba(159, 122, 234, 0.2);
+}
+

@@ -1,0 +1,850 @@
+/* Rune Weaver Dashboard — global app shell and full-width top navigation:
+ * root layout frame, dropdown menus, shared cards, and the handheld tab bar. */
+
+
+.app-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.top-nav {
+  height: 52px;
+  width: 100%;
+  background: #15151b;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.top-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rune-glyph-icon {
+  color: var(--accent-purple);
+  filter: drop-shadow(0 0 6px var(--accent-purple-glow));
+}
+
+.app-brand-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #ffffff;
+}
+
+.top-nav-divider {
+  color: #3f3f4e;
+  font-size: 14px;
+}
+
+.top-nav-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .top-nav-subtitle,
+  .top-nav-divider {
+    display: none;
+  }
+}
+
+.top-nav-links {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 4px;
+}
+
+.top-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.top-nav-item:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.top-nav-item.active {
+  color: #ffffff;
+  border-bottom-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.nav-item-icon {
+  opacity: 0.8;
+}
+
+.top-nav-item.active .nav-item-icon {
+  opacity: 1;
+  color: var(--accent-purple);
+}
+
+.nav-badge {
+  background: var(--accent-purple);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.top-nav-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.top-nav-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #1e1e27;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Profile and section dropdown menus share one geometry contract: the
+ * `.nav-dropdown-*` classes are the source of truth both menus reuse, so
+ * the two surfaces cannot drift and the profile rules keep their placement. */
+.nav-dropdown-container,
+.profile-dropdown-container {
+  position: relative;
+}
+
+.profile-dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  background: #181822;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.profile-dropdown-btn:hover,
+.profile-dropdown-btn.open {
+  border-color: var(--accent-purple);
+  background: #1f1f2e;
+}
+
+.profile-dropdown-btn.settings-active {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 1px var(--accent-purple);
+}
+
+.profile-user-icon {
+  color: var(--accent-purple);
+}
+
+.profile-btn-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-chevron {
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+
+.dropdown-chevron.rotate-180 {
+  transform: rotate(180deg);
+}
+
+.nav-dropdown-menu,
+.profile-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  min-width: 280px;
+  width: max-content;
+  max-width: min(500px, calc(100vw - 32px));
+  background: #14141d;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  padding: 8px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: fadeInDown 0.15s ease-out;
+}
+
+/* Anchoring stays contextual: the profile trigger sits at the far right, while
+ * the Work trigger sits near the brand, so each menu grows toward the page
+ * centre instead of off-screen. */
+.profile-dropdown-menu {
+  right: 0;
+}
+
+.nav-dropdown-menu {
+  left: 0;
+}
+
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.profile-menu-header {
+  padding: 8px 10px 10px;
+}
+
+.profile-header-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-header-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profile-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f3f4f6;
+}
+
+.profile-status-text {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.status-dot-sm {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-green);
+  box-shadow: 0 0 5px rgba(16, 185, 129, 0.6);
+}
+
+.profile-menu-section {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 8px;
+}
+
+.profile-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.profile-info-row .info-label {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.profile-info-row .info-value {
+  color: #e5e7eb;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.profile-menu-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.nav-dropdown-item,
+.profile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: #d1d5db;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+/* The active child reads the same as the active profile item, so selecting
+ * Goals/Schedules/Runs inside Work highlights exactly like Settings does. */
+.nav-dropdown-item:hover,
+.nav-dropdown-item.active,
+.profile-menu-item:hover,
+.profile-menu-item.active {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+/* Keyboard focus stays visible on the Work trigger and its items without
+ * altering the profile menu, which keeps its existing trigger affordance. */
+.nav-group-trigger:focus-visible,
+.nav-dropdown-item:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Open trigger mirrors the profile dropdown's open affordance so both menus
+ * read as one system while the active underline still marks the current tab. */
+.nav-group-trigger.open {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Child unread pill inside the open Work menu. It docks right inside the
+ * existing flex `.nav-dropdown-item` row and matches the trigger `.nav-badge`
+ * palette so the rolled-up total stays visually auditable per child. */
+.nav-dropdown-item-badge {
+  background: var(--accent-purple);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.profile-menu-footer {
+  padding: 6px 12px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-green);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.icon-button {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.icon-button:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.icon-button.active {
+  color: var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+.icon-button.danger:hover {
+  color: var(--status-red);
+  border-color: var(--status-red);
+}
+
+/* ==========================================================================
+   Main Content Layout
+   ========================================================================== */
+
+.app-main-content {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  padding: 10px 16px 12px;
+  box-sizing: border-box;
+}
+
+.app-container {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 20px;
+  background: var(--bg-panel);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: calc(100vh - 76px);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel h2 {
+  margin-top: 0;
+  margin-bottom: 4px;
+  font-size: 18px;
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Generic Card & Badge Components */
+.card {
+  background: #181822;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 16px;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.card:last-child {
+  margin-bottom: 0;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.keychain-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.keychain-status-badge.stored {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.keychain-status-badge.missing {
+  background: rgba(234, 179, 8, 0.15);
+  color: #facc15;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.keychain-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 6px;
+  background: #1e1e28;
+  border: 1px solid #333344;
+  color: var(--text-main, #ffffff);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.keychain-action-btn:hover {
+  background: #2a2a38;
+  border-color: #4a4a60;
+  color: #38bdf8;
+}
+
+.store-secret-modal {
+  max-width: 480px;
+}
+
+
+/* ==========================================================================
+   Mobile Bottom Tab Bar + Slim Top (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Bottom bar owns the five canonical tabs on handheld widths, fixed to the
+ * viewport bottom with safe-area clearance so the home indicator never covers
+ * the targets. Hidden by default; the max-width query is the sole reveal path. */
+.mobile-bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  min-height: calc(64px + 8px + env(safe-area-inset-bottom, 0px));
+  height: auto;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  background: #15151b;
+  border-top: 1px solid var(--border-color);
+  z-index: 40;
+  display: none;
+  box-sizing: border-box;
+}
+
+/* Each tab keeps a 48px touch target (above the 44px minimum) with a 64px
+ * minimum width so five tabs share narrow screens without squeezing labels.
+ * The top border reserves the active indicator slot without shifting layout. */
+.mobile-bottom-tab {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 48px;
+  min-width: 64px;
+  padding: 6px 4px 4px;
+  background: transparent;
+  border: none;
+  border-top: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.mobile-bottom-tab:hover {
+  color: #ffffff;
+}
+
+.mobile-bottom-tab:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: -2px;
+}
+
+/* Active tab reads as white text on a purple glow with a top indicator bar;
+ * the glyph itself takes the solid accent so icon and text stay distinct. */
+.mobile-bottom-tab.active {
+  color: #ffffff;
+  border-top-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.mobile-bottom-tab.active .mobile-bottom-tab-icon {
+  color: var(--accent-purple);
+}
+
+.mobile-bottom-tab-icon-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobile-bottom-tab-label {
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* Unread badge floats above the icon's top-right so counts never push the
+ * label sideways. The numeric cap (99+) is applied in the navigation contract
+ * before render, so this rule only positions the pill. */
+.mobile-bottom-tab-badge {
+  position: absolute;
+  top: 4px;
+  left: calc(50% + 2px);
+  background: var(--accent-purple);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.mobile-bottom-group-wrap {
+  flex: 1 1 0;
+  display: flex;
+  position: relative;
+}
+
+.mobile-bottom-group-wrap .mobile-bottom-tab {
+  width: 100%;
+}
+
+.mobile-bottom-tab-label-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.mobile-bottom-tab-chevron {
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+  margin-top: 1px;
+}
+
+.mobile-bottom-tab.active .mobile-bottom-tab-chevron,
+.mobile-bottom-tab.open .mobile-bottom-tab-chevron {
+  color: #ffffff;
+}
+
+.mobile-bottom-tab-chevron.rotate-180 {
+  transform: rotate(180deg);
+}
+
+/* Mobile drop-up backdrop: dismisses menu when tapping outside */
+.mobile-dropup-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 38;
+}
+
+/* Drop-up popover menu anchored above the bottom bar */
+.mobile-dropup-menu {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  min-width: 190px;
+  max-width: calc(100vw - 24px);
+  background: #14141d;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  padding: 6px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  animation: fadeInUp 0.15s ease-out;
+}
+
+/* Anchoring: Work is center-left, Memory is right-aligned */
+.mobile-dropup-work {
+  left: 50%;
+  transform: translateX(-50%);
+  animation: fadeInUpWork 0.15s ease-out;
+}
+
+.mobile-dropup-memory {
+  right: 4px;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeInUpWork {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Item inside mobile drop-up */
+.mobile-dropup-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  width: 100%;
+}
+
+.mobile-dropup-item:hover,
+.mobile-dropup-item:active {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.mobile-dropup-item.active {
+  background: var(--accent-purple-glow);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.mobile-dropup-item.active .mobile-dropup-item-icon {
+  color: var(--accent-purple);
+}
+
+.mobile-dropup-item-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.mobile-dropup-item-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.mobile-dropup-item-badge {
+  background: var(--accent-purple);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Mobile reveals the bar as a space-around flex row; desktop explicitly keeps
+ * it hidden so wide viewports never show a duplicate tab surface. */
+@media (max-width: 640px) {
+  .mobile-bottom-nav {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-around;
+  }
+}
+
+@media (min-width: 641px) {
+  .mobile-bottom-nav {
+    display: none;
+  }
+}
+
+/* Slim mobile top: section links move to the bottom bar, leaving the glyph,
+ * compact title, bell, and an icon-only profile trigger. The profile menu
+ * stays absolutely anchored to the trigger with viewport-clamped width. */
+@media (max-width: 640px) {
+  .top-nav-links {
+    display: none;
+  }
+
+  .app-brand-title {
+    font-size: 14px;
+  }
+
+  /* Icon-only 32px circle: label, status dot, and chevron hide so only the
+   * user glyph remains centered. The aria-label on the trigger is untouched
+   * so assistive tech still announces the profile and settings menu. */
+  .profile-dropdown-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    border-radius: 50%;
+    justify-content: center;
+    gap: 0;
+  }
+
+  .profile-btn-label {
+    display: none;
+  }
+
+  .profile-dropdown-btn .status-dot {
+    display: none;
+  }
+
+  .profile-dropdown-btn .dropdown-chevron {
+    display: none;
+  }
+
+  .profile-dropdown-menu,
+  .nav-dropdown-menu {
+    position: absolute;
+    right: 0;
+    min-width: 240px;
+    max-width: calc(100vw - 16px);
+  }
+
+  /* Handheld shell uses an exact 8px gutter on every side: the bottom adds
+   * the 72px padded bar plus an 8px gap and the home-indicator inset so the input
+   * never slides under the fixed bar while side gutters stay at 8px. */
+  .app-main-content {
+    padding: 8px 8px calc(80px + env(safe-area-inset-bottom, 0px));
+  }
+}
+

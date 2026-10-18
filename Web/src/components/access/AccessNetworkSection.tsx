@@ -107,12 +107,7 @@ export function isValidDomainLine(entry: string): boolean {
   // literals, so a network line carrying [ or ] never authorizes.
   if (lowered.includes("[") || lowered.includes("]")) return false;
   if (lowered.includes("?")) return false;
-  if (
-    lowered.includes("/") ||
-    lowered.includes("\\") ||
-    lowered.includes("@") ||
-    lowered.includes("#")
-  ) {
+  if (lowered.includes("/") || lowered.includes("\\") || lowered.includes("@") || lowered.includes("#")) {
     return false;
   }
   // A valid IPv6 literal always carries at least two colons, so a lone colon
@@ -521,12 +516,14 @@ export interface NetworkEgressEditorsProps {
   applying?: boolean;
 }
 
+const EMPTY_DOMAINS: string[] = [];
+
 // Structured network egress editors.
 export function NetworkEgressEditors({
   mode = "allowlist_only",
-  allowedDomains = [],
-  blockedDomains = [],
-  localExemptions = [],
+  allowedDomains = EMPTY_DOMAINS,
+  blockedDomains = EMPTY_DOMAINS,
+  localExemptions = EMPTY_DOMAINS,
   onModeChange,
   onAllowedDomainsChange,
   onBlockedDomainsChange,
@@ -534,13 +531,17 @@ export function NetworkEgressEditors({
   rechecking,
   applying,
 }: NetworkEgressEditorsProps) {
-  const allowedList = allowedDomains ?? [];
-  const blockedList = blockedDomains ?? [];
-  const localList = localExemptions ?? [];
+  const allowedList = useMemo(() => allowedDomains ?? EMPTY_DOMAINS, [allowedDomains]);
+  const blockedList = useMemo(() => blockedDomains ?? EMPTY_DOMAINS, [blockedDomains]);
+  const localList = localExemptions ?? EMPTY_DOMAINS;
   // Display buffers keep the typed text while the parent draft stays canonical,
   // so a trailing space stays visible instead of vanishing on the next render.
   const [allowedBuffer, setAllowedBuffer] = useState<string>(() => formatDomainLines(allowedList));
   const [blockedBuffer, setBlockedBuffer] = useState<string>(() => formatDomainLines(blockedList));
+  const allowedBufferRef = useRef(allowedBuffer);
+  allowedBufferRef.current = allowedBuffer;
+  const blockedBufferRef = useRef(blockedBuffer);
+  blockedBufferRef.current = blockedBuffer;
   const localText = formatDomainLines(localList);
   const shadowWarnings = findEgressShadowWarnings(allowedList, blockedList);
   const invalidAllowed = allowedList.filter((entry) => !isValidDomainLine(entry));
@@ -548,14 +549,14 @@ export function NetworkEgressEditors({
 
   useEffect(() => {
     const propText = formatDomainLines(allowedList);
-    if (JSON.stringify(parseDomainLines(allowedBuffer)) !== JSON.stringify(allowedList)) {
+    if (JSON.stringify(parseDomainLines(allowedBufferRef.current)) !== JSON.stringify(allowedList)) {
       setAllowedBuffer(propText);
     }
   }, [allowedList]);
 
   useEffect(() => {
     const propText = formatDomainLines(blockedList);
-    if (JSON.stringify(parseDomainLines(blockedBuffer)) !== JSON.stringify(blockedList)) {
+    if (JSON.stringify(parseDomainLines(blockedBufferRef.current)) !== JSON.stringify(blockedList)) {
       setBlockedBuffer(propText);
     }
   }, [blockedList]);

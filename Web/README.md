@@ -21,7 +21,7 @@ Use the `Makefile` at the repo root as the canonical way to build, test, and lin
 ```bash
 make build-web   # build the dashboard bundle (requires Node.js 20+)
 make test-web    # dashboard tests (vitest)
-make lint-web    # dashboard typecheck (tsc --noEmit)
+make lint-web    # typecheck + eslint (TS/CSS) + file-size budgets
 ```
 
 Full target list (see root `Makefile`):
@@ -38,7 +38,7 @@ Full target list (see root `Makefile`):
 | `make test-web` | Dashboard tests (`npm test` in `Web/`, vitest) |
 | `make test-swift` | `swift test` (full Swift suite) |
 | `make lint` | `lint-web` + `lint-swift` |
-| `make lint-web` | Dashboard typecheck (`npm run typecheck` in `Web/`) |
+| `make lint-web` | Dashboard typecheck + lint (`npm run typecheck` + `npm run lint` in `Web/`: eslint over `src` — TS/TSX + CSS via `@eslint/css` — plus the file-budget vitest suite) |
 | `make lint-swift` | `swiftformat --lint .` plus `swiftlint lint` |
 | `make audit` / `make audit-web` | Security vulnerability scan (`npm audit --audit-level=high` in `Web/`) |
 | `make run ARGS="<args>"` | Launch the engine (`swift run rune-weaver <args>`), e.g. `make run ARGS="chat"` |
@@ -108,7 +108,7 @@ Canonical checks from the repo root:
 
 ```bash
 make test-web   # vitest: API-client plus component tests
-make lint-web   # typecheck (tsc --noEmit)
+make lint-web   # typecheck + eslint (TS/CSS) + file-size budgets
 make build-web  # full dashboard build
 ```
 
@@ -117,6 +117,7 @@ Dashboard-only commands (run inside `Web/`, development only):
 ```bash
 npm run dev        # Vite dev server (development only)
 npm run typecheck  # TypeScript check
+npm run lint       # eslint over src (TS/TSX + CSS) + file-size budgets
 npm test           # vitest: API-client plus component tests
 ```
 
