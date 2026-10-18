@@ -1,0 +1,861 @@
+/* Rune Weaver Dashboard — modal dialogs and the run detail viewer: backdrop,
+ * panel chrome, and wizard step layout. */
+
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 20px;
+}
+
+.modal-container {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 680px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.modal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.modal-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.modal-body::-webkit-scrollbar-thumb {
+  background: var(--border-color, #2d3748);
+  border-radius: 4px;
+}
+
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted, #718096);
+}
+
+.modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  background: #141419;
+}
+
+.session-delete-modal {
+  max-width: 440px;
+}
+
+/* Run Details */
+
+.run-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.meta-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.meta-value {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.run-section {
+  margin-bottom: 16px;
+}
+
+.run-section h4 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0 0 6px 0;
+}
+
+.prompt-display-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.agent-response-box {
+  background: #131318;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.empty-response-note {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+}
+
+.tool-action-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.tool-action-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.tool-action-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-name {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tool-call-id {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Shared badge states for the run-log card variant: one stylesheet source keeps
+ * card and chat rows consistent. Green/red/amber/purple mirror the chat pill
+ * taxonomy (Done / Error / Unknown Tool / Invalid Syntax) with the same hues. */
+.tool-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.tool-badge-ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--status-green);
+}
+
+.tool-badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--status-red);
+}
+
+/* An unknown tool call (amber) and malformed call syntax (purple) are
+ * distinct outcomes from a runtime error, not error variants. */
+.tool-badge-invalid-tool {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.tool-badge-invalid-syntax {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.tool-badge-pending {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--status-amber);
+}
+
+.tool-badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.tool-action-body {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+  background: #141419;
+}
+
+.code-block {
+  margin: 4px 0 0 0;
+  padding: 8px;
+  background: #0d0d12;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ==========================================================================
+   Schedule Wizard
+   ========================================================================== */
+
+.wizard-modal {
+  max-width: 640px;
+}
+
+.wizard-progress-track {
+  height: 3px;
+  background: var(--border-color);
+  width: 100%;
+}
+
+.wizard-progress-bar {
+  height: 100%;
+  background: var(--accent-purple);
+  transition: width 0.3s ease;
+}
+
+.wizard-step-indicator {
+  font-size: 12px;
+  color: var(--accent-purple);
+  font-weight: 500;
+}
+
+.trigger-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.trigger-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border-color);
+  border-radius: 10px;
+  padding: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.trigger-card:hover {
+  border-color: var(--border-focus);
+}
+
+.trigger-card.selected {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.trigger-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.trigger-icon {
+  color: var(--accent-purple);
+}
+
+.trigger-card p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.preset-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-card:hover {
+  border-color: var(--border-focus);
+}
+
+.preset-card.selected {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.preset-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.preset-card-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.preset-cron-tag {
+  font-size: 11px;
+  color: var(--accent-purple);
+  margin-top: 4px;
+}
+
+/* Goals empty state: centered explainer steps plus example cards that reuse
+   the preset look with a roomier grid and a cadence accent. */
+.goal-explainer-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 560px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.goal-example-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  width: 100%;
+  margin-top: 4px;
+}
+
+.goal-example-card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.goal-example-cadence {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent-purple);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.template-pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.template-pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.template-pill:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-focus);
+}
+
+.review-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.review-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #252530;
+  font-size: 13px;
+}
+
+.review-label {
+  color: var(--text-muted);
+}
+
+.prompt-preview-box {
+  margin-top: 6px;
+  padding: 10px;
+  background: #131318;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ==========================================================================
+   Schedule Cards & Embedded Runs
+   ========================================================================== */
+
+.job-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.schedule-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 16px;
+  transition: border-color 0.15s ease;
+}
+
+.schedule-card.disabled {
+  opacity: 0.7;
+}
+
+.schedule-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Flex ancestors must allow shrinking below content width, otherwise a long
+ * cron string forces the card wider instead of letting the badge truncate. */
+.schedule-card-identity {
+  min-width: 0;
+}
+
+.schedule-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.schedule-card-name {
+  font-size: 16px;
+}
+
+.trigger-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Cron badge stays on one line inside the card: it shrinks with the title row
+ * and truncates with an ellipsis instead of wrapping, while the full expression
+ * stays hover-readable via the title attribute. The poll variant keeps wrapping. */
+.trigger-badge.cron {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+/* Inner text carries the truncation so the leading icon keeps its size while
+ * only the schedule string clips. */
+.trigger-badge.cron > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.trigger-badge.poll {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+
+.trigger-badge.poll.messages {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.trigger-badge.poll.calendar {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.schedule-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-toggle-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.status-toggle-btn.enabled {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.status-toggle-btn.disabled {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+
+.schedule-card-prompt {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #d1d1db;
+}
+
+.prompt-label {
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.schedule-card-footer {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #252530;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.view-history-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent-purple);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.view-history-btn:hover {
+  text-decoration: underline;
+}
+
+.embedded-history-drawer {
+  margin-top: 12px;
+  padding: 12px;
+  background: #141419;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.embedded-history-drawer h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+}
+
+.embedded-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.embedded-run-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.embedded-run-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.embedded-run-response {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cfcfe0;
+}
+
+
+/* ==========================================================================
+   Chat Settings Modal & Controls
+   ========================================================================== */
+
+.chat-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.chat-settings-modal {
+  max-width: 520px;
+}
+
+.chat-settings-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-purple, #a855f7);
+}
+
+.chat-settings-modal-title h3 {
+  margin: 0;
+  color: var(--text-primary, #ffffff);
+}
+
+.chat-settings-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+
+.chat-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color, #282833);
+}
+
+.chat-settings-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.chat-settings-section-header h4 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #ffffff);
+}
+
+.chat-settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.4;
+}
+
+.chat-settings-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.chat-settings-radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #282833);
+  background: var(--bg-card, #171720);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-settings-radio-card:hover {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.chat-settings-radio-card.active {
+  background: rgba(168, 85, 247, 0.08);
+  border-color: var(--accent-purple, #a855f7);
+}
+
+.chat-settings-radio-input {
+  margin-top: 3px;
+  accent-color: var(--accent-purple, #a855f7);
+  cursor: pointer;
+}
+
+.chat-settings-radio-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-settings-option-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #ffffff);
+}
+
+.chat-settings-option-desc {
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.4;
+}
+
+.chat-settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.chat-settings-toggle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.chat-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+
+/* ==========================================================================
+   Policy Binding Modal Step Layout
+   ========================================================================== */
+
+/* Separates hint text from its error block on every step. */
+.policy-binding-modal .error-banner {
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
+/* Method scope radios stack so the two options never share one line. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Adjacent container holds the seven method boxes; sibling keeps scope radios untouched. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] + div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+/* Narrow probe grid stacks to one column so the three inputs never crush. */
+@media (max-width: 560px) {
+  .policy-binding-modal [data-testid="binding-review"] > div {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Step indicator drops below the subtitle so the header stacks instead of running inline. */
+.policy-binding-modal .wizard-step-indicator {
+  display: block;
+  margin-top: 4px;
+}
+
+/* Stored pill reuses the shipped success tokens so In Keychain reads like other success states. */
+.policy-binding-modal .keychain-pill-stored {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+/* Missing pill stays neutral slate so Not in Keychain never reads as an error. */
+.policy-binding-modal .keychain-pill-missing {
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #cbd5e1;
+}
+
+/* Review allow-domains row wraps so the label and the uncovered count never crowd. */
+.policy-binding-modal .allow-domains-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Review step stacks its blocks so summary, explanation, and probe never crowd. */
+.policy-binding-modal [data-testid="binding-review"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Summary rows keep even rhythm without touching other steps. */
+.policy-binding-modal [data-testid="review-summary"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+

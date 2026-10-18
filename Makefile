@@ -10,7 +10,7 @@
 #   make setup            # clean install dependencies for Web and Swift
 #   make build            # Swift engine + dashboard bundle (Web/dist)
 #   make test             # Swift tests + dashboard tests (vitest)
-#   make lint             # Swift style gates + dashboard typecheck
+#   make lint             # Swift style gates + dashboard typecheck, ESLint (TS/CSS), and file budgets
 #   make audit            # security audit for Web dashboard and Swift dependencies
 #   make run ARGS="chat"  # launch the engine (extra args pass through)
 #   make all              # build + test + lint (default)
@@ -80,10 +80,11 @@ test-swift: version
 
 lint: lint-web lint-swift
 
-# Web has no eslint config; the TypeScript compiler check is the lint gate.
+# Web lint runs TypeScript compiler checks, ESLint (TS & CSS), and file budget enforcement.
 lint-web:
 	@test -d Web/node_modules || $(MAKE) setup-web
 	cd Web && npm run typecheck
+	cd Web && npm run lint
 
 lint-swift:
 	swiftformat --lint .

@@ -38,10 +38,12 @@ describe("Wire API Casing Contract (Web)", () => {
   });
 
   it("verifies api.ts interface and type definitions contain no snake_case properties", async () => {
-    const { readFileSync } = (await import(
+    const { existsSync, readdirSync, readFileSync } = (await import(
       // @ts-expect-error node builtin without @types/node; test-only probe.
       "node:fs"
     )) as {
+      existsSync: (path: string) => boolean;
+      readdirSync: (path: string) => string[];
       readFileSync: (path: string, encoding: string) => string;
     };
     const { resolve } = (await import(
@@ -53,7 +55,16 @@ describe("Wire API Casing Contract (Web)", () => {
 
     const cwd = typeof process !== "undefined" && typeof process.cwd === "function" ? process.cwd() : "";
     const apiPath = resolve(cwd, "src/api.ts");
-    const source = readFileSync(apiPath, "utf8");
+    const apiDir = resolve(cwd, "src/api");
+    const filesToScan = [apiPath];
+    if (existsSync(apiDir)) {
+      for (const entry of readdirSync(apiDir)) {
+        if (entry.endsWith(".ts")) {
+          filesToScan.push(resolve(apiDir, entry));
+        }
+      }
+    }
+    const source = filesToScan.map((f) => readFileSync(f, "utf8")).join("\n");
 
     // Regular expression matching object property declarations in interfaces and types:
     // e.g. "  propertyName?:" or "  propertyName:"

@@ -149,7 +149,7 @@ export default function InlineApprovalBanner({
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
     };
-  }, [anyMenuOpen, menuOpen, menuPlacement]);
+  }, [anyMenuOpen, chevronRef, denyChevronRef, menuOpen, menuPlacement]);
 
   const egressHost = resolveEgressHost(request);
   const isEgress = Boolean(egressHost);

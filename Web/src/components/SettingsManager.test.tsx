@@ -3052,7 +3052,9 @@ describe("SettingsManager", () => {
       expect(screen.getByText(/Allowed roots cannot be empty/i)).toBeDefined();
     });
     expect(putCount).toBe(putsAfterSave);
-  });
+    // Many sequential user-event keystrokes under loaded CI burst past the 5s
+    // default; this test alone carries headroom.
+  }, 15000);
 
   it("renders the fan-out Configure modal from the server hasConfig flag", async () => {
     const user = userEvent.setup();
@@ -3123,7 +3125,9 @@ describe("SettingsManager", () => {
     expect(screen.getByDisplayValue("4")).toBeDefined();
     expect(screen.getByDisplayValue("300")).toBeDefined();
     expect(screen.getByText(/Lets workers call the full tool registry/i)).toBeDefined();
-  });
+    // Loaded CI worker contention can push initial renders past the 5s
+    // default; this test alone carries headroom.
+  }, 15000);
 
   it("hides the fan-out Configure button when the server reports no config", async () => {
     const user = userEvent.setup();

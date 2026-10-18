@@ -8,6 +8,10 @@
     "dev": "vite --host 127.0.0.1 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --strictPort",
+    "lint": "eslint src && vitest run src/fileBudgets.test.ts",
+    "lint:js": "eslint 'src/**/*.{ts,tsx}'",
+    "lint:css": "eslint 'src/**/*.css'",
+    "lint:budgets": "vitest run src/fileBudgets.test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -19,18 +23,19 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@eslint/css": "^2.0.1",
     "@testing-library/jest-dom": "^6.4.5",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.1",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "jsdom": "^24.1.0",
     "typescript": "~5.5.4",
+    "typescript-eslint": "^8.71.2",
     "vite": "^6.4.3",
     "vitest": "^5.0.0"
-  },
-  "overrides": {
-    "brace-expansion": "^5.0.9"
   }
 }

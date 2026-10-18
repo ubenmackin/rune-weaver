@@ -64,15 +64,21 @@ import {
   createMockWebSocketCapture,
   dispatchFrameOrThrow,
 } from "../test-utils/mockWebSocket";
-import sharedStyles from "../styles.css?raw";
+import rootStyles from "../styles.css?raw";
+import formsStyles from "../styles/forms.css?raw";
+import settingsStyles from "../styles/settings.css?raw";
+import indexingStyles from "../styles/indexing.css?raw";
+
+const sharedStyles =
+  rootStyles + "\n" + formsStyles + "\n" + settingsStyles + "\n" + indexingStyles;
 
 // Plain stylesheet imports resolve to empty under the test transform, so the
-// raw text import keeps the regression pinned to the single stylesheet owner
+// raw text import keeps the regression pinned to the modular stylesheet owners
 // while staying inside the bundler module graph with no runtime file access.
 
-// / Isolates the module-scoped index status cache between tests. / Ownership: test isolation only;
-// every test starts with a null cache so a / prior successful load never leaks into the next
-// cold-boot assertion.
+// Isolates the module-scoped index status cache between tests. Ownership: test
+// isolation only; every test starts with a null cache so a prior successful
+// load never leaks into the next cold-boot assertion.
 beforeEach(() => {
   clearCachedIndexStatusForTesting();
 });
@@ -3770,7 +3776,7 @@ describe("IndexingPanel run actions wrap", () => {
 
   it("keeps Cancel wired while a run is in flight", async () => {
     const user = userEvent.setup();
-    let running = true;
+    const running = true;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {

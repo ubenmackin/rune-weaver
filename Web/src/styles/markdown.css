@@ -1,0 +1,162 @@
+/* Rune Weaver Dashboard — rendered markdown styling in assistant messages. */
+
+.message-text {
+  word-break: break-word;
+}
+
+.markdown-content p {
+  margin: 0 0 8px 0;
+  line-height: 1.55;
+}
+
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content strong {
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content .chat-inline-code {
+  background: #121217;
+  border: 1px solid var(--border-color);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-family: ui-monospace, monospace;
+  color: #c4b5fd;
+}
+
+.markdown-content .chat-code-block-wrapper {
+  margin: 8px 0;
+  background: #0f0f14;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.markdown-content .chat-code-lang-tag {
+  background: #1c1c24;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  letter-spacing: 0.5px;
+  font-family: ui-monospace, monospace;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.markdown-content .chat-code-block {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #e2e8f0;
+}
+
+.markdown-content .chat-ul,
+.markdown-content .chat-ol {
+  margin: 6px 0 8px 20px;
+  padding: 0;
+}
+
+.markdown-content .chat-ul li,
+.markdown-content .chat-ol li {
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
+
+.markdown-content .chat-h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 10px 0 6px;
+  color: var(--text-main);
+}
+
+.markdown-content .chat-h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+  color: var(--text-main);
+}
+
+.markdown-content .chat-h5 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 6px 0 4px;
+  color: var(--text-main);
+}
+
+.markdown-content .chat-blockquote {
+  border-left: 3px solid var(--accent-purple);
+  margin: 8px 0;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  background: rgba(147, 51, 234, 0.05);
+  border-radius: 0 4px 4px 0;
+}
+
+.markdown-content .chat-markdown-link {
+  color: #a78bfa;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-content .chat-markdown-link:hover {
+  color: #c4b5fd;
+}
+
+/* Markdown Tables */
+.markdown-content .chat-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  background: rgba(18, 18, 24, 0.4);
+}
+
+.markdown-content .chat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.markdown-content .chat-table th {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+
+.markdown-content .chat-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.markdown-content .chat-table tr:last-child td {
+  border-bottom: none;
+}
+
+.markdown-content .chat-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Markdown Horizontal Rule */
+.markdown-content .chat-hr {
+  border: none;
+  border-top: 1px solid var(--border-light);
+  margin: 14px 0;
+}
+

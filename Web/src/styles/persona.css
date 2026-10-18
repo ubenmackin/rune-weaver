@@ -1,0 +1,153 @@
+/* Rune Weaver Dashboard — persona avatar chrome: wisp sprite frames, avatar
+ * picker, and identity display states. */
+
+
+/* The sprite sheets carry their own soft drop shadow from the generator, so the
+ * avatar never needs a frame or border of its own, and the sleeping dim lives in
+ * the prerendered asset itself, never in a CSS filter. */
+.persona-avatar {
+  display: inline-block;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Avatar motion is transform-only float with a static-frame fallback: idle,
+ * working, and sleeping drift on translateY alone so a busy Wisp never reads
+ * as a loading shimmer; frames arm only under prefers-reduced-motion. */
+.persona-avatar--idle,
+.persona-avatar--sleeping,
+.persona-avatar--working {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .persona-avatar--idle {
+    animation: personaFloat 4s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .persona-avatar--sleeping {
+    animation: personaFloat 7s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .persona-avatar--working {
+    animation: personaFloat 4s ease-in-out infinite;
+    will-change: transform;
+  }
+}
+
+/* Attention is deliberately static: the amber ring is baked into the frame and
+ * is the signal itself, so motion on top of it would cheapen both. */
+@keyframes personaFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+/* Avatar picker: pill-styled buttons around the 64px colorway sprites. The
+ * grid is auto-fit so all four accents always share the pane's width budget
+ * instead of overflowing on narrow drawers. */
+.persona-avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.persona-avatar-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.persona-avatar-option:hover {
+  border-color: var(--accent-purple);
+}
+
+.persona-avatar-option:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* The selected ring reuses the shared input-focus language (2px accent purple)
+ * rather than inventing a selection color, keeping the picker inside the
+ * existing token budget. */
+.persona-avatar-option.selected {
+  box-shadow: 0 0 0 2px var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+/* Chat header identity row: small and muted so the session title stays primary
+ * while the owner still sees who is answering. Text identity only — the row
+ * carries the persona name span alone, never an avatar image. */
+.chat-persona-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-persona-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+/* Reduced-motion fallback stays explicit even though the float animations
+ * above only arm under `no-preference`: an owner asking for no animation
+ * always sees static frames, never a mid-float freeze. */
+@media (prefers-reduced-motion: reduce) {
+  .persona-avatar--idle,
+  .persona-avatar--sleeping,
+  .persona-avatar--working {
+    animation: none;
+  }
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 900px) {
+  .dashboard-main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-root {
+    padding: 16px 16px 96px;
+    gap: 20px;
+  }
+
+  .dashboard-greeting-title {
+    font-size: 20px;
+  }
+
+  .dashboard-prompt-bar-wrap {
+    padding: 12px 14px;
+  }
+
+  .dashboard-recommendations-list {
+    grid-template-columns: 1fr;
+  }
+
+  .action-card-buttons .btn {
+    min-height: 40px;
+    flex: 1;
+    justify-content: center;
+  }
+}
+

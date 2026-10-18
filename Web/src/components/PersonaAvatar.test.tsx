@@ -341,7 +341,7 @@ describe("persona avatar motion", () => {
       // @ts-expect-error node builtin without @types/node; test-only probe.
       "node:path"
     )) as { resolve: (...pathSegments: string[]) => string };
-    const cssPath = resolve(process.cwd(), "src/styles.css");
+    const cssPath = resolve(process.cwd(), "src/styles/persona.css");
     const css = readFileSync(cssPath, "utf8");
     // All avatar animation arms behind the no-preference gate.
     expect(css).toContain("prefers-reduced-motion: no-preference");
