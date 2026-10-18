@@ -46,7 +46,7 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
     public init(
         memoryMB: Int = ContainersConfig.defaultMemoryMB,
         maxConcurrent: Int = ContainersConfig.defaultMaxConcurrent,
-        runtime: (any ContainerHostRuntime)? = nil,
+        runtime: any ContainerHostRuntime? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil
     ) {
         let resolvedRuntime = runtime ?? LiveContainerHostRuntime()
@@ -61,7 +61,7 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
     /// Creates a detonator from the loaded policy sharing one ledger.
     public init(
         containersConfig: ContainersConfig,
-        runtime: (any ContainerHostRuntime)? = nil,
+        runtime: any ContainerHostRuntime? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil
     ) {
         self.init(

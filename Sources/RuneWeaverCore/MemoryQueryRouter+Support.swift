@@ -165,8 +165,7 @@ extension MemoryQueryRouter {
     static func hasDayAfterTomorrow(_ tokens: [String]) -> Bool {
         guard tokens.count >= 3 else { return false }
         for index in 0 ..< (tokens.count - 2) {
-            guard tokens[index] == "day" || tokens[index] == "days" else { continue }
-            guard tokens[index + 1] == "after", tokens[index + 2] == "tomorrow" else { continue }
+            guard tokens[index] == "day" || tokens[index] == "days", tokens[index + 1] == "after", tokens[index + 2] == "tomorrow" else { continue }
             return true
         }
         return false
@@ -192,8 +191,7 @@ extension MemoryQueryRouter {
     static func firstDateString(in lowered: String) -> String? {
         guard let regex = dateStringRegex else { return nil }
         let range = NSRange(lowered.startIndex ..< lowered.endIndex, in: lowered)
-        guard let match = regex.firstMatch(in: lowered, range: range) else { return nil }
-        guard let swiftRange = Range(match.range, in: lowered) else { return nil }
+        guard let match = regex.firstMatch(in: lowered, range: range), let swiftRange = Range(match.range, in: lowered) else { return nil }
         return String(lowered[swiftRange])
     }
 

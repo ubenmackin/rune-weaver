@@ -303,8 +303,7 @@ public enum MailVectorWindow: Sendable, Equatable {
 
     /// Whether a message date falls inside the window.
     public func includes(date: Date?, now: Date) -> Bool {
-        guard let cutoff = cutoff(now: now) else { return true }
-        guard let date else { return true }
+        guard let cutoff = cutoff(now: now), let date else { return true }
         return date >= cutoff
     }
 }

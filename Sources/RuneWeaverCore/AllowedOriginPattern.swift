@@ -124,8 +124,7 @@ public enum AllowedOriginPattern: Sendable {
             return SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) != nil
         }
         for label in cleaned.split(separator: ".", omittingEmptySubsequences: false) {
-            guard !label.isEmpty else { return false }
-            guard label.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
+            guard !label.isEmpty, label.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
                 return false
             }
         }

@@ -285,8 +285,7 @@ extension EmailCredentialFilter {
             let end = min(lower.length, range.location + range.length + codeWindowRadius)
             guard end > start else { continue }
             let window = lower.substring(with: NSRange(location: start, length: end - start))
-            guard codeKeywords.contains(where: { window.contains($0) }) else { continue }
-            guard range.location >= bodyStart else { continue }
+            guard codeKeywords.contains(where: { window.contains($0) }), range.location >= bodyStart else { continue }
             bodyRanges.append(NSRange(location: range.location - bodyStart, length: range.length))
         }
         guard !bodyRanges.isEmpty else { return body }
@@ -311,8 +310,7 @@ extension EmailCredentialFilter {
             let end = min(lower.length, range.location + range.length + codeWindowRadius)
             guard end > start else { continue }
             let window = lower.substring(with: NSRange(location: start, length: end - start))
-            guard codeKeywords.contains(where: { window.contains($0) }) else { continue }
-            guard range.location + range.length <= subjectLength else { continue }
+            guard codeKeywords.contains(where: { window.contains($0) }), range.location + range.length <= subjectLength else { continue }
             subjectRanges.append(range)
         }
         guard !subjectRanges.isEmpty else { return subject }

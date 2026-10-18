@@ -182,11 +182,7 @@ extension Orchestrator {
         }
         var partition = StructuredCallPartition()
         for call in calls {
-            guard let tool = await toolBus.tool(named: call.toolName) else {
-                partition.allowed.append(call)
-                continue
-            }
-            guard await toolBus.isToolEnabled(named: call.toolName) else {
+            guard let tool = await toolBus.tool(named: call.toolName), await toolBus.isToolEnabled(named: call.toolName) else {
                 partition.allowed.append(call)
                 continue
             }
@@ -493,10 +489,12 @@ extension Orchestrator {
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> (outcome: TurnLoopOutcome?, shouldStop: Bool) {
         if admissions.allowed.isEmpty, admissions.refusedCalls.isEmpty {
-            if !admissions.combinedGated.isEmpty {
-                if let parked = await parkTurnIfGated(context: parkContext, request: request, pendingEpisodic: &pendingEpisodic) {
-                    return (parked, true)
-                }
+            if !admissions.combinedGated.isEmpty, let parked = await parkTurnIfGated(
+                context: parkContext,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
+            ) {
+                return (parked, true)
             }
             return (nil, true)
         }

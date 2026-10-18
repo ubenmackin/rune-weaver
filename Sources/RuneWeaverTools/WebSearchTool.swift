@@ -461,8 +461,7 @@ extension SearXNGEnsurer {
     /// handling.
     @discardableResult
     public static func bestEffortStart(browser: BrowserConfig) async -> Bool {
-        guard isManagedBaseURL(browser.searxngURL) else { return false }
-        guard let runtime = resolveRuntimeURL() else { return false }
+        guard isManagedBaseURL(browser.searxngURL), let runtime = resolveRuntimeURL() else { return false }
         if Task.isCancelled {
             return false
         }
@@ -677,8 +676,8 @@ public struct WebSearchTool: Tool, Sendable {
     /// Creates a search tool.
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
-        transport: (any WebSearchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        transport: any WebSearchTransport? = nil,
+        ensurer: any SearXNGEnsuring? = nil
     ) {
         self.browserConfig = browserConfig
         self.transport = transport ?? URLSessionWebSearchTransport()
@@ -772,8 +771,7 @@ public struct WebSearchTool: Tool, Sendable {
         // Fail closed on non-web schemes: a misconfigured `searxng_url` with a
         // file:/ftp:/javascript:-adjacent shape must never build a request,
         // mirroring the per-hop allowlist in `web.fetch`/`api.request`.
-        guard WebURLSafety.isSafeUrl(normalized) else { return nil }
-        guard !normalized.isEmpty, let base = URL(string: normalized) else { return nil }
+        guard WebURLSafety.isSafeUrl(normalized), !normalized.isEmpty, let base = URL(string: normalized) else { return nil }
         // Fail closed on embedded query or fragment: appending `/search` to
         // `http://127.0.0.1:8888/?x=1` would mangle the endpoint instead of
         // dialing the JSON API, so such bases never build a request.
@@ -822,8 +820,8 @@ public enum WebSearchTools {
     /// Builds the search tool for a browser config.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
-        transport: (any WebSearchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        transport: any WebSearchTransport? = nil,
+        ensurer: any SearXNGEnsuring? = nil
     ) -> [any Tool] {
         [WebSearchTool(browserConfig: browserConfig, transport: transport, ensurer: ensurer)]
     }
@@ -832,8 +830,8 @@ public enum WebSearchTools {
     public static func register(
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
-        transport: (any WebSearchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        transport: any WebSearchTransport? = nil,
+        ensurer: any SearXNGEnsuring? = nil
     ) async {
         for tool in makeTools(browserConfig: browserConfig, transport: transport, ensurer: ensurer) {
             await bus.register(tool: tool)
@@ -852,9 +850,9 @@ public enum WebTools {
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        searchTransport: (any WebSearchTransport)? = nil,
-        fetchTransport: (any WebFetchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil,
+        searchTransport: any WebSearchTransport? = nil,
+        fetchTransport: any WebFetchTransport? = nil,
+        ensurer: any SearXNGEnsuring? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
@@ -873,9 +871,9 @@ public enum WebTools {
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        searchTransport: (any WebSearchTransport)? = nil,
-        fetchTransport: (any WebFetchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil,
+        searchTransport: any WebSearchTransport? = nil,
+        fetchTransport: any WebFetchTransport? = nil,
+        ensurer: any SearXNGEnsuring? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) async {

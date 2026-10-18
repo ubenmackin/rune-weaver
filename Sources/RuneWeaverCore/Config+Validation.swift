@@ -191,23 +191,21 @@ extension RuneWeaverConfig {
         // Fail closed on unbracketed `host:suffix` with a non-numeric suffix: normalization strips
         // only an empty or numeric port, so `evil.com:evil` would otherwise persist verbatim garbage
         // that never matches yet reads as configured.
-        if !trimmed.hasPrefix("[") {
-            if trimmed.filter({ $0 == ":" }).count == 1,
-               let colonIndex = trimmed.firstIndex(of: ":")
-            {
-                let suffix = trimmed[trimmed.index(after: colonIndex)...]
-                if !suffix.allSatisfy({ $0 >= "0" && $0 <= "9" }) {
-                    if field == "server.hostname" {
-                        throw ConfigError.validationError(
-                            field: field,
-                            message: "must be a host without a port (got '\(original)'); configure the port via server.port instead"
-                        )
-                    }
+        if !trimmed.hasPrefix("["), trimmed.filter({ $0 == ":" }).count == 1,
+           let colonIndex = trimmed.firstIndex(of: ":")
+        {
+            let suffix = trimmed[trimmed.index(after: colonIndex)...]
+            if !suffix.allSatisfy({ $0 >= "0" && $0 <= "9" }) {
+                if field == "server.hostname" {
                     throw ConfigError.validationError(
                         field: field,
-                        message: "must be a host with an optional numeric port (got '\(original)'); list exact hosts instead"
+                        message: "must be a host without a port (got '\(original)'); configure the port via server.port instead"
                     )
                 }
+                throw ConfigError.validationError(
+                    field: field,
+                    message: "must be a host with an optional numeric port (got '\(original)'); list exact hosts instead"
+                )
             }
         }
         // Fail closed on a trailing FQDN dot: the gate compares exact normalized hosts, so

@@ -73,9 +73,10 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     /// top-level object shape so fragments (arrays, strings, numbers) reject, matching the bus
     /// execute and narration gates.
     static func parsedArgumentsObject(from argumentsJSON: String) -> [String: Any]? {
-        guard argumentsJSON.utf8.count <= maxArgumentsJSONBytes else { return nil }
-        guard let data = argumentsJSON.data(using: .utf8) else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+        guard argumentsJSON.utf8.count <= maxArgumentsJSONBytes, let data = argumentsJSON.data(using: .utf8), let object = try? JSONSerialization.jsonObject(
+            with: data,
+            options: []
+        ) as? [String: Any] else {
             return nil
         }
         return object
@@ -224,8 +225,7 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         } else if let anyMap = raw as? [String: Any] {
             for (name, value) in anyMap {
                 let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedName.isEmpty else { continue }
-                guard let text = value as? String else { continue }
+                guard !trimmedName.isEmpty, let text = value as? String else { continue }
                 let trimmedValue = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmedValue.isEmpty else { continue }
                 checked[trimmedName] = trimmedValue

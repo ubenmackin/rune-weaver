@@ -197,8 +197,7 @@ public enum LLMProviderFactory: Sendable {
         if let explicit, !explicit.isEmpty {
             return explicit
         }
-        guard let envVar, !envVar.isEmpty else { return nil }
-        guard let value = ProcessInfo.processInfo.environment[envVar],
+        guard let envVar, !envVar.isEmpty, let value = ProcessInfo.processInfo.environment[envVar],
               !value.isEmpty
         else { return nil }
         return value

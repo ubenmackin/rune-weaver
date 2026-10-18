@@ -281,10 +281,7 @@ public actor WorkspaceStore {
         var removed = 0
         for child in children {
             let values = try? child.resourceValues(forKeys: [.contentModificationDateKey])
-            guard let mtime = values?.contentModificationDate else {
-                continue
-            }
-            guard mtime < cutoff else {
+            guard let mtime = values?.contentModificationDate, mtime < cutoff else {
                 continue
             }
             do {

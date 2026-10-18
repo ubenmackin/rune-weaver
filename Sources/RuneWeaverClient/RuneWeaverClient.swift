@@ -285,9 +285,7 @@ public actor RuneWeaverClient {
             var emittedTerminal = Set<String>()
             for line in warnings {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { continue }
-                guard !liveWarnings.contains(trimmed) else { continue }
-                guard emittedTerminal.insert(trimmed).inserted else { continue }
+                guard !trimmed.isEmpty, !liveWarnings.contains(trimmed), emittedTerminal.insert(trimmed).inserted else { continue }
                 liveWarnings.insert(trimmed)
                 continuation.yield(Message(role: .system, content: trimmed))
             }

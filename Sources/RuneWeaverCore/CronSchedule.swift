@@ -197,10 +197,7 @@ public struct CronSchedule: Sendable, Codable, Equatable {
         }
         if trimmed.contains("/") {
             let sides = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            guard sides.count == 2 else {
-                throw CronScheduleError.invalidField(field: field, value: part)
-            }
-            guard let step = Int(sides[1].trimmingCharacters(in: .whitespaces)), step > 0 else {
+            guard sides.count == 2, let step = Int(sides[1].trimmingCharacters(in: .whitespaces)), step > 0 else {
                 throw CronScheduleError.invalidField(field: field, value: part)
             }
             let base = sides[0].trimmingCharacters(in: .whitespaces)

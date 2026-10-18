@@ -7,7 +7,7 @@ public actor PermissionGate {
     /// Durable rules, mirrored to the store best-effort.
     private var rules: [AccessRule] = []
     /// Optional persistence backend for durable rules.
-    private let ruleStore: (any AccessRuleStoring)?
+    private let ruleStore: any AccessRuleStoring?
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
     /// Ephemeral grants valid for the remainder of an active task/turn, indexed by session ID.
@@ -31,7 +31,7 @@ public actor PermissionGate {
     /// Recurring task for pruning expired rules periodically.
     private var reaperTask: Task<Void, Never>?
     /// Optional egress policy evaluator for network egress admission.
-    private var egressEvaluator: (any EgressPolicyEvaluator)?
+    private var egressEvaluator: any EgressPolicyEvaluator?
 
     /// Refusal text when the write-path policy denies without naming a reason. Every real posture
     /// carries its own reason, so this only backstops a classification that somehow answered deny
@@ -40,9 +40,9 @@ public actor PermissionGate {
 
     /// Creates a permission gate.
     public init(
-        ruleStore: (any AccessRuleStoring)? = nil,
+        ruleStore: any AccessRuleStoring? = nil,
         pluginsDir: URL? = nil,
-        egressEvaluator: (any EgressPolicyEvaluator)? = nil
+        egressEvaluator: any EgressPolicyEvaluator? = nil
     ) {
         self.ruleStore = ruleStore
         self.pluginsDir = pluginsDir
@@ -52,9 +52,9 @@ public actor PermissionGate {
     /// Loads a permission gate hydrated from durable storage, pruning expired
     /// rules on startup.
     public static func load(
-        ruleStore: (any AccessRuleStoring)? = nil,
+        ruleStore: any AccessRuleStoring? = nil,
         pluginsDir: URL? = nil,
-        egressEvaluator: (any EgressPolicyEvaluator)? = nil
+        egressEvaluator: any EgressPolicyEvaluator? = nil
     ) async -> PermissionGate {
         let gate = PermissionGate(
             ruleStore: ruleStore,
@@ -67,7 +67,7 @@ public actor PermissionGate {
 
     /// Updates the live egress policy evaluator consulted by the gate.
     /// - Parameter evaluator: Replacement egress evaluator.
-    public func setEgressEvaluator(_ evaluator: (any EgressPolicyEvaluator)?) {
+    public func setEgressEvaluator(_ evaluator: any EgressPolicyEvaluator?) {
         egressEvaluator = evaluator
     }
 
@@ -910,9 +910,8 @@ extension PermissionGate {
     /// value reaches the policy, so a malformed mode is an absent one and the write stays on its
     /// safe default.
     private static func writeRequestedMode(from toolCall: ToolInput) -> String? {
-        guard let object = ActionDescriptor.parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
-        guard let raw = object["mode"], !(raw is NSNull) else { return nil }
-        guard let text = raw as? String else { return nil }
+        guard let object = ActionDescriptor.parsedArgumentsObject(from: toolCall.argumentsJSON), let raw = object["mode"], !(raw is NSNull),
+              let text = raw as? String else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }

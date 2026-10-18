@@ -20,7 +20,7 @@ public actor Orchestrator {
     /// Episodic mirror for every turn, when configured.
     private let memoryEngine: MemoryEngine?
     /// Optional embeddings producer for vector-ranked automatic recall.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
     /// Context window compaction threshold percentage (10-100).
     private var compactionPercent: Int
     /// Queue receiving narrated gated calls, when configured.
@@ -67,7 +67,7 @@ public actor Orchestrator {
         toolResolver: OrchestratorToolResolver? = nil,
         memoryEngine: MemoryEngine? = nil,
         approvalQueue: ApprovalQueue? = nil,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         compactionThresholdPercent: Int = 80,
         steeringQueue: SteeringQueue? = nil,
         securityConfig: SecurityConfig = SecurityConfig(),
@@ -518,8 +518,7 @@ extension Orchestrator {
 
     /// Returns a copy of a turn response carrying the content-free recall summary.
     static func responseWithRecall(_ response: OrchestratorResponse, summary: RecallSummary?) -> OrchestratorResponse {
-        guard let summary else { return response }
-        guard response.recallDiagnostics == nil else { return response }
+        guard let summary, response.recallDiagnostics == nil else { return response }
         return OrchestratorResponse(
             text: response.text,
             sessionID: response.sessionID,
@@ -756,8 +755,8 @@ extension Orchestrator {
 
     /// Files one pure Q&A answer so the next identical question hits the cache.
     private func storeAnswerCacheIfPure(query: String, source: String, finalText: String, executedToolCalls: Int, isParked: Bool = false) async {
-        guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: executedToolCalls, isParked: isParked) else { return }
-        guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return }
+        guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: executedToolCalls, isParked: isParked),
+              OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return }
         await memoryEngine?.cacheAnswer(
             finalText,
             for: SemanticAnswerCache.normalizedQuery(query),
@@ -770,10 +769,7 @@ extension Orchestrator {
     /// Drops malformed negative usage like the dashboard so a drifted backend
     /// cannot decrement the stored total or leak negatives into done frames.
     func accumulateSessionTokens(_ billedTokens: Int?, for sessionID: UUID) -> Int? {
-        guard let billedTokens else {
-            return sessionTokensBySession[sessionID]
-        }
-        guard billedTokens >= 0 else {
+        guard let billedTokens, billedTokens >= 0 else {
             return sessionTokensBySession[sessionID]
         }
         let updated = (sessionTokensBySession[sessionID] ?? 0) + billedTokens
@@ -823,10 +819,7 @@ extension Orchestrator {
 
     /// Stores an explicit remember request and builds its acknowledgement.
     private func rememberAcknowledgement(factText: String, source: String) async throws -> String {
-        guard MemoryEngine.isStorableFact(factText) else {
-            return MemoryEngine.rememberAcknowledgementText(for: factText, stored: false)
-        }
-        guard let memoryEngine else {
+        guard MemoryEngine.isStorableFact(factText), let memoryEngine else {
             return MemoryEngine.rememberAcknowledgementText(for: factText, stored: false)
         }
         let stored = try await memoryEngine.storeRememberedFact(

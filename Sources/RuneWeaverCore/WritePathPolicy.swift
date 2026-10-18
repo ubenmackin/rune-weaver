@@ -236,8 +236,7 @@ public enum WritePathPolicy: Sendable {
         var best: FilesWritePathRule?
         var bestLength = -1
         for rule in rules {
-            guard let base = canonicalRuleBase(rule.path, home: home) else { continue }
-            guard WorkspaceContainment.isInsidePath(canonicalPath, root: base) else { continue }
+            guard let base = canonicalRuleBase(rule.path, home: home), WorkspaceContainment.isInsidePath(canonicalPath, root: base) else { continue }
             if base.count > bestLength {
                 best = rule
                 bestLength = base.count

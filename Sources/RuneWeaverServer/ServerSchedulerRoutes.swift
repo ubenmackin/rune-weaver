@@ -41,20 +41,16 @@ func awaitingParkedRun(
     guard !candidates.isEmpty else {
         return nil
     }
-    if let decidedCallID, !decidedCallID.isEmpty {
-        if let match = candidates.first(where: { run in
-            run.toolActions.contains { $0.callID == decidedCallID }
-        }) {
-            return match
-        }
+    if let decidedCallID, !decidedCallID.isEmpty, let match = candidates.first(where: { run in
+        run.toolActions.contains { $0.callID == decidedCallID }
+    }) {
+        return match
     }
     let resumedCallIDs = Set(resumed.toolActions.map(\.callID))
-    if !resumedCallIDs.isEmpty {
-        if let match = candidates.first(where: { run in
-            run.toolActions.contains { resumedCallIDs.contains($0.callID) }
-        }) {
-            return match
-        }
+    if !resumedCallIDs.isEmpty, let match = candidates.first(where: { run in
+        run.toolActions.contains { resumedCallIDs.contains($0.callID) }
+    }) {
+        return match
     }
     return candidates.first
 }
@@ -71,12 +67,10 @@ func strandedParkedRun(
     guard !candidates.isEmpty else {
         return nil
     }
-    if let decidedCallID, !decidedCallID.isEmpty {
-        if let match = candidates.first(where: { run in
-            run.toolActions.contains { $0.callID == decidedCallID }
-        }) {
-            return match
-        }
+    if let decidedCallID, !decidedCallID.isEmpty, let match = candidates.first(where: { run in
+        run.toolActions.contains { $0.callID == decidedCallID }
+    }) {
+        return match
     }
     return candidates.first
 }
@@ -113,14 +107,12 @@ public func resumeNarratedApproval(
 
     // If approving, immediately transition the run row to "running" and broadcast run_started
     // so Working Right Now stream and Chat history badge immediately reflect active execution.
-    if approved, let targetSessionID {
-        if let awaiting = await strandedParkedRun(sessionID: targetSessionID, decidedCallID: decidedCallID, context: context) {
-            let runningEntry = await context.runs.update(
-                id: awaiting.id,
-                status: "running"
-            ) ?? awaiting
-            await context.hub.broadcastRun(runningEntry)
-        }
+    if approved, let targetSessionID, let awaiting = await strandedParkedRun(sessionID: targetSessionID, decidedCallID: decidedCallID, context: context) {
+        let runningEntry = await context.runs.update(
+            id: awaiting.id,
+            status: "running"
+        ) ?? awaiting
+        await context.hub.broadcastRun(runningEntry)
     }
 
     let resumed: OrchestratorResponse?

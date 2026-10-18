@@ -630,12 +630,11 @@ public struct SubprocessSMTPGateway: EmailSMTPGateway, Sendable {
             // A login or send rejection is endpoint-independent (same
             // credentials and message), so retrying the next port only helps
             // connect/TLS failures. Surface auth/send errors immediately.
-            if let bridge = lastError as? EmailIMAPError, case let .bridgeFailed(detail) = bridge {
-                if detail.contains("login failed") || detail.contains("SMTP send failed") || detail.contains("Invalid") || detail.contains("Missing")
-                    || detail.contains("Unsupported")
-                {
-                    throw bridge
-                }
+            if let bridge = lastError as? EmailIMAPError, case let .bridgeFailed(detail) = bridge,
+               detail.contains("login failed") || detail.contains("SMTP send failed") || detail.contains("Invalid") || detail.contains("Missing")
+               || detail.contains("Unsupported")
+            {
+                throw bridge
             }
         }
         if let lastError {

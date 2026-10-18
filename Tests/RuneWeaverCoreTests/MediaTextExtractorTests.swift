@@ -25,9 +25,9 @@ struct MediaTextExtractorTests {
     }
 
     @Test
-    func `DocumentTextExtractor extracts image with OCR text`() {
+    func `DocumentTextExtractor extracts image with OCR text`() throws {
         let extractor = DocumentTextExtractor()
-        let fakeImageData = "fake-image-bytes".data(using: .utf8)!
+        let fakeImageData = try #require("fake-image-bytes".data(using: .utf8))
 
         let result = extractor.extract(data: fakeImageData, fileName: "test.png", contentType: "image/png")
         #expect(result.format == .image)
@@ -35,9 +35,9 @@ struct MediaTextExtractorTests {
     }
 
     @Test
-    func `DocumentTextExtractor extracts audio as metadataOnly for multimodal processing`() {
+    func `DocumentTextExtractor extracts audio as metadataOnly for multimodal processing`() throws {
         let extractor = DocumentTextExtractor()
-        let fakeAudioData = "fake-audio-bytes".data(using: .utf8)!
+        let fakeAudioData = try #require("fake-audio-bytes".data(using: .utf8))
 
         let result = extractor.extract(data: fakeAudioData, fileName: "test.m4a", contentType: "audio/x-m4a")
         #expect(result.format == .audio)

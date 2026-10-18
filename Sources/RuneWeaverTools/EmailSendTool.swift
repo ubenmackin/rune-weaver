@@ -549,14 +549,14 @@ public struct EmailSendTool: Tool, Sendable {
     /// IMAP gateway for threading fetches and Sent appends (subprocess by default, stub in tests).
     private let imapGateway: any EmailIMAPGateway
     /// Booking seam storing approved scheduled sends; nil fails closed with guidance.
-    private let booking: (any ScheduledSendBooking)?
+    private let booking: any ScheduledSendBooking?
 
     /// Creates a send tool.
     public init(
         emailConfig: EmailConfig,
-        smtpGateway: (any EmailSMTPGateway)? = nil,
-        gateway: (any EmailIMAPGateway)? = nil,
-        booking: (any ScheduledSendBooking)? = nil
+        smtpGateway: any EmailSMTPGateway? = nil,
+        gateway: any EmailIMAPGateway? = nil,
+        booking: any ScheduledSendBooking? = nil
     ) {
         self.emailConfig = emailConfig
         self.smtpGateway = smtpGateway ?? SubprocessSMTPGateway()

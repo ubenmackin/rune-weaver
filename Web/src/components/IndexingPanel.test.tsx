@@ -328,6 +328,46 @@ describe("IndexingPanel helpers", () => {
     expect(rows[1]).toMatchObject({ documents: 0, chunks: 0, bytes: 0 });
   });
 
+  it("gates the cumulative live fallback to single-source runs", () => {
+    const live = {
+      trigger: "onDemand",
+      phase: "embedding",
+      stage: "files",
+      scanned: 100,
+      indexed: 45,
+      skipped: 0,
+      errors: 0,
+      elapsedMs: 1000,
+      current: null,
+    };
+    // Two enabled sources: the run-cumulative total must not inflate the stage row.
+    expect(
+      resolveIndexSourceContent(
+        {
+          sources: [
+            { kind: "files", enabled: true },
+            { kind: "mail", enabled: true },
+          ],
+          bySource: [{ kind: "files", documents: 30, chunks: 70, bytes: 1500 }],
+        },
+        live,
+      )[0].documents,
+    ).toBe(30);
+    // One enabled source: the cumulative total maps honestly onto its row.
+    expect(
+      resolveIndexSourceContent(
+        {
+          sources: [
+            { kind: "files", enabled: true },
+            { kind: "mail", enabled: false },
+          ],
+          bySource: [{ kind: "files", documents: 30, chunks: 70, bytes: 1500 }],
+        },
+        live,
+      )[0].documents,
+    ).toBe(75);
+  });
+
   it("summarizes the last run strip with counts and finish time", () => {
     expect(describeIndexRun(null)).toBe("No runs yet");
     expect(describeIndexRun(null)).toBe("No runs yet");
@@ -1210,6 +1250,23 @@ describe("IndexingPanel", () => {
     expect(sharedStyles).toMatch(
       /\.primary-button:disabled[^{]*\{[^}]*opacity/,
     );
+  });
+
+  it("keeps the stylesheet header and every comment inside the shared bounds", () => {
+    // The raw text is the exact stylesheet the bundler emits, so the file's
+    // own comment tokens pin the header rule: a one-to-two-line ownership
+    // header and no comment block longer than three lines.
+    const comments = sharedStyles.match(/\/\*[\s\S]*?\*\//g) ?? [];
+    expect(comments.length).toBeGreaterThan(0);
+    const header = comments[0];
+    if (header == null) {
+      throw new Error("sharedStyles must carry at least one comment block");
+    }
+    expect(header).toMatch(/^\/\* Rune Weaver Dashboard — global stylesheet:/);
+    expect(header.split("\n")).toHaveLength(2);
+    for (const comment of comments) {
+      expect(comment.split("\n").length).toBeLessThanOrEqual(3);
+    }
   });
 
   it("sends the custom worker count only for the custom preset", async () => {
@@ -2154,18 +2211,12 @@ describe("IndexingPanel", () => {
     15000,
   );
 
-  it("keeps committed cards frozen mid-run while live stays live, then jumps on completion", async () => {
+  it("projects live document delta mid-run while keeping baseline anchored, then settles on completion", async () => {
     let documents = 42;
-    let running = true;
-    let live: Record<string, unknown> | null = {
-      trigger: "onDemand",
-      phase: "extracting",
-      stage: "files",
-      scanned: 5,
-      indexed: 3,
-      elapsedMs: 1500,
-      current: "notes/ideas.md",
-    };
+    // Mount pre-run: adopting a settled baseline means the run's cumulative
+    // deltas project from it instead of a mid-run load anchoring committed work.
+    let running = false;
+    let live: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {
@@ -2191,12 +2242,39 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
     });
+
+    // Start the run: the broadcast-driven live-only poll adopts the new live
+    // snapshot and the +3 cumulative delta projects onto the pre-run baseline.
+    running = true;
+    live = {
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 5,
+      indexed: 3,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
+    };
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        kind: "index",
+        message: "Index run started (onDemand)",
+        response: null,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("45");
+    });
+    expect(screen.getByTestId("index-stat-documents-live")).toHaveTextContent("+3 this run");
     await waitFor(() => {
       expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
     });
-    // Freeze-then-jump: committed growth plus live progress arrive together
-    // while the run stays in flight. The live header tracks the polled
-    // snapshot while the committed card holds the last settled total.
+    // Baseline anchor + live delta projection: committed baseline stays at 42 while
+    // in-flight live.indexed (7) projects 42 + 7 = 49 mid-run.
     documents = 87;
     live = {
       trigger: "onDemand",
@@ -2221,7 +2299,7 @@ describe("IndexingPanel", () => {
         response: null,
       },
     });
-    // The frame-triggered live-only poll adopts the new live snapshot.
+    // The frame-triggered live-only poll adopts the new live snapshot and projects +7 onto baseline 42.
     await waitFor(() => {
       expect(screen.getByTestId("index-live-header")).toHaveTextContent("9 scanned");
     });
@@ -2229,15 +2307,12 @@ describe("IndexingPanel", () => {
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
     ).toBeGreaterThan(callsBefore);
-    // Committed cards stay frozen mid-run despite the newer status payload.
-    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
-    // The live block stays mounted through the frozen window with its
-    // polled header.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("49");
+    expect(screen.getByTestId("index-stat-documents-live")).toHaveTextContent("+7 this run");
     expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
     expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
 
-    // Atomic jump: the terminal broadcast reloads the full status, so the
-    // committed card jumps to the settled total and the live block unmounts.
+    // On completion, the terminal broadcast reloads the settled status (87) and unmounts live UI.
     running = false;
     live = null;
     await dispatchFrameOrThrow(capture.onMessage, {
@@ -2255,25 +2330,17 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("index-live-progress")).toBeNull();
     });
+    expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
   });
 
-  it("keeps Size/Documents/Chunks frozen mid-run with no flash, then jumps without flash", async () => {
+  it("projects live Documents/Chunks mid-run while keeping Size on disk frozen, then settles without flash", async () => {
     let payload: Record<string, unknown> = {
       ...statusPayload,
       enabled: true,
-      running: true,
+      running: false,
       documents: 42,
       chunks: 100,
       bytes: 2048,
-      live: {
-        trigger: "onDemand",
-        phase: "extracting",
-        stage: "files",
-        scanned: 5,
-        indexed: 3,
-        elapsedMs: 1500,
-        current: "notes/ideas.md",
-      },
     };
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
@@ -2292,10 +2359,7 @@ describe("IndexingPanel", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-stat-documents-value")).toBeInTheDocument();
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
     });
     // The first snapshot seeds the baseline and never flashes.
     expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
@@ -2308,9 +2372,42 @@ describe("IndexingPanel", () => {
       "index-stat-value-flash",
     );
 
-    // Freeze-then-jump: committed Size/Documents/Chunks plus live progress
-    // arrive together mid-run. Only the live header tracks the poll; every
-    // committed card holds the last settled snapshot with no flash.
+    // Pre-run mount settled on the baseline; the run starts now and the first
+    // live snapshot (+3 documents, +6 chunks) projects onto it.
+    payload = {
+      ...payload,
+      running: true,
+      live: {
+        trigger: "onDemand",
+        phase: "extracting",
+        stage: "files",
+        scanned: 5,
+        indexed: 3,
+        vectorChunks: 4,
+        keywordChunks: 2,
+        elapsedMs: 1500,
+        current: "notes/ideas.md",
+      },
+    };
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        kind: "index",
+        message: "Index run started (onDemand)",
+        response: null,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+    });
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("45");
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("106");
+
+    // Mid-run update: live document (+7) and chunk (+15) deltas project onto the baseline (42 -> 49,
+    // 100 -> 115), while expensive Size on disk stays frozen at 2 KB until run_completed.
     payload = {
       ...payload,
       documents: 60,
@@ -2322,6 +2419,8 @@ describe("IndexingPanel", () => {
         stage: "files",
         scanned: 9,
         indexed: 7,
+        vectorChunks: 10,
+        keywordChunks: 5,
         elapsedMs: 2500,
         current: "notes/ideas.md",
       },
@@ -2340,16 +2439,15 @@ describe("IndexingPanel", () => {
         response: null,
       },
     });
-    // Live-only poll lands: the header tracks the new live snapshot.
+    // Live-only poll lands: the header and count cards track the new live snapshot.
     await waitFor(() => {
       expect(screen.getByTestId("index-live-header")).toHaveTextContent("9 scanned");
     });
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
     ).toBeGreaterThan(callsBefore);
-    // Committed cards stay frozen with no flash mid-run.
-    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
-    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("100");
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("49");
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("115");
     expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("2 KB");
     expect(screen.getByTestId("index-live-header")).toHaveTextContent("7 indexed");
     expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
@@ -2371,8 +2469,7 @@ describe("IndexingPanel", () => {
       expect(pill).not.toHaveClass("index-stat-value-flash");
     }
 
-    // Atomic jump on completion: the terminal broadcast reloads the full
-    // status, so all three cards jump together still with no flash.
+    // On completion: the terminal broadcast reloads the full status + storage.
     payload = { ...payload, running: false, live: null };
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
@@ -2397,6 +2494,194 @@ describe("IndexingPanel", () => {
     expect(screen.getByTestId("index-stat-chunks-value")).not.toHaveClass(
       "index-stat-value-flash",
     );
+  });
+
+  it("anchors a fresh mid-run load on its committed snapshot without double-counting live commits", async () => {
+    // The engine snapshot adopted on a cold mount while a run is in flight
+    // already contains this run's committed work, so the panel must not add
+    // the cumulative live counters on top of it; only the settle reload may
+    // introduce new totals.
+    let payload: Record<string, unknown> = {
+      ...statusPayload,
+      enabled: true,
+      running: true,
+      documents: 60,
+      chunks: 135,
+      vectorChunks: 100,
+      keywordChunks: 35,
+      bytes: 6144,
+      bySource: [{ kind: "files", documents: 48, chunks: 110, bytes: 5120 }],
+      sources: [{ kind: "files", enabled: true }],
+      live: {
+        trigger: "onDemand",
+        phase: "embedding",
+        stage: "files",
+        scanned: 9,
+        indexed: 5,
+        vectorChunks: 8,
+        keywordChunks: 4,
+        elapsedMs: 2500,
+        current: "notes/ideas.md",
+      },
+    };
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse(payload);
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: indexConfig,
+      });
+    });
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("60");
+    });
+    // Adopted counts stay bare: the live snapshot's cumulative totals never
+    // inflate the committed work timeline on a fresh mid-run load.
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("135");
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("6 KB");
+    expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
+    expect(
+      screen.getByLabelText("100 vector chunks, 35 keyword chunks"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("index-bar-files")).toHaveAttribute(
+      "aria-label",
+      "Files 48 documents",
+    );
+
+    // Live UI still tracks the run while totals stay anchored on the snapshot;
+    // a larger mid-run committed count waits for the settle instead of stacking.
+    payload = {
+      ...payload,
+      documents: 70,
+      chunks: 150,
+      live: {
+        trigger: "onDemand",
+        phase: "embedding",
+        stage: "files",
+        scanned: 15,
+        indexed: 12,
+        vectorChunks: 8,
+        keywordChunks: 4,
+        elapsedMs: 4000,
+        current: "notes/ideas.md",
+      },
+    };
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        kind: "index",
+        message: "Index run started (onDemand)",
+        response: null,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("15 scanned");
+    });
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("60");
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("135");
+    expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
+
+    // On completion the terminal broadcast adopts the settled engine counts.
+    payload = { ...payload, running: false, live: null, bytes: 9216 };
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        kind: "index",
+        status: "ok",
+        message: "Index run ok: 22 indexed, 27 scanned",
+        response: "Index run ok: 22 indexed, 27 scanned",
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("70");
+    });
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("150");
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("9 KB");
+    expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
+  });
+
+  it("renders the 4-stage pipeline track, 4 modality queue lanes, and concurrent source chips during a run", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        documents: 100,
+        chunks: 250,
+        vectorChunks: 200,
+        keywordChunks: 50,
+        bySource: [
+          { kind: "files", documents: 80, chunks: 200, bytes: 1024 },
+          { kind: "mail", documents: 20, chunks: 50, bytes: 512 },
+        ],
+        live: {
+          trigger: "onDemand",
+          phase: "embedding",
+          stage: "files",
+          scanned: 120,
+          indexed: 45,
+          vectorChunks: 90,
+          keywordChunks: 30,
+          elapsedMs: 4000,
+          rate: 11.2,
+          current: "Sources/RuneWeaverCore/FilesIndexer.swift",
+          queues: [
+            { lane: "keywordData", label: "Keyword Data", queued: 30, processed: 30, indexed: 25 },
+            { lane: "fastText", label: "Fast Text", queued: 70, processed: 20, indexed: 18 },
+            { lane: "imageOCR", label: "Image & PDF OCR", queued: 15, processed: 2, indexed: 2 },
+            { lane: "mediaSpeech", label: "Media Speech", queued: 5, processed: 0, indexed: 0 },
+          ],
+          sources: [
+            { kind: "files", state: "running", scanned: 100, indexed: 40, skipped: 5, errors: 0, current: "FilesIndexer.swift" },
+            { kind: "mail", state: "running", scanned: 15, indexed: 3, skipped: 0, errors: 0, current: "INBOX" },
+            { kind: "calendars", state: "completed", scanned: 5, indexed: 2, skipped: 3, errors: 0, current: null },
+          ],
+        },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-pipeline")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-pipeline-step-discovering")).toHaveAttribute("data-state", "done");
+    expect(screen.getByTestId("index-pipeline-step-queues")).toHaveAttribute("data-state", "active");
+    expect(screen.getByTestId("index-pipeline-step-embedding")).toHaveAttribute("data-state", "active");
+    expect(screen.getByTestId("index-pipeline-step-committing")).toHaveAttribute("data-state", "active");
+
+    expect(screen.getByTestId("index-live-queues")).toBeInTheDocument();
+    expect(screen.getByTestId("index-queue-counts-keywordData")).toHaveTextContent("30 / 30");
+    expect(screen.getByTestId("index-queue-counts-fastText")).toHaveTextContent("20 / 70");
+    expect(screen.getByTestId("index-queue-counts-imageOCR")).toHaveTextContent("2 / 15");
+    expect(screen.getByTestId("index-queue-counts-mediaSpeech")).toHaveTextContent("0 / 5");
+
+    expect(screen.getByTestId("index-live-sources")).toBeInTheDocument();
+    expect(screen.getByTestId("index-live-source-files")).toHaveTextContent("Files");
+    expect(screen.getByTestId("index-live-source-files")).toHaveTextContent("Running · 40 indexed");
+    expect(screen.getByTestId("index-live-source-calendars")).toHaveTextContent("Done · 2 indexed");
+    expect(screen.getByTestId("index-live-source-files")).toHaveClass("running");
+    expect(screen.getByTestId("index-live-source-calendars")).toHaveClass("completed");
+
+    // A cold mount mid-run adopts the committed snapshot as its baseline, so
+    // the cumulative live counters stay suppressed instead of stacking onto it
+    // (settled baseline: 100 documents, 250 chunks). Delta projection from a
+    // pre-run anchor is covered by the dedicated tests above.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("100");
+    expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("250");
   });
 });
 

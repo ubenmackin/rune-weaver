@@ -111,9 +111,8 @@ extension ToolInput {
     /// Parses one persisted assistant placeholder line into a structured input.
     public static func parsePlaceholderLine(_ line: String) -> ToolInput? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("Calling ") else { return nil }
-        guard trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "[") else { return nil }
-        guard trimmed.distance(from: trimmed.startIndex, to: bracketStart) > "Calling ".count else { return nil }
+        guard trimmed.hasPrefix("Calling "), trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "["),
+              trimmed.distance(from: trimmed.startIndex, to: bracketStart) > "Calling ".count else { return nil }
         let beforeBracket = trimmed[trimmed.index(before: bracketStart)]
         guard beforeBracket == " " || beforeBracket == "\t" else { return nil }
         let afterBracket = trimmed.index(after: bracketStart)

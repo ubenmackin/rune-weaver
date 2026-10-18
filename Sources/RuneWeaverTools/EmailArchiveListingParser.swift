@@ -47,8 +47,7 @@ public enum EmailArchiveListingParser: Sendable {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let tokens = trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            guard tokens.count >= 6 else { continue }
-            guard tokens[0].count >= 9,
+            guard tokens.count >= 6, tokens[0].count >= 9,
                   tokens[0].hasPrefix("-") || tokens[0].hasPrefix("d") || tokens[0].hasPrefix("l") else { continue }
             var sizeIndex: Int?
             for index in 1 ..< tokens.count where Int(tokens[index]) != nil {

@@ -214,15 +214,7 @@ public actor ApprovalQueue {
         assessment: ImpactAssessment,
         perRequestHandler: (@Sendable (PermissionRequest) async -> Void)?
     ) async {
-        guard !Task.isCancelled else {
-            enrichmentTasks.removeValue(forKey: id)
-            return
-        }
-        guard pending[id] != nil else {
-            enrichmentTasks.removeValue(forKey: id)
-            return
-        }
-        guard let updated = applyAssessment(id: id, assessment: assessment) else {
+        guard !Task.isCancelled, pending[id] != nil, let updated = applyAssessment(id: id, assessment: assessment) else {
             enrichmentTasks.removeValue(forKey: id)
             return
         }
@@ -309,8 +301,7 @@ public actor ApprovalQueue {
     /// when one is already parked for the tool or the name is not a registered system-notice tier.
     @discardableResult
     public func enqueueSystemNoticeIfAbsent(toolName: String, description: String) async -> PermissionRequest? {
-        guard SystemNoticeTools.isSystemNotice(toolName) else { return nil }
-        guard !pending.values.contains(where: { $0.toolName == toolName }) else { return nil }
+        guard SystemNoticeTools.isSystemNotice(toolName), !pending.values.contains(where: { $0.toolName == toolName }) else { return nil }
         let request = enqueue(
             toolName: toolName,
             description: description,
@@ -525,8 +516,7 @@ extension ApprovalQueue {
     /// Denies one waiter when its decision timeout elapses.
     private func timeoutWaiter(id: UUID) async {
         timeoutTasks.removeValue(forKey: id)
-        guard let waiter = waiters.removeValue(forKey: id) else { return }
-        guard pending[id] != nil else { return }
+        guard let waiter = waiters.removeValue(forKey: id), pending[id] != nil else { return }
         timedOutIDs.insert(id)
         waiter.resume(returning: ApprovalQueueDecision(approved: false, duration: nil, timedOut: true))
     }
@@ -662,9 +652,7 @@ extension ApprovalQueue {
         bashConfig: BashConfig?,
         workspaceRoot: URL? = nil
     ) -> String? {
-        guard let bashConfig else { return nil }
-        guard toolName == "bash.exec" else { return nil }
-        guard let command = bashCommand(from: argumentsJSON) else { return nil }
+        guard let bashConfig, toolName == "bash.exec", let command = bashCommand(from: argumentsJSON) else { return nil }
         let rawCwd = bashCwd(from: argumentsJSON)
         let effectiveRoot = workspaceRoot ?? WorkspaceStore.resolveRoot()
         let tier = BashSandboxRouter.effectiveTier(command: command, config: bashConfig, rawCwd: rawCwd, workspaceRoot: effectiveRoot)

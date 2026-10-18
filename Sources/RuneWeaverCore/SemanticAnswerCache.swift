@@ -47,12 +47,12 @@ public actor SemanticAnswerCache {
     /// Retained entries keyed by their composite identity.
     private var entries: [Key: Entry] = [:]
     /// Optional embeddings producer for the vector similarity path.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
 
     /// Creates a cache, optionally scoring through an embeddings backend.
     /// - Parameter embedder: Backend serving vector similarity; nil keeps the
     ///   keyword-overlap path.
-    public init(embedder: (any EmbeddingsBackend)? = nil) {
+    public init(embedder: any EmbeddingsBackend? = nil) {
         self.embedder = embedder
     }
 
@@ -98,8 +98,7 @@ public actor SemanticAnswerCache {
         var best: CachedAnswer?
         var bestScore = 0.0
         for (key, entry) in entries where key.persona == persona && key.modelID == modelID {
-            guard let score = Self.score(queryTokens: queryTokens, queryEmbedding: queryEmbedding, entry: entry) else { continue }
-            guard score > bestScore else { continue }
+            guard let score = Self.score(queryTokens: queryTokens, queryEmbedding: queryEmbedding, entry: entry), score > bestScore else { continue }
             best = entry.answer
             bestScore = score
         }

@@ -30,8 +30,7 @@ public enum SensitiveAddressParsing: Sendable {
         guard !trimmed.isEmpty else { return nil }
         if trimmed.hasPrefix("0x") || trimmed.hasPrefix("0X") {
             let hex = String(trimmed.dropFirst(2))
-            guard !hex.isEmpty, hex.count <= 8 else { return nil }
-            guard hex.allSatisfy(\.isHexDigit) else { return nil }
+            guard !hex.isEmpty, hex.count <= 8, hex.allSatisfy(\.isHexDigit) else { return nil }
             return UInt32(hex, radix: 16)
         }
         if trimmed.hasPrefix("0"), trimmed.count > 1, trimmed.allSatisfy(\.isNumber) {
@@ -52,8 +51,7 @@ public enum SensitiveAddressParsing: Sendable {
     /// Parses IPv6 text into eight hextets for loopback and mapped checks.
     public static func ipv6Hextets(_ host: String) -> [UInt16]? {
         let lowered = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lowered.isEmpty, lowered.contains(":"), !lowered.contains(".") else { return nil }
-        guard !lowered.contains("%") else { return nil }
+        guard !lowered.isEmpty, lowered.contains(":"), !lowered.contains("."), !lowered.contains("%") else { return nil }
         if lowered.contains("::") {
             let halves = lowered.components(separatedBy: "::")
             guard halves.count == 2 else { return nil }
@@ -83,8 +81,7 @@ public enum SensitiveAddressParsing: Sendable {
         var groups: [UInt16] = []
         groups.reserveCapacity(8)
         for part in parts {
-            guard !part.isEmpty, part.count <= 4, part.allSatisfy(\.isHexDigit) else { return nil }
-            guard let value = UInt16(String(part), radix: 16) else { return nil }
+            guard !part.isEmpty, part.count <= 4, part.allSatisfy(\.isHexDigit), let value = UInt16(String(part), radix: 16) else { return nil }
             groups.append(value)
         }
         return groups
@@ -123,14 +120,12 @@ public enum SensitiveAddressParsing: Sendable {
         if lowered.contains(".") {
             guard let lastColon = lowered.lastIndex(of: ":") else { return nil }
             let tail = String(lowered[lowered.index(after: lastColon)...])
-            guard !tail.isEmpty, !tail.contains(":") else { return nil }
-            guard canonicalIPv4Octets(tail) != nil else { return nil }
+            guard !tail.isEmpty, !tail.contains(":"), canonicalIPv4Octets(tail) != nil else { return nil }
             let prefix = String(lowered[..<lastColon])
             guard ipv6Hextets(prefix + ":0:0") != nil else { return nil }
             return canonicalIPv4Octets(tail)
         }
-        guard let groups = ipv6Hextets(lowered) else { return nil }
-        guard isIPv4Mapped(groups) else { return nil }
+        guard let groups = ipv6Hextets(lowered), isIPv4Mapped(groups) else { return nil }
         let high = groups[6]
         let low = groups[7]
         return IPv4Octets(
@@ -149,8 +144,7 @@ public enum SensitiveAddressParsing: Sendable {
 
     /// Whether a cleaned host is a dotted IPv4-embedded IPv6 literal with a proven prefix.
     public static func isValidDottedIPv6Literal(_ cleaned: String) -> Bool {
-        guard cleaned.contains(":"), cleaned.contains(".") else { return false }
-        guard let lastColon = cleaned.lastIndex(of: ":") else { return false }
+        guard cleaned.contains(":"), cleaned.contains("."), let lastColon = cleaned.lastIndex(of: ":") else { return false }
         let tail = String(cleaned[cleaned.index(after: lastColon)...])
         guard !tail.isEmpty, !tail.contains(":"),
               canonicalIPv4Octets(tail) != nil
@@ -166,8 +160,7 @@ public enum SensitiveAddressParsing: Sendable {
         var values: [UInt32] = []
         values.reserveCapacity(parts.count)
         for part in parts {
-            guard !part.isEmpty else { return nil }
-            guard let value = parseNumericPart(String(part)) else { return nil }
+            guard !part.isEmpty, let value = parseNumericPart(String(part)) else { return nil }
             values.append(value)
         }
         return values
@@ -289,8 +282,7 @@ public enum SensitiveAddressRanges: Sendable {
     /// Whether a host is IPv6 link-local (`fe80::/10`, never allowlisted).
     public static func isLinkLocalIPv6(_ host: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
-        guard cleaned.contains(":") else { return false }
-        guard let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) else { return false }
+        guard cleaned.contains(":"), let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) else { return false }
         return (groups[0] & 0xFFC0) == 0xFE80
     }
 
@@ -303,8 +295,7 @@ public enum SensitiveAddressRanges: Sendable {
     /// Whether a host is IPv6 loopback or unspecified.
     public static func isLoopbackIPv6(_ host: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
-        guard cleaned.contains(":") else { return false }
-        guard let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) else { return false }
+        guard cleaned.contains(":"), let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) else { return false }
         let allZero = groups.allSatisfy { $0 == 0 }
         if allZero {
             return true
@@ -456,8 +447,7 @@ public enum SensitiveAddressRanges: Sendable {
     /// when the literal embeds none.
     public static func embeddedIPv4Literal(_ host: String) -> String? {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
-        guard cleaned.contains(":") else { return nil }
-        guard let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned),
+        guard cleaned.contains(":"), let groups = SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned),
               let value = embeddedIPv4Value(in: groups)
         else { return nil }
         let first = (value >> 24) & 0xFF

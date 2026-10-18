@@ -56,7 +56,15 @@ extension FilesIndexer {
         candidates: [(file: URL, root: URL)],
         maxVectorBytes: Int
     ) -> [(file: URL, root: URL)] {
-        guard candidates.count > 1 else { return candidates }
+        partitionCandidatesWithLanes(candidates: candidates, maxVectorBytes: maxVectorBytes).candidates
+    }
+
+    /// Partitions discovered candidates into the 4 modality queues and returns both the ordered
+    /// candidate list and initial per-lane queue counts for live dashboard telemetry.
+    static func partitionCandidatesWithLanes(
+        candidates: [(file: URL, root: URL)],
+        maxVectorBytes: Int
+    ) -> (candidates: [(file: URL, root: URL)], lanes: [IndexQueueLaneProgress]) {
         var buckets: [[QueuedCandidateEntry]] = Array(
             repeating: [],
             count: FilesModalityLane.allCases.count
@@ -77,6 +85,18 @@ extension FilesIndexer {
                 order: index
             ))
         }
+        let lanes: [IndexQueueLaneProgress] = FilesModalityLane.allCases.map { lane in
+            IndexQueueLaneProgress(
+                lane: lane.key,
+                label: lane.label,
+                queued: buckets[lane.rawValue].count,
+                processed: 0,
+                indexed: 0
+            )
+        }
+        guard candidates.count > 1 else {
+            return (candidates: candidates, lanes: lanes)
+        }
         var ordered: [(file: URL, root: URL)] = []
         ordered.reserveCapacity(candidates.count)
         for lane in FilesModalityLane.allCases {
@@ -91,7 +111,34 @@ extension FilesIndexer {
                 ordered.append((entry.file, entry.root))
             }
         }
-        return ordered
+        return (candidates: ordered, lanes: lanes)
+    }
+
+    /// Resolves the modality lane for a candidate at `orderedIndex` inside the partitioned queue.
+    static func laneForOrderedIndex(_ orderedIndex: Int, in lanes: [IndexQueueLaneProgress]) -> FilesModalityLane {
+        var cursor = 0
+        for lane in FilesModalityLane.allCases where lanes.indices.contains(lane.rawValue) {
+            let nextCursor = cursor + lanes[lane.rawValue].queued
+            if orderedIndex < nextCursor {
+                return lane
+            }
+            cursor = nextCursor
+        }
+        return .fastText
+    }
+
+    /// Updates per-lane processed and indexed counters when a candidate finishes.
+    static func recordQueueLaneOutcome(_ outcome: FileOutcome, lanes: inout [IndexQueueLaneProgress]) {
+        guard let lane = outcome.lane, lanes.indices.contains(lane.rawValue) else { return }
+        switch outcome.kind {
+        case .indexed:
+            lanes[lane.rawValue].processed += 1
+            lanes[lane.rawValue].indexed += 1
+        case .unchanged, .skipped, .error:
+            lanes[lane.rawValue].processed += 1
+        case .overBudget, .cancelled:
+            break
+        }
     }
 
     /// Mutable batch accumulation state for the multi-queue modality pipeline.
@@ -115,6 +162,7 @@ extension FilesIndexer {
         counters: inout Counters
     ) async {
         guard !candidates.isEmpty else { return }
+        await emit(message: Self.startMessage, counters: counters, current: nil, start: start)
         let preloadedFingerprints = try? await store.storedFingerprints(source: .files)
         let services = CandidateServices(
             store: store,
@@ -133,6 +181,7 @@ extension FilesIndexer {
             fileReader: fileReader
         )
         let state = CandidateRunState(budget: budget, cancellation: cancelBox)
+        let initialLanes = counters.queueLanes
         var batchState = ModalityPipelineBatchState(
             totalCandidates: candidates.count,
             workers: max(1, workers),
@@ -171,11 +220,18 @@ extension FilesIndexer {
                     await handleStagedWorkerResult(result, batchState: &batchState, counters: &counters)
                     continue
                 }
-                let candidate = candidates[next]
+                let candidateIndex = next
+                let candidate = candidates[candidateIndex]
+                let lane = Self.laneForOrderedIndex(candidateIndex, in: initialLanes)
                 next += 1
                 group.addTask(priority: .utility) {
-                    await FilesIndexer.stageCandidate(
-                        identity: CandidateIdentity(fileURL: candidate.file, root: candidate.root, runID: runID),
+                    await FilesIndexer.stageCandidateWithLane(
+                        identity: CandidateIdentity(
+                            fileURL: candidate.file,
+                            root: candidate.root,
+                            runID: runID,
+                            lane: lane
+                        ),
                         services: services,
                         policy: policy,
                         state: state
@@ -240,6 +296,22 @@ extension FilesIndexer {
                     counters: &counters
                 )
             }
+        }
+    }
+
+    /// Runs `stageCandidate` and stamps `identity.lane` onto any immediate `FileOutcome`.
+    static func stageCandidateWithLane(
+        identity: CandidateIdentity,
+        services: CandidateServices,
+        policy: CandidatePolicy,
+        state: CandidateRunState
+    ) async -> StagedCandidateResult {
+        switch await stageCandidate(identity: identity, services: services, policy: policy, state: state) {
+        case var .outcome(outcome):
+            outcome.lane = identity.lane
+            return .outcome(outcome)
+        case let .staged(candidate):
+            return .staged(candidate)
         }
     }
 
@@ -538,7 +610,8 @@ extension FilesIndexer {
                         vectors: chunks.reduce(0) { $0 + ($1.isVector ? 1 : 0) },
                         truncated: truncated
                     ),
-                    relative: item.resolved.relative
+                    relative: item.resolved.relative,
+                    lane: item.identity.lane
                 )
                 if cancelBox.isSet || Task.isCancelled {
                     outcome.propagateCancel = true
@@ -670,7 +743,8 @@ extension FilesIndexer {
                         vectors: chunks.reduce(0) { $0 + ($1.isVector ? 1 : 0) },
                         truncated: truncated
                     ),
-                    relative: item.resolved.relative
+                    relative: item.resolved.relative,
+                    lane: item.identity.lane
                 )
                 await foldOutcome(outcome, counters: &counters, start: start)
             } catch is CancellationError {
@@ -684,10 +758,11 @@ extension FilesIndexer {
                     canonicalPath: item.resolved.canonicalPath,
                     runID: item.identity.runID
                 )
-                let failed = Self.stamped(
+                var failed = Self.stamped(
                     stamp,
                     onto: Self.failedOutcome(relative: item.resolved.relative, reason: "store write failed")
                 )
+                failed.lane = item.identity.lane
                 await foldOutcome(failed, counters: &counters, start: start)
             }
         }

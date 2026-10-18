@@ -81,7 +81,7 @@ extension AppModel {
         let selectedProvider: any LLMProvider
         let memoryEngine: MemoryEngine
         let conversations: ConversationManager
-        let embedder: (any EmbeddingsBackend)?
+        let embedder: any EmbeddingsBackend?
         let runs: RunLogStore
         let hub: WSHub
         let indexComponents: ServerIndexComponents?

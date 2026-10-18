@@ -323,15 +323,13 @@ public actor LlamaEmbeddingSupervisor {
 
     private func reapStaleProcesses(socketURL: URL, pidURL: URL) {
         if let pidString = (try? String(contentsOf: pidURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = pid_t(pidString), pid > 1
+           let pid = pid_t(pidString), pid > 1, kill(pid, 0) == 0
         {
+            RuneWeaverLog.stores.info("LlamaEmbeddingSupervisor: Reaping stale llama-server process (PID \(pid))...")
+            kill(pid, SIGTERM)
+            Thread.sleep(forTimeInterval: 0.1)
             if kill(pid, 0) == 0 {
-                RuneWeaverLog.stores.info("LlamaEmbeddingSupervisor: Reaping stale llama-server process (PID \(pid))...")
-                kill(pid, SIGTERM)
-                Thread.sleep(forTimeInterval: 0.1)
-                if kill(pid, 0) == 0 {
-                    kill(pid, SIGKILL)
-                }
+                kill(pid, SIGKILL)
             }
         }
         try? FileManager.default.removeItem(at: pidURL)

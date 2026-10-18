@@ -79,7 +79,7 @@ struct ServerSchedulerWorkerEventWatcherTests {
 
     private func makeWorker(
         toolBus: ToolBus,
-        llm: (any LLMProvider)? = nil
+        llm: any LLMProvider? = nil
     ) async throws -> WorkerHarness {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("event_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)

@@ -66,8 +66,7 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
         // A domain carries no edges, so every wildcard placement refuses first;
         // the shared gate then refuses glob syntax, whitespace, URL syntax,
         // userinfo, and port qualifiers.
-        guard AllowedOriginPattern.classifyWildcard(stripped) == .none else { return nil }
-        guard AllowedOriginPattern.isValidExemptionEntry(stripped) else { return nil }
+        guard AllowedOriginPattern.classifyWildcard(stripped) == .none, AllowedOriginPattern.isValidExemptionEntry(stripped) else { return nil }
         return stripped
     }
 
@@ -343,8 +342,7 @@ extension AccessScope {
     private func matchesGlob(_ pattern: String, toolName: String, argumentsJSON: String) -> Bool {
         // Command patterns spell bash only; every other tool keeps its own
         // scope so a pattern can never silently cover a send or a write.
-        guard toolName == "bash.exec" else { return false }
-        guard let command = Self.bashCommand(from: argumentsJSON) else { return false }
+        guard toolName == "bash.exec", let command = Self.bashCommand(from: argumentsJSON) else { return false }
         return BashSecurity.matches(command: command, pattern: pattern)
     }
 

@@ -74,7 +74,7 @@ public actor CalendarIndexer {
 
     private let store: any CalendarStore
     private let index: DocIndexStore
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
     private let stateURL: URL
     private let occurrenceCap: Int
     private let now: @Sendable () -> Date
@@ -83,7 +83,7 @@ public actor CalendarIndexer {
     public init(
         store: any CalendarStore,
         index: DocIndexStore,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         statePath: String = CalendarIndexer.defaultStatePath,
         occurrenceCap: Int = CalendarIndexer.defaultOccurrenceCap,
         now: @escaping @Sendable () -> Date = { Date() }
@@ -141,7 +141,7 @@ public actor CalendarIndexer {
         config: IndexConfig,
         store: DocIndexStore,
         calendarStore: any CalendarStore,
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: any EmbeddingsBackend? = nil
     ) -> IndexClosureStage {
         IndexClosureStage(kind: .calendars, isEnabled: config.enabled && config.calendars) { policy, reporter, _ in
             guard policy.enabled, policy.calendars else {
@@ -391,6 +391,16 @@ extension CalendarIndexer {
     /// Embeds and upserts pending calendar documents in a single SQLite transaction.
     private func upsertPendings(_ pendings: [CalendarPending], runID: String, report: inout CalendarIndexReport) async throws {
         guard !pendings.isEmpty else { return }
+        // A reset triggered by a dimension mismatch may fail while other source
+        // stages run concurrently; the pass then degrades to keyword-only.
+        if let embedder, let dim = await embedder.dimension {
+            _ = try? await index.ensureEmbeddingDimensionMatch(
+                activeModelID: embedder.modelID,
+                activeDimension: dim,
+                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
+                messagesStatePath: MessagesIndexer.defaultStatePath
+            )
+        }
         let vectors = try await embeddings(for: pendings.map(\.chunkText))
         var entries: [DocBatchUpsertEntry] = []
         entries.reserveCapacity(pendings.count)
@@ -426,10 +436,8 @@ extension CalendarIndexer {
         for externalID in vanished {
             try Task.checkCancellation()
             do {
-                if let stored = try await index.document(source: .calendars, externalID: externalID) {
-                    if try await index.deleteDocument(id: stored.id) {
-                        report.pruned += 1
-                    }
+                if let stored = try await index.document(source: .calendars, externalID: externalID), try await index.deleteDocument(id: stored.id) {
+                    report.pruned += 1
                 }
             } catch {
                 report.warnings.append("calendar prune skipped \(externalID)")

@@ -167,9 +167,7 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     /// Allowlisted roots safe to interpolate into SBPL subpaths.
     private static func sanitizedAllowPaths(_ paths: Set<String>) -> [String] {
         expandPaths(Array(paths)).compactMap { expanded in
-            guard expanded.hasPrefix("/") else { return nil }
-            guard expanded != "/" else { return nil }
-            guard !expanded.contains("\n"), !expanded.contains("\r"), !expanded.contains("\0") else { return nil }
+            guard expanded.hasPrefix("/"), expanded != "/", !expanded.contains("\n"), !expanded.contains("\r"), !expanded.contains("\0") else { return nil }
             return expanded
         }
     }
@@ -177,8 +175,7 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     /// Deny roots safe to interpolate; malformed entries are dropped fail-closed.
     private static func sanitizedDenyPaths(_ paths: Set<String>) -> [String] {
         expandPaths(Array(paths)).compactMap { expanded in
-            guard expanded.hasPrefix("/") else { return nil }
-            guard !expanded.contains("\n"), !expanded.contains("\r"), !expanded.contains("\0") else { return nil }
+            guard expanded.hasPrefix("/"), !expanded.contains("\n"), !expanded.contains("\r"), !expanded.contains("\0") else { return nil }
             return expanded
         }
     }
@@ -461,11 +458,9 @@ extension SeatbeltProfileBuilder {
         for raw in hosts {
             guard out.count < maxEgressHosts else { break }
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            guard isValidEgressHost(trimmed) else { continue }
+            guard !trimmed.isEmpty, isValidEgressHost(trimmed) else { continue }
             let canonical = SensitiveAddressNormalization.normalizedHost(trimmed)
-            guard !canonical.isEmpty else { continue }
-            guard !seen.contains(canonical) else { continue }
+            guard !canonical.isEmpty, !seen.contains(canonical) else { continue }
             seen.insert(canonical)
             out.append(canonical)
         }
@@ -512,9 +507,8 @@ extension SeatbeltProfileBuilder {
         let labels = bare.split(separator: ".", omittingEmptySubsequences: false)
         guard !labels.isEmpty, labels.count <= 253 else { return false }
         for label in labels {
-            guard !label.isEmpty, label.count <= 63 else { return false }
-            guard label.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return false }
-            guard !label.hasPrefix("-"), !label.hasSuffix("-") else { return false }
+            guard !label.isEmpty, label.count <= 63, label.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }), !label.hasPrefix("-"),
+                  !label.hasSuffix("-") else { return false }
         }
         if labels.count == 1 {
             let single = String(labels[0])

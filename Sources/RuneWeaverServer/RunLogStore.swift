@@ -753,8 +753,7 @@ enum SQLiteOpenHelper {
 
     extension SQLiteRunLogStore {
         static func read(dbPath: String, limit: Int) -> [RunLogEntry] {
-            guard limit > 0 else { return [] }
-            guard let handle = SQLiteOpenHelper.openLogged(
+            guard limit > 0, let handle = SQLiteOpenHelper.openLogged(
                 dbPath: dbPath,
                 storeName: "SQLiteRunLogStore",
                 fallbackNote: "read returning in-memory state only",

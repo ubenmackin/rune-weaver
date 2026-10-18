@@ -21,8 +21,7 @@ private func loadPersonaConfig(_ extra: String) throws -> RuneWeaverConfig {
 
 /// Extracts the dotted field from a validation failure, failing otherwise.
 private func validationField(of error: any Error) -> String? {
-    guard let configError = error as? ConfigError else { return nil }
-    guard case let .validationError(field, _) = configError else { return nil }
+    guard let configError = error as? ConfigError, case let .validationError(field, _) = configError else { return nil }
     return field
 }
 

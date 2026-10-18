@@ -32,6 +32,8 @@ extension FilesIndexer {
         var propagateCancel = false
         /// Canonical path to stamp in the batched `markSeenBatch` queue when resolved via preloaded fingerprints.
         var pendingSeenPath: String?
+        /// Modality queue lane this candidate was scheduled in, when known.
+        var lane: FilesModalityLane?
     }
 
     /// Result of stamping one visited file as seen by the current run.
@@ -84,6 +86,8 @@ extension FilesIndexer {
         let root: URL
         /// Opaque stamp for the run in flight.
         let runID: String
+        /// Modality queue lane this candidate was scheduled in.
+        var lane: FilesModalityLane = .fastText
     }
 
     /// Shared services consulted while processing one candidate.
@@ -93,7 +97,7 @@ extension FilesIndexer {
         /// Text extractor for the candidate file.
         let extractor: any DocumentTextExtracting
         /// Shared embeddings backend, or nil for keyword-only indexing.
-        let embedder: (any EmbeddingsBackend)?
+        let embedder: any EmbeddingsBackend?
         /// Pooled backends preferred for parallel embedding, or nil to share `embedder`.
         let embeddingsPool: EmbeddingsBackendPool?
         /// Path policy consulted before opening the candidate.
@@ -479,7 +483,7 @@ extension FilesIndexer {
         fileURL: URL,
         fileName: String,
         config: IndexConfig,
-        embedder: (any EmbeddingsBackend)?,
+        embedder: any EmbeddingsBackend?,
         embeddingsPool: EmbeddingsBackendPool?
     ) async throws -> [[Float]]? {
         let embedded = try await embedCandidateWithVisual(
@@ -499,7 +503,7 @@ extension FilesIndexer {
         fileURL: URL,
         fileName: String,
         config: IndexConfig,
-        embedder: (any EmbeddingsBackend)?,
+        embedder: any EmbeddingsBackend?,
         embeddingsPool: EmbeddingsBackendPool?
     ) async throws -> (vectors: [[Float]]?, visualSucceeded: Bool) {
         guard !extraction.chunks.isEmpty else { return (nil, false) }

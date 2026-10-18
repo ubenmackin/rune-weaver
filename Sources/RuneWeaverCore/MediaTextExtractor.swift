@@ -191,10 +191,10 @@ public struct MediaTextExtractor: Sendable {
     public static func extractAudioTrack(from videoURL: URL) async -> URL? {
         #if canImport(AVFoundation)
             let asset = AVURLAsset(url: videoURL)
-            guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty else {
-                return nil
-            }
-            guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty, let session = AVAssetExportSession(
+                asset: asset,
+                presetName: AVAssetExportPresetAppleM4A
+            ) else {
                 return nil
             }
             let tempURL = FileManager.default.temporaryDirectory

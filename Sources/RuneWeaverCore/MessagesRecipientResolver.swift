@@ -50,15 +50,15 @@ public protocol MessageAliasStoring: Sendable {
         /// Direct-chat history surface; always present, defaulting to the snapshot reader.
         private let history: any MessagesHistorySourcing
         /// Alias store, or nil when aliases are not wired.
-        private let aliasStore: (any MessageAliasStoring)?
+        private let aliasStore: any MessageAliasStoring?
 
         /// Creates a recipient resolver. chatDatabasePath: Live `chat.db` path used
         /// to build the default history source.
         public init(
             chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
             contacts: any MessagesContactSearching = MessagesContactNameResolver(),
-            history: (any MessagesHistorySourcing)? = nil,
-            aliasStore: (any MessageAliasStoring)? = nil
+            history: any MessagesHistorySourcing? = nil,
+            aliasStore: any MessageAliasStoring? = nil
         ) {
             self.contacts = contacts
             self.history = history ?? MessagesChatHistorySource(chatDatabasePath: chatDatabasePath)

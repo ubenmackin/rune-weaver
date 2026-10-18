@@ -15,10 +15,7 @@ public enum DocumentSnappy: Sendable {
         let bytes = [UInt8](data)
         var pos = 0
 
-        guard let expectedLength = readVarintLength(bytes: bytes, pos: &pos) else {
-            return nil
-        }
-        guard expectedLength > 0, expectedLength <= maxUncompressedBlockBytes else {
+        guard let expectedLength = readVarintLength(bytes: bytes, pos: &pos), expectedLength > 0, expectedLength <= maxUncompressedBlockBytes else {
             return nil
         }
 

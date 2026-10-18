@@ -21,11 +21,9 @@ public enum PluginSecurity {
     public static func calculateDirectoryHash(at directoryURL: URL) -> String? {
         let fileManager = FileManager.default
         var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDir), isDir.boolValue else {
-            return nil
-        }
-
-        guard let entries = collectEntries(at: directoryURL, fileManager: fileManager) else {
+        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDir), isDir.boolValue,
+              let entries = collectEntries(at: directoryURL, fileManager: fileManager)
+        else {
             return nil
         }
 

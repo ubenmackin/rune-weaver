@@ -89,7 +89,7 @@ public final class ServerContext: Sendable {
     /// Three-tier memory serving search and facts.
     public let memoryEngine: MemoryEngine
     /// Optional embeddings producer for vector-ranked memory routes.
-    public let embedder: (any EmbeddingsBackend)?
+    public let embedder: any EmbeddingsBackend?
     /// Graduated-trust gate backing approvals.
     public let permissionGate: PermissionGate
     /// Pending approval prompts shared by REST and WebSocket.
@@ -162,8 +162,8 @@ public final class ServerContext: Sendable {
     /// Parallel worker fan-out engine backing the `fanout.run` tool.
     public let fanOut: FanOutEngine
     /// Active chat provider backing goal planning, ideas, fan-out review, and the proactive judge.
-    private let servingLLMBox: OSAllocatedUnfairLock<(any LLMProvider)?>
-    public var servingLLM: (any LLMProvider)? {
+    private let servingLLMBox: OSAllocatedUnfairLock<any LLMProvider?>
+    public var servingLLM: any LLMProvider? {
         get { servingLLMBox.withLock { $0 } }
         set { servingLLMBox.withLock { $0 = newValue } }
     }
@@ -195,17 +195,17 @@ public final class ServerContext: Sendable {
     public let auth: ServerAuth?
     /// Shared Playwright gateway reused across browser live-reloads so a settings PUT
     /// refreshes allowlisted origins without dropping the managed bridge or test doubles.
-    public let browserGateway: (any BrowserPlaywrightGateway)?
+    public let browserGateway: any BrowserPlaywrightGateway?
     /// Hermetic search transport preserved across live-reloads.
-    public let searchTransport: (any WebSearchTransport)?
+    public let searchTransport: any WebSearchTransport?
     /// Hermetic fetch transport preserved across live-reloads.
-    public let fetchTransport: (any WebFetchTransport)?
+    public let fetchTransport: any WebFetchTransport?
     /// Hermetic API transport preserved across live-reloads.
-    public let apiTransport: (any ApiRequestTransport)?
+    public let apiTransport: any ApiRequestTransport?
     /// Hermetic media transport preserved across live-reloads.
-    public let mediaTransport: (any MediaArrTransport)?
+    public let mediaTransport: any MediaArrTransport?
     /// Search lifecycle ensurer preserved across live-reloads.
-    public let searchEnsurer: (any SearXNGEnsuring)?
+    public let searchEnsurer: any SearXNGEnsuring?
     /// Media secrets resolver preserved across live-reloads so injected doubles survive.
     public let mediaSecrets: SecretsManager?
     /// Shared secrets backing surrogate resolution preserved across live-reloads.
@@ -227,10 +227,10 @@ public final class ServerContext: Sendable {
 
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
-    public let desktopCaptureBridge: (any DesktopCapturing)?
+    public let desktopCaptureBridge: any DesktopCapturing?
     /// Hermetic desktop control bridge preserved across live-reloads so a
     /// settings PUT refreshes control knobs without dropping test doubles.
-    public let desktopControlBridge: (any DesktopControlling)?
+    public let desktopControlBridge: any DesktopControlling?
     /// Live `[desktop]` capture policy. Held behind a lock because
     /// settings PUTs refresh it in place while this class stays Sendable.
     private let desktopConfigBox: OSAllocatedUnfairLock<DesktopConfig>
@@ -258,7 +258,7 @@ public final class ServerContext: Sendable {
         toolBus: ToolBus,
         orchestrator: Orchestrator,
         memoryEngine: MemoryEngine,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         permissionGate: PermissionGate,
         approvals: ApprovalQueue,
         scheduler: SchedulerStore = SchedulerStore(),
@@ -280,18 +280,18 @@ public final class ServerContext: Sendable {
         indexStore: DocIndexStore? = nil,
         indexMessagesStatePath: String = MessagesIndexer.defaultStatePath,
         indexMailCheckpointPath: String = MailIndexCheckpointStore.defaultPath,
-        servingLLM: (any LLMProvider)? = nil,
+        servingLLM: any LLMProvider? = nil,
         auth: ServerAuth? = nil,
-        browserGateway: (any BrowserPlaywrightGateway)? = nil,
-        searchTransport: (any WebSearchTransport)? = nil,
-        fetchTransport: (any WebFetchTransport)? = nil,
-        apiTransport: (any ApiRequestTransport)? = nil,
-        mediaTransport: (any MediaArrTransport)? = nil,
-        searchEnsurer: (any SearXNGEnsuring)? = nil,
+        browserGateway: any BrowserPlaywrightGateway? = nil,
+        searchTransport: any WebSearchTransport? = nil,
+        fetchTransport: any WebFetchTransport? = nil,
+        apiTransport: any ApiRequestTransport? = nil,
+        mediaTransport: any MediaArrTransport? = nil,
+        searchEnsurer: any SearXNGEnsuring? = nil,
         mediaSecrets: SecretsManager? = nil,
         secrets: SecretsManager? = nil,
-        desktopCaptureBridge: (any DesktopCapturing)? = nil,
-        desktopControlBridge: (any DesktopControlling)? = nil,
+        desktopCaptureBridge: any DesktopCapturing? = nil,
+        desktopControlBridge: any DesktopControlling? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         goals: GoalStore? = nil,
         goalEngine: GoalEngine? = nil,
@@ -313,7 +313,7 @@ public final class ServerContext: Sendable {
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil,
-        approvalDecisions: (any ApprovalDecisionRecording)? = nil
+        approvalDecisions: any ApprovalDecisionRecording? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -583,16 +583,16 @@ extension ServerContext {
     }
 
     private struct ToolTransports: Sendable {
-        let gateway: (any BrowserPlaywrightGateway)?
-        let search: (any WebSearchTransport)?
-        let fetch: (any WebFetchTransport)?
-        let api: (any ApiRequestTransport)?
-        let media: (any MediaArrTransport)?
-        let ensurer: (any SearXNGEnsuring)?
+        let gateway: any BrowserPlaywrightGateway?
+        let search: any WebSearchTransport?
+        let fetch: any WebFetchTransport?
+        let api: any ApiRequestTransport?
+        let media: any MediaArrTransport?
+        let ensurer: any SearXNGEnsuring?
         let mediaSecrets: SecretsManager?
         let secrets: SecretsManager?
-        let desktopCapture: (any DesktopCapturing)?
-        let desktopControl: (any DesktopControlling)?
+        let desktopCapture: any DesktopCapturing?
+        let desktopControl: any DesktopControlling?
     }
 
     private struct RuntimeEngineArgs: Sendable {
@@ -604,14 +604,14 @@ extension ServerContext {
         let memoryEngine: MemoryEngine
         let approvals: ApprovalQueue
         let permissionGate: PermissionGate
-        let embedder: (any EmbeddingsBackend)?
+        let embedder: any EmbeddingsBackend?
         let securityConfig: SecurityConfig
         /// Recall budgets bounding automatic recall fan-out. Carries the
         /// clamped `[memory] recall_*` values from config so headless and
         /// served turns inject with file config instead of defaults.
         let recallBudgets: RecallBudgets
         let durable: DurableServerStores
-        let notifier: (any SchedulerNotifier)?
+        let notifier: any SchedulerNotifier?
         let indexCoordinator: IndexCoordinator?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
@@ -691,7 +691,7 @@ extension ServerContext {
         let configs: ToolConfigs
         let transports: ToolTransports
         let memoryEngine: MemoryEngine
-        let embedder: (any EmbeddingsBackend)?
+        let embedder: any EmbeddingsBackend?
         let goals: GoalComponents
         let stagedFiles: StagedFilesStore
         /// Workspace store backing the shell default directory and quota gate.
@@ -709,7 +709,7 @@ extension ServerContext {
         /// Booking seam storing approved scheduled sends for the send tools, or
         /// nil when no firing worker owns the rows (direct-core contexts keep
         /// scheduleAt failing closed with guidance).
-        let scheduledSendBooking: (any ScheduledSendBooking)?
+        let scheduledSendBooking: any ScheduledSendBooking?
         /// The one policy store for this process, shared by the supervisor
         /// built for `api.request` and the settings policy routes.
         let policyStore: PolicyStore
@@ -901,14 +901,14 @@ extension ServerContext {
         config: ServerConfig = .default,
         conversations: ConversationManager,
         memoryEngine: MemoryEngine,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         permissionGate: PermissionGate,
         llm: any LLMProvider,
         systemPrompt: String? = nil,
         schedulerConfig: SchedulerConfig = .empty,
         episodesDBPath: String? = nil,
         pluginConfig: PluginConfig = PluginConfig(),
-        notifier: (any SchedulerNotifier)? = nil,
+        notifier: any SchedulerNotifier? = nil,
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
         containersConfig: ContainersConfig = ContainersConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
@@ -928,16 +928,16 @@ extension ServerContext {
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
         auth: ServerAuth? = nil,
         fanOutConfig: FanOutConfig = FanOutConfig(),
-        browserGateway: (any BrowserPlaywrightGateway)? = nil,
-        searchTransport: (any WebSearchTransport)? = nil,
-        fetchTransport: (any WebFetchTransport)? = nil,
-        apiTransport: (any ApiRequestTransport)? = nil,
-        mediaTransport: (any MediaArrTransport)? = nil,
-        searchEnsurer: (any SearXNGEnsuring)? = nil,
+        browserGateway: any BrowserPlaywrightGateway? = nil,
+        searchTransport: any WebSearchTransport? = nil,
+        fetchTransport: any WebFetchTransport? = nil,
+        apiTransport: any ApiRequestTransport? = nil,
+        mediaTransport: any MediaArrTransport? = nil,
+        searchEnsurer: any SearXNGEnsuring? = nil,
         mediaSecrets: SecretsManager? = nil,
         secrets: SecretsManager? = nil,
-        desktopCaptureBridge: (any DesktopCapturing)? = nil,
-        desktopControlBridge: (any DesktopControlling)? = nil,
+        desktopCaptureBridge: any DesktopCapturing? = nil,
+        desktopControlBridge: any DesktopControlling? = nil,
         runs: RunLogStore? = nil,
         hub: WSHub? = nil,
         policyStore: PolicyStore? = nil,

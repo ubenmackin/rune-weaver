@@ -340,9 +340,9 @@ struct ConfigIndexTests {
 
     @Test
     func `Workers decodes into the canonical field`() throws {
-        let payload = """
+        let payload = try #require("""
         {"effort":"custom","workers":5}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(IndexConfig.self, from: payload)
         #expect(decoded.workers == 5)
         let encoded = try JSONEncoder().encode(IndexConfig(effort: "custom", workers: 2))

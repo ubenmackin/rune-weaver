@@ -224,19 +224,19 @@ struct GoalLinkageMigrationTests {
     func `Legacy payloads decode without a goal tag`() throws {
         // Rows and inputs written before goal linkage carry no link key; the
         // absence must mean unlinked rather than corrupt.
-        let sessionData = """
+        let sessionData = try #require("""
         {"id":"\(UUID().uuidString)","title":"Old","messages":[],"createdAt":0,"updatedAt":0}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         #expect(try JSONDecoder().decode(ConversationSession.self, from: sessionData).goalID == nil)
 
-        let summaryData = """
+        let summaryData = try #require("""
         {"id":"\(UUID().uuidString)","title":"Old","messageCount":0,"createdAt":0,"updatedAt":0}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         #expect(try JSONDecoder().decode(SessionSummary.self, from: summaryData).goalID == nil)
 
-        let inputData = """
+        let inputData = try #require("""
         {"text":"hello","sessionID":"\(UUID().uuidString)","source":"text"}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         #expect(try JSONDecoder().decode(UserInput.self, from: inputData).goalID == nil)
 
         // Tagged inputs round-trip with the link intact.

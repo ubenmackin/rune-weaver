@@ -63,6 +63,18 @@ public actor IndexCoordinator {
     ///
     /// Keyed by the stage's index in the overlap batch, not by kind.
     private var overlapIndexed: [Int: Int] = [:]
+    /// Source kinds in the active overlap batch, in canonical run order.
+    private var overlapKinds: [IndexSourceKind] = []
+    /// Per-stage vector-chunk high-water marks in the overlap batch.
+    private var overlapVectorChunks: [Int: Int] = [:]
+    /// Per-stage keyword-chunk high-water marks in the overlap batch.
+    private var overlapKeywordChunks: [Int: Int] = [:]
+    /// Per-stage latest relative item in the overlap batch.
+    private var overlapCurrent: [Int: String] = [:]
+    /// Indices of stages in the overlap batch that have finished.
+    private var overlapCompleted: Set<Int> = []
+    /// Latest per-lane modality queue progress emitted by the files indexer.
+    private var liveQueues: [IndexQueueLaneProgress] = []
     /// Handle for the run task in flight, so cancellation aborts in-flight awaits.
     private var activeRunTask: Task<IndexRunSummary, Never>?
     /// Whether a run is in flight.
@@ -151,7 +163,11 @@ public actor IndexCoordinator {
             rate: rate,
             elapsedMs: elapsedMs,
             current: liveCurrent,
-            startedAt: startedAt
+            startedAt: startedAt,
+            vectorChunks: liveVectorChunks,
+            keywordChunks: liveKeywordChunks,
+            sources: currentLiveSources(),
+            queues: liveQueues
         )
     }
 
@@ -184,9 +200,7 @@ public actor IndexCoordinator {
         } else {
             guard !didAttemptLaunchCatchUp else { return nil }
             didAttemptLaunchCatchUp = true
-            guard !running else { return nil }
-
-            guard hour > nightlyHour else { return nil }
+            guard !running, hour > nightlyHour else { return nil }
             let snapshot = await stateStore.snapshot()
             // Catch-up only fires if at least 1 index run has previously completed.
             guard snapshot.lastCompletedAt != nil else { return nil }
@@ -359,6 +373,12 @@ extension IndexCoordinator {
         overlapBaseIndexed = 0
         overlapScanned = [:]
         overlapIndexed = [:]
+        overlapKinds = []
+        overlapVectorChunks = [:]
+        overlapKeywordChunks = [:]
+        overlapCurrent = [:]
+        overlapCompleted = []
+        liveQueues = []
     }
 
     /// Finalizes a run into its summary, watermark, and completion broadcast. - ranAny: Whether any
@@ -469,6 +489,12 @@ extension IndexCoordinator {
         overlapBaseIndexed = 0
         overlapScanned = [:]
         overlapIndexed = [:]
+        overlapKinds = []
+        overlapVectorChunks = [:]
+        overlapKeywordChunks = [:]
+        overlapCurrent = [:]
+        overlapCompleted = []
+        liveQueues = []
     }
 }
 
@@ -519,9 +545,16 @@ extension IndexCoordinator {
         overlapBaseIndexed = baseIndexed
         overlapScanned = [:]
         overlapIndexed = [:]
+        overlapKinds = overlapStages.map(\.kind)
+        overlapVectorChunks = [:]
+        overlapKeywordChunks = [:]
+        overlapCurrent = [:]
+        overlapCompleted = []
         for index in overlapStages.indices {
             overlapScanned[index] = 0
             overlapIndexed[index] = 0
+            overlapVectorChunks[index] = 0
+            overlapKeywordChunks[index] = 0
         }
         // Register every peer upfront so a cancel racing stage start still reaches
         // each peer; removal below pops exactly the appended slice so two
@@ -671,6 +704,7 @@ extension IndexCoordinator {
         } catch {
             stageTotals.errors += 1
             stageTotals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
+            overlapCompleted.insert(index)
             self.recordSourceReport(IndexSourceRunReport(
                 kind: stage.kind,
                 scanned: 0,
@@ -691,16 +725,34 @@ extension IndexCoordinator {
         let priorIndexed = overlapIndexed[index] ?? 0
         overlapScanned[index] = max(priorScanned, frame.scanned)
         overlapIndexed[index] = max(priorIndexed, frame.matched)
+        if let vectorChunks = frame.vectorChunks {
+            overlapVectorChunks[index] = max(overlapVectorChunks[index] ?? 0, vectorChunks)
+        }
+        if let keywordChunks = frame.keywordChunks {
+            overlapKeywordChunks[index] = max(overlapKeywordChunks[index] ?? 0, keywordChunks)
+        }
+        if let queues = frame.queues, !queues.isEmpty {
+            liveQueues = queues
+        }
         if let current = frame.current {
             liveCurrent = current
+            overlapCurrent[index] = current
         }
         let summedScanned = overlapBaseScanned + overlapScanned.values.reduce(0, +)
         let summedIndexed = overlapBaseIndexed + overlapIndexed.values.reduce(0, +)
+        let summedVectors = overlapVectorChunks.values.reduce(0, +)
+        let summedKeywords = overlapKeywordChunks.values.reduce(0, +)
         if summedScanned > liveScanned {
             liveScanned = summedScanned
         }
         if summedIndexed > liveIndexed {
             liveIndexed = summedIndexed
+        }
+        if summedVectors > liveVectorChunks {
+            liveVectorChunks = summedVectors
+        }
+        if summedKeywords > liveKeywordChunks {
+            liveKeywordChunks = summedKeywords
         }
         await emit(phase: .extracting, stage: nil, totals: liveSnapshot(), startedAt: startedAt, force: false)
     }
@@ -709,16 +761,28 @@ extension IndexCoordinator {
     private func finalizeConcurrentProgress(index: Int, report: IndexSourceRunReport) async {
         overlapScanned[index] = max(overlapScanned[index] ?? 0, report.scanned)
         overlapIndexed[index] = max(overlapIndexed[index] ?? 0, report.indexed)
+        overlapVectorChunks[index] = max(overlapVectorChunks[index] ?? 0, report.vectorChunks)
+        overlapKeywordChunks[index] = max(overlapKeywordChunks[index] ?? 0, report.keywordChunks)
+        overlapCompleted.insert(index)
         if let item = report.lastItem {
             liveCurrent = item
+            overlapCurrent[index] = item
         }
         let summedScanned = overlapBaseScanned + overlapScanned.values.reduce(0, +)
         let summedIndexed = overlapBaseIndexed + overlapIndexed.values.reduce(0, +)
+        let summedVectors = overlapVectorChunks.values.reduce(0, +)
+        let summedKeywords = overlapKeywordChunks.values.reduce(0, +)
         if summedScanned > liveScanned {
             liveScanned = summedScanned
         }
         if summedIndexed > liveIndexed {
             liveIndexed = summedIndexed
+        }
+        if summedVectors > liveVectorChunks {
+            liveVectorChunks = summedVectors
+        }
+        if summedKeywords > liveKeywordChunks {
+            liveKeywordChunks = summedKeywords
         }
     }
 
@@ -779,6 +843,42 @@ extension IndexCoordinator {
 // MARK: - Progress
 
 extension IndexCoordinator {
+    /// Builds per-source live progress rows for the active run.
+    private func currentLiveSources() -> [IndexLiveSourceProgress] {
+        if !overlapKinds.isEmpty {
+            return overlapKinds.enumerated().map { index, kind in
+                IndexLiveSourceProgress(
+                    kind: kind,
+                    state: overlapCompleted.contains(index) ? "completed" : "running",
+                    scanned: overlapScanned[index] ?? 0,
+                    indexed: overlapIndexed[index] ?? 0,
+                    current: overlapCurrent[index]
+                )
+            }
+        }
+        var rows: [IndexLiveSourceProgress] = currentSourceReports.map { report in
+            IndexLiveSourceProgress(
+                kind: report.kind,
+                state: "completed",
+                scanned: report.scanned,
+                indexed: report.indexed,
+                current: report.lastItem
+            )
+        }
+        if let stage = liveStage, !rows.contains(where: { $0.kind == stage }) {
+            let completedScanned = currentSourceReports.reduce(0) { $0 + $1.scanned }
+            let completedIndexed = currentSourceReports.reduce(0) { $0 + $1.indexed }
+            rows.append(IndexLiveSourceProgress(
+                kind: stage,
+                state: "running",
+                scanned: max(0, liveScanned - completedScanned),
+                indexed: max(0, liveIndexed - completedIndexed),
+                current: liveCurrent
+            ))
+        }
+        return rows
+    }
+
     /// Builds the live totals snapshot from the cached counters.
     private func liveSnapshot() -> Totals {
         var snapshot = Totals()
@@ -827,6 +927,15 @@ extension IndexCoordinator {
         }
         if cumulativeIndexed > liveIndexed {
             liveIndexed = cumulativeIndexed
+        }
+        if let vectorChunks = frame.vectorChunks, vectorChunks > liveVectorChunks {
+            liveVectorChunks = vectorChunks
+        }
+        if let keywordChunks = frame.keywordChunks, keywordChunks > liveKeywordChunks {
+            liveKeywordChunks = keywordChunks
+        }
+        if let queues = frame.queues, !queues.isEmpty {
+            liveQueues = queues
         }
         if let current = frame.current {
             liveCurrent = current

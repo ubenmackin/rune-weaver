@@ -623,7 +623,7 @@ public actor SchedulerEngine {
     /// Log sink for fires, skips, and failures.
     private let logger: SchedulerLogHandler?
     /// User-visible notifier for fired jobs.
-    private let notifier: (any SchedulerNotifier)?
+    private let notifier: any SchedulerNotifier?
 
     /// Creates a scheduler engine.
     public init(
@@ -631,7 +631,7 @@ public actor SchedulerEngine {
         turnRunner: SchedulerTurnRunner? = nil,
         pollChecker: SchedulerPollChecker? = nil,
         logger: SchedulerLogHandler? = nil,
-        notifier: (any SchedulerNotifier)? = nil
+        notifier: any SchedulerNotifier? = nil
     ) {
         for job in jobs {
             let key = normalizedSchedulerJobName(job.name)

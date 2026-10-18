@@ -59,7 +59,7 @@ public struct MediaArrTool: Tool, Sendable {
 
     public init(
         mediaConfig: MediaConfig,
-        transport: (any MediaArrTransport)? = nil,
+        transport: any MediaArrTransport? = nil,
         secrets: SecretsManager? = nil
     ) {
         self.client = MediaArrClient(mediaConfig: mediaConfig, transport: transport, secrets: secrets)
@@ -133,7 +133,7 @@ public struct MediaArrReadTool: Tool, Sendable {
 
     public init(
         mediaConfig: MediaConfig,
-        transport: (any MediaArrTransport)? = nil,
+        transport: any MediaArrTransport? = nil,
         secrets: SecretsManager? = nil
     ) {
         self.client = MediaArrClient(mediaConfig: mediaConfig, transport: transport, secrets: secrets)
@@ -199,7 +199,7 @@ public enum MediaTools {
 
     public static func makeTools(
         mediaConfig: MediaConfig = MediaConfig(),
-        transport: (any MediaArrTransport)? = nil,
+        transport: any MediaArrTransport? = nil,
         secrets: SecretsManager? = nil
     ) -> [any Tool] {
         [

@@ -1209,7 +1209,7 @@ struct IndexCoordinatorTests {
     }
 
     @Test
-    func `Files plus mail plus messages overlap with messages finishing before mail and vision after peers`() async {
+    func `Files plus mail plus messages overlap with messages finishing before mail and vision after peers`() async throws {
         // CPU-bound files, network-bound mail, and light local sources (messages, calendars)
         // overlap concurrently so fast local peers finish before files and mail without waiting.
         let probe = IndexOverlapProbe()
@@ -1258,8 +1258,8 @@ struct IndexCoordinatorTests {
         let messagesIndex = completions.firstIndex(of: .messages)
         let filesIndex = completions.firstIndex(of: .files)
         let mailIndex = completions.firstIndex(of: .mail)
-        #expect(calendarsIndex != nil && filesIndex != nil && calendarsIndex! < filesIndex!)
-        #expect(messagesIndex != nil && mailIndex != nil && messagesIndex! < mailIndex!)
+        #expect(try calendarsIndex != nil && filesIndex != nil && #require(calendarsIndex) < #require(filesIndex))
+        #expect(try messagesIndex != nil && mailIndex != nil && #require(messagesIndex) < #require(mailIndex))
     }
 
     @Test

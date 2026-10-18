@@ -291,7 +291,7 @@ public actor FanOutEngine {
     /// Background reviewer over the collected worker outputs, injected from the same serving
     /// instance the Wayfinder uses so review quality tracks the active model posture; nil keeps the
     /// merge pass on its deterministic and fail-open fallbacks instead of spending a review call.
-    private var reviewer: (any LLMProvider)?
+    private var reviewer: any LLMProvider?
 
     /// In-flight runs keyed by parent audit-row id, the cancellation surface the owner drives
     /// through ``cancel(rowID:)``.
@@ -303,7 +303,7 @@ public actor FanOutEngine {
         orchestrator: any OrchestratorFanOutSeam,
         runLogs: any FanOutRunLogging,
         config: FanOutConfig,
-        reviewer: (any LLMProvider)? = nil
+        reviewer: any LLMProvider? = nil
     ) {
         self.orchestrator = orchestrator
         self.runLogs = runLogs
@@ -312,7 +312,7 @@ public actor FanOutEngine {
     }
 
     /// Dynamically updates the background reviewer provider without a restart.
-    public func updateReviewer(_ reviewer: (any LLMProvider)?) {
+    public func updateReviewer(_ reviewer: any LLMProvider?) {
         self.reviewer = reviewer
     }
 
@@ -922,20 +922,16 @@ extension FanOutEngine {
             // qualifies while prose ratios and conjunction joins do not.
             guard token.count >= 3, !token.hasPrefix("/"), !token.hasSuffix("/") else { return false }
             let segments = token.split(separator: "/", omittingEmptySubsequences: false)
-            guard segments.count >= 2, segments.allSatisfy({ !$0.isEmpty }) else { return false }
-            guard let last = segments.last, last.contains(".") else { return false }
+            guard segments.count >= 2, segments.allSatisfy({ !$0.isEmpty }), let last = segments.last, last.contains(".") else { return false }
             return token.contains { $0.isLetter || $0.isNumber }
         }
         // Dot-only tokens mirror the doc-recall file rule: stem plus dot plus
         // a short alphabetic extension, so "report.pdf" qualifies while
         // "e.g.", "i.e.", and "v1.2" do not.
-        guard token.count >= 4 else { return false }
-        guard !token.hasPrefix("."), !token.hasSuffix(".") else { return false }
+        guard token.count >= 4, !token.hasPrefix("."), !token.hasSuffix(".") else { return false }
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }) else { return false }
-        guard let ext = parts.last, ext.count >= 1, ext.count <= 5 else { return false }
-        guard ext.contains(where: \.isLetter) else { return false }
-        guard ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
+        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }), let ext = parts.last, ext.count >= 1, ext.count <= 5, ext.contains(where: \.isLetter),
+              ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
         return true
     }
 

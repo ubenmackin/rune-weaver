@@ -25,7 +25,7 @@ public actor ServerSchedulerWorker {
     let conversations: ConversationManager
     let toolBus: ToolBus
     let approvals: ApprovalQueue?
-    let notifier: (any SchedulerNotifier)?
+    let notifier: any SchedulerNotifier?
     let logger: (@Sendable (String) async -> Void)?
     let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
     private let indexCoordinator: IndexCoordinator?
@@ -68,12 +68,12 @@ public actor ServerSchedulerWorker {
     /// Creates a server scheduler worker.
     public init(scheduler: SchedulerStore, runs: RunLogStore, hub: WSHub, runLock: SchedulerRunLock, orchestrator: Orchestrator,
                 conversations: ConversationManager, toolBus: ToolBus, approvals: ApprovalQueue? = nil, intervalSeconds: TimeInterval = 60,
-                notifier: (any SchedulerNotifier)? = nil, logger: (@Sendable (String) async -> Void)? = nil,
+                notifier: any SchedulerNotifier? = nil, logger: (@Sendable (String) async -> Void)? = nil,
                 pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil, indexCoordinator: IndexCoordinator? = nil,
                 goalStore: GoalStore? = nil, goalEngine: GoalEngine? = nil, ideasEngine: IdeasEngine? = nil,
                 goalRunLock: SchedulerRunLock? = nil, activeTurns: ActiveTurnTracker? = nil, triggerEpisodeStore: EpisodeStore? = nil,
                 goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(), outcomeGate: OutcomeGate? = nil,
-                proactiveConfig: ProactiveConfig = ProactiveConfig(), judgeLLM: (any LLMProvider)? = nil,
+                proactiveConfig: ProactiveConfig = ProactiveConfig(), judgeLLM: any LLMProvider? = nil,
                 schedulerConfig: SchedulerConfig = .empty, goalsConfig: GoalsConfig = GoalsConfig())
     {
         self.scheduler = scheduler
@@ -200,19 +200,15 @@ public actor ServerSchedulerWorker {
 
         for job in jobs where job.enabled {
             // 1. Evaluate Event Watcher trigger (Email, Messages, Calendar)
-            if job.isEventWatcher {
-                if let watcherResults = await evaluateEventWatcherJob(job: job, now: now) {
-                    results.append(contentsOf: watcherResults)
-                    continue
-                }
+            if job.isEventWatcher, let watcherResults = await evaluateEventWatcherJob(job: job, now: now) {
+                results.append(contentsOf: watcherResults)
+                continue
             }
 
             // 2. Evaluate Cron trigger
-            if job.hasCronTrigger, let cron = try? CronSchedule.parse(job.schedule) {
-                if cron.isDue(at: now, lastCheck: windowStart) {
-                    let outcome = await executeJob(job, reason: .cron)
-                    results.append(outcome)
-                }
+            if job.hasCronTrigger, let cron = try? CronSchedule.parse(job.schedule), cron.isDue(at: now, lastCheck: windowStart) {
+                let outcome = await executeJob(job, reason: .cron)
+                results.append(outcome)
             }
         }
 
@@ -233,59 +229,59 @@ public actor ServerSchedulerWorker {
         // The nightly-or-catch-up index trigger rides the same tick: the coordinator selects
         // `.nightly` at the nightly hour and `.catchUp` for a later same-day launch, while a
         // disabled or already-run coordinator returns immediately, so this is a no-op for the default configuration.
-        if let goalStore, let goalEngine {
-            // Disabled installs never spend advancement turns even when stale
-            // rows linger from an earlier enabled period.
-            if await goalEngine.isEnabled {
-                let dueGoals: [Goal]
+        if let goalStore, let goalEngine,
+           // Disabled installs never spend advancement turns even when stale
+           // rows linger from an earlier enabled period.
+           await goalEngine.isEnabled
+        {
+            let dueGoals: [Goal]
+            do {
+                dueGoals = try await goalStore.advanceDue(now: now)
+            } catch {
+                await logger?("Goals due scan failed: \(error.localizedDescription)")
+                dueGoals = []
+            }
+            // Deleted or settled goals would otherwise pin skip-suppression
+            // entries here forever, so prune before firing; goals still
+            // active and due skip the store read and keep suppression.
+            await pruneStaleGoalSkips(store: goalStore, liveActiveDueIDs: Set(dueGoals.map(\.id)))
+            for goal in dueGoals {
+                if let dueAt = goal.nextDueAt,
+                   lastSkippedGoalDueAt[goal.id] == dueAt,
+                   await isGoalBusy(id: goal.id)
+                {
+                    continue
+                }
                 do {
-                    dueGoals = try await goalStore.advanceDue(now: now)
+                    let outcome = try await executeGoal(goal, store: goalStore, engine: goalEngine)
+                    results.append(outcome)
+                } catch is CancellationError {
+                    // Cancelled turns stay due with no error result; halt
+                    // further fires in this tick and preserve cancellation
+                    // (the outer task remains cancelled and exits on sleep).
+                    break
                 } catch {
-                    await logger?("Goals due scan failed: \(error.localizedDescription)")
-                    dueGoals = []
+                    // Defensive: advancement records its own failures, so an
+                    // escape here is unexpected; continue to the next due goal
+                    // so one throw never starves the rest of the tick.
+                    await logger?("Goal fire failed: \(error.localizedDescription)")
+                    continue
                 }
-                // Deleted or settled goals would otherwise pin skip-suppression
-                // entries here forever, so prune before firing; goals still
-                // active and due skip the store read and keep suppression.
-                await pruneStaleGoalSkips(store: goalStore, liveActiveDueIDs: Set(dueGoals.map(\.id)))
-                for goal in dueGoals {
-                    if let dueAt = goal.nextDueAt,
-                       lastSkippedGoalDueAt[goal.id] == dueAt,
-                       await isGoalBusy(id: goal.id)
-                    {
-                        continue
-                    }
-                    do {
-                        let outcome = try await executeGoal(goal, store: goalStore, engine: goalEngine)
-                        results.append(outcome)
-                    } catch is CancellationError {
-                        // Cancelled turns stay due with no error result; halt
-                        // further fires in this tick and preserve cancellation
-                        // (the outer task remains cancelled and exits on sleep).
-                        break
-                    } catch {
-                        // Defensive: advancement records its own failures, so an
-                        // escape here is unexpected; continue to the next due goal
-                        // so one throw never starves the rest of the tick.
-                        await logger?("Goal fire failed: \(error.localizedDescription)")
-                        continue
-                    }
-                }
-                // Event wake-ups settle after the due scan: a matched trigger
-                // pulls its goal due for the NEXT tick, so the ordinary firing
-                // path runs unchanged rather than a second in-tick path.
-                if let triggerEpisodeStore {
-                    let since = lastTriggerCheck
-                    lastTriggerCheck = now
-                    let fires = await goalTriggerBridge.poll(
-                        store: goalStore,
-                        episodeStore: triggerEpisodeStore,
-                        now: now,
-                        since: since
-                    )
-                    for fire in fires {
-                        await logger?("Goal trigger '\(fire.eventKind)' armed goal \(fire.goalID) for the next tick.")
-                    }
+            }
+            // Event wake-ups settle after the due scan: a matched trigger
+            // pulls its goal due for the NEXT tick, so the ordinary firing
+            // path runs unchanged rather than a second in-tick path.
+            if let triggerEpisodeStore {
+                let since = lastTriggerCheck
+                lastTriggerCheck = now
+                let fires = await goalTriggerBridge.poll(
+                    store: goalStore,
+                    episodeStore: triggerEpisodeStore,
+                    now: now,
+                    since: since
+                )
+                for fire in fires {
+                    await logger?("Goal trigger '\(fire.eventKind)' armed goal \(fire.goalID) for the next tick.")
                 }
             }
         }
@@ -300,8 +296,7 @@ public actor ServerSchedulerWorker {
 
     /// Refreshes proactive ideas at most once per cadence window.
     private func refreshIdeasIfDue(now: Date) async {
-        guard let ideasEngine else { return }
-        guard now.timeIntervalSince(lastIdeasRefresh) >= Self.ideasRefreshInterval else { return }
+        guard let ideasEngine, now.timeIntervalSince(lastIdeasRefresh) >= Self.ideasRefreshInterval else { return }
         lastIdeasRefresh = now
         let generated = await ideasEngine.generate()
         // Each fresh suggestion rides the existing proactive frame so the

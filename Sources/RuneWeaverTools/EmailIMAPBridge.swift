@@ -94,8 +94,7 @@ public enum EmailIMAPValidation: Sendable {
     /// - Parameter messageID: Trimmed candidate id.
     /// - Returns: True when it matches `^[0-9][0-9:,]*$`.
     public static func isValidMessageID(_ messageID: String) -> Bool {
-        guard !messageID.isEmpty else { return false }
-        guard let first = messageID.unicodeScalars.first,
+        guard !messageID.isEmpty, let first = messageID.unicodeScalars.first,
               first.value >= 48, first.value <= 57
         else { return false }
         for scalar in messageID.unicodeScalars {

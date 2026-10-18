@@ -132,10 +132,7 @@ public actor OutcomeGate {
             if event.kind.isMilestone {
                 return (true, fallback)
             }
-            guard event.kind == .schedulerOk else {
-                return (false, fallback)
-            }
-            guard let judge else {
+            guard event.kind == .schedulerOk, let judge else {
                 return (false, fallback)
             }
             do {

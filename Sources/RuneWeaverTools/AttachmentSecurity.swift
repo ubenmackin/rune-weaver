@@ -132,10 +132,8 @@ public enum AttachmentSecurity: Sendable {
         }
 
         // Compiled AppleScript: `FasdUAS `
-        if bytes.count >= 8 {
-            if bytes[0] == 0x46, bytes[1] == 0x61, bytes[2] == 0x73, bytes[3] == 0x64 {
-                return "Compiled AppleScript signature detected"
-            }
+        if bytes.count >= 8, bytes[0] == 0x46, bytes[1] == 0x61, bytes[2] == 0x73, bytes[3] == 0x64 {
+            return "Compiled AppleScript signature detected"
         }
 
         return nil
@@ -227,12 +225,10 @@ public enum AttachmentSecurity: Sendable {
         }
 
         // TAR: 'ustar' at offset 257
-        if bytes.count >= 262 {
-            if bytes[257] == 0x75, bytes[258] == 0x73, bytes[259] == 0x74,
-               bytes[260] == 0x61, bytes[261] == 0x72
-            {
-                return "tar"
-            }
+        if bytes.count >= 262, bytes[257] == 0x75, bytes[258] == 0x73, bytes[259] == 0x74,
+           bytes[260] == 0x61, bytes[261] == 0x72
+        {
+            return "tar"
         }
 
         return nil
@@ -272,12 +268,10 @@ public enum AttachmentSecurity: Sendable {
         }
 
         // TIFF: 'I' 'I' 0x2A 0x00 (little-endian) or 'M' 'M' 0x00 0x2A (big-endian)
-        if bytes.count >= 4 {
-            if (bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00) ||
-                (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)
-            {
-                return "tiff"
-            }
+        if bytes.count >= 4, (bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00) ||
+            (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)
+        {
+            return "tiff"
         }
 
         // BMP: 'B' 'M'

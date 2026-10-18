@@ -94,7 +94,7 @@ private struct CancellingSchedulerEmbedder: EmbeddingsBackend, Sendable {
 struct ServerSchedulerWorkerTests {
     private func makeWorker(
         answer: String = "done",
-        llm: (any LLMProvider)? = nil,
+        llm: any LLMProvider? = nil,
         toolBus: ToolBus? = nil
     ) async throws -> (ServerSchedulerWorker, SchedulerStore, RunLogStore, URL) {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("sched_test_\(UUID().uuidString)")

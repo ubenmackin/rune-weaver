@@ -51,6 +51,12 @@ public struct ToolProgress: Sendable, Codable, Equatable {
     /// applies. Always relative so progress can never disclose an absolute
     /// filesystem location; an absolute or traversing candidate degrades to nil.
     public let current: String?
+    /// Optional cumulative vector chunk count emitted by indexing stages.
+    public let vectorChunks: Int?
+    /// Optional cumulative keyword-only chunk count emitted by indexing stages.
+    public let keywordChunks: Int?
+    /// Optional per-lane modality queue progress emitted by the files indexer.
+    public let queues: [IndexQueueLaneProgress]?
 
     /// Longest relative path retained for display, bounding frame size.
     static let maxCurrentLength = 240
@@ -67,7 +73,10 @@ public struct ToolProgress: Sendable, Codable, Equatable {
         scanned: Int = 0,
         matched: Int = 0,
         elapsedMs: Int = 0,
-        current: String? = nil
+        current: String? = nil,
+        vectorChunks: Int? = nil,
+        keywordChunks: Int? = nil,
+        queues: [IndexQueueLaneProgress]? = nil
     ) {
         self.callID = callID
         self.toolName = toolName
@@ -80,6 +89,9 @@ public struct ToolProgress: Sendable, Codable, Equatable {
         self.matched = max(0, matched)
         self.elapsedMs = max(0, elapsedMs)
         self.current = Self.relativeCurrent(current)
+        self.vectorChunks = vectorChunks.map { max(0, $0) }
+        self.keywordChunks = keywordChunks.map { max(0, $0) }
+        self.queues = queues
     }
 
     /// Returns a copy re-attributed to the given call, preserving the content.
@@ -93,7 +105,10 @@ public struct ToolProgress: Sendable, Codable, Equatable {
             scanned: scanned,
             matched: matched,
             elapsedMs: elapsedMs,
-            current: current
+            current: current,
+            vectorChunks: vectorChunks,
+            keywordChunks: keywordChunks,
+            queues: queues
         )
     }
 

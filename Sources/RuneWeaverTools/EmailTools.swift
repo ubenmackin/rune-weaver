@@ -81,7 +81,7 @@ public struct EmailSearchTool: Tool, Sendable {
     /// Creates a search tool.
     public init(
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil,
+        gateway: any EmailIMAPGateway? = nil,
         securityConfig: SecurityConfig = SecurityConfig()
     ) {
         self.emailConfig = emailConfig
@@ -785,7 +785,7 @@ public struct EmailReadTool: Tool, Sendable {
     /// Creates a read tool.
     public init(
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil,
+        gateway: any EmailIMAPGateway? = nil,
         securityConfig: SecurityConfig = SecurityConfig()
     ) {
         self.emailConfig = emailConfig
@@ -878,15 +878,15 @@ public enum EmailTools {
     /// Builds the email tools for an email config.
     public static func makeTools(
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil,
-        smtpGateway: (any EmailSMTPGateway)? = nil,
+        gateway: any EmailIMAPGateway? = nil,
+        smtpGateway: any EmailSMTPGateway? = nil,
         containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        archiveDetonator: any EmailArchiveDetonator? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil,
         securityConfig: SecurityConfig = SecurityConfig(),
-        booking: (any ScheduledSendBooking)? = nil
+        booking: any ScheduledSendBooking? = nil
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
         let sharedSMTP: any EmailSMTPGateway = smtpGateway ?? SubprocessSMTPGateway()
@@ -916,15 +916,15 @@ public enum EmailTools {
     public static func register(
         on bus: ToolBus,
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil,
-        smtpGateway: (any EmailSMTPGateway)? = nil,
+        gateway: any EmailIMAPGateway? = nil,
+        smtpGateway: any EmailSMTPGateway? = nil,
         containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        archiveDetonator: any EmailArchiveDetonator? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil,
         securityConfig: SecurityConfig = SecurityConfig(),
-        booking: (any ScheduledSendBooking)? = nil
+        booking: any ScheduledSendBooking? = nil
     ) async {
         let effectiveLedger: EphemeralContainerLedger? = if archiveDetonator == nil {
             if let ephemeralLedger {

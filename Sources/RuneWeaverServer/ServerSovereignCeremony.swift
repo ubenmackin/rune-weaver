@@ -20,7 +20,7 @@ struct SovereignCeremonySink: Sendable {
     /// Inbox an unverifiable ceremony parks an item in, nil when unwired.
     let approvals: ApprovalQueue?
     /// Decision history recording automatic settlements, nil when unwired.
-    let decisionLog: (any ApprovalDecisionRecording)?
+    let decisionLog: any ApprovalDecisionRecording?
 }
 
 /// Resolves the sovereign ceremony sink, seeding application storage on first use so every ceremony
@@ -45,7 +45,7 @@ func settleSystemNotice(
     note: String,
     approvals: ApprovalQueue,
     hub: WSHub,
-    decisionLog: (any ApprovalDecisionRecording)?
+    decisionLog: any ApprovalDecisionRecording?
 ) async {
     let settled = await approvals.settleSystemNotice(toolName: toolName)
     for request in settled {

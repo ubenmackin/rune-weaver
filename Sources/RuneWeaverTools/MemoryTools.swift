@@ -310,10 +310,10 @@ public struct RememberFactTool: Tool, Sendable {
     /// Audit sink for successful writes. Defaults to nil (file audit).
     private let audit: MemoryAuditHandler?
     /// Optional embeddings producer for vector-backed writes.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
 
     /// Creates a remember tool.
-    public init(name: String = primaryName, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) {
+    public init(name: String = primaryName, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: any EmbeddingsBackend? = nil) {
         self.name = name
         self.engine = engine
         self.audit = audit
@@ -418,10 +418,10 @@ public struct RecallMemoriesTool: Tool, Sendable {
     /// Shared memory engine serving recall.
     private let engine: MemoryEngine
     /// Optional embeddings producer for vector-ranked recall.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
 
     /// Creates a recall tool.
-    public init(name: String = primaryName, engine: MemoryEngine, embedder: (any EmbeddingsBackend)? = nil) {
+    public init(name: String = primaryName, engine: MemoryEngine, embedder: any EmbeddingsBackend? = nil) {
         self.name = name
         self.engine = engine
         self.embedder = embedder
@@ -482,14 +482,14 @@ public enum MemoryTools {
     public static let toolNames = [RememberFactTool.primaryName, RecallMemoriesTool.primaryName]
 
     /// Builds the memory tools for a shared engine.
-    public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) -> [any Tool] {
+    public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: any EmbeddingsBackend? = nil) -> [any Tool] {
         let remember: any Tool = RememberFactTool(engine: engine, audit: audit, embedder: embedder)
         let recall: any Tool = RecallMemoriesTool(engine: engine, embedder: embedder)
         return [remember, recall]
     }
 
     /// Registers the memory tools, replacing same-named entries.
-    public static func register(on bus: ToolBus, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) async {
+    public static func register(on bus: ToolBus, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: any EmbeddingsBackend? = nil) async {
         for tool in makeTools(engine: engine, audit: audit, embedder: embedder) {
             await bus.register(tool: tool)
         }

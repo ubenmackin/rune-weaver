@@ -42,6 +42,8 @@ import {
   type IndexConfigData,
   type IndexExtractStatusCounts,
   type IndexLastRunStatus,
+  type IndexLiveQueueLane,
+  type IndexLiveSourceStatus,
   type IndexLiveStatus,
   type IndexReclaimResponse,
   type IndexSourceCounts,
@@ -864,9 +866,11 @@ export interface IndexSourceContentRow {
 }
 
 // Resolves the canonical Files/Mail/Messages/Calendars/Reminders rows with real totals, so the
-// bars scale by content instead of rendering binary on/off widths.
+// bars scale by content instead of rendering binary on/off widths. When an in-flight `live`
+// snapshot is supplied, per-source live indexed counts project onto the baseline.
 export function resolveIndexSourceContent(
   status: Pick<IndexStatusResponse, "sources" | "bySource"> | null | undefined,
+  live?: IndexLiveStatus | null,
 ): IndexSourceContentRow[] {
   const sources = status?.sources ?? [];
   const totals = status?.bySource ?? [];
@@ -874,16 +878,92 @@ export function resolveIndexSourceContent(
   const totalsByKind = new Map<string, IndexSourceCounts>(
     totals.map((row) => [row.kind, row]),
   );
+  const liveByKind = new Map<string, number>();
+  if (Array.isArray(live?.sources) && live.sources.length > 0) {
+    for (const entry of live.sources) {
+      if (entry && typeof entry.kind === "string") {
+        liveByKind.set(entry.kind, floorPositive(entry.indexed));
+      }
+    }
+  } else if (
+    live &&
+    typeof live.stage === "string" &&
+    live.stage &&
+    // Cumulative fallback: `live.indexed` spans the whole run, so it maps onto one row
+    // only when that stage is the run's sole enabled source; otherwise other sources'
+    // work totals would inflate the active stage's row.
+    sources.filter((source) => source.enabled).length === 1 &&
+    enabledByKind.get(live.stage) === true
+  ) {
+    liveByKind.set(live.stage, floorPositive(live.indexed));
+  }
   return INDEX_SOURCES.map((source) => {
     const totalsRow = totalsByKind.get(source.kind);
+    const liveDelta = liveByKind.get(source.kind) ?? 0;
     return {
       kind: source.kind,
       enabled: enabledByKind.get(source.kind) ?? false,
-      documents: floorPositive(totalsRow?.documents),
+      documents: floorPositive(totalsRow?.documents) + liveDelta,
       chunks: floorPositive(totalsRow?.chunks),
       bytes: floorPositive(totalsRow?.bytes),
     };
   });
+}
+
+// Pipeline stage node descriptor for the animated 4-stage live flow track.
+export interface IndexPipelineStep {
+  id: "discovering" | "queues" | "embedding" | "committing";
+  label: string;
+  state: "pending" | "active" | "done";
+}
+
+// Resolves the 4 pipeline stages from the polled live snapshot so the user can see items flow
+// from discovery through modality queues, cross-file batch embedding, and SQLite commits.
+export function resolveIndexPipelineSteps(
+  live: IndexLiveStatus | null | undefined,
+  cancelling = false,
+): IndexPipelineStep[] {
+  const phase = live?.phase ?? null;
+  const scanned = floorPositive(live?.scanned);
+  const indexed = floorPositive(live?.indexed);
+  const vectors = floorPositive(live?.vectorChunks);
+  const hasQueues =
+    Array.isArray(live?.queues) &&
+    live.queues.some((lane) => floorPositive(lane.queued) > 0);
+  if (cancelling) {
+    return [
+      { id: "discovering", label: "Walk & Classify", state: "done" },
+      { id: "queues", label: "Modality Queues", state: "active" },
+      { id: "embedding", label: "Batch Embed", state: vectors > 0 ? "done" : "pending" },
+      { id: "committing", label: "SQLite Commit", state: indexed > 0 ? "done" : "pending" },
+    ];
+  }
+  const isDiscovering = phase === "discovering" && scanned === 0 && !hasQueues;
+  const isCommitting = phase === "committing";
+  const isEmbedding =
+    phase === "embedding" || (!isDiscovering && !isCommitting && vectors > 0);
+  return [
+    {
+      id: "discovering",
+      label: "Walk & Classify",
+      state: isDiscovering ? "active" : "done",
+    },
+    {
+      id: "queues",
+      label: "Modality Queues",
+      state: isDiscovering ? "pending" : isCommitting ? "done" : "active",
+    },
+    {
+      id: "embedding",
+      label: "Batch Embed",
+      state: isCommitting ? "done" : isEmbedding ? "active" : "pending",
+    },
+    {
+      id: "committing",
+      label: "SQLite Commit",
+      state: isCommitting || indexed > 0 ? "active" : "pending",
+    },
+  ];
 }
 
 // Sanitized share of the total index for one chart row: the true documents/total fraction capped to
@@ -911,6 +991,12 @@ export function indexSourceBarPercent(documents: number, totalDocuments: number)
   const share = indexShare(documents, totalDocuments);
   if (share <= 0) return "0%";
   return `${Math.min(100, Math.round(share * 100))}%`;
+}
+
+// Rounded 0..100 share percent for meter segment widths, flowing through indexShare so a
+// malformed or zero total degrades to zero instead of NaN.
+export function percentOf(part: number, total: number): number {
+  return Math.round(indexShare(part, total) * 100);
 }
 
 // Display label for an extraction-outcome token, falling back to the engine's
@@ -1032,11 +1118,15 @@ let cachedIndexStatus: (IndexStatusResponse & IndexStorageResponse) | null = nul
 // successful storage merge and cleared with the cache, so a remount paints
 // the honest sizing state without waiting for a fresh slow fetch.
 let cachedHasStorage = false;
+// Module-scoped adoption parity for the cached baseline: true when the cached
+// snapshot was adopted during an in-flight run, so its counts already contain
+// that run's committed work and live deltas must not project on top.
+let cachedIndexAdoptedMidRun = false;
 
 /// Clears the module-scoped cached index status.
 /// Ownership: test isolation only, never called from production paths.
 /// Edge cases: safe when the cache is already null; the next mount cold-boots to the skeleton.
-export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = null; cachedHasStorage = false; }
+export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = null; cachedHasStorage = false; cachedIndexAdoptedMidRun = false; }
 
 /// Renders the index status dashboard with instant hydration from the module cache.
 /// Ownership: initial paint reads the cache via the state initializer; refreshes revalidate via loadStatus without resetting to null.
@@ -1049,6 +1139,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // lands so `Sizing storage…` shows only while slow is pending, even for an
   // honest empty index whose breakdown stays all zeros.
   const [hasStorage, setHasStorage] = useState(() => cachedHasStorage);
+  // Adoption parity mirror for the projection gate below. Initialized from the
+  // cache so a remount mid-run keeps suppressing the cached baseline's deltas
+  // without waiting for the revalidation poll to answer.
+  const [midRunAdopted, setMidRunAdopted] = useState(() => cachedIndexAdoptedMidRun);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay mutually exclusive
@@ -1091,9 +1185,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(
     () => new Set<string>(),
   );
-  // Freeze-then-jump: committed stat cards hold the last settled snapshot mid-run and jump
-  // atomically at completion, so there is no committed-growth flash. Only the live block stays live
-  // via the polled liveTotals snapshot.
+  // Overlapping loads commit newest-wins under this generation counter; stat cards project
+  // preRunBaseline + inRunLiveDelta so Documents/Chunks move mid-run and only Size on disk
+  // stays frozen until run_completed.
   const loadGenerationRef = useRef(0);
   const [accessBusy, setAccessBusy] = useState<Record<string, boolean>>({});
 
@@ -1121,12 +1215,25 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // absolute path the engine keeps private.
   const liveCurrent = live ? relativeProgressCurrent(live.current) : null;
 
-  const vectorChunks = status?.vectorChunks ?? 0;
-  const keywordChunks = status?.keywordChunks ?? 0;
+  // In-flight projections: a baseline adopted before the run adds the run's cumulative
+  // live deltas on top, while a snapshot adopted mid-run already holds those commits,
+  // so each projection waits for the settle instead of double-counting in-flight work.
+  const liveIndexedDelta = !midRunAdopted && live ? floorPositive(live.indexed) : 0;
+  const liveVectorDelta = !midRunAdopted && live ? floorPositive(live.vectorChunks) : 0;
+  const liveKeywordDelta = !midRunAdopted && live ? floorPositive(live.keywordChunks) : 0;
+  const liveChunksDelta = liveVectorDelta + liveKeywordDelta;
+  const displayDocuments = floorPositive(status?.documents) + liveIndexedDelta;
+  const vectorChunks = floorPositive(status?.vectorChunks) + liveVectorDelta;
+  const keywordChunks = floorPositive(status?.keywordChunks) + liveKeywordDelta;
+  const displayChunks = floorPositive(status?.chunks) + liveChunksDelta;
   const donut = indexDonutArcs(vectorChunks, keywordChunks, DONUT_RADIUS);
   // Real per-source totals for the bars, in canonical Files/Mail/Messages/Calendars/Reminders
-  // order; older engines without the aggregates degrade to zeroed rows.
-  const sourceContent = resolveIndexSourceContent(status);
+  // order; older engines without the aggregates degrade to zeroed rows, and only a baseline
+  // adopted before the run projects live per-source deltas on top of the settled totals.
+  const sourceContent = resolveIndexSourceContent(status, midRunAdopted ? null : live);
+  const pipelineSteps = resolveIndexPipelineSteps(live, cancelling);
+  const liveQueues: IndexLiveQueueLane[] = live?.queues ?? [];
+  const liveSources: IndexLiveSourceStatus[] = live?.sources ?? [];
   // Displayed-total denominator for the source chart: every visible row shares
   // this sum so each bar reads as its honest fraction of the index.
   const sourceTotalDocuments = sourceContent.reduce((sum, row) => sum + row.documents, 0);
@@ -1141,6 +1248,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Honest on-disk storage: the database file plus the write-ahead log as the primary figure, the
   // text/vector/FTS/free rows as the breakdown, and the content total as the secondary detail.
   const storage = resolveIndexStorageBreakdown(status, hasStorage);
+  const storageBreakdownTotal = storage.text + storage.vector + storage.fts + storage.free;
   // Resolved effort reality for the status pane: the canonical nested `effort` block when present,
   // otherwise the local mapping against the machine cores so the line still reflects the hardware.
   const statusEffort = resolveStatusEffort(status);
@@ -1174,9 +1282,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     loadGenerationRef.current = generation;
     setError(null);
     let fast: IndexStatusResponse | null = null;
-    // Freeze-then-jump gate: while a fresh snapshot reports a run in flight, committed cards hold
-    // the last settled snapshot and only liveness is adopted, preventing reconnects, post-start
-    // probes, or overlapping polls from overwriting frozen totals mid-run.
+    // Baseline hold gate: while a fresh snapshot reports a run in flight, the baseline committed
+    // snapshot stays anchored and live deltas project on top of it, preventing expensive storage
+    // byte queries or overlapping polls from thrashing SQLite mid-run.
     let frozeCommitted = false;
     try {
       const response = await getIndexStatus();
@@ -1200,6 +1308,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         cachedHasStorage = false;
         setStatus(response);
         setHasStorage(false);
+        // An adopt while a run is already in flight anchors a baseline that
+        // carries the run's commits; a settled adopt is self-consistent.
+        cachedIndexAdoptedMidRun = response.running === true;
+        setMidRunAdopted(response.running === true);
       }
     } catch (failure) {
       // Only the newest poll owns the error slot so a stale rejection never
@@ -1248,14 +1360,19 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     return fast;
   }, []);
 
-  // Live-only poll while a run is in flight: fetches status but adopts only the live snapshot plus
-  // the running flag, holding every committed card frozen on the last settled snapshot.
+  // Live-only poll while a run is in flight: fetches status and adopts the live snapshot plus
+  // running flag so live count deltas project smoothly while on-disk byte sizing stays deferred.
+  // A cold-boot adopt records mid-run parity exactly like loadStatus does.
   const loadLiveOnly = useCallback(async () => {
     try {
       const fresh = await getIndexStatus();
+      // statusRef mirrors committed truth: null only before the first commit,
+      // matching the updater's prev == null branch.
+      const coldBoot = statusRef.current == null;
       setStatus((prev) => {
         if (prev == null) {
           cachedIndexStatus = fresh;
+          cachedIndexAdoptedMidRun = fresh.running === true;
           return fresh;
         }
         const merged: IndexStatusResponse & IndexStorageResponse = {
@@ -1266,6 +1383,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         cachedIndexStatus = merged;
         return merged;
       });
+      if (coldBoot && fresh.running === true) {
+        setMidRunAdopted(true);
+      }
     } catch {
       // Live-only failure leaves the frozen cards plus the existing error
       // slot untouched and never nulls status.
@@ -1276,8 +1396,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     void loadStatus();
   }, [loadStatus]);
 
-  // Live broadcast consumer: run_completed jumps the frozen cards atomically via a full reload with
-  // no manual Refresh control, while `tool_progress` and run_started only refresh the live snapshot
+  // Live broadcast consumer: run_completed reloads settled counts + storage atomically with
+  // no manual Refresh control, while `tool_progress` and run_started refresh the live snapshot
   // — numbers always come from the polled status live snapshot, never from frame parsing.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
@@ -1316,9 +1436,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           });
           return;
         }
-        // Freeze-then-jump: a run_started frame only refreshes the live
-        // snapshot so the committed cards stay frozen; the atomic jump lands
-        // on run_completed below.
+        // A run_started frame refreshes the live snapshot while storage byte
+        // sizing waits for run_completed below.
         if (isIndexKind) {
           void loadLiveOnly();
         }
@@ -1333,9 +1452,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         )
       )
         return;
-      // Poll-now trigger only for the live block: the live numbers render from
-      // status live, so a frame refreshes only live while committed cards stay
-      // frozen instead of distilling counters locally.
+      // Poll-now trigger for the live snapshot: live numbers and count deltas
+      // render from status.live without re-running expensive storage queries.
       void loadLiveOnly();
     },
     [loadStatus, loadLiveOnly],
@@ -1388,9 +1506,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     setCancelling(false);
   }, [status?.running, status?.lastRun]);
 
-  // Polls only the live snapshot every ~2s while progress is active or cancelling is open,
-  // keeping the live block updated while committed cards hold the last settled snapshot frozen
-  // with no reload and no flash.
+  // Polls the live snapshot every ~2s while progress is active or cancelling is open,
+  // keeping the live pipeline card and projected count deltas updated without storage query thrash.
   useEffect(() => {
     if (!progressActive && !cancelling) return;
     const timer = setInterval(() => {
@@ -1577,7 +1694,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // The grep-style live block mounts only from the polled live snapshot — or during the cancelling
+  // The live pipeline block mounts only from the polled live snapshot — or during the cancelling
   // window — and unmounts fully on settle with no persistence.
   const showLiveBlock = live != null || cancelling;
   // Line 1 without any pill: trigger label plus stage-aware title with counts, rate, and elapsed
@@ -1679,75 +1796,76 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className="muted text-sm">{notice}</p> : null}
 
-      {/* Run controls top: start, stop, prune, reclaim, and reset sit above
-          the numbers they act on. Each destructive action opens its own modal
-          carrying the description, so no helper text repeats under the row.
-          Reclaim compacts without deleting content, so it needs no modal. */}
-      <div className="index-actions-section">
-        <h3>Run</h3>
-        <div className="row">
-          <button
-            type="button"
-            className="primary icon-text-btn"
-            onClick={() => void handleRun()}
-            disabled={actionBusy || cancelBusy || cancelling || !indexingEnabled || progressActive}
-            title={
-              indexingEnabled
-                ? "Run an on-demand index pass"
-                : "Enable indexing to run a pass"
-            }
-          >
-            <span>
-              {action === "run" ? "Indexing…" : "Run"}
-            </span>
-          </button>
+      {/* Top Bento Command Bar: start, stop, prune, reclaim, and reset sit above the numbers
+          they act on. Destructive actions open their own description-carrying modals, so no
+          helper text repeats under the row; reclaim compacts without deleting, so no modal. */}
+      <div className="index-actions-section index-bento-header">
+        <div className="index-bento-header-top">
+          <h3>Run</h3>
+          <div className="row">
+            <button
+              type="button"
+              className="primary icon-text-btn"
+              onClick={() => void handleRun()}
+              disabled={actionBusy || cancelBusy || cancelling || !indexingEnabled || progressActive}
+              title={
+                indexingEnabled
+                  ? "Run an on-demand index pass"
+                  : "Enable indexing to run a pass"
+              }
+            >
+              <span>
+                {action === "run" ? "Indexing…" : "Run"}
+              </span>
+            </button>
 
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void handleCancel()}
-            disabled={cancelBusy || cancelling || !progressActive || action === "prune" || action === "reset" || action === "reclaim"}
-          >
-            <StopIcon size={14} />
-            <span>{cancelBusy || cancelling ? "Cancelling…" : "Cancel"}</span>
-          </button>
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => void handleCancel()}
+              disabled={cancelBusy || cancelling || !progressActive || action === "prune" || action === "reset" || action === "reclaim"}
+            >
+              <StopIcon size={14} />
+              <span>{cancelBusy || cancelling ? "Cancelling…" : "Cancel"}</span>
+            </button>
 
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => {
-              setPruneBefore("");
-              setPruneError(null);
-              setPendingPrune(true);
-            }}
-            disabled={actionBusy || cancelBusy || progressActive || cancelling}
-          >
-            <TrashIcon size={14} />
-            <span>{action === "prune" ? "Pruning…" : "Prune"}</span>
-          </button>
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => {
+                setPruneBefore("");
+                setPruneError(null);
+                setPendingPrune(true);
+              }}
+              disabled={actionBusy || cancelBusy || progressActive || cancelling}
+            >
+              <TrashIcon size={14} />
+              <span>{action === "prune" ? "Pruning…" : "Prune"}</span>
+            </button>
 
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void handleReclaim()}
-            disabled={actionBusy || cancelBusy || progressActive || cancelling}
-            title="Compact the index database to reclaim free space"
-          >
-            <span>{action === "reclaim" ? "Reclaiming…" : "Reclaim space"}</span>
-          </button>
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => void handleReclaim()}
+              disabled={actionBusy || cancelBusy || progressActive || cancelling}
+              title="Compact the index database to reclaim free space"
+            >
+              <span>{action === "reclaim" ? "Reclaiming…" : "Reclaim space"}</span>
+            </button>
 
-          <button
-            type="button"
-            className="danger icon-text-btn"
-            onClick={() => {
-              setResetError(null);
-              setPendingRebuild(true);
-            }}
-            disabled={actionBusy || cancelBusy || progressActive || cancelling}
-          >
-            <TrashIcon size={14} />
-            <span>{action === "reset" ? "Clearing…" : "Reset Index"}</span>
-          </button>
+            <button
+              type="button"
+              className="danger icon-text-btn"
+              onClick={() => {
+                setResetError(null);
+                setPendingRebuild(true);
+              }}
+              disabled={actionBusy || cancelBusy || progressActive || cancelling}
+            >
+              <TrashIcon size={14} />
+              <span>{action === "reset" ? "Clearing…" : "Reset Index"}</span>
+            </button>
+          </div>
         </div>
         {/* Disabled-index hint under the Run row; prune/reclaim/reset stay
             independent of the enabled flag. */}
@@ -1770,12 +1888,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         ) : null}
       </div>
 
-      {/* Grep-style live block under Run while the polled snapshot is present:
-          line 1 trigger plus stage-aware counts, line 2 single truncated
-          relative file with full-path title, line 3 indeterminate activity bar
-          reusing the ToolProgress activity style (activity only, never
-          percent). Unmounts fully on settle; without live data it renders
-          nothing and the Status pill owns Running. */}
+      {/* Live Indexing Pipeline Card under Run while the polled snapshot is present: header
+          strip plus animated 4-stage pipeline flow track, 4-lane modality queue grid, source
+          strip, ticker, and activity bar. Unmounts fully on settle. */}
       {showLiveBlock && (
         <div className="index-live-progress" data-testid="index-live-progress">
           <div
@@ -1784,6 +1899,90 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           >
             {liveHeaderText}
           </div>
+
+          <div
+            className="index-pipeline-track"
+            data-testid="index-live-pipeline"
+            aria-label="Indexing pipeline stages"
+          >
+            {pipelineSteps.map((step) => (
+              <div
+                key={step.id}
+                className={`index-pipeline-step ${step.state}`}
+                data-testid={`index-pipeline-step-${step.id}`}
+                data-state={step.state}
+              >
+                <span className="index-pipeline-node" aria-hidden="true" />
+                <span className="index-pipeline-label">{step.label}</span>
+              </div>
+            ))}
+          </div>
+
+          {liveQueues.length > 0 ? (
+            <div
+              className="index-queue-lanes-grid"
+              data-testid="index-live-queues"
+            >
+              {liveQueues.map((lane) => {
+                const pct =
+                  lane.queued > 0
+                    ? Math.min(100, Math.round((lane.processed / lane.queued) * 100))
+                    : 0;
+                const isActive = lane.queued > lane.processed;
+                return (
+                  <div
+                    key={lane.lane}
+                    className={`index-queue-lane-card${isActive ? " active" : ""}`}
+                    data-testid={`index-queue-lane-${lane.lane}`}
+                  >
+                    <div className="index-queue-lane-header">
+                      <span className="index-queue-lane-label">{lane.label}</span>
+                      <span
+                        className="index-queue-lane-counts muted text-xs"
+                        data-testid={`index-queue-counts-${lane.lane}`}
+                      >
+                        {formatIndexCount(lane.processed)} / {formatIndexCount(lane.queued)}
+                      </span>
+                    </div>
+                    <div className="index-queue-lane-track">
+                      <div
+                        className="index-queue-lane-fill"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {liveSources.length > 0 ? (
+            <div
+              className="index-live-sources-strip"
+              data-testid="index-live-sources"
+            >
+              {liveSources.map((src) => {
+                const running = src.state === "running";
+                return (
+                  <span
+                    key={src.kind}
+                    className={`index-live-source-chip ${running ? "running" : "completed"}`}
+                    data-testid={`index-live-source-${src.kind}`}
+                  >
+                    <span className="index-live-source-dot" aria-hidden="true" />
+                    <span className="index-live-source-name">
+                      {sourceLabel(src.kind)}
+                    </span>
+                    <span className="index-live-source-state muted text-xs">
+                      {running ? "Running" : "Done"} ·{" "}
+                      {formatIndexCount(src.indexed)} indexed
+                    </span>
+                  </span>
+                );
+              })}
+            </div>
+          ) : null}
+
           {liveCurrent ? (
             <div
               className="tool-progress-current index-live-current"
@@ -1803,79 +2002,55 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         </div>
       )}
 
-      {/* Stat cards middle: frozen committed size, counts with the
-          vector/keyword split, prominent watermark age, per-source pills,
-          last-run strip, and recent failures. Freeze-then-jump: cards hold the
-          last settled snapshot mid-run and jump atomically at completion while
-          only the live block above stays live. */}
+      {/* Stat cards middle: on-disk storage breakdown, live-projected document & chunk
+          counts with vector/keyword split, and watermark age. Expensive storage byte sizing
+          waits for run_completed while in-memory count deltas project smoothly mid-run. */}
       <div className="index-status-section">
-        <h3>Status</h3>
-        <div className="index-status-line">
-          {cancelling ? (
-            <span className="status-pill running">Cancelling</span>
-          ) : status?.running || runActive ? (
-            <span className="status-pill running">Running</span>
-          ) : status?.enabled ? (
-            <span className="status-pill ok">Enabled</span>
-          ) : (
-            <span className="status-pill skipped">Disabled</span>
-          )}
-        </div>
-
-        {status ? (
-          <>
-            {/* Last-run strip distilled from the newest index-kind run log row:
-                status plus indexed/scanned/errors/retired/truncated and the
-                finish time, so the latest outcome reads without opening run
-                history. A first run in flight names itself instead of reading
-                as empty history. */}
-            <div
-              className="index-last-run"
-              data-testid="index-last-run"
-              style={{ marginTop: 12 }}
-            >
-              <span className="muted text-sm">{lastRunText}</span>
+        <div className="index-status-banner">
+          <div className="index-status-banner-left">
+            <h3>Status</h3>
+            <div className="index-status-line">
+              {cancelling ? (
+                <span className="status-pill running">Cancelling</span>
+              ) : status?.running || runActive ? (
+                <span className="status-pill running">Running</span>
+              ) : status?.enabled ? (
+                <span className="status-pill ok">Enabled</span>
+              ) : (
+                <span className="status-pill skipped">Disabled</span>
+              )}
             </div>
-            {/* Resolved effort reality for the status pane: the engine preset
-                plus the worker resolution against the machine cores. Rendered
-                only when the engine carries an effort signal so older engines
-                never invent a preset. The editable control lives in Settings →
-                Indexing; this line is the read-only mirror. */}
             {statusEffortReality ? (
               <p
-                className="muted text-sm"
+                className="muted text-sm index-effort-badge"
                 data-testid="index-effort-status"
-                style={{ marginTop: 8, marginBottom: 0 }}
               >
                 {statusEffortReality}
               </p>
             ) : null}
+          </div>
+          {status ? (
             <div
-              className="index-stat-cards"
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-                gap: 12,
-                marginTop: 12,
-              }}
+              className="index-last-run"
+              data-testid="index-last-run"
             >
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Size on disk</div>
-                {/* Freeze-then-jump: committed cards hold the last settled snapshot
-                    mid-run with no flash; only the live block above stays live. */}
+              <span className="muted text-sm">{lastRunText}</span>
+            </div>
+          ) : null}
+        </div>
+
+        {status ? (
+          <>
+            <div className="index-stat-cards">
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Size on disk</div>
                 <div
                   className="index-stat-value"
                   data-testid="index-stat-size-value"
-                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
                   <span data-testid="index-stat-size-figure">
                     {formatIndexBytes(storage.onDisk)}
                   </span>
-                  {/* Explicit sizing state while slow storage is pending:
-                      inline copy beside the figure with no spinner so the card
-                      never shifts layout when exact sizes fill in. Gated on
-                      slow arrival so an honest empty index hides it once slow
-                      lands instead of gating on non-zero breakdown. */}
                   {storage.hasStorage ? null : (
                     <span
                       className="muted text-xs"
@@ -1886,9 +2061,30 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     </span>
                   )}
                 </div>
-                {/* Breakdown row for the on-disk figure: text, vectors, FTS,
-                    and free space. Omitted for older engines without the
-                    storage rows so the card never renders a row of zeros. */}
+                {storage.hasBreakdown && storageBreakdownTotal > 0 ? (
+                  <div
+                    className="index-storage-meter"
+                    data-testid="index-size-meter"
+                    aria-hidden="true"
+                  >
+                    <span
+                      className="index-storage-seg text"
+                      style={{ width: `${percentOf(storage.text, storageBreakdownTotal)}%` }}
+                    />
+                    <span
+                      className="index-storage-seg vector"
+                      style={{ width: `${percentOf(storage.vector, storageBreakdownTotal)}%` }}
+                    />
+                    <span
+                      className="index-storage-seg fts"
+                      style={{ width: `${percentOf(storage.fts, storageBreakdownTotal)}%` }}
+                    />
+                    <span
+                      className="index-storage-seg free"
+                      style={{ width: `${percentOf(storage.free, storageBreakdownTotal)}%` }}
+                    />
+                  </div>
+                ) : null}
                 {storage.hasBreakdown ? (
                   <div
                     className="muted text-xs"
@@ -1912,9 +2108,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     </span>
                   </div>
                 ) : null}
-                {/* On-disk file detail: database file plus write-ahead log, the
-                    two addends behind the primary figure. Omitted for older
-                    engines without the file sizes. */}
                 {storage.hasOnDisk ? (
                   <div
                     className="muted text-xs"
@@ -1925,9 +2118,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     {formatIndexBytes(storage.wal)}
                   </div>
                 ) : null}
-                {/* Content bytes stay as the secondary detail so the pane never
-                    loses the pre-existing figure while the primary moves to
-                    the honest on-disk total. */}
                 <div
                   className="muted text-xs"
                   data-testid="index-size-content"
@@ -1936,41 +2126,57 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   Content {formatIndexBytes(storage.content)}
                 </div>
               </div>
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Documents</div>
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Documents</div>
                 <div
                   className="index-stat-value"
                   data-testid="index-stat-documents-value"
-                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {formatIndexCount(status.documents)}
+                  {formatIndexCount(displayDocuments)}
                 </div>
+                {liveIndexedDelta > 0 ? (
+                  <div
+                    className="index-stat-live-delta text-xs"
+                    data-testid="index-stat-documents-live"
+                  >
+                    +{formatIndexCount(liveIndexedDelta)} this run
+                  </div>
+                ) : (
+                  <div className="muted text-xs" style={{ marginTop: 2 }}>
+                    Across {formatIndexCount(status.sources.filter((s) => s.enabled).length)} active sources
+                  </div>
+                )}
               </div>
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Chunks</div>
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Chunks</div>
                 <div
                   className="index-stat-value"
                   data-testid="index-stat-chunks-value"
-                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {formatIndexCount(status.chunks)}
+                  {formatIndexCount(displayChunks)}
                 </div>
+                {vectorChunks + keywordChunks > 0 ? (
+                  <div className="index-chunks-meter" aria-hidden="true">
+                    <span
+                      className="index-chunks-seg vector"
+                      style={{ width: `${percentOf(vectorChunks, vectorChunks + keywordChunks)}%` }}
+                    />
+                    <span
+                      className="index-chunks-seg keyword"
+                      style={{ width: `${percentOf(keywordChunks, vectorChunks + keywordChunks)}%` }}
+                    />
+                  </div>
+                ) : null}
                 <div className="muted text-xs" style={{ marginTop: 2 }}>
-                  {formatIndexCount(status.vectorChunks)} vector · {formatIndexCount(status.keywordChunks)} keyword
+                  {formatIndexCount(vectorChunks)} vector · {formatIndexCount(keywordChunks)} keyword
                 </div>
               </div>
               <div
                 className="card index-stat-card index-watermark-card"
                 data-testid="index-watermark-card"
-                style={{
-                  padding: 12,
-                  marginBottom: 0,
-                  borderWidth: 2,
-                  borderStyle: "solid",
-                }}
               >
-                <div className="muted text-xs">Last indexed</div>
-                <div style={{ fontSize: 22, fontWeight: 800, marginTop: 2 }}>
+                <div className="muted text-xs index-stat-label">Last indexed</div>
+                <div className="index-stat-value">
                   {formatIndexAge(status.indexAsOf)}
                 </div>
                 <div className="muted text-xs" style={{ marginTop: 2 }}>
@@ -1978,85 +2184,26 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 </div>
               </div>
             </div>
-
-            {status.sources.length > 0 ? (
-              <div
-                className="index-source-pills"
-                style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}
-              >
-                {status.sources.map((source) => {
-                  const tone = indexSourcePillTone(source);
-                  const title = indexSourcePillTitle(source);
-                  const showGrant = shouldShowIndexGrantButton(source);
-                  const showDenied = shouldShowIndexAccessDeniedGuidance(source);
-                  return (
-                    <span
-                      key={source.kind}
-                      className={`status-pill ${tone}`}
-                      title={title ?? undefined}
-                    >
-                      {sourceLabel(source.kind)} · {source.enabled ? "On" : "Off"}
-                      {showGrant ? (
-                        <button
-                          type="button"
-                          className="ghost"
-                          aria-label={`Grant ${sourceLabel(source.kind)} access`}
-                          disabled={!!accessBusy[source.kind]}
-                          onClick={() => void handleGrantAccess(source.kind)}
-                          style={{ marginLeft: 8 }}
-                        >
-                          {accessBusy[source.kind] ? "Requesting…" : "Grant"}
-                        </button>
-                      ) : null}
-                      {showDenied ? (
-                        <span
-                          className="muted text-xs"
-                          style={{ marginLeft: 8 }}
-                        >
-                          {indexAccessDeniedGuidance(source.kind)}
-                        </span>
-                      ) : null}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : null}
           </>
         ) : (
           <div className="index-status-skeleton" data-testid="index-status-skeleton" role="status" aria-busy="true" aria-label="Loading index status">
             {/* Cold-boot skeleton: same card and pill geometry as the loaded panel
                 so the first paint reserves space without the old text paragraph. */}
-            <div
-              className="index-stat-cards"
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-                gap: 12,
-                marginTop: 12,
-              }}
-            >
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Size on disk</div>
+            <div className="index-stat-cards">
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Size on disk</div>
                 <div className="index-stat-value muted text-sm">Loading…</div>
               </div>
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Documents</div>
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Documents</div>
                 <div className="index-stat-value muted text-sm">Loading…</div>
               </div>
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Chunks</div>
+              <div className="card index-stat-card">
+                <div className="muted text-xs index-stat-label">Chunks</div>
                 <div className="index-stat-value muted text-sm">Loading…</div>
               </div>
-              <div
-                className="card index-stat-card index-watermark-card"
-                style={{
-                  padding: 12,
-                  marginBottom: 0,
-                  borderWidth: 2,
-                  borderStyle: "solid",
-                }}
-              >
-                <div className="muted text-xs">Last indexed</div>
+              <div className="card index-stat-card index-watermark-card">
+                <div className="muted text-xs index-stat-label">Last indexed</div>
                 <div className="index-stat-value muted text-sm">Loading…</div>
               </div>
             </div>
@@ -2072,231 +2219,91 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         )}
       </div>
 
-      {/* Charts bottom: frontend-only SVG donut (vector vs keyword), CSS bars
-          for real per-source content (documents/chunks/bytes by source), and
-          bars for the extraction-outcome breakdown — plain markup computed
-          from the status payload, no chart dependency and no extra route. */}
+      {/* Charts & Coverage Bento Grid: 2-column Bento layout pairing
+          Sources & Coverage (enablement pills + share-of-index bars) with
+          Composition & Extraction Outcomes (SVG donut + outcome bars). */}
       {status ? (
         <div className="index-charts-section">
           <h3>Charts</h3>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 24,
-              alignItems: "flex-start",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              <svg
-                width={DONUT_SIZE}
-                height={DONUT_SIZE}
-                viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`}
-                role="img"
-                aria-label={`${formatIndexCount(vectorChunks)} vector chunks, ${formatIndexCount(keywordChunks)} keyword chunks`}
-                data-testid="index-donut-chart"
-              >
-                <circle
-                  cx={DONUT_SIZE / 2}
-                  cy={DONUT_SIZE / 2}
-                  r={DONUT_RADIUS}
-                  fill="none"
-                  stroke={CHART_TRACK_COLOR}
-                  strokeWidth={DONUT_STROKE}
-                />
-                <circle
-                  cx={DONUT_SIZE / 2}
-                  cy={DONUT_SIZE / 2}
-                  r={DONUT_RADIUS}
-                  fill="none"
-                  stroke={CHART_VECTOR_COLOR}
-                  strokeWidth={DONUT_STROKE}
-                  strokeDasharray={`${donut.vectorDash} ${donut.circumference - donut.vectorDash}`}
-                  transform={`rotate(-90 ${DONUT_SIZE / 2} ${DONUT_SIZE / 2})`}
-                />
-                <circle
-                  cx={DONUT_SIZE / 2}
-                  cy={DONUT_SIZE / 2}
-                  r={DONUT_RADIUS}
-                  fill="none"
-                  stroke={CHART_KEYWORD_COLOR}
-                  strokeWidth={DONUT_STROKE}
-                  strokeDasharray={`${donut.keywordDash} ${donut.circumference - donut.keywordDash}`}
-                  strokeDashoffset={-donut.vectorDash}
-                  transform={`rotate(-90 ${DONUT_SIZE / 2} ${DONUT_SIZE / 2})`}
-                />
-              </svg>
-              <div
-                style={{ display: "flex", flexDirection: "column", gap: 6 }}
-                className="text-sm"
-              >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: 2,
-                      display: "inline-block",
-                      background: CHART_VECTOR_COLOR,
-                    }}
-                  />
-                  Vector <strong>{formatIndexCount(vectorChunks)}</strong>
-                </span>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: 2,
-                      display: "inline-block",
-                      background: CHART_KEYWORD_COLOR,
-                    }}
-                  />
-                  Keyword <strong>{formatIndexCount(keywordChunks)}</strong>
+          <div className="index-bento-charts-grid">
+            <div className="card index-bento-card">
+              <div className="index-bento-card-header">
+                <span className="index-bento-card-title">Sources &amp; Coverage</span>
+                <span className="muted text-xs">
+                  {formatIndexCount(sourceTotalDocuments)} total docs
                 </span>
               </div>
-            </div>
-
-            <div
-              data-testid="index-source-bars"
-              style={{
-                flex: "1 1 240px",
-                minWidth: 200,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              {/* Share-of-index heading keeps the scaling honest: every bar
-                  below is a fraction of the displayed total, so small buckets
-                  read as slivers rather than competing for the longest slot. */}
-              <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-                Documents by source — share of index
-              </h4>
-              {sourceContent.map((source) => {
-                // Width equals the rounded share with no visibility floor, so a tiny bucket paints
-                // as a sliver while its label stays truthful.
-                const barWidth = indexSourceBarWidth(
-                  source.documents,
-                  sourceTotalDocuments,
-                );
-                const barLabel = indexSourceBarPercent(
-                  source.documents,
-                  sourceTotalDocuments,
-                );
-                const isEmpty = source.documents <= 0;
-                // Stacked row keeps every track on its own full-width line so label length and
-                // trailing counts can never shift the bar origin: line one pairs the name with its
-                // share, line two paints the full-width track, line three carries the totals.
-                const skippedReason = resolveIndexSourceSkippedReason(
-                  status?.lastRun ?? null,
-                  source.kind,
-                );
-                return (
-                  <div
-                    key={source.kind}
-                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "baseline",
-                        gap: 8,
-                      }}
-                    >
-                      <span className="text-xs muted">
-                        {sourceLabel(source.kind)}
-                      </span>
-                      {isEmpty ? null : (
-                        <span
-                          className="text-xs muted"
-                          data-testid={`index-bar-pct-${source.kind}`}
-                          style={{ textAlign: "right" }}
-                        >
-                          {barLabel}
-                        </span>
-                      )}
-                    </div>
-                    {isEmpty ? (
+              {status.sources.length > 0 ? (
+                <div
+                  className="index-source-pills"
+                  style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}
+                >
+                  {status.sources.map((source) => {
+                    const tone = indexSourcePillTone(source);
+                    const title = indexSourcePillTitle(source);
+                    const showGrant = shouldShowIndexGrantButton(source);
+                    const showDenied = shouldShowIndexAccessDeniedGuidance(source);
+                    return (
                       <span
-                        className="text-xs muted"
-                        data-testid={`index-bar-empty-${source.kind}`}
+                        key={source.kind}
+                        className={`status-pill ${tone}`}
+                        title={title ?? undefined}
                       >
-                        No data yet
+                        {sourceLabel(source.kind)} · {source.enabled ? "On" : "Off"}
+                        {showGrant ? (
+                          <button
+                            type="button"
+                            className="ghost"
+                            aria-label={`Grant ${sourceLabel(source.kind)} access`}
+                            disabled={!!accessBusy[source.kind]}
+                            onClick={() => void handleGrantAccess(source.kind)}
+                            style={{ marginLeft: 8 }}
+                          >
+                            {accessBusy[source.kind] ? "Requesting…" : "Grant"}
+                          </button>
+                        ) : null}
+                        {showDenied ? (
+                          <span
+                            className="muted text-xs"
+                            style={{ marginLeft: 8 }}
+                          >
+                            {indexAccessDeniedGuidance(source.kind)}
+                          </span>
+                        ) : null}
                       </span>
-                    ) : (
-                      <div
-                        style={{
-                          width: "100%",
-                          height: 10,
-                          borderRadius: 5,
-                          background: CHART_TRACK_COLOR,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          data-testid={`index-bar-${source.kind}`}
-                          aria-label={`${sourceLabel(source.kind)} ${formatIndexCount(source.documents)} documents`}
-                          style={{
-                            width: barWidth,
-                            height: "100%",
-                            borderRadius: 5,
-                            background: CHART_VECTOR_COLOR,
-                          }}
-                        />
-                      </div>
-                    )}
-                    <span className="text-xs muted">
-                      {formatIndexCount(source.documents)} docs · {formatIndexCount(source.chunks)} chunks · {formatIndexBytes(source.bytes)}
-                    </span>
-                    {skippedReason ? (
-                      <span
-                        className="muted text-xs"
-                        data-testid={`index-source-note-${source.kind}`}
-                      >
-                        {skippedReason}
-                      </span>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
+                    );
+                  })}
+                </div>
+              ) : null}
 
-            <div
-              data-testid="index-extract-bars"
-              style={{
-                flex: "1 1 240px",
-                minWidth: 200,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              {/* Same share-of-index contract as the source bars so both
-                  breakdowns read as proportions of their own displayed total. */}
-              <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-                Extraction outcomes — share of index
-              </h4>
-              {extractRows.length > 0 ? (
-                extractRows.map((row) => {
-                  // Width equals the rounded share like the source bars above,
-                  // so the paint and the label never disagree.
+              <div
+                data-testid="index-source-bars"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                }}
+              >
+                <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+                  Documents by source — share of index
+                </h4>
+                {sourceContent.map((source) => {
                   const barWidth = indexSourceBarWidth(
-                    row.documents,
-                    extractTotalDocuments,
+                    source.documents,
+                    sourceTotalDocuments,
                   );
                   const barLabel = indexSourceBarPercent(
-                    row.documents,
-                    extractTotalDocuments,
+                    source.documents,
+                    sourceTotalDocuments,
                   );
-                  const isEmpty = row.documents <= 0;
-                  // Same stacked contract as the source chart so both groups
-                  // share one row geometry: label plus share on line one, a
-                  // full-width track on line two, totals on line three.
+                  const isEmpty = source.documents <= 0;
+                  const skippedReason = resolveIndexSourceSkippedReason(
+                    status?.lastRun ?? null,
+                    source.kind,
+                  );
                   return (
                     <div
-                      key={row.status}
+                      key={source.kind}
                       style={{ display: "flex", flexDirection: "column", gap: 4 }}
                     >
                       <div
@@ -2308,12 +2315,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                         }}
                       >
                         <span className="text-xs muted">
-                          {extractStatusLabel(row.status)}
+                          {sourceLabel(source.kind)}
                         </span>
                         {isEmpty ? null : (
                           <span
                             className="text-xs muted"
-                            data-testid={`index-extract-pct-${row.status}`}
+                            data-testid={`index-bar-pct-${source.kind}`}
                             style={{ textAlign: "right" }}
                           >
                             {barLabel}
@@ -2323,7 +2330,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       {isEmpty ? (
                         <span
                           className="text-xs muted"
-                          data-testid={`index-extract-empty-${row.status}`}
+                          data-testid={`index-bar-empty-${source.kind}`}
                         >
                           No data yet
                         </span>
@@ -2338,42 +2345,211 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                           }}
                         >
                           <div
-                            data-testid={`index-extract-bar-${row.status}`}
-                            aria-label={`${extractStatusLabel(row.status)} ${formatIndexCount(row.documents)} documents`}
+                            data-testid={`index-bar-${source.kind}`}
+                            aria-label={`${sourceLabel(source.kind)} ${formatIndexCount(source.documents)} documents`}
                             style={{
                               width: barWidth,
                               height: "100%",
                               borderRadius: 5,
-                              background: CHART_EXTRACT_COLOR,
+                              background: CHART_VECTOR_COLOR,
+                              transition: "width 240ms ease",
                             }}
                           />
                         </div>
                       )}
                       <span className="text-xs muted">
-                        {formatIndexCount(row.documents)} docs
+                        {formatIndexCount(source.documents)} docs · {formatIndexCount(source.chunks)} chunks · {formatIndexBytes(source.bytes)}
                       </span>
+                      {skippedReason ? (
+                        <span
+                          className="muted text-xs"
+                          data-testid={`index-source-note-${source.kind}`}
+                        >
+                          {skippedReason}
+                        </span>
+                      ) : null}
                     </div>
                   );
-                })
-              ) : (
-                <span className="text-xs muted" data-testid="index-extract-empty">
-                  No data yet
+                })}
+              </div>
+            </div>
+
+            <div className="card index-bento-card">
+              <div className="index-bento-card-header">
+                <span className="index-bento-card-title">Composition &amp; Extraction</span>
+                <span className="muted text-xs">
+                  {formatIndexCount(vectorChunks + keywordChunks)} chunks
                 </span>
-              )}
+              </div>
+
+              <div className="index-donut-showcase">
+                <svg
+                  width={DONUT_SIZE}
+                  height={DONUT_SIZE}
+                  viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`}
+                  role="img"
+                  aria-label={`${formatIndexCount(vectorChunks)} vector chunks, ${formatIndexCount(keywordChunks)} keyword chunks`}
+                  data-testid="index-donut-chart"
+                >
+                  <circle
+                    cx={DONUT_SIZE / 2}
+                    cy={DONUT_SIZE / 2}
+                    r={DONUT_RADIUS}
+                    fill="none"
+                    stroke={CHART_TRACK_COLOR}
+                    strokeWidth={DONUT_STROKE}
+                  />
+                  <circle
+                    cx={DONUT_SIZE / 2}
+                    cy={DONUT_SIZE / 2}
+                    r={DONUT_RADIUS}
+                    fill="none"
+                    stroke={CHART_VECTOR_COLOR}
+                    strokeWidth={DONUT_STROKE}
+                    strokeDasharray={`${donut.vectorDash} ${donut.circumference - donut.vectorDash}`}
+                    transform={`rotate(-90 ${DONUT_SIZE / 2} ${DONUT_SIZE / 2})`}
+                  />
+                  <circle
+                    cx={DONUT_SIZE / 2}
+                    cy={DONUT_SIZE / 2}
+                    r={DONUT_RADIUS}
+                    fill="none"
+                    stroke={CHART_KEYWORD_COLOR}
+                    strokeWidth={DONUT_STROKE}
+                    strokeDasharray={`${donut.keywordDash} ${donut.circumference - donut.keywordDash}`}
+                    strokeDashoffset={-donut.vectorDash}
+                    transform={`rotate(-90 ${DONUT_SIZE / 2} ${DONUT_SIZE / 2})`}
+                  />
+                </svg>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 6 }}
+                  className="text-sm"
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        display: "inline-block",
+                        background: CHART_VECTOR_COLOR,
+                      }}
+                    />
+                    Vector <strong>{formatIndexCount(vectorChunks)}</strong>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        display: "inline-block",
+                        background: CHART_KEYWORD_COLOR,
+                      }}
+                    />
+                    Keyword <strong>{formatIndexCount(keywordChunks)}</strong>
+                  </span>
+                </div>
+              </div>
+
+              <div
+                data-testid="index-extract-bars"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  marginTop: 14,
+                }}
+              >
+                <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+                  Extraction outcomes — share of index
+                </h4>
+                {extractRows.length > 0 ? (
+                  extractRows.map((row) => {
+                    const barWidth = indexSourceBarWidth(
+                      row.documents,
+                      extractTotalDocuments,
+                    );
+                    const barLabel = indexSourceBarPercent(
+                      row.documents,
+                      extractTotalDocuments,
+                    );
+                    const isEmpty = row.documents <= 0;
+                    return (
+                      <div
+                        key={row.status}
+                        style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "baseline",
+                            gap: 8,
+                          }}
+                        >
+                          <span className="text-xs muted">
+                            {extractStatusLabel(row.status)}
+                          </span>
+                          {isEmpty ? null : (
+                            <span
+                              className="text-xs muted"
+                              data-testid={`index-extract-pct-${row.status}`}
+                              style={{ textAlign: "right" }}
+                            >
+                              {barLabel}
+                            </span>
+                          )}
+                        </div>
+                        {isEmpty ? (
+                          <span
+                            className="text-xs muted"
+                            data-testid={`index-extract-empty-${row.status}`}
+                          >
+                            No data yet
+                          </span>
+                        ) : (
+                          <div
+                            style={{
+                              width: "100%",
+                              height: 10,
+                              borderRadius: 5,
+                              background: CHART_TRACK_COLOR,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              data-testid={`index-extract-bar-${row.status}`}
+                              aria-label={`${extractStatusLabel(row.status)} ${formatIndexCount(row.documents)} documents`}
+                              style={{
+                                width: barWidth,
+                                height: "100%",
+                                borderRadius: 5,
+                                background: CHART_EXTRACT_COLOR,
+                              }}
+                            />
+                          </div>
+                        )}
+                        <span className="text-xs muted">
+                          {formatIndexCount(row.documents)} docs
+                        </span>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <span className="text-xs muted" data-testid="index-extract-empty">
+                    No data yet
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
       ) : null}
 
-      {/* Last errors below the charts: rows stay collapsed behind their header
-          toggle so a noisy pass never pushes the charts, with the full list
-          in a fixed inset scroll once expanded. The Full Disk Access guidance
-          stays visible even while collapsed so the actionable onboarding never
-          hides behind Show. When the display list is empty (guidance-only
-          denial) the header renders a static count with no toggle, so the
-          Show/Hide affordance never flips with zero visible change. Row
-          markup, test ids, per-row expand controls, and the guided onboarding
-          stay owned here. */}
+      {/* Last errors below the charts stay collapsed behind their header toggle so a noisy
+          pass never pushes the charts, expanding to a fixed inset scroll once shown. FDA
+          guidance stays visible even collapsed; a guidance-only denial keeps a static count. */}
       {hasErrorBlock ? (
         <div
           className="index-errors"
@@ -2463,16 +2639,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   </ul>
                 </div>
               ) : null}
-              {/* Guided onboarding for the Full Disk Access denial, always visible
-                  even while the rows stay collapsed: macOS
-                  offers no prompt API, so the denial only surfaces at
-                  run time. The button navigates the top frame to the exact
-                  Settings pane, where window.open would be treated as a
-                  blocked popup for this system scheme. The steps name both
-                  grants because macOS attributes the read to the host
-                  process: RuneWeaver.app for the app, the terminal emulator
-                  for rune-weaver serve. The raw denial bullet stays hidden
-                  while this renders — the guidance is its formatted form. */}
+              {/* Guided onboarding for the Full Disk Access denial stays visible even while the
+                  rows stay collapsed: macOS offers no prompt API, so the denial surfaces only
+                  at run time, and the top frame navigation beats a window.open popup block. */}
               {showFdaGuidance ? (
                 <div
                   className="index-fda-guidance"
@@ -3020,10 +3189,9 @@ export function IndexPolicyPanel() {
             className="muted text-xs"
             data-testid="index-always-skipped-block"
           >
-            {/* Walker prune list renders solely from the `alwaysSkipped`
-                payload so the copy cannot drift from
-                FilesIndexer.alwaysSkippedPatterns. The file-access deny list
-                stays generic and never enumerates patterns here. */}
+            {/* Walker prune list renders solely from the `alwaysSkipped` payload so the copy
+                cannot drift from FilesIndexer.alwaysSkippedPatterns; the file-access deny
+                list stays generic and never enumerates patterns here. */}
             {alwaysSkipped.length > 0 ? (
               <>
                 <p style={{ marginTop: 4, marginBottom: 0 }}>
@@ -3117,13 +3285,9 @@ export function IndexPolicyPanel() {
           })}
         </fieldset>
 
-        {/* Index roots editor: the file-walk boundary over IndexConfig.roots.
-            One root per line, trimmed with blanks dropped on save; an emptied
-            editor and `..` escapes fail closed with line numbers in handleSave.
-            Saved through the existing `roots` key with no API shape change.
-            The deny filter honors deny patterns only and ignores allow roots,
-            while paths denied under Security Files and Access are never
-            indexed. */}
+        {/* Index roots editor: the file-walk boundary over IndexConfig.roots. One root per
+            line, trimmed with blanks dropped on save; an emptied editor and `..` escapes fail
+            closed with line numbers in handleSave; the deny filter honors deny patterns only. */}
         <div className="form-group">
           <label htmlFor="index-roots">Index roots (one per line)</label>
           <textarea
@@ -3138,10 +3302,9 @@ export function IndexPolicyPanel() {
             ignored. Paths denied under Security Files and Access are never
             indexed.
           </p>
-          {/* Informational outside-allow-roots warning: renders exactly when a
-              live index root sits outside the loaded files allow roots, since
-              recalled content from there may not be readable by live file
-              tools. Informational only — the save still persists. */}
+          {/* Informational outside-allow-roots warning: renders exactly when a live index root
+              sits outside the loaded files allow roots, since recalled content from there may
+              not be readable by live file tools. The save still persists regardless. */}
           {outsideRoots.length > 0 ? (
             <p
               className="muted text-xs"
@@ -3258,10 +3421,9 @@ export function IndexPolicyPanel() {
           </label>
         </fieldset>
 
-        {/* Per-document vector chunk cap: bounds embedding work so one
-            text-dense document cannot fan an outsized batch. Chunks beyond the
-            cap stay keyword-searchable, so a capped document is still fully
-            findable by keyword. Persisted only on Save like every other knob. */}
+        {/* Per-document vector chunk cap: bounds embedding work so one text-dense document
+            cannot fan an outsized batch. Chunks beyond the cap stay keyword-searchable, so a
+            capped document remains fully findable; persisted only on Save like the others. */}
         <div className="form-group" style={{ marginTop: 12 }}>
           <label htmlFor="index-vector-cap">
             Max vector chunks per document

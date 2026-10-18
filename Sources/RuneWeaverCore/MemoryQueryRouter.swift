@@ -118,8 +118,8 @@ public enum MemoryQueryRouter: Sendable {
         if back == 0 {
             back = 7
         }
-        guard let dayStart = calendar.date(byAdding: .day, value: -back, to: todayStart) else { return nil }
-        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+        guard let dayStart = calendar.date(byAdding: .day, value: -back, to: todayStart),
+              let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
         return dayWindow(since: dayStart, until: nextDay, calendar: calendar)
     }
 
@@ -136,8 +136,8 @@ public enum MemoryQueryRouter: Sendable {
     private static func singleDateRange(lowered: String) -> TemporalRange? {
         guard let match = firstDateString(in: lowered) else { return nil }
         let calendar = gregorianCalendar()
-        guard let midnight = try? TemporalFilter.parse(since: match, until: nil).since else { return nil }
-        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: midnight) else { return nil }
+        guard let midnight = try? TemporalFilter.parse(since: match, until: nil).since,
+              let nextDay = calendar.date(byAdding: .day, value: 1, to: midnight) else { return nil }
         return dayWindow(since: midnight, until: nextDay, calendar: calendar)
     }
 
@@ -150,8 +150,8 @@ public enum MemoryQueryRouter: Sendable {
         guard LiveSearchGuidance.containsWord("tomorrow", in: lowered) else { return nil }
         let calendar = gregorianCalendar()
         let todayStart = calendar.startOfDay(for: currentDate)
-        guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart) else { return nil }
-        guard let dayAfter = calendar.date(byAdding: .day, value: 1, to: tomorrowStart) else { return nil }
+        guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart),
+              let dayAfter = calendar.date(byAdding: .day, value: 1, to: tomorrowStart) else { return nil }
         return dayWindow(since: tomorrowStart, until: dayAfter, calendar: calendar)
     }
 
@@ -182,8 +182,8 @@ public enum MemoryQueryRouter: Sendable {
         let todayStart = calendar.startOfDay(for: currentDate)
         let todayWeekday = calendar.component(.weekday, from: currentDate)
         let ahead = (target - todayWeekday + 7) % 7
-        guard let dayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart) else { return nil }
-        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+        guard let dayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart),
+              let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
         return dayWindow(since: dayStart, until: nextDay, calendar: calendar)
     }
 
@@ -228,8 +228,8 @@ public enum MemoryQueryRouter: Sendable {
         let todayStart = calendar.startOfDay(for: currentDate)
         let todayWeekday = calendar.component(.weekday, from: currentDate)
         let ahead = (7 - todayWeekday + 7) % 7
-        guard let saturdayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart) else { return nil }
-        guard let mondayStart = calendar.date(byAdding: .day, value: 2, to: saturdayStart) else { return nil }
+        guard let saturdayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart),
+              let mondayStart = calendar.date(byAdding: .day, value: 2, to: saturdayStart) else { return nil }
         return dayWindow(since: saturdayStart, until: mondayStart, calendar: calendar)
     }
 
@@ -254,8 +254,7 @@ public enum MemoryQueryRouter: Sendable {
         let nextYear = month == 12 ? year + 1 : year
         let untilString = String(format: "%04d-%02d-01", nextYear, nextMonth)
         guard let initial = try? TemporalFilter.parse(since: sinceString, until: untilString) else { return nil }
-        guard let since = initial.since, since > currentDate else { return initial }
-        guard let until = initial.until,
+        guard let since = initial.since, since > currentDate, let until = initial.until,
               let rolledSince = calendar.date(byAdding: .year, value: -1, to: since),
               let rolledUntil = calendar.date(byAdding: .year, value: -1, to: until)
         else { return initial }

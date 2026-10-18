@@ -161,7 +161,7 @@ private final class CapturingMergeRunLogger: FanOutRunLogging {
 private func makeMergeEngine(
     orchestrator: OrchestratorFanOutSeam,
     runLogger: FanOutRunLogging,
-    reviewer: (any LLMProvider)? = nil,
+    reviewer: any LLMProvider? = nil,
     configure: (inout FanOutConfig) -> Void = { _ in }
 ) -> FanOutEngine {
     var config = FanOutConfig()

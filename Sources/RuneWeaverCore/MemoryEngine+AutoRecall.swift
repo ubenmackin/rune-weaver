@@ -293,8 +293,7 @@ extension MemoryEngine {
     ) -> [MemoryResult] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return results.filter { result in
-            guard result.source == .episodic else { return true }
-            guard result.metadata["session_id"] == sessionID.uuidString else { return true }
+            guard result.source == .episodic, result.metadata["session_id"] == sessionID.uuidString else { return true }
             return result.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != trimmedQuery
         }
     }
@@ -321,7 +320,7 @@ extension MemoryEngine {
     public func recallMessage(
         for query: String,
         sessionID: UUID,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         labelingEnabled: Bool = true,
         budgets: RecallBudgets = RecallBudgets(),
         plan: RecallPlan? = nil
@@ -343,7 +342,7 @@ extension MemoryEngine {
     public func recallMessageWithDiagnostics(
         for query: String,
         sessionID: UUID,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         labelingEnabled: Bool = true,
         budgets: RecallBudgets = RecallBudgets(),
         plan: RecallPlan? = nil

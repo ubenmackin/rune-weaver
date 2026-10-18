@@ -113,8 +113,7 @@ public enum MachineScopedRunner: Sendable {
     /// - Returns: Decoded array or object, nil when the dump is not pure JSON.
     public static func decodedInspectJSON(from output: String) -> Any? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let data = trimmed.data(using: .utf8) else { return nil }
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [])
     }
 
@@ -167,10 +166,8 @@ public enum MachineScopedRunner: Sendable {
                 if let found = configValueInDecodedJSON(entry) {
                     return found
                 }
-                if let text = entry as? String, text.contains(configLabel) {
-                    if let extracted = extractConfigValue(from: text) {
-                        return extracted
-                    }
+                if let text = entry as? String, text.contains(configLabel), let extracted = extractConfigValue(from: text) {
+                    return extracted
                 }
             }
         }
@@ -293,7 +290,7 @@ public struct MachineContainerClient: Sendable {
     private let runtime: any ContainerHostRuntime
 
     /// Creates a client on an injected runtime, live when nil.
-    public init(runtime: (any ContainerHostRuntime)? = nil) {
+    public init(runtime: any ContainerHostRuntime? = nil) {
         self.runtime = runtime ?? LiveContainerHostRuntime()
     }
 

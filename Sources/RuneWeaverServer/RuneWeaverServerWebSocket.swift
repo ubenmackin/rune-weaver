@@ -883,9 +883,8 @@ private struct WSDecisionScopeOutcome: Sendable {
 
 private func wsDecisionScope(from text: String) -> WSDecisionScopeOutcome {
     guard let data = text.data(using: .utf8),
-          let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return WSDecisionScopeOutcome(scope: nil, invalid: false) }
-    guard raw.keys.contains("scope") else {
+          let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any], raw.keys.contains("scope")
+    else {
         return WSDecisionScopeOutcome(scope: nil, invalid: false)
     }
     // A JSON null scope reads as no explicit scope; any other present value

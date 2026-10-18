@@ -827,7 +827,7 @@ public struct RemindersDeleteTool: Tool, Sendable {
 public enum RemindersTools {
     public static let toolNames = ["reminders.search", "reminders.create", "reminders.update", "reminders.delete"]
 
-    public static func makeTools(gateway: (any RemindersGateway)? = nil) -> [any Tool] {
+    public static func makeTools(gateway: any RemindersGateway? = nil) -> [any Tool] {
         let effective: any RemindersGateway = gateway ?? ProductionRemindersGateway()
         let search: any Tool = RemindersSearchTool(gateway: effective)
         let create: any Tool = RemindersCreateTool(gateway: effective)
@@ -836,7 +836,7 @@ public enum RemindersTools {
         return [search, create, update, delete]
     }
 
-    public static func register(on bus: ToolBus, gateway: (any RemindersGateway)? = nil) async {
+    public static func register(on bus: ToolBus, gateway: any RemindersGateway? = nil) async {
         for tool in makeTools(gateway: gateway) {
             await bus.register(tool: tool)
         }

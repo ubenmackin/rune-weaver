@@ -721,8 +721,7 @@ extension SQLiteStagedFilesStore {
             }
             defer { sqlite3_finalize(statement) }
             SQLiteHelpers.bindText(statement, index: 1, value: path)
-            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-            guard let recordPath = SQLiteHelpers.columnText(statement, index: 0) else { return nil }
+            guard sqlite3_step(statement) == SQLITE_ROW, let recordPath = SQLiteHelpers.columnText(statement, index: 0) else { return nil }
             let backupPath = SQLiteHelpers.columnText(statement, index: 1)
             let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 2))
             let resolution = SQLiteHelpers.columnText(statement, index: 3).flatMap { FileReviewState(rawValue: $0) }

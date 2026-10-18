@@ -73,8 +73,7 @@ extension ServerEndpointConfig {
                 continue
             }
             let normalized = normalizeHost(entry)
-            guard !normalized.isEmpty else { continue }
-            guard normalized.count <= maxAllowedHostLength else { continue }
+            guard !normalized.isEmpty, normalized.count <= maxAllowedHostLength else { continue }
             if seen.insert(normalized).inserted {
                 deduped.append(normalized)
             }

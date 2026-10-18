@@ -140,10 +140,7 @@ public enum TemporalFilter: Sendable {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let startOfDay = calendar.startOfDay(for: date)
-        guard date > startOfDay else {
-            return imapDateString(from: date)
-        }
-        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else {
+        guard date > startOfDay, let nextDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else {
             return imapDateString(from: date)
         }
         return imapDateString(from: nextDay)
@@ -342,10 +339,7 @@ public enum TemporalFilter: Sendable {
 
     /// Resolves a date-only day to midnight in the device timezone.
     private static func dateOnlyMidnight(from text: String) -> Date? {
-        guard let parts = dateOnlyParts(from: text) else {
-            return nil
-        }
-        guard (1 ... 12).contains(parts.month) else {
+        guard let parts = dateOnlyParts(from: text), (1 ... 12).contains(parts.month) else {
             return nil
         }
         var calendar = Calendar(identifier: .gregorian)

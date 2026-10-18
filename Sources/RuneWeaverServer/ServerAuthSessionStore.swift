@@ -85,8 +85,7 @@ public struct ServerAuthSessionStore: Sendable {
 
     /// Loads the persisted session document.
     public func load() throws -> PersistedAuthSessions? {
-        guard let fileURL else { return nil }
-        guard let data = try ServerAuthTokenStore.readRestrictedData(
+        guard let fileURL, let data = try ServerAuthTokenStore.readRestrictedData(
             fileURL,
             insecureFileError: ServerAuthError.insecureSessionsFile
         ) else {

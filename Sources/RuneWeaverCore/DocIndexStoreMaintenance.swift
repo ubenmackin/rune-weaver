@@ -1045,8 +1045,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
                 throw DocIndexError.persistenceFailed("Could not prepare watermark")
             }
             defer { sqlite3_finalize(statement) }
-            guard sqlite3_step(statement) == SQLITE_ROW else { return Date(timeIntervalSince1970: 0) }
-            guard sqlite3_column_type(statement, 0) != SQLITE_NULL else { return Date(timeIntervalSince1970: 0) }
+            guard sqlite3_step(statement) == SQLITE_ROW, sqlite3_column_type(statement, 0) != SQLITE_NULL else { return Date(timeIntervalSince1970: 0) }
             return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
         }
     }

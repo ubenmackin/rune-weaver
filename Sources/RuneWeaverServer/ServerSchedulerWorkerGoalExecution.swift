@@ -295,11 +295,7 @@ extension ServerSchedulerWorker {
             return completed
         }
 
-        guard await !isGoalBusy(id: goal.id) else {
-            return await recordGoalSkipped(goal: goal, startTime: startTime)
-        }
-
-        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
+        guard await !isGoalBusy(id: goal.id), await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
             return await recordGoalSkipped(goal: goal, startTime: startTime)
         }
         lastSkippedGoalDueAt.removeValue(forKey: goal.id)
@@ -395,21 +391,14 @@ extension ServerSchedulerWorker {
 
     /// Advances one goal immediately, bypassing its due cadence.
     public func advanceGoalNow(goalID: UUID) async throws -> (runID: UUID, sessionID: UUID) {
-        guard let store = goalStore, let engine = goalEngine else {
-            throw GoalEngineError.disabled
-        }
-        guard await engine.isEnabled else {
+        guard let store = goalStore, let engine = goalEngine, await engine.isEnabled else {
             throw GoalEngineError.disabled
         }
         guard let goal = try await store.goal(id: goalID) else {
             throw GoalStoreError.notFound("No goal \(goalID)")
         }
         let startTime = Date()
-        guard await !isGoalBusy(id: goal.id) else {
-            _ = await recordGoalSkipped(goal: goal, startTime: startTime)
-            throw GoalBusyError()
-        }
-        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
+        guard await !isGoalBusy(id: goal.id), await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
             _ = await recordGoalSkipped(goal: goal, startTime: startTime)
             throw GoalBusyError()
         }
