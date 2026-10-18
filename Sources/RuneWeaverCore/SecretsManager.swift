@@ -346,8 +346,7 @@ extension SecretsManager {
         while end < afterPrefix.endIndex, isSurrogateKeyChar(afterPrefix[end]) {
             end = afterPrefix.index(after: end)
         }
-        guard end > afterPrefix.startIndex else { return nil }
-        guard end == afterPrefix.endIndex else { return nil }
+        guard end > afterPrefix.startIndex, end == afterPrefix.endIndex else { return nil }
         return String(afterPrefix[..<end])
     }
 
@@ -438,10 +437,7 @@ extension SecretsManager {
         secrets.reserveCapacity(keys.count)
         for key in keys {
             // Same reservation refusal as the exact-reference path.
-            guard !Self.isReservedAccount(key) else {
-                throw SecretsError.unknownSurrogate(key: key)
-            }
-            guard let secret = try retrieve(key: key, service: service), !secret.isEmpty else {
+            guard !Self.isReservedAccount(key), let secret = try retrieve(key: key, service: service), !secret.isEmpty else {
                 throw SecretsError.unknownSurrogate(key: key)
             }
             resolved = resolved.replacingOccurrences(

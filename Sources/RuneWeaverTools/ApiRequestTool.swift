@@ -304,7 +304,7 @@ public struct ApiRequestTool: Tool, Sendable {
     /// Creates an API request tool. transport: HTTP transport; the live pinned
     /// dialer when nil.
     public init(
-        transport: (any ApiRequestTransport)? = nil,
+        transport: any ApiRequestTransport? = nil,
         browserConfig: BrowserConfig? = nil,
         timeoutSeconds: Double? = nil,
         egressSupervisor: OutboundEgressSupervisor
@@ -854,7 +854,7 @@ public enum ApiRequestTools {
     /// Builds the API request tool over one shared egress supervisor.
     public static func makeTools(
         supervisor: OutboundEgressSupervisor,
-        transport: (any ApiRequestTransport)? = nil,
+        transport: any ApiRequestTransport? = nil,
         browserConfig: BrowserConfig? = nil,
         timeoutSeconds: Double? = nil
     ) -> [any Tool] {
@@ -874,7 +874,7 @@ public enum ApiRequestTools {
     public static func register(
         on bus: ToolBus,
         supervisor: OutboundEgressSupervisor,
-        transport: (any ApiRequestTransport)? = nil,
+        transport: any ApiRequestTransport? = nil,
         browserConfig: BrowserConfig? = nil,
         timeoutSeconds: Double? = nil
     ) async {

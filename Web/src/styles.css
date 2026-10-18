@@ -1,9 +1,5 @@
-/* Rune Weaver Dashboard — global stylesheet.
- *
- * Single shared stylesheet for the dashboard static bundle: layout shell,
- * 100% full-width top navigation, session sidebar, chat messages with status bar,
- * modal dialogs, schedule wizard, and execution audit cards.
- */
+/* Rune Weaver Dashboard — global stylesheet: one shared file for the static bundle
+ * covering layout shell, top nav, session sidebar, chat, modals, wizard, and audit cards. */
 
 :root {
   color-scheme: light dark;
@@ -174,10 +170,9 @@ a {
   color: var(--text-muted);
 }
 
-/* Profile and section dropdown menus share one geometry contract. The
- * `.nav-dropdown-*` classes are the source of truth reused by the Work group
- * menu and the profile menu, so the two surfaces cannot drift; the profile
- * rules below keep their existing right-anchored placement unchanged. */
+/* Profile and section dropdown menus share one geometry contract: the
+ * `.nav-dropdown-*` classes are the source of truth both menus reuse, so
+ * the two surfaces cannot drift and the profile rules keep their placement. */
 .nav-dropdown-container,
 .profile-dropdown-container {
   position: relative;
@@ -762,10 +757,9 @@ a {
   color: #fbbf24;
 }
 
-/* Fan-out tree: a parent row's disclosure reveals its worker children as
- * indented rows. The chevron, agent count, and worker glyph share one violet
- * accent so a swarm grouping reads as a distinct origin at a glance without
- * minting a new global token. */
+/* Fan-out tree: a parent row's disclosure reveals worker children as indented
+ * rows; chevron, agent count, and worker glyph share one violet accent so a
+ * swarm grouping reads as a distinct origin without minting a new token. */
 .session-item-child {
   padding-left: 24px;
 }
@@ -1399,9 +1393,8 @@ a {
 }
 
 /* The live header pairs the toggle with a per-call cancel control; the toggle
- * yields its full width so the two actions share one row without wrapping. The
- * right inset lives on the cancel control rather than the header so a row with
- * no cancel keeps the toggle's own 8px padding instead of doubling it. */
+ * yields its full width so the actions share one row. The right inset lives on
+ * the cancel control so a row with no cancel keeps the toggle's 8px padding. */
 .chat-tool-pill-header {
   display: flex;
   align-items: center;
@@ -1529,12 +1522,9 @@ a {
   white-space: nowrap;
 }
 
-/* Live per-tool progress under the Running pill. The engine publishes counters
- * and a relative tail only, so the bar stays an indeterminate shimmer rather
- * than a percent track it cannot fill honestly. One shared token drives both
- * the chat rows and the index strip: the track reuses the border token while
- * the sliding highlight pairs two high-contrast stripe stops. The highlight
- * slides with transform only so the animation stays compositor-cheap. */
+/* Live per-tool progress under the Running pill: counters arrive but no percent
+ * does, so the bar stays an indeterminate shimmer. One shared token drives the
+ * chat rows and the index strip; the highlight slides with transform only. */
 .tool-progress-shimmer {
   height: 4px;
   border-radius: 2px;
@@ -1577,34 +1567,421 @@ a {
   }
 }
 
-/* Index live block: single grep-style block under Run with a header line,
- * one truncated current file, and an indeterminate activity bar reusing the
- * ToolProgress shimmer (activity only, never percent). */
+/* Index live pipeline card: header strip, animated 4-stage pipeline flow track,
+ * 4-lane modality queue progress grid, concurrent source status chips, monospaced
+ * current-item ticker, and indeterminate activity bar. */
 .index-live-progress {
   margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
 }
 
 .index-live-header {
   font-size: 12px;
-  color: var(--text-muted);
+  font-weight: 600;
+  color: var(--text-main);
 }
 
 .index-live-current {
   max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+  border: 1px solid var(--border-color);
 }
 
 .index-live-activity {
   margin-top: 2px;
 }
 
-/* Index run actions stay inside narrow cards without sideways scrolling. Five
- * controls share one card, so the row wraps to a second line on a 320px card
- * instead of pushing the shortest label off the edge. Buttons keep touch size
- * without growing because flex-grow stays zero, letting short labels sit
- * compactly while long ones shrink within the card. */
+.index-pipeline-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+
+@media (max-width: 640px) {
+  .index-pipeline-track {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.index-pipeline-step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+}
+
+.index-pipeline-node {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+  flex-shrink: 0;
+}
+
+.index-pipeline-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-pipeline-step.done {
+  color: var(--text-main);
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.index-pipeline-step.done .index-pipeline-node {
+  background: var(--status-green, #10b981);
+}
+
+.index-pipeline-step.active {
+  color: var(--text-main);
+  font-weight: 600;
+  border-color: rgba(99, 102, 241, 0.65);
+  background: rgba(99, 102, 241, 0.14);
+}
+
+.index-pipeline-step.active .index-pipeline-node {
+  background: #6366f1;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.22);
+  animation: indexPipelinePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes indexPipelinePulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.78;
+  }
+}
+
+.index-queue-lanes-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .index-queue-lanes-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.index-queue-lane-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.28);
+  border: 1px solid var(--border-color);
+}
+
+.index-queue-lane-card.active {
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+.index-queue-lane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.index-queue-lane-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-queue-lane-counts {
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.index-queue-lane-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.index-queue-lane-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #14b8a6);
+  transition: width 220ms ease;
+}
+
+.index-live-sources-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.index-live-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid var(--border-color);
+}
+
+.index-live-source-chip.running {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.index-live-source-chip.completed {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.index-live-source-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.6);
+}
+
+.index-live-source-chip.running .index-live-source-dot {
+  background: #6366f1;
+}
+
+.index-live-source-chip.completed .index-live-source-dot {
+  background: var(--status-green, #10b981);
+}
+
+.index-live-source-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* Bento dashboard layout for Index Status */
+.index-bento-header {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+}
+
+.index-bento-header-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.index-bento-header-top h3 {
+  margin: 0;
+}
+
+.index-status-section {
+  margin-top: 14px;
+}
+
+.index-status-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+}
+
+.index-status-banner-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.index-status-banner-left h3 {
+  margin: 0;
+}
+
+.index-effort-badge {
+  margin: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--border-color);
+}
+
+.index-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+@media (max-width: 820px) {
+  .index-stat-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .index-stat-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.index-stat-card {
+  padding: 14px;
+  margin-bottom: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.index-stat-label {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.index-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.index-stat-live-delta {
+  display: inline-flex;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  color: #818cf8;
+  background: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.index-watermark-card {
+  border-left: 3px solid #6366f1;
+}
+
+.index-storage-meter,
+.index-chunks-meter {
+  display: flex;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.2);
+  margin-top: 4px;
+}
+
+.index-storage-seg.text {
+  background: #38bdf8;
+}
+
+.index-storage-seg.vector,
+.index-chunks-seg.vector {
+  background: #6366f1;
+}
+
+.index-storage-seg.fts,
+.index-chunks-seg.keyword {
+  background: #14b8a6;
+}
+
+.index-storage-seg.free {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.index-charts-section {
+  margin-top: 16px;
+}
+
+.index-bento-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+
+@media (max-width: 780px) {
+  .index-bento-charts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.index-bento-card {
+  padding: 16px;
+  margin-bottom: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.index-bento-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.index-bento-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.index-donut-showcase {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.24);
+  border: 1px solid var(--border-color);
+}
+
+/* Index run actions stay inside narrow cards: the row wraps to a second line
+ * on a 320px card instead of pushing the shortest label off the edge, and
+ * buttons keep touch size because flex-grow stays zero. */
 .index-actions-section {
   min-width: 0;
   max-width: 100%;
@@ -1626,10 +2003,9 @@ a {
   box-sizing: border-box;
 }
 
-/* Index last-errors block below the charts: a collapsed header toggle keeps a
- * noisy pass from pushing surrounding content, while the expanded list reads
- * inside a fixed inset scroll so ten-plus rows never grow the page. Rows keep
- * the warning icon beside wrapped text even at 360px widths. */
+/* Index last-errors block: a collapsed header toggle keeps a noisy pass from
+ * pushing surrounding content, while the expanded list reads inside a fixed
+ * inset scroll so ten-plus rows never grow the page. */
 .index-errors {
   margin-top: 12px;
   display: flex;
@@ -2109,10 +2485,9 @@ a {
   color: var(--text-muted);
 }
 
-/* Shared badge states for the run-log card variant: single stylesheet source
- * so card and chat rows stay visually consistent without inline styles.
- * Green/red/amber/purple mirror the chat pill taxonomy (Done / Error /
- * Unknown Tool / Invalid Syntax) with the same token hues. */
+/* Shared badge states for the run-log card variant: one stylesheet source keeps
+ * card and chat rows consistent. Green/red/amber/purple mirror the chat pill
+ * taxonomy (Done / Error / Unknown Tool / Invalid Syntax) with the same hues. */
 .tool-badge {
   font-size: 10px;
   padding: 1px 6px;
@@ -2426,10 +2801,8 @@ a {
 }
 
 /* Cron badge stays on one line inside the card: it shrinks with the title row
- * and truncates with an ellipsis instead of wrapping or stretching the card.
- * The full expression remains available via the title attribute for hover and
- * assistive reading. The poll variant intentionally keeps its default wrapping.
- * Bounds: max-width keeps the badge within the card on mobile and desktop. */
+ * and truncates with an ellipsis instead of wrapping, while the full expression
+ * stays hover-readable via the title attribute. The poll variant keeps wrapping. */
 .trigger-badge.cron {
   background: rgba(139, 92, 246, 0.15);
   color: #a78bfa;
@@ -2876,10 +3249,9 @@ button.primary:hover:not(:disabled) {
   opacity: 0.9;
 }
 
-/* Secondary action carries the same button affordance as Revoke so the
- * Widen control reads as a button rather than plain text; the blue outline
- * pairs with the red danger variant without minting a new shape. Disabled
- * intentionally inherits the global button:disabled dimming above. */
+/* Secondary action carries the same button affordance as Revoke so the Widen
+ * control reads as a button; the blue outline pairs with the red danger variant
+ * and Disabled inherits the global button:disabled dimming above. */
 button.secondary {
   padding: 9px 16px;
   border-radius: 8px;
@@ -3062,10 +3434,9 @@ button:disabled {
   align-items: flex-start;
 }
 
-/* Fixed-width rail that owns the sidenav's desktop footprint and the handheld
- * drawer transform. Holding both the section finder and the tab list lets the
- * two slide as one unit on narrow widths instead of stranding the finder in
- * the page flow while the list docks to the edge. */
+/* Fixed-width rail owning the sidenav's desktop footprint and the handheld
+ * drawer transform: the section finder and the tab list slide as one unit on
+ * narrow widths instead of the finder stranding in the page flow. */
 .settings-nav-column {
   width: 220px;
   flex-shrink: 0;
@@ -3074,10 +3445,9 @@ button:disabled {
   gap: 8px;
 }
 
-/* Section finder mirrors the tools pane search: overlaid icon with a 32px
- * left text inset (10px offset + 14px icon + 8px gap) so queries never slide
- * under the icon, and the element-plus-attribute selector outranks the global
- * input[type="search"] padding at every width. */
+/* Section finder mirrors the tools pane search: overlaid icon with a 32px left
+ * text inset (10px offset + 14px icon + 8px gap) so queries never slide under
+ * the icon, and the attribute selector outranks the global search padding. */
 .settings-nav-search-wrapper {
   position: relative;
   display: flex;
@@ -3202,10 +3572,9 @@ input.settings-nav-search-input[type="search"] {
   }
 }
 
-/* Settings drawer trigger sits top-left of the panel header. Hidden by
- * default so desktop keeps the inline sidenav with no duplicate control;
- * the handheld query below is the sole path that reveals it. The 44px box
- * keeps the trigger above the minimum touch size without growing the header. */
+/* Settings drawer trigger sits top-left of the panel header: hidden by default
+ * so desktop keeps the inline sidenav, and the handheld query below is the sole
+ * reveal path. The 44px box stays above the minimum touch size. */
 .settings-menu-btn {
   display: none;
   align-items: center;
@@ -3245,13 +3614,8 @@ input.settings-nav-search-input[type="search"] {
 }
 
 /* Handheld settings drawer sits between the 52px top nav and the 64px bottom
- * bar with safe-area clearance, sliding in from the left above a dim
- * backdrop. The drawer transform lives on the column — not the bare tab
- * list — so the section finder docks with the tabs it filters instead of
- * stranding itself in the page flow. The fixed offsets keep the nav surfaces
- * tappable while the drawer is open, and the width bound keeps the form
- * partially visible on wide phones so the backdrop remains the single
- * dismiss affordance alongside Escape. */
+ * bar sliding in above a dim backdrop; the transform lives on the column so the
+ * finder docks with its tabs, and the width bound keeps the backdrop dismissable. */
 @media (max-width: 640px) {
   .settings-menu-btn {
     display: inline-flex;
@@ -3311,10 +3675,8 @@ input.settings-nav-search-input[type="search"] {
 }
 
 /* Wide viewports keep the settings list as a static flex child with zero
- * backdrop. The explicit query mirrors the handheld ceiling above so exactly
- * one layout owns the 640px boundary and the drawer rules can never leak
- * onto desktop. The row direction re-affirms the inline layout inside the
- * older 800px stacking range so 641-800px stays side-by-side, not stacked. */
+ * backdrop; the explicit query mirrors the handheld ceiling above so exactly
+ * one layout owns the 640px boundary and the drawer rules never leak to desktop. */
 @media (min-width: 641px) {
   .settings-menu-btn {
     display: none;
@@ -3658,11 +4020,9 @@ section[data-testid="policy-pane"] .settings-footer {
   gap: 8px;
 }
 
-/* Shared Save presentation for Settings footers: both the Index policy form
- * and the Settings manager footer consume these classes so enabled Saves stay
- * solid theme blue in one place instead of per-component colors. `.save-button`
- * keeps padding and typography while `.primary-button` owns the blue fill,
- * hover brightening, and disabled dimming. */
+/* Shared Save presentation for Settings footers: both footers consume these
+ * classes so enabled Saves stay solid theme blue in one place. `.save-button`
+ * keeps padding and typography while `.primary-button` owns the blue fill. */
 .primary-button {
   background: var(--accent-blue);
   border: 0;
@@ -3696,9 +4056,8 @@ section[data-testid="policy-pane"] .settings-footer {
 }
 
 /* Transient toast stack: fixed column at the top-right so success and error
-   toasts stack with a gap instead of painting at identical coordinates.
-   The stack owns the only fixed anchoring; individual toasts lay out in
-   normal flow inside it. Toasts render only inside this stack. */
+ * toasts stack with a gap instead of painting at identical coordinates. The
+ * stack owns the anchoring; individual toasts render only inside it. */
 .toast-stack {
   position: fixed;
   top: 64px;
@@ -3711,9 +4070,8 @@ section[data-testid="policy-pane"] .settings-footer {
 }
 
 /* Transient toast: in-flow item rendered only inside `.toast-stack` so action
-   feedback surfaces without blocking the form. Slides down from just under the
-   nav bar on appearance. Auto-dismiss timing lives in the Toast component;
-   contextual health/state errors stay as persistent inline banners instead of toasts. */
+ * feedback never blocks the form. Auto-dismiss timing lives in the Toast
+ * component; contextual errors stay as persistent inline banners. */
 .toast {
   position: static;
   padding: 10px 14px;
@@ -3759,10 +4117,9 @@ section[data-testid="policy-pane"] .settings-footer {
   font-size: 13px;
 }
 
-/* Centered persistent reconnect toast: a fixed overlay at the top-center so a
-   socket outage stays visible without shifting or wrapping the chat header.
-   The toast persists for the whole outage and leaves only on socket recovery
-   or an explicit retry/dismiss, keeping the conversation usable underneath. */
+/* Centered persistent reconnect toast: fixed and top-center so a socket outage
+ * stays visible without shifting or wrapping the chat header. It leaves only on
+ * socket recovery or an explicit retry/dismiss, keeping the chat usable. */
 .connection-toast {
   position: fixed;
   top: 60px;
@@ -3835,8 +4192,7 @@ section[data-testid="policy-pane"] .settings-footer {
 
 /* Full-width underline tab bar for the Memory section: three equal inner tabs
  * share one row with large touch targets and an active underline instead of
- * pills. The bar spans the panel width so Search, Facts, and Episodes read as
- * views of one surface rather than small floating buttons. */
+ * pills, so the tabs read as views of one surface. */
 .memory-tabs,
 .policy-tabs,
 .access-tabs {
@@ -4291,10 +4647,9 @@ section[data-testid="policy-pane"] .settings-footer {
   gap: 16px;
 }
 
-/* Pending | History segmented control in the inbox header row: a joined pill
- * pair whose aria-pressed state (not a separate .active class) carries the
- * selected view, so the toggle stays honest with the buttons' accessibility
- * contract. */
+/* Pending | History segmented control: a joined pill pair whose aria-pressed
+ * state (not an .active class) carries the selected view, so the toggle stays
+ * honest with the buttons' accessibility contract. */
 .approvals-view-toggle {
   display: inline-flex;
   align-items: center;
@@ -4665,10 +5020,9 @@ a.ghost.icon-text-btn:hover {
    Approval Decision History (Inbox → History)
    ========================================================================== */
 
-/* Decision history pane: the filter row reuses the shared ghost button
- * treatment, and the table follows the app's other tables (sticky-free,
- * hairline row separators, muted uppercase-adjacent headers) so the History
- * view does not drift from the design system. */
+/* Decision history pane: the filter row reuses the shared ghost button treatment
+ * and the table follows the app's other tables (hairline separators, muted
+ * headers) so the History view does not drift from the design system. */
 .approval-history {
   display: flex;
   flex-direction: column;
@@ -4897,10 +5251,8 @@ a.ghost.icon-text-btn:hover {
 }
 
 /* Split Deny control mirrors the split Allow geometry so Deny reads as one
- * joined control on both quick surfaces. The group is the positioned anchor
- * the shared duration menu resolves against — without it the absolutely
- * positioned menu attaches to a distant ancestor and the dashboard card's
- * overflow clipping hides "Deny always" entirely. */
+ * joined control. The group is the positioned anchor the shared duration menu
+ * resolves against; without it the menu would attach to a clipping ancestor. */
 .split-deny-group {
   position: relative;
   display: flex;
@@ -5447,10 +5799,9 @@ button.danger:hover:not(:disabled) {
    Mobile Bottom Tab Bar + Slim Top (max-width 640px / min-width 641px)
    ========================================================================== */
 
-/* Bottom bar owns the five canonical tabs on handheld widths. Fixed to the
- * viewport bottom with safe-area clearance so the iOS home indicator never
- * covers the touch targets. Hidden by default so desktop keeps top tabs only;
- * the max-width query below is the sole path that reveals it. */
+/* Bottom bar owns the five canonical tabs on handheld widths, fixed to the
+ * viewport bottom with safe-area clearance so the home indicator never covers
+ * the targets. Hidden by default; the max-width query is the sole reveal path. */
 .mobile-bottom-nav {
   position: fixed;
   bottom: 0;
@@ -5763,10 +6114,8 @@ button.danger:hover:not(:disabled) {
    ========================================================================== */
 
 /* Handheld drawer sits between the 52px top nav and the padded bottom bar with
- * safe-area clearance, sliding in from the left above a dim backdrop. The
- * fixed offsets keep the nav surfaces tappable while the drawer is open, and
- * the width bound keeps the conversation partially visible on wide phones so
- * the backdrop remains the single dismiss affordance alongside Escape. */
+ * safe-area clearance, sliding in from the left above a dim backdrop. The width
+ * bound keeps the conversation partially visible so the backdrop stays dismissable. */
 @media (max-width: 640px) {
   .session-sidebar {
     position: fixed;
@@ -5815,9 +6164,8 @@ button.danger:hover:not(:disabled) {
 }
 
 /* Wide viewports keep the history list as a static flex child with zero
- * backdrop. The explicit query mirrors the handheld ceiling above so exactly
- * one layout owns the 640px boundary and the drawer rules can never leak
- * onto desktop. */
+ * backdrop; the explicit query mirrors the handheld ceiling above so exactly
+ * one layout owns the 640px boundary and the drawer rules never leak to desktop. */
 @media (min-width: 641px) {
   .session-sidebar {
     position: static;
@@ -5847,12 +6195,9 @@ button.danger:hover:not(:disabled) {
    Full-Width Chat Shell (max-width 640px / min-width 641px)
    ========================================================================== */
 
-/* Handheld chat spans the viewport with an exact 8px side gutter: the layout
- * drops the desktop inter-column gap because the history list is a fixed
- * drawer on small screens, and the height subtracts the 52px top nav plus
- * the 64px bottom bar plus the 16px shell gutter so the input never slides
- * under the fixed bar. The vh declaration stays as the fallback for engines
- * without dynamic viewport units while dvh tracks the iOS toolbar. */
+/* Handheld chat spans the viewport with an exact 8px side gutter: the fixed
+ * drawer history frees the desktop gap, and the height subtracts the 52px top
+ * nav plus the 64px bottom bar so the input never slides under the fixed bar. */
 @media (max-width: 640px) {
   .chat-layout {
     display: flex;
@@ -5957,10 +6302,9 @@ button.danger:hover:not(:disabled) {
     white-space: nowrap;
   }
 
-  /* Header actions stay tappable without taking the full input height, which
-   * would double the header once it wraps. Visibility itself stays owned by
-   * the chat view: History renders only while the drawer is closed and New
-   * Session always renders. */
+  /* Tappable header actions skip the full input height that would double the
+   * header once it wraps. Visibility stays owned by the chat view: History
+   * renders only while the drawer is closed, and New Session always renders. */
   .open-sidebar-btn,
   .new-session-btn,
   .chat-settings-btn {
@@ -5982,10 +6326,9 @@ button.danger:hover:not(:disabled) {
     align-items: flex-end;
   }
 
-  /* 16px blocks iOS auto-zoom on focus; the full-row basis puts the buttons
-   * on their own line while the height bounds keep long drafts from covering
-   * the message stream. Length itself stays enforced by the server
-   * MAX_CHAT_TEXT_LENGTH grapheme guard in the chat view, not by CSS. */
+  /* 16px blocks iOS auto-zoom on focus; the full-row basis puts the buttons on
+   * their own line while the height bounds keep long drafts from covering the
+   * stream. Length is enforced by the server's MAX_CHAT_TEXT_LENGTH guard, not CSS. */
   .chat-input-row textarea {
     flex: 1 1 100%;
     min-height: 56px;
@@ -6079,12 +6422,9 @@ button.danger:hover:not(:disabled) {
    Condensed Footer Token Metadata (max-width 640px / min-width 641px)
    ========================================================================== */
 
-/* Handheld summary stays out of the desktop row so wide viewports keep the
- * four full metrics without a duplicate glanceable line; the detail block
- * only exists while expanded, so its base style is the expanded layout. The
- * desktop metrics wrapper uses contents so the four items plus dividers keep
- * participating in the status-bar flex row directly; the queries below own
- * the viewport guarantees. */
+/* Handheld summary stays out of the desktop row so wide viewports keep the four
+ * full metrics without a duplicate glanceable line; the desktop metrics wrapper
+ * uses contents so its items keep participating in the status-bar flex row. */
 .status-bar-mobile-summary {
   display: flex;
   align-items: center;
@@ -6208,9 +6548,8 @@ button.danger:hover:not(:disabled) {
    ========================================================================== */
 
 /* Compact stepper row for the Custom workers control: the custom Decrease /
- * Increase buttons stay the visible steppers, so the row keeps a single
- * left-aligned flex line that holds at both narrow and wide viewports
- * instead of stretching the numeric field across the form. */
+ * Increase buttons stay the visible steppers, keeping a single left-aligned
+ * flex line instead of stretching the numeric field across the form. */
 .index-stepper {
   display: flex;
   align-items: center;
@@ -6246,12 +6585,9 @@ button.danger:hover:not(:disabled) {
    Mobile Input Auto-Zoom Guard (max-width 640px)
    ========================================================================== */
 
-/* iOS Safari auto-zooms the viewport whenever a focused field renders below
- * 16px, and the zoom sticks after blur on chat-length flows. Raising only the
- * type size on handhelds keeps focus at a 1:1 viewport scale while heights,
- * padding, and colors stay on the desktop tokens above, so geometry never
- * shifts across the breakpoint. Desktop keeps the 14px scale untouched, and
- * the viewport meta carries no maximum-scale so pinch zoom stays available. */
+/* iOS Safari auto-zooms the viewport when a focused field renders below 16px
+ * and the zoom sticks after blur on chat-length flows; raising only the type
+ * size on handhelds keeps focus at 1:1 scale while desktop keeps 14px. */
 @media (max-width: 640px) {
   input[type="text"],
   input[type="number"],
@@ -6293,11 +6629,8 @@ button.danger:hover:not(:disabled) {
 }
 
 /* Tools search reserves room for its overlaid icon: the element-plus-attribute
- * selector outranks the global input[type="search"] padding so the 36px left
- * inset survives at every width, and that inset equals the 12px icon offset
- * plus the 16px icon plus an 8px gap so placeholder and typed text — including
- * long queries at narrow widths — never slide under the icon. The icon itself
- * stays click-through so focus always lands in the field. */
+ * selector outranks the global search padding, and the inset equals the icon
+ * offset plus icon plus gap so typed text never slides under the icon. */
 input.tools-search-input[type="search"] {
   width: 100%;
   padding: 8px 12px 8px 36px;
@@ -7373,11 +7706,8 @@ button.ghost.staged-expand-all-btn {
 }
 
 /* Greeting-row identity cluster: the app's sole avatar image, right-aligned on
- * the welcome headline. The row spreads headline and identity apart while the
- * identity pairs the 112px Wisp with a right-aligned name-plus-caption stack,
- * so the caption reads as the assistant's status line. No new color tokens:
- * identity chrome reuses the muted text, border, and accent-purple tokens the
- * nav badges and link pills already speak. */
+ * the welcome headline, pairing the 112px Wisp with a name-plus-caption stack
+ * that reuses the muted, border, and accent-purple tokens; no new color tokens. */
 .dashboard-greeting-row {
   display: flex;
   align-items: center;
@@ -8812,24 +9142,18 @@ button.ghost.staged-expand-all-btn {
    Persona Avatar — Wisp sprite, avatar picker, and identity chrome
    ========================================================================== */
 
-/* The sprite sheets carry their own soft drop shadow from the generator, so
- * the avatar never needs a frame or border of its own; width/height attrs pin
- * the rendered size and the image renders in the sole identity surface (settings picker editor excluded):
- * the dashboard greeting cluster. The sleeping dim lives in the prerendered
- * asset itself, never in a CSS filter, so the stylesheet never darkens a
- * frame it did not generate. */
+/* The sprite sheets carry their own soft drop shadow from the generator, so the
+ * avatar never needs a frame or border of its own, and the sleeping dim lives in
+ * the prerendered asset itself, never in a CSS filter. */
 .persona-avatar {
   display: inline-block;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-/* Avatar motion is transform-only float with a static-frame fallback. Idle,
- * working, and sleeping drift on translateY alone — never opacity or a fade —
- * so a busy Wisp never reads as a loading shimmer and reduced-motion owners
- * always see a still frame. Idle and working share the 4s cadence while
- * sleeping breathes slower at 7s. Animations arm only under
- * `prefers-reduced-motion: no-preference`; outside it the frames sit static. */
+/* Avatar motion is transform-only float with a static-frame fallback: idle,
+ * working, and sleeping drift on translateY alone so a busy Wisp never reads
+ * as a loading shimmer; frames arm only under prefers-reduced-motion. */
 .persona-avatar--idle,
 .persona-avatar--sleeping,
 .persona-avatar--working {

@@ -9,7 +9,7 @@ extension IndexClosureStage {
         config: IndexConfig,
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil,
         accessGuard: any FilesIndexAccessGuard,
         vectorPolicy: FilesVectorPolicy = FilesVectorPolicy(),
@@ -82,7 +82,7 @@ extension IndexClosureStage {
         emailConfig: EmailConfig,
         gateway: any MailIndexGateway,
         store: DocIndexStore,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         checkpoints: MailIndexCheckpointStore = MailIndexCheckpointStore(),
         stagingRoot: URL? = nil,
@@ -127,7 +127,7 @@ extension IndexClosureStage {
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         contacts: any MessagesContactResolving = MessagesContactNameResolver(),
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {

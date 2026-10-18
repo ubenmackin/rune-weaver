@@ -34,7 +34,7 @@ public actor FilesIndexer {
     /// Text extractor injected so a test can stub extraction without real files.
     let extractor: any DocumentTextExtracting
     /// Embeddings backend consulted inside the vector policy; nil stays keyword-only.
-    let embedder: (any EmbeddingsBackend)?
+    let embedder: any EmbeddingsBackend?
     /// Pooled embeddings backends consulted by parallel workers; nil shares `embedder`.
     let embeddingsPool: EmbeddingsBackendPool?
     /// Override for the resolved worker count; nil derives from `config`.
@@ -76,7 +76,7 @@ public actor FilesIndexer {
     public init(
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         embeddingsPool: EmbeddingsBackendPool? = nil,
         workerCountOverride: Int? = nil,
         thermalStateProvider: (@Sendable () -> ProcessInfo.ThermalState)? = nil,
@@ -171,6 +171,8 @@ public actor FilesIndexer {
         var thermalStoppedEarly = false
         /// Whether any `last_seen_run` stamp failed, forcing the reconcile to stay skipped.
         var stampFailed = false
+        /// Live modality queue progress across the 4 file processing lanes.
+        var queueLanes: [IndexQueueLaneProgress] = []
     }
 
     /// Runs one sequential pass over every configured root.
@@ -365,10 +367,12 @@ extension FilesIndexer {
             let rootURL = resolvedRootURL(root)
             await candidates.append(contentsOf: collectCandidates(rootURL: rootURL, rawRoot: root, workers: workers, budget: budget, counters: &counters))
         }
-        return Self.partitionIntoModalityQueues(
+        let partitioned = Self.partitionCandidatesWithLanes(
             candidates: candidates,
             maxVectorBytes: vectorPolicy.maxBytes
         )
+        counters.queueLanes = partitioned.lanes
+        return partitioned.candidates
     }
 
     /// Dispatches candidate processing through the multi-queue modality and batching pipeline.
@@ -476,6 +480,7 @@ extension FilesIndexer {
             cancelBox.set()
         }
         counters.scanned += 1
+        Self.recordQueueLaneOutcome(outcome, lanes: &counters.queueLanes)
         switch outcome.kind {
         case let .indexed(chunks, vectors, truncated):
             counters.indexed += 1
@@ -553,7 +558,10 @@ extension FilesIndexer {
             scanned: counters.scanned,
             matched: counters.indexed,
             elapsedMs: elapsedMs(since: start),
-            current: current
+            current: current,
+            vectorChunks: counters.vectors,
+            keywordChunks: max(0, counters.chunks - counters.vectors),
+            queues: counters.queueLanes.isEmpty ? nil : counters.queueLanes
         ))
     }
 
@@ -787,8 +795,7 @@ extension FilesIndexer {
         } else {
             try? url.resourceValues(forKeys: Set([.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]))
         }
-        guard resolved?.isUbiquitousItem == true else { return false }
-        guard let status = resolved?.ubiquitousItemDownloadingStatus else { return false }
+        guard resolved?.isUbiquitousItem == true, let status = resolved?.ubiquitousItemDownloadingStatus else { return false }
         return status == URLUbiquitousItemDownloadingStatus.notDownloaded
     }
 
@@ -874,8 +881,7 @@ extension FilesIndexer {
     ) -> [[Float]]? {
         guard vectors.count == expectedCount else { return nil }
         guard !vectors.isEmpty else { return vectors }
-        guard let firstWidth = vectors.first?.count, firstWidth > 0 else { return nil }
-        guard vectors.allSatisfy({ $0.count == firstWidth }) else { return nil }
+        guard let firstWidth = vectors.first?.count, firstWidth > 0, vectors.allSatisfy({ $0.count == firstWidth }) else { return nil }
         if let expected = expectedDimension, firstWidth != expected {
             return nil
         }
@@ -1071,8 +1077,7 @@ extension FilesIndexer {
     /// - Parameter path: Candidate relative path.
     static func safeRelative(_ path: String) -> String? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~") else { return nil }
-        guard !trimmed.split(separator: "/").contains("..") else { return nil }
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~"), !trimmed.split(separator: "/").contains("..") else { return nil }
         return String(trimmed.prefix(maxCurrentLength))
     }
 

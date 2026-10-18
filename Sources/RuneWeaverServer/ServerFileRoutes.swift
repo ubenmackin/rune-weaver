@@ -115,9 +115,7 @@ enum StagedFilesManager {
             let liveDecision = FilesAccessGuard.evaluate(path: liveURL.path, filesConfig: filesConfig)
             guard liveDecision.allowed else { continue }
             let stagedDecision = FilesAccessGuard.evaluate(path: stagingURL.path, filesConfig: filesConfig)
-            guard stagedDecision.allowed else { continue }
-
-            guard let stagedContent = readUTF8Text(at: stagingURL) else {
+            guard stagedDecision.allowed, let stagedContent = readUTF8Text(at: stagingURL) else {
                 continue
             }
 

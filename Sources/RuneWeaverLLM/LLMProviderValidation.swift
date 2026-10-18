@@ -213,8 +213,7 @@ private func buildOpenAIChatWireMessages(messages: [Message]) -> [[String: Any]]
 /// Validates and returns tool call arguments for the wire, falling back to "{}" if malformed.
 func sanitizedToolCallArgumentsJSON(_ raw: String) -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return "{}" }
-    guard let data = trimmed.data(using: .utf8),
+    guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
           let parsed = try? JSONSerialization.jsonObject(with: data),
           parsed is [String: Any]
     else {

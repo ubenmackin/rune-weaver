@@ -178,8 +178,7 @@ public struct DashboardBundle: Sendable, Equatable {
 
     /// File URL for a request path when that exact file exists.
     public func localFileURL(for requestPath: String, fileManager: FileManager = .default) -> URL? {
-        guard let directoryURL, let components = Self.sanitizedComponents(for: requestPath) else { return nil }
-        guard !components.isEmpty else { return nil }
+        guard let directoryURL, let components = Self.sanitizedComponents(for: requestPath), !components.isEmpty else { return nil }
         var url = directoryURL
         for component in components {
             url.appendPathComponent(component, isDirectory: false)
@@ -212,8 +211,7 @@ public struct DashboardBundle: Sendable, Equatable {
 
     /// Whether a request path looks like a client-side route.
     public static func isClientRoute(_ requestPath: String) -> Bool {
-        guard let components = sanitizedComponents(for: requestPath), !components.isEmpty else { return false }
-        guard let last = components.last else { return false }
+        guard let components = sanitizedComponents(for: requestPath), !components.isEmpty, let last = components.last else { return false }
         return (last as NSString).pathExtension.isEmpty
     }
 

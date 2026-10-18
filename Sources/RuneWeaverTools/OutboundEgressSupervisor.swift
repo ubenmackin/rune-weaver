@@ -290,8 +290,7 @@ public actor OutboundEgressSupervisor {
         var undeclared: [String] = []
         for raw in screenedHosts {
             let canonical = SensitiveAddressNormalization.normalizedHost(raw)
-            guard !canonical.isEmpty else { continue }
-            guard !seen.contains(canonical) else { continue }
+            guard !canonical.isEmpty, !seen.contains(canonical) else { continue }
             seen.insert(canonical)
             if !declared.contains(canonical) {
                 undeclared.append(raw)

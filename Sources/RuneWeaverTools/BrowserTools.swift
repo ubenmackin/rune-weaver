@@ -449,7 +449,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
 
     /// Creates a navigate tool.
     public init(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
@@ -465,7 +465,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
 
     /// Creates a navigate tool bound to the configured exemption set.
     public init(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
@@ -677,7 +677,7 @@ public struct BrowserActTool: Tool, Sendable {
     /// Creates an act tool. Delegates to the designated config-bound init with a neutral policy,
     /// matching the navigate tool: the explicit set stays the only exemption source here.
     public init(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
@@ -693,7 +693,7 @@ public struct BrowserActTool: Tool, Sendable {
 
     /// Creates an act tool bound to the configured exemption set.
     public init(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
@@ -857,7 +857,7 @@ public enum BrowserTools {
     /// Delegates to the config-bound builder with a neutral policy so one
     /// construction site owns the shared gateway plus navigate/act assembly.
     public static func makeTools(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) -> [any Tool] {
@@ -873,7 +873,7 @@ public enum BrowserTools {
 
     /// Builds the browser tools sharing one gateway bound to the configured exemption set.
     public static func makeTools(
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
@@ -911,7 +911,7 @@ public enum BrowserTools {
     /// site owns registration.
     public static func register(
         on bus: ToolBus,
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) async {
@@ -929,7 +929,7 @@ public enum BrowserTools {
     /// Registers the config-bound browser tools, replacing same-named entries.
     public static func register(
         on bus: ToolBus,
-        gateway: (any BrowserPlaywrightGateway)? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],

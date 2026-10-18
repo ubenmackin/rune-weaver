@@ -196,8 +196,7 @@ public enum BrowserBridgeParsing: Sendable {
         fallbackHash: String?
     ) -> (dataURL: String?, hash: String?) {
         let candidate = NormalizedText.value(direct) ?? normalizedDataURL(raw)
-        guard let candidate, !candidate.isEmpty else { return (nil, nil) }
-        guard let bytes = screenshotBytes(from: candidate) else { return (nil, nil) }
+        guard let candidate, !candidate.isEmpty, let bytes = screenshotBytes(from: candidate) else { return (nil, nil) }
         // Over-budget captures stay text-only: pixels never enter history
         // past the persistence budget.
         guard BrowserScreenshotPolicy.isWithinBudget(byteCount: bytes.count) else { return (nil, nil) }

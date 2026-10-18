@@ -64,8 +64,8 @@ private enum ApprovalDecisionLogTestSupport {
                 decided_at REAL NOT NULL
             );
             """
-            guard sqlite3_exec(handle, createSQL, nil, nil, nil) == SQLITE_OK else { return false }
-            guard sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else { return false }
+            guard sqlite3_exec(handle, createSQL, nil, nil, nil) == SQLITE_OK,
+                  sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else { return false }
             let sql = "INSERT INTO approval_decisions (id, tool_name, scope_kind, scope_data, allowed, duration, surface, session_id, display_target, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {

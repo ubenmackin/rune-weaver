@@ -374,7 +374,7 @@ private enum MessagesRecipientRouting {
     /// the gateway unaddressed.
     static func handles(
         for name: String,
-        resolver: (any MessagesRecipientResolving)?
+        resolver: any MessagesRecipientResolving?
     ) async -> (handles: [String], resolvedRecipient: String?) {
         let resolution: MessageRecipientResolution = if let resolver {
             await resolver.resolve(name: name, limit: candidateLimit)
@@ -450,9 +450,9 @@ public struct MessagesSearchTool: Tool, Sendable {
     private let gateway: any MessagesGateway
     /// Name resolver for name-shaped recipients; nil fails such recipients
     /// closed with guidance rather than passing a name to the gateway.
-    private let resolver: (any MessagesRecipientResolving)?
+    private let resolver: any MessagesRecipientResolving?
 
-    public init(gateway: any MessagesGateway, resolver: (any MessagesRecipientResolving)? = nil) {
+    public init(gateway: any MessagesGateway, resolver: any MessagesRecipientResolving? = nil) {
         self.gateway = gateway
         self.resolver = resolver
     }
@@ -551,9 +551,9 @@ public struct MessagesReadTool: Tool, Sendable {
     private let gateway: any MessagesGateway
     /// Name resolver for name-shaped recipients; nil fails such recipients
     /// closed with guidance rather than passing a name to the gateway.
-    private let resolver: (any MessagesRecipientResolving)?
+    private let resolver: any MessagesRecipientResolving?
 
-    public init(gateway: any MessagesGateway, resolver: (any MessagesRecipientResolving)? = nil) {
+    public init(gateway: any MessagesGateway, resolver: any MessagesRecipientResolving? = nil) {
         self.gateway = gateway
         self.resolver = resolver
     }
@@ -665,16 +665,16 @@ public struct MessagesSendTool: Tool, Sendable {
     }
 
     private let gateway: any MessagesGateway
-    private let resolver: (any MessagesRecipientResolving)?
-    private let recipientAliasStore: (any MessageAliasStoring)?
+    private let resolver: any MessagesRecipientResolving?
+    private let recipientAliasStore: any MessageAliasStoring?
     /// Booking seam storing approved scheduled sends; nil fails closed with guidance.
-    private let booking: (any ScheduledSendBooking)?
+    private let booking: any ScheduledSendBooking?
 
     public init(
         gateway: any MessagesGateway,
-        resolver: (any MessagesRecipientResolving)? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil,
-        booking: (any ScheduledSendBooking)? = nil
+        resolver: any MessagesRecipientResolving? = nil,
+        recipientAliasStore: any MessageAliasStoring? = nil,
+        booking: any ScheduledSendBooking? = nil
     ) {
         self.gateway = gateway
         self.resolver = resolver
@@ -1070,10 +1070,10 @@ public enum MessagesTools {
 
     public static func makeTools(
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
-        gateway: (any MessagesGateway)? = nil,
-        resolver: (any MessagesRecipientResolving)? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil,
-        booking: (any ScheduledSendBooking)? = nil
+        gateway: any MessagesGateway? = nil,
+        resolver: any MessagesRecipientResolving? = nil,
+        recipientAliasStore: any MessageAliasStoring? = nil,
+        booking: any ScheduledSendBooking? = nil
     ) -> [any Tool] {
         let effectiveGateway = gateway ?? ProductionMessagesGateway(chatDatabasePath: chatDatabasePath)
         // The default resolver reads contacts and chat history live per call, so constructing it
@@ -1108,7 +1108,7 @@ public enum MessagesTools {
     public static func register(
         on bus: ToolBus,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
-        gateway: (any MessagesGateway)? = nil
+        gateway: any MessagesGateway? = nil
     ) async {
         for tool in makeTools(chatDatabasePath: chatDatabasePath, gateway: gateway) {
             await bus.register(tool: tool)

@@ -282,13 +282,13 @@ public final class CheckedOnce<Success: Sendable>: Sendable {
             lockState.continuation = continuation
             return nil
         }
-        if let settled {
-            // Every resume stores its result before releasing the lock, so a
-            // settled gate always carries a value; a missing value stays
-            // unsettled here rather than resuming with a forged outcome.
-            if let result = settled {
-                continuation.resume(with: result)
-            }
+        if let settled,
+           // Every resume stores its result before releasing the lock, so a
+           // settled gate always carries a value; a missing value stays
+           // unsettled here rather than resuming with a forged outcome.
+           let result = settled
+        {
+            continuation.resume(with: result)
         }
     }
 

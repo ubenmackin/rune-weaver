@@ -697,15 +697,13 @@ extension BashTool {
             tier: tier,
             isNetworkCapable: isNetworkCapable
         )
-        if shouldScreen {
-            if let envelope = await screenExplicitURLs(
-                command: command,
-                declaredHosts: declaredHosts,
-                isChained: decision.isChained,
-                sessionID: context.sessionID
-            ) {
-                return .failure(encodeEnvelope(envelope), callID: callID)
-            }
+        if shouldScreen, let envelope = await screenExplicitURLs(
+            command: command,
+            declaredHosts: declaredHosts,
+            isChained: decision.isChained,
+            sessionID: context.sessionID
+        ) {
+            return .failure(encodeEnvelope(envelope), callID: callID)
         }
         return nil
     }

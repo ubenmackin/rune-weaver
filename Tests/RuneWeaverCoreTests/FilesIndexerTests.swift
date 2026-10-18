@@ -253,7 +253,7 @@ private func makeIndexer(
     root: URL,
     accessGuard: any FilesIndexAccessGuard,
     exclude: [String] = [],
-    embedder: (any EmbeddingsBackend)? = nil,
+    embedder: any EmbeddingsBackend? = nil,
     embeddingsPool: EmbeddingsBackendPool? = nil,
     workerCountOverride: Int? = nil,
     thermalStateProvider: (@Sendable () -> ProcessInfo.ThermalState)? = nil,
@@ -1571,6 +1571,43 @@ struct FilesIndexerTests {
         #expect(sizes.reduce(0, +) == fileCount)
         #expect(sizes.count < fileCount)
         #expect(sizes.contains { $0 > 1 })
+    }
+
+    @Test
+    func `Progress frames emit 4 modality queue lanes with queued and processed counts plus chunk splits`() async {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        writeFile("{\"a\":1}", at: base.appendingPathComponent("config.json"))
+        writeFile("fast text body", at: base.appendingPathComponent("notes.md"))
+
+        let captured = OSAllocatedUnfairLock(initialState: [ToolProgress]())
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            embedder: FilesIndexerBatchRecordingEmbedder(),
+            workerCountOverride: 2,
+            progress: { frame in
+                captured.withLock { $0.append(frame) }
+            }
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 2)
+        let frames = captured.withLock { $0 }
+        let lastWithQueues = frames.last { ($0.queues?.isEmpty == false) }
+        #expect(lastWithQueues != nil)
+        let queues = lastWithQueues?.queues ?? []
+        #expect(queues.map(\.lane) == ["keywordData", "fastText", "imageOCR", "mediaSpeech"])
+        #expect(queues.first { $0.lane == "keywordData" }?.queued == 1)
+        #expect(queues.first { $0.lane == "keywordData" }?.processed == 1)
+        #expect(queues.first { $0.lane == "fastText" }?.queued == 1)
+        #expect(queues.first { $0.lane == "fastText" }?.processed == 1)
+        #expect(lastWithQueues?.vectorChunks == 1)
+        #expect(lastWithQueues?.keywordChunks == 1)
     }
 }
 

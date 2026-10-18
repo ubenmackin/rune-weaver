@@ -487,20 +487,13 @@ extension MemoryEngine {
     private static func isFileLikeToken(_ token: String) -> Bool {
         guard !token.isEmpty else { return false }
         if token.contains("/") {
-            guard token.count >= 3 else { return false }
-            guard !token.hasPrefix("/"), !token.hasSuffix("/") else { return false }
+            guard token.count >= 3, !token.hasPrefix("/"), !token.hasSuffix("/") else { return false }
             return token.contains { $0.isLetter || $0.isNumber }
         }
-        guard token.contains(".") else { return false }
-        guard token.count >= 4 else { return false }
-        guard !token.hasPrefix("."), !token.hasSuffix(".") else { return false }
+        guard token.contains("."), token.count >= 4, !token.hasPrefix("."), !token.hasSuffix(".") else { return false }
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count >= 2 else { return false }
-        guard parts.allSatisfy({ !$0.isEmpty }) else { return false }
-        guard let ext = parts.last else { return false }
-        guard ext.count >= 1, ext.count <= 5 else { return false }
-        guard ext.contains(where: \.isLetter) else { return false }
-        guard ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
+        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }), let ext = parts.last, ext.count >= 1, ext.count <= 5, ext.contains(where: \.isLetter),
+              ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
         return true
     }
 

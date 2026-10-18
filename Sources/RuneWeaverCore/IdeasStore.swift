@@ -265,8 +265,7 @@ public actor IdeasStore: IdeasStoring {
                 var inserted: [Idea] = []
                 for idea in ideas {
                     let key = normalizedTitle(idea.title)
-                    guard !key.isEmpty else { continue }
-                    guard !existing.contains(key) else { continue }
+                    guard !key.isEmpty, !existing.contains(key) else { continue }
                     try insertIdea(idea, handle: handle)
                     existing.insert(key)
                     inserted.append(idea)

@@ -278,7 +278,7 @@ enum CLIShared {
         bashConfig: BashConfig = BashConfig(),
         memoryEngine: MemoryEngine? = nil,
         containersConfig: ContainersConfig? = nil,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         browserConfig: BrowserConfig? = nil,
         llmConfig: LLMConfig? = nil,
         llmServerURLs: [String] = [],
@@ -292,7 +292,7 @@ enum CLIShared {
         goalsConfig: GoalsConfig = GoalsConfig(),
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        recipientAliasStore: any MessageAliasStoring? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil
     ) async throws -> [any Tool] {
@@ -344,7 +344,7 @@ enum CLIShared {
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil,
         containersConfig: ContainersConfig? = nil,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         pluginConfig: PluginConfig? = nil,
         episodesDBPath: String? = nil,
         browserConfig: BrowserConfig? = nil,
@@ -358,10 +358,10 @@ enum CLIShared {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        goalLLM: (any LLMProvider)? = nil,
+        goalLLM: any LLMProvider? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        recipientAliasStore: any MessageAliasStoring? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil
     ) async throws -> ToolBus {

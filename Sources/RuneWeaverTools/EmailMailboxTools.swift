@@ -27,7 +27,7 @@ public struct EmailListMailboxesTool: Tool, Sendable {
     private let gateway: any EmailIMAPGateway
 
     /// Creates a listing tool.
-    public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
+    public init(emailConfig: EmailConfig, gateway: any EmailIMAPGateway? = nil) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
     }
@@ -139,7 +139,7 @@ public struct EmailMoveTool: Tool, Sendable {
     private let gateway: any EmailIMAPGateway
 
     /// Creates a move tool.
-    public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
+    public init(emailConfig: EmailConfig, gateway: any EmailIMAPGateway? = nil) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
     }

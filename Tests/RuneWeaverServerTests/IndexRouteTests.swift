@@ -543,9 +543,9 @@ struct IndexStatusDTOTests {
     func `Status decodes payloads predating sizes and effort`() throws {
         // Older engines never wrote the size breakdown or the effort block,
         // so the status contract stays version-tolerant instead of failing.
-        let payload = """
+        let payload = try #require("""
         {"enabled":true,"running":false,"documents":7,"chunks":21,"vectorChunks":14,"keywordChunks":7,"bytes":4096,"sources":[],"lastErrors":[],"bySource":[],"byExtractStatus":[]}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(IndexStatusResponse.self, from: payload)
         #expect(decoded.documents == 7)
         #expect(decoded.dbFileBytes == 0)
@@ -720,9 +720,9 @@ struct IndexSettingsDTOTests {
 
     @Test
     func `Index patch decodes the workers field`() throws {
-        let payload = """
+        let payload = try #require("""
         {"effort":"custom","workers":5}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(IndexSettingsUpdate.self, from: payload)
         #expect(decoded.workers == 5)
     }
@@ -760,9 +760,9 @@ struct IndexSettingsDTOTests {
         #expect(config.index.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
         #expect(!config.index.alwaysSkipped.contains("SentinelSkipAlpha"))
         // Decoding a payload that carries the key also discards it.
-        let payload = """
+        let payload = try #require("""
         {"enabled":true,"always_skipped":["SentinelSkipAlpha"]}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(IndexConfig.self, from: payload)
         #expect(decoded.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
     }
@@ -1132,9 +1132,9 @@ struct IndexStatusLiveLatestTests {
     func `Last-run strip decodes payloads predating the skip reason`() throws {
         // Older engines never wrote `skippedReason`, so the strip contract
         // stays version-tolerant and decodes to a nil reason instead of failing.
-        let payload = """
+        let payload = try #require("""
         {"status":"ok","indexed":7,"scanned":10,"errors":0,"trigger":"onDemand"}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(IndexLastRunStatus.self, from: payload)
         #expect(decoded.status == IndexRunStatus.ok.rawValue)
         #expect(decoded.indexed == 7)

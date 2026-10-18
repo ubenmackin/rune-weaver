@@ -10,8 +10,7 @@ public enum HTTPRedirectFollower: Sendable {
     /// Resolves a redirect `Location` against the current URL.
     public static func resolveRedirect(current: URL, location: String) -> URL? {
         let trimmed = location.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let resolved = URL(string: trimmed, relativeTo: current)?.absoluteURL,
+        guard !trimmed.isEmpty, let resolved = URL(string: trimmed, relativeTo: current)?.absoluteURL,
               let scheme = resolved.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
         else { return nil }

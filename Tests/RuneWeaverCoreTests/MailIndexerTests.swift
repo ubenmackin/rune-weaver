@@ -745,7 +745,7 @@ private func makeIndexer(
     window: String = "2y",
     budget: Int = 0,
     maxFileMB: Int = 20,
-    embedder: (any EmbeddingsBackend)? = nil,
+    embedder: any EmbeddingsBackend? = nil,
     stagingRoot: URL? = nil,
     now: @escaping @Sendable () -> Date = { Date() }
 ) -> MailIndexer {
@@ -2617,13 +2617,13 @@ struct MailIndexerTests {
 
     @Test
     func `MailIndexCheckpoint decodes backward-compatibly without backfillFloors`() throws {
-        let jsonWithoutBackfill = """
+        let jsonWithoutBackfill = try #require("""
         {
             "watermarks": {"test\\u001fINBOX": 42},
             "contentHashes": ["hash1"],
             "uidValidities": {"test\\u001fINBOX": 100}
         }
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
 
         let checkpoint = try JSONDecoder().decode(MailIndexCheckpoint.self, from: jsonWithoutBackfill)
         #expect(checkpoint.watermarks["test\u{1F}INBOX"] == 42)

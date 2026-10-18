@@ -78,8 +78,7 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
 
     /// Whether a normalized Host is private IPv4 (RFC 1918) or link-local.
     public static func isPrivateIPv4LANHost(_ host: String) -> Bool {
-        guard let octets = parseIPv4Octets(host), octets.count == 4 else { return false }
-        guard octets[0] != 0, octets[0] != 127 else { return false }
+        guard let octets = parseIPv4Octets(host), octets.count == 4, octets[0] != 0, octets[0] != 127 else { return false }
         // Built from the strict octets above rather than re-parsing, so the
         // value tested here is exactly the spelling the shape gate approved.
         let value = (UInt32(octets[0]) << 24) | (UInt32(octets[1]) << 16)
@@ -123,8 +122,7 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
         if let percent = candidate.firstIndex(of: "%") {
             candidate = String(candidate[..<percent])
         }
-        guard candidate.contains(":"), !candidate.contains(".") else { return false }
-        guard let groups = ipv6Hextets(candidate) else { return false }
+        guard candidate.contains(":"), !candidate.contains("."), let groups = ipv6Hextets(candidate) else { return false }
         // fc00::/7 (Unique Local Address): top seven bits 1111110.
         if (groups[0] & 0xFE00) == 0xFC00 {
             return true
@@ -148,20 +146,16 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
         // trailing-dot hosts fail-closed, so `studio.local.` stays closed
         // here instead of riding the gate under a stripped spelling.
         let candidate = host
-        guard candidate.hasSuffix(".local") else { return false }
-        guard candidate.count > ".local".count else { return false }
-        guard candidate.count <= 253 else { return false }
-        guard !candidate.contains(":"), !candidate.contains("/") else { return false }
-        guard !candidate.contains("?"), !candidate.contains("#"), !candidate.contains("@") else { return false }
-        guard !candidate.contains(" "), !candidate.contains("\t") else { return false }
-        guard !candidate.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return false }
+        guard candidate.hasSuffix(".local"), candidate.count > ".local".count, candidate.count <= 253,
+              !candidate.contains(":"), !candidate.contains("/"), !candidate.contains("?"),
+              !candidate.contains("#"), !candidate.contains("@"), !candidate.contains(" "), !candidate.contains("\t"),
+              !candidate.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return false }
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-._")
         guard candidate.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
         let labels = candidate.split(separator: ".", omittingEmptySubsequences: false)
         guard labels.count >= 2, labels.last == "local" else { return false }
         for label in labels {
-            guard !label.isEmpty, label.count <= 63 else { return false }
-            guard !label.hasPrefix("-"), !label.hasSuffix("-") else { return false }
+            guard !label.isEmpty, label.count <= 63, !label.hasPrefix("-"), !label.hasSuffix("-") else { return false }
         }
         return true
     }

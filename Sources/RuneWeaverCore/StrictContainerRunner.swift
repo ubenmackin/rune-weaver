@@ -267,8 +267,7 @@ public enum StrictContainerRunner: Sendable {
     }
 
     private static func stopAndDeleteSync(name: String, timeoutSeconds: TimeInterval) {
-        guard ProcessInfo.processInfo.environment[hermeticTestsEnvKey] != "1" else { return }
-        guard let runtimeURL = resolveRuntimeURL() else { return }
+        guard ProcessInfo.processInfo.environment[hermeticTestsEnvKey] != "1", let runtimeURL = resolveRuntimeURL() else { return }
         _ = try? BoundedProcessRunner.runSync(
             executableURL: runtimeURL,
             arguments: containerStopArguments(name: name),
@@ -841,9 +840,8 @@ extension StrictTurnRegistry {
     ) async -> Int {
         var removed = 0
         for row in StrictContainerRunner.parseContainerListOutput(combined) {
-            guard row.name != StrictContainerRunner.workspaceContainerName else { continue }
-            guard StrictContainerRunner.isEphemeralContainerName(row.name) else { continue }
-            guard !excludedNames.contains(row.name) else { continue }
+            guard row.name != StrictContainerRunner.workspaceContainerName, StrictContainerRunner.isEphemeralContainerName(row.name),
+                  !excludedNames.contains(row.name) else { continue }
             if !isStoppedStatus(row.status) {
                 guard StrictContainerRunner.isRunningStatus(row.status) else { continue }
                 guard !Task.isCancelled else { break }
@@ -908,7 +906,7 @@ public struct ContainerSeam: Sendable {
     public let memory: String
 
     /// Creates a seam sharing one runtime across both tiers.
-    public init(runtime: (any ContainerHostRuntime)? = nil, memory: String = StrictContainerRunner.defaultMemory) {
+    public init(runtime: any ContainerHostRuntime? = nil, memory: String = StrictContainerRunner.defaultMemory) {
         let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
         let ledger = EphemeralContainerLedger(runtime: resolved)
         self.runtime = resolved
@@ -919,7 +917,7 @@ public struct ContainerSeam: Sendable {
     }
 
     /// Creates a seam from the loaded containers policy with a fresh ledger.
-    public init(containersConfig: ContainersConfig, runtime: (any ContainerHostRuntime)? = nil) {
+    public init(containersConfig: ContainersConfig, runtime: any ContainerHostRuntime? = nil) {
         let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
         let ledger = EphemeralContainerLedger(
             runtime: resolved,
@@ -937,7 +935,7 @@ public struct ContainerSeam: Sendable {
         containersConfig: ContainersConfig,
         strictRegistry: StrictTurnRegistry,
         ephemeralLedger: EphemeralContainerLedger,
-        runtime: (any ContainerHostRuntime)? = nil
+        runtime: any ContainerHostRuntime? = nil
     ) {
         let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
         self.runtime = resolved

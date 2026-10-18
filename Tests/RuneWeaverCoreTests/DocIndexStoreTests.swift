@@ -209,8 +209,7 @@ private func readIndexSchemaVersion(atPath path: String) throws -> Int? {
             throw LegacyIndexError.failed("Could not prepare schema version read")
         }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        guard let text = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { return nil }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { return nil }
         return Int(text)
     #else
         return nil

@@ -168,4 +168,47 @@ public enum FilesModalityLane: Int, Sendable, Comparable, CaseIterable {
     public static func < (lhs: FilesModalityLane, rhs: FilesModalityLane) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
+
+    /// Canonical wire identifier for the modality queue lane.
+    public var key: String {
+        switch self {
+        case .keywordData: "keywordData"
+        case .fastText: "fastText"
+        case .imageOCR: "imageOCR"
+        case .mediaSpeech: "mediaSpeech"
+        }
+    }
+
+    /// Human-readable display label for the modality queue lane.
+    public var label: String {
+        switch self {
+        case .keywordData: "Keyword Data"
+        case .fastText: "Fast Text"
+        case .imageOCR: "Image & PDF OCR"
+        case .mediaSpeech: "Media Speech"
+        }
+    }
+}
+
+/// Live progress for one modality queue lane inside the files indexer.
+public struct IndexQueueLaneProgress: Sendable, Codable, Equatable {
+    /// Canonical lane identifier (`"keywordData"`, `"fastText"`, `"imageOCR"`, `"mediaSpeech"`).
+    public let lane: String
+    /// Human-readable lane title.
+    public let label: String
+    /// Total candidate files queued in this lane after discovery.
+    public var queued: Int
+    /// Candidate files finished (indexed, unchanged, skipped, or errored).
+    public var processed: Int
+    /// Candidate files newly written to the index in this lane.
+    public var indexed: Int
+
+    /// Creates a modality queue lane progress snapshot.
+    public init(lane: String, label: String, queued: Int = 0, processed: Int = 0, indexed: Int = 0) {
+        self.lane = lane
+        self.label = label
+        self.queued = max(0, queued)
+        self.processed = max(0, processed)
+        self.indexed = max(0, indexed)
+    }
 }

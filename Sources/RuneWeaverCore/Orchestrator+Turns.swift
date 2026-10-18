@@ -63,7 +63,7 @@ extension Orchestrator {
         engine: MemoryEngine,
         query: String,
         sessionID: UUID,
-        embedder: (any EmbeddingsBackend)?,
+        embedder: any EmbeddingsBackend?,
         labelingEnabled: Bool,
         budgets: RecallBudgets,
         currentDate: Date = Date()

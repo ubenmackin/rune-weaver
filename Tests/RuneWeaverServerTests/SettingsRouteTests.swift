@@ -1744,7 +1744,7 @@ private func settingsRequest(
     app: Application,
     method: HTTPMethod,
     path: String,
-    body: (some Content)?
+    body: some Content?
 ) async throws -> Response {
     let request = Request(
         application: app,

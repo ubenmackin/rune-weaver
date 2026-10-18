@@ -17,7 +17,7 @@ public enum IndexPhase: String, Sendable, Equatable, CaseIterable {
 }
 
 /// Indexable corpora the coordinator sequences, in canonical run order.
-public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
+public enum IndexSourceKind: String, Sendable, Codable, Hashable, CaseIterable {
     /// Local filesystem documents.
     case files
     /// Mail messages read from a configured mailbox.
@@ -217,6 +217,35 @@ public struct IndexRunSummary: Sendable, Equatable {
     }
 }
 
+/// Live progress for one source stage during a coordinator run.
+public struct IndexLiveSourceProgress: Sendable, Codable, Equatable {
+    /// Source stage identifier.
+    public let kind: IndexSourceKind
+    /// Current stage state (`"running"` or `"completed"`).
+    public let state: String
+    /// Items examined so far by this source.
+    public let scanned: Int
+    /// Documents indexed so far by this source.
+    public let indexed: Int
+    /// Last relative item reported by this source, when any.
+    public let current: String?
+
+    /// Creates a live source progress snapshot.
+    public init(
+        kind: IndexSourceKind,
+        state: String = "running",
+        scanned: Int = 0,
+        indexed: Int = 0,
+        current: String? = nil
+    ) {
+        self.kind = kind
+        self.state = state
+        self.scanned = max(0, scanned)
+        self.indexed = max(0, indexed)
+        self.current = current
+    }
+}
+
 /// Lightweight snapshot of an in-flight index run for polling surfaces.
 public struct IndexLiveTotals: Sendable, Equatable {
     /// What caused the run.
@@ -241,6 +270,14 @@ public struct IndexLiveTotals: Sendable, Equatable {
     public let current: String?
     /// Instant the run began.
     public let startedAt: Date
+    /// Chunks written carrying an embedding across completed stages plus observed in-flight progress.
+    public let vectorChunks: Int
+    /// Chunks written without an embedding across completed stages plus observed in-flight progress.
+    public let keywordChunks: Int
+    /// Per-source live progress across active and completed stages in this run.
+    public let sources: [IndexLiveSourceProgress]
+    /// Per-lane modality queue progress emitted by the files indexer.
+    public let queues: [IndexQueueLaneProgress]
 
     /// Creates a live snapshot. trigger: What caused the run.
     public init(
@@ -254,7 +291,11 @@ public struct IndexLiveTotals: Sendable, Equatable {
         rate: Double = 0,
         elapsedMs: Int,
         current: String?,
-        startedAt: Date
+        startedAt: Date,
+        vectorChunks: Int = 0,
+        keywordChunks: Int = 0,
+        sources: [IndexLiveSourceProgress] = [],
+        queues: [IndexQueueLaneProgress] = []
     ) {
         self.trigger = trigger
         self.phase = phase
@@ -267,6 +308,10 @@ public struct IndexLiveTotals: Sendable, Equatable {
         self.elapsedMs = elapsedMs
         self.current = current
         self.startedAt = startedAt
+        self.vectorChunks = vectorChunks
+        self.keywordChunks = keywordChunks
+        self.sources = sources
+        self.queues = queues
     }
 }
 

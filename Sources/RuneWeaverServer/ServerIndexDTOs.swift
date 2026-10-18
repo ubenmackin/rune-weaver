@@ -274,6 +274,40 @@ public struct IndexLastRunStatus: Content, Equatable {
     }
 }
 
+/// Live per-source progress row on `GET /index/status`.
+public struct IndexLiveSourceDTO: Content, Equatable {
+    /// Canonical source identifier (`"files"`, `"mail"`, `"messages"`, `"calendars"`, `"reminders"`).
+    public let kind: String
+    /// Execution state (`"running"` or `"completed"`).
+    public let state: String
+    /// Items examined so far by this source.
+    public let scanned: Int
+    /// Documents indexed so far by this source.
+    public let indexed: Int
+    /// Relative display path or identifier of the latest item in this source.
+    public let current: String?
+
+    /// Creates a live source row.
+    public init(kind: String, state: String, scanned: Int = 0, indexed: Int = 0, current: String? = nil) {
+        self.kind = kind
+        self.state = state
+        self.scanned = scanned
+        self.indexed = indexed
+        self.current = current
+    }
+
+    /// Maps a coordinator live source progress snapshot onto the wire shape.
+    public init(_ source: IndexLiveSourceProgress) {
+        self.kind = source.kind.rawValue
+        self.state = source.state
+        self.scanned = source.scanned
+        self.indexed = source.indexed
+        self.current = source.current
+    }
+}
+
+extension IndexQueueLaneProgress: Content {}
+
 /// Live in-flight index run snapshot on `GET /index/status`, derived from the
 /// coordinator's `liveTotals`. Null when idle so polling surfaces unmount the
 /// live strip without persisting any post-run summary.
@@ -298,6 +332,14 @@ public struct IndexLiveStatus: Content, Equatable {
     public let elapsedMs: Int
     /// Last relative item reported, for the display `current` field.
     public let current: String?
+    /// Chunks written carrying an embedding so far in this run.
+    public let vectorChunks: Int?
+    /// Chunks written without an embedding so far in this run.
+    public let keywordChunks: Int?
+    /// Per-source live progress across active and completed stages in this run.
+    public let sources: [IndexLiveSourceDTO]?
+    /// Per-lane modality queue progress emitted by the files indexer.
+    public let queues: [IndexQueueLaneProgress]?
 
     /// Creates a live snapshot row. trigger: What caused the run.
     public init(
@@ -310,7 +352,11 @@ public struct IndexLiveStatus: Content, Equatable {
         errors: Int = 0,
         rate: Double = 0,
         elapsedMs: Int = 0,
-        current: String? = nil
+        current: String? = nil,
+        vectorChunks: Int? = nil,
+        keywordChunks: Int? = nil,
+        sources: [IndexLiveSourceDTO]? = nil,
+        queues: [IndexQueueLaneProgress]? = nil
     ) {
         self.trigger = trigger
         self.phase = phase
@@ -322,6 +368,10 @@ public struct IndexLiveStatus: Content, Equatable {
         self.rate = rate
         self.elapsedMs = elapsedMs
         self.current = current
+        self.vectorChunks = vectorChunks
+        self.keywordChunks = keywordChunks
+        self.sources = sources
+        self.queues = queues
     }
 
     /// Maps coordinator live totals onto the wire shape.
@@ -337,6 +387,10 @@ public struct IndexLiveStatus: Content, Equatable {
         self.rate = totals.rate
         self.elapsedMs = totals.elapsedMs
         self.current = totals.current
+        self.vectorChunks = totals.vectorChunks
+        self.keywordChunks = totals.keywordChunks
+        self.sources = totals.sources.isEmpty ? nil : totals.sources.map(IndexLiveSourceDTO.init)
+        self.queues = totals.queues.isEmpty ? nil : totals.queues
     }
 }
 

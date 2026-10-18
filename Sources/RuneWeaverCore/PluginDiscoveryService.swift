@@ -29,11 +29,7 @@ public final class PluginDiscoveryService: Sendable {
         let expandedPath = pluginsDirectory.path
         var isDir: ObjCBool = false
 
-        guard fileManager.fileExists(atPath: expandedPath, isDirectory: &isDir), isDir.boolValue else {
-            return []
-        }
-
-        guard let subdirs = try? fileManager.contentsOfDirectory(
+        guard fileManager.fileExists(atPath: expandedPath, isDirectory: &isDir), isDir.boolValue, let subdirs = try? fileManager.contentsOfDirectory(
             at: pluginsDirectory,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]

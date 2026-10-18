@@ -63,7 +63,7 @@ public actor RemindersIndexer {
     /// Durable retrieval store receiving documents and chunks.
     private let index: DocIndexStore
     /// Optional embeddings backend for vector-eligible reminders.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
     /// Persisted known-identifier location.
     private let stateURL: URL
     /// Wall-clock seam for the indexed-at stamp.
@@ -73,7 +73,7 @@ public actor RemindersIndexer {
     public init(
         store: any ReminderStore,
         index: DocIndexStore,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         statePath: String = RemindersIndexer.defaultStatePath,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -128,7 +128,7 @@ public actor RemindersIndexer {
         config: IndexConfig,
         store: DocIndexStore,
         reminderStore: any ReminderStore,
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: any EmbeddingsBackend? = nil
     ) -> IndexClosureStage {
         IndexClosureStage(kind: .reminders, isEnabled: config.enabled && config.reminders) { policy, reporter, _ in
             guard policy.enabled, policy.reminders else {
@@ -268,6 +268,16 @@ public actor RemindersIndexer {
     /// Embeds and upserts pending reminder documents in a single SQLite transaction.
     private func upsertPrepared(_ prepared: [ReminderPending], runID: String, report: inout ReminderIndexReport) async throws {
         guard !prepared.isEmpty else { return }
+        // A reset triggered by a dimension mismatch may fail while other source
+        // stages run concurrently; the run then degrades to keyword-only.
+        if let embedder, let dim = await embedder.dimension {
+            _ = try? await index.ensureEmbeddingDimensionMatch(
+                activeModelID: embedder.modelID,
+                activeDimension: dim,
+                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
+                messagesStatePath: MessagesIndexer.defaultStatePath
+            )
+        }
         var embeddings: [[Float]] = []
         if let embedder {
             let texts = prepared.map(\.chunkText)

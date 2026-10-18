@@ -165,10 +165,7 @@ extension ApiSSRFGuard {
         if lowered.hasPrefix("file:") {
             return .denied("SSRF denied: file scheme is not allowed (\(trimmed)).")
         }
-        guard WebURLSafety.isSafeUrl(trimmed) else {
-            return .denied("Unsafe URL: api.request only dereferences absolute http(s) URLs (\(trimmed)).")
-        }
-        guard let url = URL(string: trimmed), let host = url.host, !host.isEmpty else {
+        guard WebURLSafety.isSafeUrl(trimmed), let url = URL(string: trimmed), let host = url.host, !host.isEmpty else {
             return .denied("Unsafe URL: api.request only dereferences absolute http(s) URLs (\(trimmed)).")
         }
         if isMetadataHost(host) {

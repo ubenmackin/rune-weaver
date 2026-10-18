@@ -19,7 +19,7 @@ public actor EphemeralContainerLedger {
 
     /// Creates a ledger on an injected runtime, live when nil, with an explicit or default cap. -
     /// Parameters: - runtime: Host runtime behind the CLI census.
-    public init(runtime: (any ContainerHostRuntime)? = nil, maxConcurrent: Int = EphemeralContainerLedger.defaultMaxConcurrent) {
+    public init(runtime: any ContainerHostRuntime? = nil, maxConcurrent: Int = EphemeralContainerLedger.defaultMaxConcurrent) {
         self.runtime = runtime ?? LiveContainerHostRuntime()
         self.maxConcurrent = StrictContainerRunner.clampedMaxConcurrent(for: ContainersConfig(maxConcurrent: maxConcurrent))
     }

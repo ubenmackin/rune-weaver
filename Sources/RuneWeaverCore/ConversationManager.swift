@@ -555,8 +555,7 @@ public actor ConversationManager {
         if sessionToUpdate == nil {
             sessionToUpdate = await readSingleMerged(id: id)
         }
-        guard var session = sessionToUpdate else { return }
-        guard session.isArchived != isArchived else { return }
+        guard var session = sessionToUpdate, session.isArchived != isArchived else { return }
         session.isArchived = isArchived
         session.updatedAt = Date()
         sessions[id] = session
@@ -569,8 +568,7 @@ public actor ConversationManager {
         if sessionToUpdate == nil {
             sessionToUpdate = await readSingleMerged(id: sessionID)
         }
-        guard var session = sessionToUpdate else { return }
-        guard session.goalID != goalID else { return }
+        guard var session = sessionToUpdate, session.goalID != goalID else { return }
         session.goalID = goalID
         session.updatedAt = Date()
         sessions[sessionID] = session
@@ -1092,8 +1090,7 @@ extension ConversationManager {
         thresholdPercent: Int,
         reservedTokens: Int = 0
     ) async -> Bool {
-        guard contextLength > 0, thresholdPercent > 0 else { return false }
-        guard var session = await readSingleMerged(id: sessionID) else { return false }
+        guard contextLength > 0, thresholdPercent > 0, var session = await readSingleMerged(id: sessionID) else { return false }
         let effectiveLength = max(100, contextLength - max(0, reservedTokens))
         let maxAllowedTokens = max(100, (effectiveLength * min(100, thresholdPercent)) / 100)
 

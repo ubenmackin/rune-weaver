@@ -47,7 +47,7 @@ struct ProviderCircuitBreakerTests {
         #expect(await breaker.isAvailable(provider: provider, at: now) == false)
         let remaining = await breaker.cooldownRemaining(provider: provider, at: now)
         #expect(remaining != nil)
-        #expect(try #require(remaining) <= 60 && remaining! > 50)
+        #expect(try #require(remaining) <= 60 && #require(remaining) > 50)
 
         // After 61 seconds, breaker allows calls again
         let later = now.addingTimeInterval(61)
@@ -72,7 +72,7 @@ struct ProviderCircuitBreakerTests {
         #expect(await breaker.isAvailable(provider: provider, at: now) == false)
         let remaining = await breaker.cooldownRemaining(provider: provider, at: now)
         #expect(remaining != nil)
-        #expect(try #require(remaining) <= 180 && remaining! > 170)
+        #expect(try #require(remaining) <= 180 && #require(remaining) > 170)
 
         // Success resets failures
         await breaker.recordSuccess(provider: provider)

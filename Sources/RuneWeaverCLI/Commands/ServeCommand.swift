@@ -209,7 +209,7 @@ struct ServeCommand: AsyncParsableCommand {
 extension ServeCommand {
     private struct ToolBootstrapDependencies {
         let memoryEngine: MemoryEngine
-        let embedder: (any EmbeddingsBackend)?
+        let embedder: any EmbeddingsBackend?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
         let recipientAliasStore: RecipientAliasStore
@@ -480,7 +480,7 @@ extension ServeCommand {
         selected _: any LLMProvider,
         runs: RunLogStore,
         hub: WSHub,
-        embedder: (any EmbeddingsBackend)?
+        embedder: any EmbeddingsBackend?
     ) -> ServerIndexComponents? {
         let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
             EmbeddingsBackendFactory.makePoolFactory(

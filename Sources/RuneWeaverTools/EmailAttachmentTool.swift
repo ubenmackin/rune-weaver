@@ -84,18 +84,18 @@ public struct EmailAttachmentTool: Tool, Sendable {
     /// Home boundary override forwarded to the guard. Nil means the real home.
     private let homeDirectoryURL: URL?
     /// Archive detonator override (stub in tests). Nil defers to the shared registry ledger.
-    private let archiveDetonator: (any EmailArchiveDetonator)?
+    private let archiveDetonator: any EmailArchiveDetonator?
     /// Ledger override for the default detonator. Nil defers to the shared registry ledger.
     private let ephemeralLedger: EphemeralContainerLedger?
 
     /// Creates an attachment tool.
     public init(
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil,
+        gateway: any EmailIMAPGateway? = nil,
         containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        archiveDetonator: any EmailArchiveDetonator? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil
     ) {
         self.emailConfig = emailConfig

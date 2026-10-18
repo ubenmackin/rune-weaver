@@ -306,10 +306,7 @@ extension EmailBridgeParsing {
 
     /// Resolves a requested mailbox against an already-listed selectable list.
     public static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
-        guard !available.isEmpty else {
-            throw unknownMailboxError(requested: requested, available: available)
-        }
-        guard let canonical = resolveMailbox(requested, among: available) else {
+        guard !available.isEmpty, let canonical = resolveMailbox(requested, among: available) else {
             throw unknownMailboxError(requested: requested, available: available)
         }
         return canonical

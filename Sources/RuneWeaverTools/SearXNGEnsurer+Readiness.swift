@@ -60,8 +60,7 @@ extension SearXNGEnsurer {
     /// Whether a `list --all` dump names the tracked entry.
     public static func containerExists(inListOutput output: String) -> Bool {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        guard let regex = containerExistsRegex else {
+        guard !trimmed.isEmpty, let regex = containerExistsRegex else {
             return false
         }
         let range = NSRange(trimmed.startIndex..., in: trimmed)
@@ -512,10 +511,7 @@ extension SearXNGEnsurer {
             // Only a true revive claims a start: a nonzero exit leaves the
             // original run conflict plus chained detail for the caller to
             // surface, and an unanswered probe does the same.
-            guard code == 0 else {
-                return nil
-            }
-            guard await isReachable(baseURL: browser.searxngURL) else {
+            guard code == 0, await isReachable(baseURL: browser.searxngURL) else {
                 return nil
             }
             return ContainerOutcome(didStart: true, failure: nil)
@@ -611,8 +607,8 @@ extension SearXNGEnsurer {
             // allocation stays capped even when loopback answers instantly.
             if let lengthValue = http.value(forHTTPHeaderField: "Content-Length")?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-                let advertised = Int(lengthValue),
-                advertised > WebFetchTool.maxFetchBytes
+               let advertised = Int(lengthValue),
+               advertised > WebFetchTool.maxFetchBytes
             {
                 return HTTPProbeSnapshot(statusCode: code, bodyTail: "")
             }
@@ -892,8 +888,7 @@ extension SearXNGEnsurer {
         if let json = decodedInspectJSON(from: output) {
             return nonEmptyErrorInDecodedJSON(json)
         }
-        guard output.lowercased().contains("error") else { return false }
-        guard let regex = nonEmptyErrorShapeRegex else { return false }
+        guard output.lowercased().contains("error"), let regex = nonEmptyErrorShapeRegex else { return false }
         let range = NSRange(output.startIndex..., in: output)
         let matches = regex.matches(in: output, options: [], range: range)
         for match in matches {

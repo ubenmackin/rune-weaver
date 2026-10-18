@@ -29,7 +29,7 @@ public enum ServerIndexBoot {
         config: RuneWeaverConfig,
         runs: RunLogStore,
         hub: WSHub,
-        embedder: (any EmbeddingsBackend)?,
+        embedder: any EmbeddingsBackend?,
         makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil
     ) -> ServerIndexComponents? {
         guard config.index.enabled else { return nil }

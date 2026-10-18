@@ -952,8 +952,7 @@ extension SovereignLedger {
                 reason: "sovereign anchor is locked in the Keychain; unlock the Keychain and retry"
             )
         }
-        guard let raw else { return nil }
-        guard raw.count <= Self.maxAnchorJSONChars,
+        guard let raw, raw.count <= Self.maxAnchorJSONChars,
               let data = raw.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data, options: []),
               let dict = object as? [String: Any],

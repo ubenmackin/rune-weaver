@@ -387,10 +387,7 @@ public actor BehaviorWatchdog {
         let now = self.now()
         foldCompletedHours(now: now)
         pruneBuckets(now: now)
-        guard isArmed(now: now) else {
-            return BrakeDecision()
-        }
-        guard let reason = detect(now: now) else {
+        guard isArmed(now: now), let reason = detect(now: now) else {
             return BrakeDecision()
         }
         await brake(reason: reason)

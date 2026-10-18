@@ -21,10 +21,7 @@ public enum ImageDownscaler: Sendable {
         maxBytes: Int = defaultMaxBytes
     ) -> Data? {
         #if canImport(CoreGraphics) && canImport(ImageIO)
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-                return nil
-            }
-            guard CGImageSourceGetCount(source) > 0 else {
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else {
                 return nil
             }
 

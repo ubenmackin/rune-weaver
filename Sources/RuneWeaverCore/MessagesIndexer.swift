@@ -141,15 +141,11 @@ public enum AttributedBodyTextDecoder: Sendable {
             // The string field is introduced by an object reference followed by a
             // class reference and the `0x84` data-block indicator; the literal
             // `+` type tag may follow directly or after a one-byte count.
-            if bytes[cursor] == 0x01, bytes[cursor + 2] == 0x84 {
-                if let payload = readPayload(bytes, lengthIndex: cursor + 5) {
-                    return payload
-                }
+            if bytes[cursor] == 0x01, bytes[cursor + 2] == 0x84, let payload = readPayload(bytes, lengthIndex: cursor + 5) {
+                return payload
             }
-            if bytes[cursor] == 0x84, bytes[cursor + 1] == 0x01, bytes[cursor + 2] == 0x2B {
-                if let payload = readPayload(bytes, lengthIndex: cursor + 3) {
-                    return payload
-                }
+            if bytes[cursor] == 0x84, bytes[cursor + 1] == 0x01, bytes[cursor + 2] == 0x2B, let payload = readPayload(bytes, lengthIndex: cursor + 3) {
+                return payload
             }
             cursor += 1
         }
@@ -315,7 +311,7 @@ public actor MessagesIndexer {
     /// Opportunistic handle-to-name resolver.
     private let contacts: any MessagesContactResolving
     /// Optional embeddings backend for vector-eligible messages.
-    private let embedder: (any EmbeddingsBackend)?
+    private let embedder: any EmbeddingsBackend?
     /// Persisted watermark location.
     private let stateURL: URL
     /// Messages read per pass.
@@ -330,7 +326,7 @@ public actor MessagesIndexer {
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         contacts: any MessagesContactResolving = MessagesContactNameResolver(),
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit,
         maxAttachmentBytes: Int = MessagesIndexer.defaultMaxAttachmentBytes

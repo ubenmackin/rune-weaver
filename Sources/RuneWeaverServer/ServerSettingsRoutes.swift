@@ -295,10 +295,8 @@ func reloadLiveLLM(config: RuneWeaverConfig, context: ServerContext) async throw
         guard let envVar = entry.apiKeyEnv, !envVar.isEmpty else { continue }
         if let key = LLMProviderFactory.resolveAPIKey(explicit: nil, envVar: envVar) {
             keysByEntry[entryName] = key
-        } else if let secrets = context.secrets {
-            if let stored = try? await secrets.retrieve(key: envVar) {
-                keysByEntry[entryName] = stored
-            }
+        } else if let secrets = context.secrets, let stored = try? await secrets.retrieve(key: envVar) {
+            keysByEntry[entryName] = stored
         }
     }
     let providers = LLMProviderFactory.makeProviders(from: config.llm, apiKeysByEntry: keysByEntry)
@@ -359,8 +357,8 @@ private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeave
 /// Rebuilds the Playwright bridge with fresh origins while preserving injected doubles. A managed
 /// subprocess gateway keeps its executable and budgets; a test double survives as-is.
 func gatewayForLiveReload(
-    stored: (any BrowserPlaywrightGateway)?,
-    busGateway: (any BrowserPlaywrightGateway)?,
+    stored: any BrowserPlaywrightGateway?,
+    busGateway: any BrowserPlaywrightGateway?,
     browserConfig: BrowserConfig,
     mediaConfig: MediaConfig? = nil,
     llmServerURLs: [String] = [],
@@ -547,19 +545,17 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
         )
         await reregisterPreservingToggle(bashTool, on: context)
     }
-    if hasFilesPatch || hasContainersPatch, !config.email.accounts.isEmpty {
-        if await context.toolBus.tool(named: "email.search") != nil {
-            let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
-            for tool in EmailTools.makeTools(
-                emailConfig: config.email,
-                containersConfig: config.containers,
-                filesConfig: live.files,
-                ephemeralLedger: sharedLedger,
-                securityConfig: config.security,
-                booking: SchedulerStoreBookingAdapter(store: context.scheduler)
-            ) {
-                await reregisterPreservingToggle(tool, on: context)
-            }
+    if hasFilesPatch || hasContainersPatch, !config.email.accounts.isEmpty, await context.toolBus.tool(named: "email.search") != nil {
+        let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
+        for tool in EmailTools.makeTools(
+            emailConfig: config.email,
+            containersConfig: config.containers,
+            filesConfig: live.files,
+            ephemeralLedger: sharedLedger,
+            securityConfig: config.security,
+            booking: SchedulerStoreBookingAdapter(store: context.scheduler)
+        ) {
+            await reregisterPreservingToggle(tool, on: context)
         }
     }
 }

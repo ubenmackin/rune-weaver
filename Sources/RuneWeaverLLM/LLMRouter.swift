@@ -73,10 +73,7 @@ public actor LLMRouter {
                     if Task.isCancelled {
                         break
                     }
-                    guard await circuitBreaker.isAvailable(provider: provider) else {
-                        continue
-                    }
-                    guard await provider.isAvailable() else { continue }
+                    guard await circuitBreaker.isAvailable(provider: provider), await provider.isAvailable() else { continue }
                     // Per-provider vision gate: text-only backends never see
                     // image bytes even when an earlier turn captured them for
                     // a vision-capable fallback on the same priority list.
@@ -268,7 +265,7 @@ public actor LLMRouter {
     /// Consults the circuit breaker exactly like chat so a cooled provider
     /// stays rested for embeddings too instead of bypassing its cooldown.
     public func embeddings(text: [String]) async throws -> [[Float]] {
-        var lastError: (any Error)?
+        var lastError: any Error?
         for provider in providers {
             if Task.isCancelled {
                 // Abort before consulting a fallback provider so cancellation
@@ -278,8 +275,7 @@ public actor LLMRouter {
             // Breaker first so cooling providers rest for embeddings as well
             // as chat; provider health second for backends that self-report
             // downtime. Both skips fail closed to the next fallback.
-            guard await circuitBreaker.isAvailable(provider: provider) else { continue }
-            guard await provider.isAvailable() else { continue }
+            guard await circuitBreaker.isAvailable(provider: provider), await provider.isAvailable() else { continue }
             do {
                 let vectors = try await provider.embeddings(text: text)
                 await circuitBreaker.recordSuccess(provider: provider)

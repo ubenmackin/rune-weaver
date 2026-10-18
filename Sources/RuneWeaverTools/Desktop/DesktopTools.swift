@@ -473,8 +473,8 @@ public enum DesktopTools {
     /// instead of shape-shifting.
     public static func makeTools(
         desktopConfig: DesktopConfig = DesktopConfig(),
-        captureBridge: (any DesktopCapturing)? = nil,
-        controlBridge: (any DesktopControlling)? = nil,
+        captureBridge: any DesktopCapturing? = nil,
+        controlBridge: any DesktopControlling? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) -> [any Tool] {
         [

@@ -4212,6 +4212,22 @@ export interface IndexLastRunStatus {
   sources?: IndexSourceRunOutcome[] | null;
 }
 
+export interface IndexLiveSourceStatus {
+  kind: string;
+  state: "running" | "completed";
+  scanned: number;
+  indexed: number;
+  current?: string | null;
+}
+
+export interface IndexLiveQueueLane {
+  lane: string;
+  label: string;
+  queued: number;
+  processed: number;
+  indexed: number;
+}
+
 // Live snapshot of an in-flight index run on `GET /index/status`, mirroring
 // IndexLiveTotals on the engine. Null when idle; the dashboard renders the
 // live block only from this poll snapshot, never from WebSocket frame parsing.
@@ -4229,6 +4245,10 @@ export interface IndexLiveStatus {
   rate?: number | null;
   elapsedMs: number;
   current: string | null;
+  vectorChunks?: number | null;
+  keywordChunks?: number | null;
+  sources?: IndexLiveSourceStatus[] | null;
+  queues?: IndexLiveQueueLane[] | null;
 }
 
 // Resolved effort block on `GET /index/status`, mirroring the engine `IndexEffortStatus`.

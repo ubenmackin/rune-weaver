@@ -666,8 +666,7 @@ extension MemoryEngine {
             if let preference = Self.extractPreference(from: sentence) {
                 await setPreference(preference)
             }
-            guard Self.isFactLike(sentence) else { continue }
-            guard Self.isStorableFact(sentence) else { continue }
+            guard Self.isFactLike(sentence), Self.isStorableFact(sentence) else { continue }
             let embedding = embeddings[sentence] ?? []
             let fact = try await persistFact(
                 content: sentence,
@@ -882,10 +881,7 @@ extension MemoryEngine {
         role: Message.Role = .user,
         metadata: [String: String] = [:]
     ) async -> Bool {
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return false
-        }
-        guard content.count <= Self.maxContentLength else { return false }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, content.count <= Self.maxContentLength else { return false }
         return await episodeStore.storeUncancellable(
             sessionID: sessionID,
             role: role,
@@ -968,7 +964,7 @@ extension MemoryEngine {
     public func storeFactWithEmbedder(
         content: String,
         source: String,
-        embedder: (any EmbeddingsBackend)?
+        embedder: any EmbeddingsBackend?
     ) async throws -> UserFact {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         if let embedder {
@@ -997,7 +993,7 @@ extension MemoryEngine {
     public func storeRememberedFact(
         content: String,
         source: String = "chat",
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: any EmbeddingsBackend? = nil
     ) async throws -> Bool {
         guard Self.isStorableFact(content) else { return false }
         do {

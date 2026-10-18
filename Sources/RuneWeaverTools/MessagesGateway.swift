@@ -198,10 +198,8 @@ public struct ProductionMessagesGateway: MessagesGateway {
 
             for row in rows {
                 let resolved = MessagesIndexer.resolveText(for: row).text ?? ""
-                if !trimmedQuery.isEmpty && trimmedQuery != "*" {
-                    if !resolved.localizedCaseInsensitiveContains(trimmedQuery) {
-                        continue
-                    }
+                if !trimmedQuery.isEmpty && trimmedQuery != "*", !resolved.localizedCaseInsensitiveContains(trimmedQuery) {
+                    continue
                 }
                 let sender = row.isFromMe ? "Me" : MessagesIndexer.displayName(for: row, names: names)
                 let dateStr = row.date.map { isoFormatter.string(from: TemporalFilter.date(fromMacEpoch: $0)) } ?? ""

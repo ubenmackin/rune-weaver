@@ -37,11 +37,7 @@ struct ZipArchiveReader: Sendable {
         guard let endOfDirectory = Self.endOfCentralDirectoryOffset(in: data) else { return nil }
         let totalEntries = data.uint16LE(at: endOfDirectory + 10) ?? 0
         guard let directorySize = data.uint32LE(at: endOfDirectory + 12),
-              let directoryOffset = data.uint32LE(at: endOfDirectory + 16)
-        else {
-            return nil
-        }
-        guard directorySize != 0xFFFF_FFFF, directoryOffset != 0xFFFF_FFFF else { return nil }
+              let directoryOffset = data.uint32LE(at: endOfDirectory + 16), directorySize != 0xFFFF_FFFF, directoryOffset != 0xFFFF_FFFF else { return nil }
 
         var parsed: [ZipEntry] = []
         var cursor = Int(directoryOffset)
@@ -57,8 +53,10 @@ struct ZipArchiveReader: Sendable {
             let commentLength = Int(data.uint16LE(at: cursor + 32) ?? 0)
             let localOffset = data.uint32LE(at: cursor + 42) ?? 0
             let nameStart = cursor + 46
-            guard nameStart + nameLength <= data.count, let nameData = data.littleEndianSubdata(at: nameStart, length: nameLength) else { break }
-            guard let name = String(bytes: nameData, encoding: .utf8) else { break }
+            guard nameStart + nameLength <= data.count, let nameData = data.littleEndianSubdata(at: nameStart, length: nameLength), let name = String(
+                bytes: nameData,
+                encoding: .utf8
+            ) else { break }
             // ZIP64 sentinels are not expanded here, so those entries are skipped
             // rather than read from the wrong offset.
             if compressed != 0xFFFF_FFFF, uncompressed != 0xFFFF_FFFF, localOffset != 0xFFFF_FFFF {
@@ -102,8 +100,7 @@ struct ZipArchiveReader: Sendable {
     /// - Parameter entry: Central directory entry.
     /// - Returns: Entry bytes, or nil when the local header or method is unsupported.
     private func uncompressedData(for entry: ZipEntry) -> Data? {
-        guard entry.uncompressedSize <= Self.defaultMaxUncompressedBytes else { return nil }
-        guard data.uint32LE(at: entry.localHeaderOffset) == 0x0403_4B50 else { return nil }
+        guard entry.uncompressedSize <= Self.defaultMaxUncompressedBytes, data.uint32LE(at: entry.localHeaderOffset) == 0x0403_4B50 else { return nil }
         let nameLength = Int(data.uint16LE(at: entry.localHeaderOffset + 26) ?? 0)
         let extraLength = Int(data.uint16LE(at: entry.localHeaderOffset + 28) ?? 0)
         let dataStart = entry.localHeaderOffset + 30 + nameLength + extraLength

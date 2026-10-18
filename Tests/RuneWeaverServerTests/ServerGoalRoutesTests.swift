@@ -114,7 +114,7 @@ private func withGoalApp<T>(
 
 /// Sends one request through the full registered surface. app: Configured
 /// application.
-private func goalRequest(app: Application, method: HTTPMethod, path: String, body: (some Content)?) async throws -> Response {
+private func goalRequest(app: Application, method: HTTPMethod, path: String, body: some Content?) async throws -> Response {
     let request = Request(
         application: app,
         method: method,
@@ -652,9 +652,9 @@ struct GoalSettingsMergeTests {
 
     @Test
     func `GoalsUpdate decodes and encodes camelCase`() throws {
-        let payload = """
+        let payload = try #require("""
         {"enabled": true, "stepIntervalMinutes": 60, "maxActiveGoals": 5}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(GoalsUpdate.self, from: payload)
         #expect(decoded.enabled == true)
         #expect(decoded.stepIntervalMinutes == 60)
@@ -670,9 +670,9 @@ struct GoalSettingsMergeTests {
 
     @Test
     func `ProactiveUpdate decodes and encodes camelCase`() throws {
-        let payload = """
+        let payload = try #require("""
         {"mode": "guarded", "judgeTimeoutSeconds": 20}
-        """.data(using: .utf8)!
+        """.data(using: .utf8))
         let decoded = try JSONDecoder().decode(ProactiveUpdate.self, from: payload)
         #expect(decoded.mode == "guarded")
         #expect(decoded.judgeTimeoutSeconds == 20)

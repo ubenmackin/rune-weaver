@@ -198,9 +198,9 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
                   let kindText = SQLiteHelpers.columnText(statement, index: 2),
                   let kind = ScopeKind(rawValue: kindText),
                   let actionText = SQLiteHelpers.columnText(statement, index: 4),
-                  let action = AccessAction(rawValue: actionText)
-            else { return nil }
-            guard let scope = decodeScope(kind: kind, data: SQLiteHelpers.columnText(statement, index: 3) ?? "") else {
+                  let action = AccessAction(rawValue: actionText),
+                  let scope = decodeScope(kind: kind, data: SQLiteHelpers.columnText(statement, index: 3) ?? "")
+            else {
                 return nil
             }
             let grantedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 5))

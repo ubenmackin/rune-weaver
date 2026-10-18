@@ -42,7 +42,7 @@ private func freshTestSecrets() -> SecretsManager {
 private func makeLedger(
     scratch: SovereignScratch,
     secrets: SecretsManager,
-    signer: (any SovereignSigner)? = nil,
+    signer: any SovereignSigner? = nil,
     now: @escaping @Sendable () -> Date
 ) -> SovereignLedger {
     SovereignLedger(

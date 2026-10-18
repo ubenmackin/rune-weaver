@@ -226,8 +226,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     /// becomes a tip.
     public static func normalizedTip(_ value: String?) -> String? {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty, trimmed.count <= maxTipLength else { return nil }
-        guard trimmed.allSatisfy(\.isHexDigit) else { return nil }
+        guard !trimmed.isEmpty, trimmed.count <= maxTipLength, trimmed.allSatisfy(\.isHexDigit) else { return nil }
         return trimmed
     }
 

@@ -103,8 +103,8 @@ import Foundation
             while sqlite3_step(statement) == SQLITE_ROW {
                 // A row without a handle or a date cannot be attributed to a
                 // recipient, so it is skipped rather than surfaced as empty.
-                guard let handleID = SQLiteHelpers.columnText(statement, index: 0), !handleID.isEmpty else { continue }
-                guard let rawDate = SQLiteHelpers.columnInt64(statement, index: 1) else { continue }
+                guard let handleID = SQLiteHelpers.columnText(statement, index: 0), !handleID.isEmpty,
+                      let rawDate = SQLiteHelpers.columnInt64(statement, index: 1) else { continue }
                 rows.append(
                     MessageOutgoingRow(
                         handle: handleID,

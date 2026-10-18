@@ -743,10 +743,7 @@ public enum LlamaCppSlot: Sendable {
         // share one slot; hashing the raw string would scatter one session
         // across slots and defeat prefix reuse.
         let trimmed = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-        guard slotCount > 0 else { return nil }
+        guard !trimmed.isEmpty, slotCount > 0 else { return nil }
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in trimmed.utf8 {
             hash ^= UInt64(byte)

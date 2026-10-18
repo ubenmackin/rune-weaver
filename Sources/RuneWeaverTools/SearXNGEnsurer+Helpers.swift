@@ -1034,8 +1034,7 @@ extension SearXNGEnsurer {
     /// so the caller keeps waiting instead of trusting a fragment that never proved container state.
     public static func decodedInspectJSON(from output: String) -> Any? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let data = trimmed.data(using: .utf8) else { return nil }
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [])
     }
 

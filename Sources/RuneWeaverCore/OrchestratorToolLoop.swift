@@ -120,7 +120,7 @@ public enum OrchestratorToolLoop {
     public static func episodicToolRecord(
         toolName: String,
         result: ToolResult,
-        for tool: (any Tool)?,
+        for tool: any Tool?,
         labelingEnabled: Bool = true
     ) -> String? {
         guard let tool else {
@@ -172,10 +172,8 @@ public enum OrchestratorToolLoop {
         // A trailing newline is a terminator, not an extra blank line.
         var calls: [ToolInput] = []
         for rawLine in NormalizedText.splitLines(text) {
-            guard let parsed = ToolInput.parsePlaceholderLine(rawLine) else { continue }
-            guard let tool = byName[parsed.toolName] else { continue }
-            guard predicate(tool) else { continue }
-            guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
+            guard let parsed = ToolInput.parsePlaceholderLine(rawLine), let tool = byName[parsed.toolName], predicate(tool),
+                  isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
             // Preserve the narrated identifier so the executed record collapses with its persisted
             // placeholder twin when grouping by call identity.
             let trimmedCallID = parsed.callID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,15 +292,14 @@ public enum OrchestratorToolLoop {
         toolName: String,
         labelingEnabled: Bool = true
     ) -> String {
-        guard labelingEnabled else { return content }
-        guard trustLevel == .untrustedExternal else { return content }
+        guard labelingEnabled, trustLevel == .untrustedExternal else { return content }
         return ContentTrustLabeler.label(toolName: toolName, content: content)
     }
 
     /// Returns the model-context content for one tool's result.
     public static func labeledResultContent(
         _ content: String,
-        for tool: (any Tool)?,
+        for tool: any Tool?,
         labelingEnabled: Bool = true
     ) -> String {
         guard let tool else { return content }
@@ -311,7 +308,7 @@ public enum OrchestratorToolLoop {
 
     /// Builds the `tool`-role message carrying one result into model context.
     public static func toolResultMessage(
-        for tool: (any Tool)?,
+        for tool: any Tool?,
         result: ToolResult,
         labelingEnabled: Bool = true
     ) -> Message {
@@ -330,7 +327,7 @@ public enum OrchestratorToolLoop {
     /// composition with the lookup variant so parked calls holding their tool avoid a redundant
     /// registry round-trip.
     public static func appendLabeledResult(
-        for tool: (any Tool)?,
+        for tool: any Tool?,
         result: ToolResult,
         to conversations: ConversationManager,
         sessionID: UUID,
@@ -360,8 +357,7 @@ public enum OrchestratorToolLoop {
     /// Whether raw narration arguments are a JSON object.
     private static func isNarrationArgumentsJSON(_ argumentsJSON: String) -> Bool {
         let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        guard let data = trimmed.data(using: .utf8) else { return false }
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return false }
         do {
             let value = try JSONSerialization.jsonObject(with: data, options: [])
             return value is [String: Any]

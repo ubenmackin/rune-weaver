@@ -50,7 +50,7 @@ struct MessagesSearchRecipientTests {
     private func runSearch(
         _ argumentsJSON: String,
         gateway: StubMessagesGateway,
-        resolver: (any MessagesRecipientResolving)? = nil
+        resolver: any MessagesRecipientResolving? = nil
     ) async throws -> ToolOutput {
         let tool = MessagesSearchTool(gateway: gateway, resolver: resolver)
         return try await tool.execute(
@@ -63,7 +63,7 @@ struct MessagesSearchRecipientTests {
     private func runRead(
         _ argumentsJSON: String,
         gateway: StubMessagesGateway,
-        resolver: (any MessagesRecipientResolving)? = nil
+        resolver: any MessagesRecipientResolving? = nil
     ) async throws -> ToolOutput {
         let tool = MessagesReadTool(gateway: gateway, resolver: resolver)
         return try await tool.execute(

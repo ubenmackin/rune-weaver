@@ -895,7 +895,7 @@ extension ProductionCalendarGateway {
 public enum CalendarTools {
     public static let toolNames = ["calendar.search", "calendar.create", "calendar.update", "calendar.delete"]
 
-    public static func makeTools(gateway: (any CalendarGateway)? = nil) -> [any Tool] {
+    public static func makeTools(gateway: any CalendarGateway? = nil) -> [any Tool] {
         let effectiveGateway = gateway ?? ProductionCalendarGateway()
         return [
             CalendarSearchTool(gateway: effectiveGateway),
@@ -905,7 +905,7 @@ public enum CalendarTools {
         ]
     }
 
-    public static func register(on bus: ToolBus, gateway: (any CalendarGateway)? = nil) async {
+    public static func register(on bus: ToolBus, gateway: any CalendarGateway? = nil) async {
         for tool in makeTools(gateway: gateway) {
             await bus.register(tool: tool)
         }

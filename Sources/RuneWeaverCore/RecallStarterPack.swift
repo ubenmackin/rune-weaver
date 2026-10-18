@@ -146,8 +146,7 @@ extension MemoryEngine {
             RuneWeaverLog.stores.debug("RecallStarterPack: failed to read store stats: \(error.localizedDescription)")
             return .empty
         }
-        guard stats.documents > 0 else { return .empty }
-        guard stats.indexAsOf.timeIntervalSince1970 > 0 else { return .empty }
+        guard stats.documents > 0, stats.indexAsOf.timeIntervalSince1970 > 0 else { return .empty }
         return .ready(stats.indexAsOf)
     }
 

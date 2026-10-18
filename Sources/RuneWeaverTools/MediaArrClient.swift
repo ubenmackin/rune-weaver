@@ -29,7 +29,7 @@ public struct MediaArrClient: Sendable {
 
     public init(
         mediaConfig: MediaConfig,
-        transport: (any MediaArrTransport)? = nil,
+        transport: any MediaArrTransport? = nil,
         secrets: SecretsManager? = nil
     ) {
         self.mediaConfig = mediaConfig
@@ -186,7 +186,7 @@ extension MediaArrClient {
                 // of reading as a plain error.
                 if let rawLocation = response.value(forHTTPHeaderField: "Location")?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
-                    !rawLocation.isEmpty
+                   !rawLocation.isEmpty
                 {
                     throw ToolExecutionError.invalidURL(
                         "Unsafe redirect target: refusing to dereference \(Self.redactedURL(rawLocation))."
@@ -256,10 +256,7 @@ extension MediaArrClient {
 
     /// Validates one media hop URL without dialing.
     static func validateMediaHopURL(_ raw: String) throws {
-        guard WebURLSafety.isSafeUrl(raw) else {
-            throw ToolExecutionError.invalidURL("Unsafe media URL: expected an absolute http(s) URL without credentials.")
-        }
-        guard let url = URL(string: raw), let host = url.host, !host.isEmpty else {
+        guard WebURLSafety.isSafeUrl(raw), let url = URL(string: raw), let host = url.host, !host.isEmpty else {
             throw ToolExecutionError.invalidURL("Unsafe media URL: expected an absolute http(s) URL without credentials.")
         }
         if ApiSSRFGuard.isMetadataHost(host) {

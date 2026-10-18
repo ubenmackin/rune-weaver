@@ -403,7 +403,7 @@ struct SecurityProbeSink: Sendable {
     /// Trusted-tool anomaly watchdog evaluated on the same cadence.
     let watchdog: BehaviorWatchdog?
     /// Decision history recording automatic settlements, nil when unwired.
-    let decisionLog: (any ApprovalDecisionRecording)?
+    let decisionLog: any ApprovalDecisionRecording?
 }
 
 /// Recorded probe-report hash gate suppressing identical re-records.

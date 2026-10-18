@@ -940,8 +940,8 @@ public struct GoalProgressTool: Tool, Sendable {
         }
         if status == .done || status == .inProgress,
            let earlier = steps
-           .sorted(by: { $0.ordinal < $1.ordinal })
-           .first(where: { $0.ordinal < step.ordinal && ($0.status == .pending || $0.status == .inProgress) })
+               .sorted(by: { $0.ordinal < $1.ordinal })
+               .first(where: { $0.ordinal < step.ordinal && ($0.status == .pending || $0.status == .inProgress) })
         {
             return .failure(
                 "Cannot advance step \(step.ordinal) while earlier step \(earlier.ordinal)"

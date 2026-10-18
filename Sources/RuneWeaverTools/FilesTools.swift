@@ -749,10 +749,7 @@ public struct FilesGrepTool: Tool, Sendable {
         } catch {
             return nil
         }
-        guard !data.contains(0x00) else {
-            return nil
-        }
-        guard let text = String(data: data, encoding: .utf8) else {
+        guard !data.contains(0x00), let text = String(data: data, encoding: .utf8) else {
             return nil
         }
         return NormalizedText.splitLines(text)

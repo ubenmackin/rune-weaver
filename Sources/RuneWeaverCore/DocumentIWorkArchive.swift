@@ -113,15 +113,10 @@ enum DocumentIWorkArchive: Sendable {
             let lenByte1 = Int(data[cursor + 2])
             let lenByte2 = Int(data[cursor + 3])
             let uncompressedLen = lenByte0 | (lenByte1 << 8) | (lenByte2 << 16)
-            guard uncompressedLen > 0 else {
-                cursor += 4
-                continue
-            }
-            guard uncompressedLen <= DocumentSnappy.maxUncompressedBlockBytes else {
-                cursor += 4
-                continue
-            }
-            guard decompressedTotal + uncompressedLen <= maxDecompressedBytes else {
+            guard uncompressedLen > 0,
+                  uncompressedLen <= DocumentSnappy.maxUncompressedBlockBytes,
+                  decompressedTotal + uncompressedLen <= maxDecompressedBytes
+            else {
                 cursor += 4
                 continue
             }
@@ -164,12 +159,10 @@ enum DocumentIWorkArchive: Sendable {
             if (rawByte >= 32 && rawByte <= 126) || rawByte > 127 {
                 current.append(rawByte)
             } else {
-                if current.count >= 2 {
-                    if let decoded = String(bytes: current, encoding: .utf8) {
-                        let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if trimmed.count >= 2 {
-                            strings.append(trimmed)
-                        }
+                if current.count >= 2, let decoded = String(bytes: current, encoding: .utf8) {
+                    let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.count >= 2 {
+                        strings.append(trimmed)
                     }
                 }
                 current.removeAll(keepingCapacity: true)

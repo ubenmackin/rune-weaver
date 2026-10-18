@@ -29,11 +29,8 @@ public enum WebURLSafety: Sendable {
         }
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
-              let host = url.host, !host.isEmpty
+              let host = url.host, !host.isEmpty, scheme == "http" || scheme == "https"
         else {
-            return false
-        }
-        guard scheme == "http" || scheme == "https" else {
             return false
         }
         // Userinfo (`http://user:pass@host`) would smuggle credentials into logs, envelopes, and
@@ -322,7 +319,7 @@ public struct WebFetchTool: Tool, Sendable {
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil,
+        transport: any WebFetchTransport? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) {
@@ -757,7 +754,7 @@ public enum WebFetchTools {
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil,
+        transport: any WebFetchTransport? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
@@ -777,7 +774,7 @@ public enum WebFetchTools {
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil,
+        transport: any WebFetchTransport? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) async {

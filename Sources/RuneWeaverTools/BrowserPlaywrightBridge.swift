@@ -528,8 +528,7 @@ public enum BrowserValidation: Sendable {
     /// - Parameter ref: Trimmed candidate ref.
     /// - Returns: True for `e` followed by one or more digits.
     public static func isValidRef(_ ref: String) -> Bool {
-        guard ref.count >= 2, ref.count <= 12 else { return false }
-        guard ref.hasPrefix("e") else { return false }
+        guard ref.count >= 2, ref.count <= 12, ref.hasPrefix("e") else { return false }
         let digits = ref.dropFirst()
         guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return false }
         // Index zero never exists: snapshots number from e1, so e0 fails

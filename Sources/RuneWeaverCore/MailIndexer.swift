@@ -32,7 +32,7 @@ public actor MailIndexer {
     /// Document store the index writes into.
     let store: DocIndexStore
     /// Optional embeddings backend for vector-eligible chunks.
-    let embedder: (any EmbeddingsBackend)?
+    let embedder: any EmbeddingsBackend?
     /// Text extractor shared with the rest of the index pipeline.
     let extractor: any DocumentTextExtracting
     /// Incremental watermark and dedupe checkpoint store.
@@ -50,7 +50,7 @@ public actor MailIndexer {
         indexConfig: IndexConfig,
         gateway: any MailIndexGateway,
         store: DocIndexStore,
-        embedder: (any EmbeddingsBackend)? = nil,
+        embedder: any EmbeddingsBackend? = nil,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         checkpoints: MailIndexCheckpointStore = MailIndexCheckpointStore(),
         stagingRoot: URL? = nil,
@@ -772,13 +772,7 @@ extension MailIndexer {
             if page.isEmpty {
                 // Empty fixed windows step downward instead of completing so a UID gap cannot
                 // strand older mail below it.
-                guard let current = beforeUID else {
-                    return (collected, true)
-                }
-                guard let window = MailIndexTiling.window(beforeUID: current) else {
-                    return (collected, true)
-                }
-                guard window.lower > 1 else {
+                guard let current = beforeUID, let window = MailIndexTiling.window(beforeUID: current), window.lower > 1 else {
                     return (collected, true)
                 }
                 beforeUID = window.lower
