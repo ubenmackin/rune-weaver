@@ -118,7 +118,7 @@ describe("AccessBashSection", () => {
   it("pins the rules textarea contract with ordered last-match rules", async () => {
     const settings = {
       ...storedBash,
-      default_action: "deny",
+      defaultAction: "deny",
       rules: [
         { pattern: "*", action: "deny" },
         { pattern: "swiftformat *", action: "allow" },

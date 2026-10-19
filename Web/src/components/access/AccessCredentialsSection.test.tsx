@@ -16,19 +16,19 @@ const panePolicyPayload = {
     version: 1,
     network: {
       mode: "allowlist_only",
-      allowed_domains: ["api.example.com"],
-      blocked_domains: ["metadata.google.internal"],
+      allowedDomains: ["api.example.com"],
+      blockedDomains: ["metadata.google.internal"],
     },
     credentials: {
       GITHUB_TOKEN: {
-        allowed_hosts: ["api.github.com"],
-        allowed_methods: ["GET"],
-        allowed_path_prefixes: ["/repos"],
+        allowedHosts: ["api.github.com"],
+        allowedMethods: ["GET"],
+        allowedPathPrefixes: ["/repos"],
       },
     },
   },
   path: "/Users/test/.runeweaver/policy.toml",
-  loaded_from_disk: true,
+  loadedFromDisk: true,
   violations: [],
 };
 
@@ -41,14 +41,14 @@ const twoKeyPolicyPayload = {
     ...panePolicyPayload.policy,
     credentials: {
       MISSING_KEY: {
-        allowed_hosts: ["api.github.com"],
-        allowed_methods: ["GET"],
-        allowed_path_prefixes: ["/repos"],
+        allowedHosts: ["api.github.com"],
+        allowedMethods: ["GET"],
+        allowedPathPrefixes: ["/repos"],
       },
       STORED_KEY: {
-        allowed_hosts: ["api.github.com"],
-        allowed_methods: ["GET"],
-        allowed_path_prefixes: ["/repos"],
+        allowedHosts: ["api.github.com"],
+        allowedMethods: ["GET"],
+        allowedPathPrefixes: ["/repos"],
       },
     },
   },
@@ -338,13 +338,13 @@ describe("AccessCredentialsSection", () => {
         ...panePolicyPayload.policy,
         network: {
           ...panePolicyPayload.policy.network,
-          allowed_domains: ["2001:db8::1"],
+          allowedDomains: ["2001:db8::1"],
         },
         credentials: {
           IPV6_KEY: {
-            allowed_hosts: ["[2001:db8::1]"],
-            allowed_methods: ["GET"],
-            allowed_path_prefixes: ["/v1"],
+            allowedHosts: ["[2001:db8::1]"],
+            allowedMethods: ["GET"],
+            allowedPathPrefixes: ["/v1"],
           },
         },
       },
@@ -425,9 +425,9 @@ describe("AccessCredentialsSection", () => {
         ...panePolicyPayload.policy,
         credentials: {
           GITHUB_TOKEN: {
-            allowed_hosts: ["evil host"],
-            allowed_methods: ["GET"],
-            allowed_path_prefixes: ["/repos"],
+            allowedHosts: ["evil host"],
+            allowedMethods: ["GET"],
+            allowedPathPrefixes: ["/repos"],
           },
         },
       },

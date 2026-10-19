@@ -2172,8 +2172,8 @@ describe("goal client and helpers", () => {
 describe("tool-round budget readers", () => {
   const goalsBase = {
     enabled: true,
-    step_interval_minutes: 1440,
-    max_active_goals: 10,
+    stepIntervalMinutes: 1440,
+    maxActiveGoals: 10,
   };
 
   const settingsBase = {
