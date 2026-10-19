@@ -539,7 +539,11 @@ extension ApprovalQueue {
         if let egressHost = request.egressHost {
             return .domain(host: egressHost, subdomains: false)
         }
-        return .exactTarget(ActionDescriptor.descriptor(for: request.input, toolName: request.toolName).target)
+        let target = ActionDescriptor.descriptor(for: request.input, toolName: request.toolName).target
+        // Empty target means tool-wide: ledger tools carry no target, so a blank
+        // exactTarget would be malformed and never match.
+        guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .toolWide }
+        return .exactTarget(target)
     }
 
     /// Tools whose decision resolves one parked batch instead of gating a repeatable call, so a

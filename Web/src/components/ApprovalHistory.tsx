@@ -17,6 +17,9 @@ import { CloseIcon } from "./icons";
 
 type ActionFilter = "all" | ApprovalHistoryAction;
 
+// Deep link into the Settings → Access pane that owns standing rules.
+const STANDING_RULES_HREF = "#settings?access=rules";
+
 // One-line reading of a recorded scope split into kind plus data.
 function describeHistoryScope(
   scopeKind: string | null | undefined,
@@ -194,6 +197,14 @@ export default function ApprovalHistory() {
       data-testid="approval-history"
       aria-label="Approval history"
     >
+      <p
+        className="muted text-sm"
+        data-testid="approval-history-audit-banner"
+      >
+        History is an audit trail retained after expiry. Active-timed shows
+        live timed trust. Standing rules live in{" "}
+        <a href={STANDING_RULES_HREF}>Settings → Access Rules</a>.
+      </p>
       <div className="approval-history-filters row">
         <label className="approval-history-filter">
           <span className="text-sm muted">Tool:</span>
