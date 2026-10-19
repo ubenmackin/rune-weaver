@@ -596,7 +596,11 @@ public actor MemoryEngine {
     }
 
     /// Removes a profile fact and its semantic row best-effort.
+    /// Unknown ids are a true no-op leaving timestamp, file, and cache untouched.
     public func removeFact(id: UUID) async {
+        let inProfile = profile.facts.contains(where: { $0.id == id })
+        let inVector = await vectorStore.fact(id: id) != nil
+        guard inProfile || inVector else { return }
         do {
             try await vectorStore.remove(id: id)
         } catch is CancellationError {

@@ -154,6 +154,11 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["query"]"#))
+            case "memories.remove":
+                for key in ["id"] {
+                    #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
+                }
+                #expect(raw.contains(#""required":["id"]"#))
             case "email.search":
                 for key in ["account", "query", "limit", "mailbox"] {
                     #expect(properties[key] != nil, "email.search missing property \(key)")

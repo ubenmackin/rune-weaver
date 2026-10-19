@@ -1,4 +1,4 @@
-// Rune Weaver Tools — Long-term memory plugin tools for recall and persistence.
+// Rune Weaver Tools — Long-term memory plugin tools for recall, persistence, and removal.
 
 import Foundation
 import RuneWeaverCore
@@ -197,6 +197,33 @@ public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     }
 }
 
+/// Arguments for the `memories.remove` tool.
+public struct RemoveFactArgs: Sendable, Equatable, Decodable {
+    /// Fact identifier to remove.
+    public let id: String
+
+    /// Memberwise initializer.
+    public init(id: String) {
+        self.id = id
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+    }
+
+    /// Decodes arguments.
+    /// - Parameter decoder: Decoder for the arguments document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+    }
+
+    /// Trimmed identifier text.
+    public var trimmedID: String {
+        id.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// Envelope wrapping `memories.store` tool output.
 public struct RememberFactEnvelope: Sendable, Equatable, Codable {
     /// Stored fact text (trimmed).
@@ -264,6 +291,20 @@ public struct RecallMemoriesEnvelope: Sendable, Equatable, Codable {
     }
 }
 
+/// Envelope wrapping `memories.remove` tool output.
+public struct RemoveFactEnvelope: Sendable, Equatable, Codable {
+    /// Removed fact identifier.
+    public let id: String
+    /// Whether the fact was removed.
+    public let removed: Bool
+
+    /// Creates a remove envelope.
+    public init(id: String, removed: Bool) {
+        self.id = id
+        self.removed = removed
+    }
+}
+
 /// Pure JSON encoding for the memory tool output documents.
 public enum MemoryToolEncoding {
     /// Encodes a remember envelope as the tool output document.
@@ -276,6 +317,14 @@ public enum MemoryToolEncoding {
 
     /// Encodes a recall envelope as the tool output document.
     public static func encodeRecallEnvelope(_ envelope: RecallMemoriesEnvelope) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let data = try encoder.encode(envelope)
+        return String(bytes: data, encoding: .utf8) ?? ""
+    }
+
+    /// Encodes a remove envelope as the tool output document.
+    public static func encodeRemoveEnvelope(_ envelope: RemoveFactEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)
@@ -476,16 +525,99 @@ public struct RecallMemoriesTool: Tool, Sendable {
     }
 }
 
+/// `memories.remove` tool: deletes one stored fact by id.
+public struct RemoveFactTool: Tool, Sendable {
+    /// Primary tool name referenced by the LLM and memory.
+    public static let primaryName = "memories.remove"
+
+    /// Stable tool name referenced by the LLM and memory.
+    public let name: String
+    /// When the LLM should use this tool.
+    public let description = "Removes one stored fact by its id from memories.recall. Use only after recall shows the id; never guess ids."
+    /// Function-calling contract for `id`.
+    public let inputSchema = JSONSchema(
+        rawValue: #"{"type":"object","properties":{"id":{"type":"string","description":"Fact UUID "#
+            + #"from memories.recall metadata"}},"required":["id"],"additionalProperties":false}"#
+    )
+    /// Deleting durable memory always needs approval.
+    public let permissionLevel = PermissionLevel.requiresApproval
+
+    /// Shared memory engine owning the fact.
+    private let engine: MemoryEngine
+    /// Audit sink for successful removals. Defaults to nil (file audit).
+    private let audit: MemoryAuditHandler?
+
+    /// Creates a remove tool.
+    public init(name: String = primaryName, engine: MemoryEngine, audit: MemoryAuditHandler? = nil) {
+        self.name = name
+        self.engine = engine
+        self.audit = audit
+    }
+
+    /// Deletes the fact by id, audit-logging success.
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
+        let args: RemoveFactArgs
+        do {
+            args = try JSONDecoder().decode(RemoveFactArgs.self, from: Data(input.argumentsJSON.utf8))
+        } catch {
+            return .failure("Invalid memories.remove arguments: expected {\"id\": \"<uuid>\"}.", callID: input.callID)
+        }
+        let trimmed = args.trimmedID
+        guard !trimmed.isEmpty else {
+            return .failure("Invalid memories.remove arguments: 'id' must not be empty.", callID: input.callID)
+        }
+        guard trimmed.count <= 256 else {
+            return .failure("Invalid memories.remove arguments: 'id' exceeds 256 characters.", callID: input.callID)
+        }
+        guard let uuid = UUID(uuidString: trimmed) else {
+            return .failure("Invalid memories.remove arguments: 'id' must be a UUID from memories.recall.", callID: input.callID)
+        }
+        if context.dryRun {
+            return .success("Dry run: would remove fact '\(uuid.uuidString)'.", callID: input.callID)
+        }
+        // Unknown ids succeed as a no-op with removed false so retries stay idempotent.
+        let inProfile = await engine.getUserProfile().facts.contains(where: { $0.id == uuid })
+        let inVector = await engine.allSemanticFacts().contains(where: { $0.id == uuid })
+        guard inProfile || inVector else {
+            let envelope = RemoveFactEnvelope(id: uuid.uuidString, removed: false)
+            let content = try MemoryToolEncoding.encodeRemoveEnvelope(envelope)
+            return .success(content, callID: input.callID)
+        }
+        await engine.removeFact(id: uuid)
+        let envelope = RemoveFactEnvelope(id: uuid.uuidString, removed: true)
+        let content = try MemoryToolEncoding.encodeRemoveEnvelope(envelope)
+        recordAudit(id: uuid.uuidString, conversationID: context.conversationID)
+        return .success(content, callID: input.callID)
+    }
+
+    /// Records one successful removal to the audit sink or file.
+    private func recordAudit(id: String, conversationID: UUID) {
+        let event = MemoryAuditEvent(
+            toolName: name,
+            text: id,
+            category: nil,
+            conversationID: conversationID.uuidString,
+            factID: id
+        )
+        if let audit {
+            audit(event)
+        } else {
+            FileMemoryAuditLog.append(event)
+        }
+    }
+}
+
 /// Factory registering the LLM-invokable memory tools on a `ToolBus`.
 public enum MemoryTools {
     /// Tool names in registration order.
-    public static let toolNames = [RememberFactTool.primaryName, RecallMemoriesTool.primaryName]
+    public static let toolNames = [RememberFactTool.primaryName, RecallMemoriesTool.primaryName, RemoveFactTool.primaryName]
 
     /// Builds the memory tools for a shared engine.
     public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: any EmbeddingsBackend? = nil) -> [any Tool] {
         let remember: any Tool = RememberFactTool(engine: engine, audit: audit, embedder: embedder)
         let recall: any Tool = RecallMemoriesTool(engine: engine, embedder: embedder)
-        return [remember, recall]
+        let remove: any Tool = RemoveFactTool(engine: engine, audit: audit)
+        return [remember, recall, remove]
     }
 
     /// Registers the memory tools, replacing same-named entries.
