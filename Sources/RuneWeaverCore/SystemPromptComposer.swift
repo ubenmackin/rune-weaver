@@ -389,7 +389,9 @@ public enum SystemPromptComposer {
         )
         lines.append(
             "- Check memories.recall before answering from assumptions or searching documents; "
-                + "call memories.store unprompted for durable user facts, preferences, or state. Never persist secrets."
+                + "call memories.store unprompted for durable user facts, preferences, or state. "
+                + "Never persist secrets. To forget, call memories.recall to show the id, "
+                + "then call memories.remove with that id after approval; never guess ids."
         )
         lines.append(
             "- The local document index is current as of last night. "

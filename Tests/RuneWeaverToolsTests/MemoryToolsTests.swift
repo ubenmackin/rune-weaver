@@ -32,16 +32,16 @@ struct MemoryToolsTests {
     }
 
     @Test
-    func `Memory tools are trusted and registered in order`() throws {
+    func `Memory tools register in order with correct permission levels`() throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let tools = MemoryTools.makeTools(engine: engine)
-        #expect(tools.count == 2)
-        for tool in tools {
-            #expect(tool.permissionLevel == .trusted)
-        }
-        #expect(tools.map(\.name) == ["memories.store", "memories.recall"])
-        #expect(MemoryTools.toolNames == ["memories.store", "memories.recall"])
+        #expect(tools.count == 3)
+        #expect(tools.map(\.name) == ["memories.store", "memories.recall", "memories.remove"])
+        #expect(tools[0].permissionLevel == .trusted)
+        #expect(tools[1].permissionLevel == .trusted)
+        #expect(tools[2].permissionLevel == .requiresApproval)
+        #expect(MemoryTools.toolNames == ["memories.store", "memories.recall", "memories.remove"])
     }
 
     @Test
@@ -113,7 +113,7 @@ struct MemoryToolsTests {
         let bus = ToolBus()
         await MemoryTools.register(on: bus, engine: engine, audit: { capture.record($0) })
         let names = await bus.toolNames()
-        #expect(Set(names) == Set(["memories.store", "memories.recall"]))
+        #expect(Set(names) == Set(["memories.store", "memories.recall", "memories.remove"]))
         // Execute via primary names
         let stored = await bus.execute(
             toolCall: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
@@ -127,6 +127,127 @@ struct MemoryToolsTests {
         )
         #expect(recalled.isError == false)
         #expect(recalled.content.contains("lighthouse keeper"))
+    }
+
+    @Test
+    func `Remove tool deletes by exact id`() async throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
+        let store = RememberFactTool(engine: engine, audit: { _ in })
+        let stored = try await store.execute(
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(stored.isError == false)
+        let storedID = try #require(await engine.getUserProfile().facts.first?.id)
+        let remove = RemoveFactTool(engine: engine, audit: { capture.record($0) })
+        let output = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: "{\"id\":\"\(storedID.uuidString)\"}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        let decoded = try JSONDecoder().decode(RemoveFactEnvelope.self, from: Data(output.content.utf8))
+        #expect(decoded.removed == true)
+        #expect(decoded.id == storedID.uuidString)
+        let profile = await engine.getUserProfile()
+        #expect(!profile.facts.contains { $0.id == storedID })
+        let facts = await engine.allSemanticFacts()
+        #expect(!facts.contains { $0.id == storedID })
+        let events = capture.captured()
+        #expect(events.count == 1)
+        #expect(events[0].toolName == "memories.remove")
+    }
+
+    @Test
+    func `Remove unknown id succeeds as no-op with removed:false`() async throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
+        let store = RememberFactTool(engine: engine, audit: { _ in })
+        let stored = try await store.execute(
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(stored.isError == false)
+        let snapshotBefore = await engine.getUserProfile()
+        let profileBefore = snapshotBefore.facts.count
+        let vectorBefore = await engine.allSemanticFacts().count
+        let unknown = UUID()
+        #expect(!snapshotBefore.facts.contains { $0.id == unknown })
+        let remove = RemoveFactTool(engine: engine, audit: { capture.record($0) })
+        let output = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: "{\"id\":\"\(unknown.uuidString)\"}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        let decoded = try JSONDecoder().decode(RemoveFactEnvelope.self, from: Data(output.content.utf8))
+        #expect(decoded.removed == false)
+        #expect(decoded.id == unknown.uuidString)
+        let snapshotAfter = await engine.getUserProfile()
+        #expect(snapshotAfter.facts.count == profileBefore)
+        #expect(snapshotAfter.lastUpdated == snapshotBefore.lastUpdated)
+        #expect(await engine.allSemanticFacts().count == vectorBefore)
+        #expect(capture.captured().isEmpty)
+    }
+
+    @Test
+    func `Remove tool rejects malformed ids`() async throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
+        let store = RememberFactTool(engine: engine, audit: { _ in })
+        let stored = try await store.execute(
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(stored.isError == false)
+        let remove = RemoveFactTool(engine: engine, audit: { capture.record($0) })
+        let blank = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: #"{"id":"   "}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(blank.isError == true)
+        let nonUUID = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: #"{"id":"not-a-uuid"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(nonUUID.isError == true)
+        let oversized = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: "{\"id\":\"\(String(repeating: "a", count: 300))\"}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(oversized.isError == true)
+        #expect(capture.captured().isEmpty)
+        let profile = await engine.getUserProfile()
+        #expect(profile.facts.count == 1)
+        let facts = await engine.allSemanticFacts()
+        #expect(facts.count == 1)
+    }
+
+    @Test
+    func `Remove dry run mutates nothing`() async throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
+        let store = RememberFactTool(engine: engine, audit: { _ in })
+        let stored = try await store.execute(
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(stored.isError == false)
+        let storedID = try #require(await engine.getUserProfile().facts.first?.id)
+        let remove = RemoveFactTool(engine: engine, audit: { capture.record($0) })
+        let output = try await remove.execute(
+            input: ToolInput(toolName: "memories.remove", argumentsJSON: "{\"id\":\"\(storedID.uuidString)\"}"),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(output.isError == false)
+        let profile = await engine.getUserProfile()
+        #expect(profile.facts.contains { $0.id == storedID })
+        let facts = await engine.allSemanticFacts()
+        #expect(facts.contains { $0.id == storedID })
+        #expect(capture.captured().isEmpty)
     }
 
     @Test
