@@ -94,8 +94,8 @@ public enum OrchestratorToolLoop {
         )
     }
 
-    /// Builds the compact episodic record for one tool execution. Fail-closed legacy path:
-    /// provenance is unknown here, so the record labels as untrusted.
+    /// Builds the compact episodic record for one tool execution when provenance is unknown;
+    /// labels as untrusted.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
     }
@@ -212,8 +212,7 @@ public enum OrchestratorToolLoop {
         Message(role: .assistant, content: text, toolCallID: waitingOnApprovalMarker)
     }
 
-    /// Whether an assistant note matches the synthetic waiting-on-approval notice.
-    /// Legacy content fallback for rows persisted before the structural marker.
+    /// Content-matching fallback for synthetic waiting-on-approval notice messages.
     public static func isWaitingOnApprovalMessage(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "The agent has completed its allocated tool rounds. Awaiting continuation approval." {

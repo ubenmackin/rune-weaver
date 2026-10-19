@@ -3,7 +3,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
-  AUTH_TOKEN_STORAGE_KEY,
   authHeaders,
   authenticateWithToken,
   cancelChat,
@@ -93,6 +92,20 @@ import {
   type AccessScopeDTO,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
+
+// One shared JSON-failure fixture so every error-path pin states only its
+// distinct status and reason instead of repeating the Response boilerplate.
+const stubFetchError = (body: Record<string, unknown>, status: number): void => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+};
 
 describe("dashboard api client", () => {
   beforeEach(() => {
@@ -396,8 +409,8 @@ describe("dashboard api client", () => {
     expect(url.searchParams.get("q")).toBe("biscuit");
     expect(url.searchParams.get("limit")).toBe("20");
     expect(url.searchParams.get("offset")).toBe("20");
-    // Default paging stays a plain recent-window read with an omitted empty
-    // query so legacy callers keep working.
+    // Default paging omits the empty query so the default read stays a plain
+    // recent-window query, not a filtered search for the empty string.
     await getFacts();
     const defaultUrl = new URL(seen[1], "http://localhost");
     expect(defaultUrl.pathname).toBe("/memory/facts");
@@ -474,43 +487,19 @@ describe("dashboard api client", () => {
     // Malformed limits and sessions reject 400 with the engine reason, while
     // server failures surface the Abort reason through the shared fetchJson
     // path so the finder can render the honest message plus Retry.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "limit must be 1-100" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "limit must be 1-100" }, 400);
     const badLimit = await listRecentEpisodes(700).catch((error: unknown) => error);
     expect(badLimit).toBeInstanceOf(ApiError);
     expect((badLimit as ApiError).status).toBe(400);
     expect((badLimit as ApiError).message).toContain("limit must be 1-100");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "sessionID must be a UUID" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "sessionID must be a UUID" }, 400);
     const badSession = await listRecentEpisodes(20, "nope").catch(
       (error: unknown) => error,
     );
     expect(badSession).toBeInstanceOf(ApiError);
     expect((badSession as ApiError).status).toBe(400);
     expect((badSession as ApiError).message).toContain("sessionID must be a UUID");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "store unavailable" }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "store unavailable" }, 500);
     const serverError = await listRecentEpisodes().catch((error: unknown) => error);
     expect(serverError).toBeInstanceOf(ApiError);
     expect((serverError as ApiError).status).toBe(500);
@@ -595,28 +584,12 @@ describe("dashboard api client", () => {
     // An invalid UUID rejects with 400 plus the engine reason, surfaced
     // through the shared fetchJson reason parsing so the panel can render the
     // honest message in its error slot.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "id must be a UUID" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "id must be a UUID" }, 400);
     const badId = await deleteEpisode("nope").catch((error: unknown) => error);
     expect(badId).toBeInstanceOf(ApiError);
     expect((badId as ApiError).status).toBe(400);
     expect((badId as ApiError).message).toContain("id must be a UUID");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "sessionID must be a UUID" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "sessionID must be a UUID" }, 400);
     const badSession = await deleteSessionEpisodes("nope").catch(
       (error: unknown) => error,
     );
@@ -762,7 +735,7 @@ describe("dashboard api client", () => {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
             scope: { kind: "exactTarget", target: "alice@example.com" },
-            effect: "allow",
+            action: "allow",
             grantedAt: now,
             expiresAt: future,
             duration: "oneHour",
@@ -773,7 +746,7 @@ describe("dashboard api client", () => {
             id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             toolName: "api.request",
             scope: { kind: "domain", host: "blocked.example.com" },
-            effect: "deny",
+            action: "deny",
             grantedAt: now,
             expiresAt: null,
             duration: "forever",
@@ -813,7 +786,7 @@ describe("dashboard api client", () => {
     expect(path.startsWith("http")).toBe(false);
   });
 
-  it("tolerates legacy rules without usage fields", async () => {
+  it("tolerates rules without usage fields", async () => {
     const now = new Date().toISOString();
     const future = new Date(Date.now() + 3600_000).toISOString();
     const fetchMock = vi.fn(async () =>
@@ -823,7 +796,7 @@ describe("dashboard api client", () => {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
             scope: { kind: "exactTarget", target: "legacy@example.com" },
-            effect: "allow",
+            action: "allow",
             grantedAt: now,
             expiresAt: future,
             duration: "oneHour",
@@ -926,27 +899,14 @@ describe("dashboard api client", () => {
   it("surfaces rule failures as ApiError", async () => {
     // A revoked-elsewhere rule reports 404 with the engine reason so the
     // inbox can explain the row already lapsed instead of retrying blindly.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown rule abc" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "Unknown rule abc" }, 404);
     const missing = await revokeRule("abc").catch((error: unknown) => error);
     expect(missing).toBeInstanceOf(ApiError);
     expect((missing as ApiError).status).toBe(404);
     expect((missing as ApiError).message).toContain("Unknown rule abc");
     // Transport failures surface with status 0 so callers can distinguish
     // an unreachable engine from a rejected rule id.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new TypeError("boom");
-      }),
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("boom"); }));
     const offline = await listRules().catch((error: unknown) => error);
     expect(offline).toBeInstanceOf(ApiError);
     expect((offline as ApiError).status).toBe(0);
@@ -964,7 +924,7 @@ describe("dashboard api client", () => {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
             scope: { kind: "exactTarget", target: "numeric@example.com" },
-            effect: "allow",
+            action: "allow",
             grantedAt: nowSeconds,
             expiresAt: nowSeconds + 3600,
             duration: "oneHour",
@@ -975,7 +935,7 @@ describe("dashboard api client", () => {
             id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             toolName: "email.send",
             scope: { kind: "exactTarget", target: "untouched@example.com" },
-            effect: "allow",
+            action: "allow",
             grantedAt: nowSeconds,
             expiresAt: null,
             duration: "forever",
@@ -997,15 +957,7 @@ describe("dashboard api client", () => {
   it("reports already-expired revokes as notFound without retry", async () => {
     // An already-lapsed rule stays 404 with the engine reason so the inbox
     // explains the row expired instead of treating it as a transport error.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown rule lapsed-id" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "Unknown rule lapsed-id" }, 404);
     const lapsed = await revokeRule("lapsed-id").catch((error: unknown) => error);
     expect(lapsed).toBeInstanceOf(ApiError);
     expect((lapsed as ApiError).status).toBe(404);
@@ -1046,15 +998,7 @@ describe("dashboard api client", () => {
   it("surfaces re-arm failures as ApiError", async () => {
     // A lapsed rule reports 404 with the engine reason so the duration modal
     // can explain the row is gone instead of retrying blindly.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown rule abc" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    stubFetchError({ reason: "Unknown rule abc" }, 404);
     const missing = await rearmRule("abc", "oneHour").catch(
       (error: unknown) => error,
     );
@@ -1063,12 +1007,7 @@ describe("dashboard api client", () => {
     expect((missing as ApiError).message).toContain("Unknown rule abc");
     // Transport failures surface with status 0 so callers can distinguish
     // an unreachable engine from a rejected duration tier.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new TypeError("boom");
-      }),
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("boom"); }));
     const offline = await rearmRule("abc", "oneHour").catch(
       (error: unknown) => error,
     );
@@ -1089,7 +1028,7 @@ describe("dashboard api client", () => {
         id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
         toolName: "email.send",
         scope: { kind: "exactTarget", target: "new@example.com" },
-        effect: "allow",
+        action: "allow",
         grantedAt: now,
         expiresAt: null,
         duration: "forever",
@@ -1112,9 +1051,44 @@ describe("dashboard api client", () => {
     expect(JSON.parse(seen[0].body ?? "")).toEqual({
       toolName: "email.send",
       action: "allow",
+      scope: { kind: "exactTarget", target: "new@example.com" },
+      duration: "forever",
+    });
+  });
+
+  it("resolves the tool through the mirror when toolName is not a string", async () => {
+    const now = new Date().toISOString();
+    const seen: Array<{ path: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, body: init?.body ? String(init.body) : undefined });
+      return jsonResponse({
+        id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        toolName: "email.send",
+        scope: { kind: "tool" },
+        action: "allow",
+        grantedAt: now,
+        expiresAt: null,
+        duration: "forever",
+        useCount: 0,
+        lastUsedAt: null,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mirrorInput = {
       tool: "email.send",
       effect: "allow",
-      scope: { kind: "exactTarget", target: "new@example.com" },
+      scope: { kind: "tool" },
+      duration: "forever",
+    } as const;
+    // The guard admits an unset (non-string) toolName through the mirrored tool
+    // field, so the resolver reads it the same way and the payload resolves its
+    // canonical name instead of crashing between guard and wire.
+    const created = await createRule(mirrorInput);
+    expect(created.toolName).toBe("email.send");
+    expect(JSON.parse(seen[0].body ?? "")).toEqual({
+      toolName: "email.send",
+      action: "allow",
+      scope: { kind: "tool" },
       duration: "forever",
     });
   });
@@ -1729,16 +1703,7 @@ describe("owner bearer auth client", () => {
     const unsubscribe = subscribeAuthState((authenticated) =>
       transitions.push(authenticated),
     );
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(JSON.stringify({ error: "unauthorized" }), {
-            status: 401,
-            headers: { "Content-Type": "application/json" },
-          }),
-      ),
-    );
+    stubFetchError({ error: "unauthorized" }, 401);
     const failure = await getHealth().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(401);
@@ -1746,7 +1711,6 @@ describe("owner bearer auth client", () => {
     // holders fall back to the login gate without the value appearing anywhere.
     expect(getAuthToken()).toBeNull();
     expect(isSessionAuthenticated()).toBe(false);
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     expect(transitions).toEqual([false]);
     expect((failure as ApiError).message).not.toContain("secret-token-value");
     unsubscribe();
@@ -1759,8 +1723,6 @@ describe("owner bearer auth client", () => {
     const rotated = await rotateToken();
     expect(rotated).toBe("new-token");
     expect(isSessionAuthenticated()).toBe(true);
-    // Token is NOT stored in sessionStorage
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/auth/rotate");
     expect(init.method).toBe("POST");
@@ -1775,7 +1737,6 @@ describe("owner bearer auth client", () => {
     clearAuthToken();
     expect(getAuthToken()).toBeNull();
     expect(isSessionAuthenticated()).toBe(false);
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith("/auth/session", {
       method: "DELETE",
       credentials: "same-origin",
@@ -1800,7 +1761,6 @@ describe("owner bearer auth client", () => {
     expect(isSessionAuthenticated()).toBe(true);
     // Token is NOT stored in sessionStorage or in-memory authToken
     expect(getAuthToken()).toBeNull();
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/auth/session");
     expect(init.method).toBe("POST");
@@ -1813,12 +1773,7 @@ describe("owner bearer auth client", () => {
     expect(await authenticateWithToken("bad-token")).toBe("invalid");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 429 })));
     expect(await authenticateWithToken("bad-token")).toBe("throttled");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new TypeError("engine down");
-      }),
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("engine down"); }));
     expect(await authenticateWithToken("bad-token")).toBe("unreachable");
   });
 
@@ -1914,9 +1869,7 @@ describe("goal client and helpers", () => {
       progress: { done: 1.9, total: 4 },
       stepIntervalMinutes: 1440.8,
       nextDueAt: 1700000000,
-      // Canonical key wins over the legacy aliases when they ride together.
       originSessionId: "s-canonical",
-      originSessionID: "s-legacy",
       createdAt: "2024-01-01T00:00:00.000Z",
       updatedAt: 1700000000,
     });

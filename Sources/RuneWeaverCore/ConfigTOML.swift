@@ -464,7 +464,6 @@ extension RuneWeaverConfig {
         try Self.decodeMemory(root, into: &config)
         try Self.decodeVoice(root, into: &config)
         try Self.decodeContainers(root, into: &config)
-        Self.ignoreLegacySandbox(root)
         try Self.decodeFiles(root, into: &config)
         try Self.decodeIndex(root, into: &config)
         try Self.decodeEmail(root, into: &config)
@@ -606,7 +605,7 @@ extension RuneWeaverConfig {
         // Absent backend keeps the local-first default; present values are
         // validated later so a typo surfaces with the dotted field name.
         if let backend = try memory.strictString("embedding_backend", field: "memory.embedding_backend") {
-            config.memory.embeddingBackend = MemoryConfig.migratedEmbeddingBackend(backend)
+            config.memory.embeddingBackend = backend
         }
         // Recall budgets stay flat `recall_*` keys under `[memory]` so the file shape mirrors the
         // surrounding scalar knobs; absent keys keep the documented defaults.
@@ -662,16 +661,6 @@ extension RuneWeaverConfig {
         if let ttlMinutes = try containers.strictInt("ttl_minutes", field: "containers.ttl_minutes") {
             config.containers.ttlMinutes = ttlMinutes
         }
-    }
-
-    /// Logs the legacy `[sandbox]` table as ignored. The unified container policy lives in
-    /// `[containers]`; legacy `[sandbox]` keys are never read and never migrated, and a resave sheds
-    /// the table.
-    private static func ignoreLegacySandbox(_ root: TOMLNode) {
-        guard root.tables["sandbox"] != nil else { return }
-        RuneWeaverLog.stores.warning(
-            "ConfigTOML: legacy [sandbox] keys ignored (superseded by [containers]); values are not migrated and a resave sheds the table"
-        )
     }
 
     private static func decodeFiles(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

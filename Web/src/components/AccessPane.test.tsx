@@ -38,6 +38,7 @@ function seedRule(seed: RuleSeed): AccessRule {
     id: seed.id,
     toolName: seed.toolName,
     scope: seed.scope,
+    action: seed.effect,
     effect: seed.effect,
     grantedAt: nowIso(),
     expiresAt: seed.expiresAt ?? null,
@@ -278,7 +279,7 @@ describe("AccessPane", () => {
       expect(post?.body).toMatchObject({
         toolName: "bash.exec",
         scope: { kind: "tool" },
-        effect: "allow",
+        action: "allow",
       });
     });
   });
@@ -389,8 +390,6 @@ describe("AccessPane", () => {
       expect(create?.body).toMatchObject({
         toolName: "email.send",
         action: "deny",
-        tool: "email.send",
-        effect: "deny",
         scope: { kind: "exactTarget", target: "spam@evil.com" },
         duration: "forever",
         reason: "never send here",
@@ -486,8 +485,6 @@ describe("AccessPane", () => {
       expect(create?.body).toMatchObject({
         toolName: "bash.exec",
         action: "allow",
-        tool: "bash.exec",
-        effect: "allow",
         scope: { kind: "exactTarget", target: "git status" },
         duration: "oneHour",
         reason: "allow git checks",

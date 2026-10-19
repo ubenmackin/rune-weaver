@@ -1006,10 +1006,6 @@ extension ServerContext {
             proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
             activeTurns: activeTurns, persona: persona
         ))
-        // One-shot legacy marker seeding before the first tick so upgraded installs carry their
-        // email window instead of rescanning from nil.
-        let markerMigration = await engines.schedulerWorker.migrateEmailReportMarkers(memoryEngine: memoryEngine)
-        RuneWeaverLog.scheduler.info("Scheduler legacy marker migration: \(markerMigration.auditSummary)")
         let egressSupervisor = try await setupEgressAndPolicy(
             policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
             secrets: secrets, permissionGate: permissionGate

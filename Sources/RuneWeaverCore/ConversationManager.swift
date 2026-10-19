@@ -33,8 +33,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     public var isArchived: Bool
 
     /// Coding keys matching the persisted and wire shape. The goal link rides
-    /// the `goalId` spelling so dashboard payloads read one key; the legacy
-    /// `goalID` spelling still decodes so mixed-version sidecars never fail.
+    /// the `goalId` spelling so dashboard payloads read one canonical key.
     private enum CodingKeys: String, CodingKey {
         case id
         case title
@@ -44,7 +43,6 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         case updatedAt
         case source
         case goalID = "goalId"
-        case goalIDLegacy = "goalID"
         case parentSessionID
         case isArchived
     }
@@ -122,7 +120,6 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
-            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
         self.isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
@@ -167,7 +164,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
     public let isArchived: Bool
 
     /// Coding keys matching the wire shape, with the goal link on the shared
-    /// `goalId` spelling plus a tolerant legacy fallback.
+    /// canonical `goalId` spelling.
     private enum CodingKeys: String, CodingKey {
         case id
         case title
@@ -177,7 +174,6 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         case updatedAt
         case source
         case goalID = "goalId"
-        case goalIDLegacy = "goalID"
         case parentSessionID
         case isArchived
     }
@@ -219,7 +215,6 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
-            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
         self.isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }

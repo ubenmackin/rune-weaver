@@ -43,14 +43,13 @@ public struct UserInput: Sendable, Codable, Equatable {
     public let maxToolIterations: Int?
 
     /// Coding keys matching the persisted and wire shape, with the goal tag on
-    /// the shared `goalId` spelling plus a tolerant legacy fallback.
+    /// the shared `goalId` spelling.
     private enum CodingKeys: String, CodingKey {
         case text
         case sessionID
         case source
         case systemPrompt
         case goalID = "goalId"
-        case goalIDLegacy = "goalID"
         case allowedTools
         case title
         case parentSessionID
@@ -93,7 +92,6 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.source = try container.decode(String.self, forKey: .source)
         self.systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
-            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.allowedTools = try container.decodeIfPresent([String].self, forKey: .allowedTools)
         self.title = try container.decodeIfPresent(String.self, forKey: .title)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
@@ -150,9 +148,8 @@ public struct ToolAction: Sendable, Codable, Equatable {
     public let argumentsJSON: String
     /// Result returned by the bus, if the call ran.
     public let result: ToolResult?
-    /// Zero-based LLM round that produced this call, oldest first. Nil on payloads
-    /// written before round tracking so legacy history still decodes; clients treat
-    /// absent as unordered and fall back to stored order, which remains chronological.
+    /// Zero-based LLM round that produced this call, oldest first. Nil when
+    /// unnumbered; clients treat absent as unordered and fall back to stored order.
     public let roundIndex: Int?
     /// Whether the call succeeded.
     public var didSucceed: Bool {

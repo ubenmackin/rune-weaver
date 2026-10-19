@@ -46,7 +46,7 @@ extension SearXNGEnsurer {
         let containerState: @Sendable () async -> ContainerReadinessSnapshot
         /// Probe fetching the capped logs tail on terminal or backstop.
         let containerLogs: @Sendable () async -> String
-        /// Rich HTTP probe driving success and sickness, nil for legacy mode.
+        /// Rich HTTP probe driving success and sickness, nil when probe is disabled.
         let httpProbe: (@Sendable () async -> HTTPProbeSnapshot)?
 
         /// Creates a probe bundle from the entry-point closures.

@@ -148,9 +148,7 @@ tts_provider = "system"  # macOS say command
 [containers]
 # Unified container policy for sandboxed execution and detonation work.
 # Absent keys keep the documented defaults; out-of-range values fail closed
-# at load. Legacy [sandbox] keys (container_base_image,
-# archive_session_ttl_minutes, max_concurrent_machines) in older files are
-# ignored with a logged note and never migrated; a resave sheds them.
+# at load.
 # Memory budget in megabytes per container (256-8192).
 memory_mb = 512
 # Maximum containers running at once (1-32).
@@ -277,8 +275,6 @@ fetch_timeout_seconds = 15
 # tool-state toggle, which is the sole authority: a tool stays disabled
 # until an operator enables it (dashboard Tools tab / tool-state API).
 # This section carries only capture knobs and never gates enablement.
-# Retired `screen_capture_enabled`, `control_enabled`, and legacy `enabled`
-# keys are silently ignored when present so old files load without migration.
 # Captures are in-memory downscaled JPEGs; control batches park in the
 # approvals inbox.
 # Longest edge of the downscaled screenshot in pixels (256-3840). Bounds

@@ -25,9 +25,7 @@ import {
   type PolicyBindingModalState,
 } from "./AccessCredentialsSection";
 
-// Postures the egress supervisor enforces. Only these two persist; older files
-// may still carry a legacy spelling that the engine maps on load, but the pane
-// only ever offers the surviving pair.
+// Postures the egress supervisor enforces. The pane offers only this surviving pair.
 const POLICY_MODES = ["allowlist_only", "unrestricted"] as const;
 
 interface PolicyNetworkDraft {
@@ -279,11 +277,10 @@ function normalizePolicyPayload(raw: unknown): PolicyDraft {
   if (!raw || typeof raw !== "object") return fallback;
   const payload = raw as Record<string, unknown>;
   const networkRaw = (payload.network ?? {}) as Record<string, unknown>;
-  const modeRawRaw =
+  const modeRaw =
     typeof networkRaw.mode === "string" && (networkRaw.mode as string).trim()
       ? (networkRaw.mode as string).trim()
       : "allowlist_only";
-  const modeRaw = modeRawRaw === "deny_by_default" ? "allowlist_only" : modeRawRaw;
   const allowedRaw =
     (networkRaw.allowed_domains as unknown) ??
     (networkRaw.allowedDomains as unknown) ??
@@ -415,8 +412,8 @@ export async function fetchPolicy(): Promise<PolicyLoadResult> {
   };
 }
 
-// Persists the structured policy draft. Sends the DTO only with no legacy raw text field so an old
-// editor learns the new contract instead of persisting unvalidated text.
+// Persists the structured policy draft. Sends the DTO only so the endpoint
+// validates the structured contract.
 export async function savePolicy(draft: PolicyDraft): Promise<PolicyLoadResult> {
   const res = await fetch("/settings/policy", {
     method: "PUT",
@@ -1411,7 +1408,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
           ) : null}
 
           {/* Single-view mounts render only their view so Network and
-              Credentials never share a tab strip; the legacy tab shell keeps the
+              Credentials never share a tab strip; the tab shell keeps the
               credentials section mounted for modal continuity across switches. */}
           {activeView === "network" ? null : (
           <AccessCredentialsSection

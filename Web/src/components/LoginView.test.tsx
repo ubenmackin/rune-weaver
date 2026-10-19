@@ -4,7 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoginView from "./LoginView";
-import { AUTH_TOKEN_STORAGE_KEY, clearAuthToken, getAuthToken, isSessionAuthenticated } from "../api";
+import { clearAuthToken, getAuthToken, isSessionAuthenticated } from "../api";
 
 describe("LoginView owner-token gate", () => {
   beforeEach(() => {
@@ -43,7 +43,6 @@ describe("LoginView owner-token gate", () => {
     expect(isSessionAuthenticated()).toBe(true);
     // Secret token is NOT retained in client-side memory or sessionStorage to prevent XSS exfiltration
     expect(getAuthToken()).toBeNull();
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     // The typed credential is dropped as soon as it is adopted so it does not
     // linger in the replaced form, while the fixed username stays put for the
     // next save offer.

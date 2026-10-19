@@ -20,7 +20,7 @@ public enum AccessAction: String, Sendable, Codable, Equatable, Hashable, CaseIt
 public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     /// Every call of the tool, whatever the arguments say.
     case toolWide
-    /// Exactly one action target, as the legacy grant key derives it.
+    /// Exactly one action target.
     case exactTarget(String)
     /// A set of message or mail recipients.
     case recipientSet([String])
@@ -112,8 +112,7 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
         case .toolWide:
             return .toolWide
         case let .exactTarget(target):
-            // Stored byte-for-byte: this is the legacy grant key, so trimming or
-            // lowering here would change what a migrated rule covers.
+            // Stored byte-for-byte, so trimming or lowering here would change what a rule covers.
             guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return .exactTarget(target)
         case let .recipientSet(members):
@@ -150,8 +149,8 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
         case .toolWide:
             return true
         case let .exactTarget(target):
-            // A blank target is the malformed-call signature, not a scope: the
-            // legacy derivation only ever produces it from unusable arguments.
+            // A blank target is the malformed-call signature, not a scope: target
+            // derivation only produces it from unusable arguments.
             guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
             let call = ToolInput(toolName: toolName, argumentsJSON: argumentsJSON)
             let callTarget = ActionDescriptor.descriptor(for: call, toolName: toolName).target

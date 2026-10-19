@@ -34,8 +34,7 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     public let durationMs: Int?
 
     /// Coding keys matching the JSON wire shape. The goal link rides the
-    /// shared `goalId` spelling; the legacy `goalID` spelling still decodes
-    /// so mixed-version payloads never fail.
+    /// canonical `goalId` spelling.
     private enum CodingKeys: String, CodingKey {
         /// Stable entry identifier.
         case id
@@ -45,8 +44,6 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         case sessionID
         /// Linked goal, when tagged.
         case goalID = "goalId"
-        /// Legacy goal spelling, decode-only.
-        case goalIDLegacy = "goalID"
         /// Run kind.
         case kind
         /// Outcome status.
@@ -102,7 +99,6 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         self.jobID = try container.decodeIfPresent(UUID.self, forKey: .jobID)
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
-            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.kind = try container.decode(String.self, forKey: .kind)
         self.status = try container.decode(String.self, forKey: .status)
         self.message = try container.decode(String.self, forKey: .message)
@@ -593,53 +589,12 @@ enum SQLiteOpenHelper {
                     duration_ms INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_logs_job_id ON run_logs(job_id);
+                CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);
+                CREATE INDEX IF NOT EXISTS idx_run_logs_goal_id ON run_logs(goal_id);
                 CREATE INDEX IF NOT EXISTS idx_run_logs_timestamp ON run_logs(timestamp);
                 """,
                 failure: { RunLogError(message: $0) }
             )
-            // Best-effort migration for databases created before session linkage:
-            // existing tables gain the column once, later opens no-op on duplicate.
-            do {
-                try SQLiteHelpers.exec(
-                    handle: handle,
-                    sql: "ALTER TABLE run_logs ADD COLUMN session_id TEXT;",
-                    failure: { RunLogError(message: $0) }
-                )
-            } catch {
-                RuneWeaverLog.stores.debug("SQLiteRunLogStore: session_id column migration note: \(error.localizedDescription)")
-            }
-            do {
-                try SQLiteHelpers.exec(
-                    handle: handle,
-                    sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);",
-                    failure: { RunLogError(message: $0) }
-                )
-            } catch {
-                RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating session_id index: \(error.localizedDescription)")
-            }
-            // Best-effort migration for databases created before goal linkage:
-            // the probe keeps replays a no-op and concurrent opens safe, while
-            // a failed ALTER only logs and the store keeps serving memory state.
-            if !SQLiteHelpers.columnNames(handle: handle, table: .runLogs).contains("goal_id") {
-                do {
-                    try SQLiteHelpers.exec(
-                        handle: handle,
-                        sql: "ALTER TABLE run_logs ADD COLUMN goal_id TEXT;",
-                        failure: { RunLogError(message: $0) }
-                    )
-                } catch {
-                    RuneWeaverLog.stores.debug("SQLiteRunLogStore: goal_id column migration note: \(error.localizedDescription)")
-                }
-            }
-            do {
-                try SQLiteHelpers.exec(
-                    handle: handle,
-                    sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_goal_id ON run_logs(goal_id);",
-                    failure: { RunLogError(message: $0) }
-                )
-            } catch {
-                RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating goal_id index: \(error.localizedDescription)")
-            }
             return handle
         }
 
@@ -763,13 +718,7 @@ enum SQLiteOpenHelper {
             }
             defer { sqlite3_close(handle) }
 
-            // Databases whose goal-link migration has not landed carry no
-            // `goal_id` column; appending it only when present keeps the
-            // legacy indices stable and decodes absent links as nil.
-            let hasGoalID = SQLiteHelpers.columnNames(handle: handle, table: .runLogs).contains("goal_id")
-            let projection = hasGoalID
-                ? "id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms, goal_id"
-                : "id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms"
+            let projection = "id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms, goal_id"
             let sql = """
             SELECT \(projection)
             FROM (
@@ -819,13 +768,7 @@ enum SQLiteOpenHelper {
                 }()
                 let totalTokens = SQLiteHelpers.columnInt64(statement, index: 9).map { Int($0) }
                 let durationMs = SQLiteHelpers.columnInt64(statement, index: 10).map { Int($0) }
-                // A missing column (pre-migration table) or malformed link text
-                // degrades to untagged so one bad row cannot fail the history load.
-                let goalID: UUID? = if hasGoalID {
-                    SQLiteHelpers.columnText(statement, index: 11).flatMap { UUID(uuidString: $0) }
-                } else {
-                    nil
-                }
+                let goalID = SQLiteHelpers.columnText(statement, index: 11).flatMap { UUID(uuidString: $0) }
 
                 loaded.append(RunLogEntry(
                     id: id,

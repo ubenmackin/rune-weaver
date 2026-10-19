@@ -926,8 +926,8 @@ extension MemoryEngine {
         return "Used \(trimmedName): \(visibleOutcome)"
     }
 
-    /// Builds compact episodic content from a bus result. Fail-closed legacy path: provenance is
-    /// unknown here, so the record labels as untrusted rather than trusting by default.
+    /// Builds compact episodic content from a bus result when provenance is unknown;
+    /// labels as untrusted rather than trusting by default.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         episodicToolRecord(
             toolName: toolName,

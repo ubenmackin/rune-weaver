@@ -144,7 +144,7 @@ export const PLACEHOLDER_GRAMMAR_VECTORS: Array<{
   { line: "", expected: null },
 ];
 
-// Folds CRLF and legacy CR line endings to LF so placeholder coverage matches the engine,
+// Folds CRLF and standalone CR line endings to LF so placeholder coverage matches the engine,
 // which strips those shapes before comparing plumbing lines. Single source for every
 // placeholder and history path so carriage returns never hide a covered line.
 export function normalizeLineEndings(text: string): string {
@@ -346,7 +346,6 @@ export function getSessionToolActions(
 
 export interface LiveTurnResponse {
   active: boolean;
-  isRunning?: boolean;
   sessionID: string;
   text: string;
   reasoning: string;

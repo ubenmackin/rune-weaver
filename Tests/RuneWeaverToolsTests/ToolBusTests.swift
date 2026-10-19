@@ -77,7 +77,7 @@ struct ToolBusTests {
         let bus = ToolBus(permissionGate: PermissionGate())
         await bus.register(tool: ReadOnlyStubTool())
         // A denying handler would fail the call if consulted; success proves bypass.
-        await bus.setLegacyApprovalHandler { _, _ in false }
+        await bus.setApprovalHandler { _, _, _ in false }
         let result = await bus.execute(
             toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID())
@@ -189,20 +189,6 @@ struct ToolBusTests {
             context: ToolContext(conversationID: UUID())
         )
         #expect(denied.isError == true)
-    }
-
-    @Test
-    func `Legacy two-argument handler still delegates`() async {
-        let bus = ToolBus(permissionGate: PermissionGate())
-        await bus.register(tool: ApprovalStubTool())
-        // Compatibility path: callers that predate context-aware approvals keep
-        // working through the bridging setter.
-        await bus.setLegacyApprovalHandler { _, _ in true }
-        let result = await bus.execute(
-            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(result.isError == false)
     }
 
     @Test
@@ -341,25 +327,25 @@ struct ToolBusTests {
         await bus.register(tool: ReadOnlyStubTool())
         // Generic alias plumbing: the alias is only a second name for the target, so every lookup
         // and mutation must land on the same entry.
-        await bus.registerAlias(from: "stub.legacy", to: "stub.read")
+        await bus.registerAlias(from: "stub.alias", to: "stub.read")
 
         // Lookup shares resolution: alias and canonical name return the same tool.
-        #expect(await bus.tool(named: "stub.legacy")?.name == "stub.read")
+        #expect(await bus.tool(named: "stub.alias")?.name == "stub.read")
         #expect(await bus.tool(named: "stub.read")?.name == "stub.read")
 
         // Enablement shares resolution: both spellings report one state.
-        #expect(await bus.isToolEnabled(named: "stub.legacy") == true)
+        #expect(await bus.isToolEnabled(named: "stub.alias") == true)
         #expect(await bus.isToolEnabled(named: "stub.read") == true)
 
         // Disabling through the alias flips the shared target state, so the
         // canonical spelling observes the same gate.
-        await bus.disableTool(named: "stub.legacy")
+        await bus.disableTool(named: "stub.alias")
         #expect(await bus.isToolEnabled(named: "stub.read") == false)
-        #expect(await bus.isToolEnabled(named: "stub.legacy") == false)
+        #expect(await bus.isToolEnabled(named: "stub.alias") == false)
 
         // A disabled target stays disabled through the alias execution path.
         let disabled = await bus.execute(
-            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            toolCall: ToolInput(toolName: "stub.alias", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID())
         )
         #expect(disabled.isError == true)
@@ -367,11 +353,11 @@ struct ToolBusTests {
         // Enabling through the canonical name restores the alias view, proving
         // the toggle is one entry rather than two diverging flags.
         await bus.enableTool(named: "stub.read")
-        #expect(await bus.isToolEnabled(named: "stub.legacy") == true)
+        #expect(await bus.isToolEnabled(named: "stub.alias") == true)
 
         // Execution shares resolution: the alias call runs the target tool.
         let result = await bus.execute(
-            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            toolCall: ToolInput(toolName: "stub.alias", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID())
         )
         #expect(result.isError == false)
@@ -380,17 +366,17 @@ struct ToolBusTests {
         // Unregister must drop stale aliases so a removed tool cannot be
         // reached through a leftover name after its definition is gone.
         await bus.unregister(toolNamed: "stub.read")
-        #expect(await bus.tool(named: "stub.legacy") == nil)
-        #expect(await bus.isToolEnabled(named: "stub.legacy") == false)
+        #expect(await bus.tool(named: "stub.alias") == nil)
+        #expect(await bus.isToolEnabled(named: "stub.alias") == false)
         let afterRemove = await bus.execute(
-            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            toolCall: ToolInput(toolName: "stub.alias", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID())
         )
         #expect(afterRemove.isError == true)
     }
 
     @Test
-    func `Boot registers no legacy memory aliases`() async throws {
+    func `Boot registers no retired memory aliases`() async throws {
         let policyStore = await ToolsTestSupport.makeTestPolicyStore()
         let tools = try await BuiltinToolPlugins.makeAllTools(
             emailConfig: EmailConfig(),

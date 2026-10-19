@@ -14,8 +14,6 @@ export function installViewport(widthPx: number): void {
       media: query,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
     };
   };
   Object.defineProperty(window, "matchMedia", {

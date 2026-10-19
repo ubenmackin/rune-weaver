@@ -1,4 +1,4 @@
-// Rune Weaver Core Tests — Access rule store persistence and the legacy trust-grant migration.
+// Rune Weaver Core Tests — Access rule store persistence and schema evolution.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -35,8 +35,7 @@ private enum AccessRuleStoreTestSupport {
         #endif
     }
 
-    /// Counts rows in a fixture table so the copy-forward check can prove the
-    /// legacy table was left untouched. The table name is a fixed literal.
+    /// Counts rows in a table. The table name is a fixed literal.
     static func rawRowCount(dbPath: String, table: String) -> Int {
         #if canImport(SQLite3)
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -146,98 +145,7 @@ struct AccessRuleStoreTests {
         #expect(deny.reason == "owner refused this host")
     }
 
-    // MARK: - Legacy migration
-
-    @Test
-    func `legacy trust_grants rows survive migration with identical matching and the copy is idempotent`() async throws {
-        let (base, dbURL) = try AccessRuleStoreTestSupport.makeTempWorkspace()
-        defer { AccessRuleStoreTestSupport.cleanup(base) }
-
-        // A database from before the access-rule model existed: the legacy
-        // grant table plus five rows, two of which cannot become rules.
-        let legacyTable = """
-        CREATE TABLE trust_grants (
-            id TEXT PRIMARY KEY,
-            tool_name TEXT NOT NULL,
-            target TEXT NOT NULL,
-            granted_at REAL NOT NULL,
-            expires_at REAL,
-            duration TEXT NOT NULL,
-            use_count INTEGER NOT NULL DEFAULT 0,
-            last_used_at REAL
-        );
-        INSERT INTO trust_grants VALUES
-            ('AAAAAAAA-0000-0000-0000-000000000001', 'email.send', 'a@x.com', 1000, NULL, 'forever', 2, 1500),
-            ('AAAAAAAA-0000-0000-0000-000000000002', 'bash.exec', 'git status', 2000, 2000 + 86400, 'oneDay', 0, NULL),
-            ('AAAAAAAA-0000-0000-0000-000000000003', 'email.send', 'b@x.com', 3000, NULL, 'forTask', 0, NULL),
-            ('AAAAAAAA-0000-0000-0000-000000000004', 'email.send', '   ', 4000, NULL, 'forever', 0, NULL),
-            ('AAAAAAAA-0000-0000-0000-000000000005', 'messages.send', '+15551234567', 5000, NULL, 'forever', 0, NULL);
-        """
-        #expect(AccessRuleStoreTestSupport.execRaw(dbPath: dbURL.path, sql: legacyTable))
-
-        let store = SQLiteAccessRuleStore(dbPath: dbURL.path)
-        try await store.migrateLegacyIfNeeded()
-        let migrated = try await store.load()
-
-        // The durable rows carried forward; the non-durable duration and the
-        // blank target shaped no rule and were skipped.
-        #expect(migrated.count == 3)
-        let email = try #require(migrated.first { $0.id.uuidString == "AAAAAAAA-0000-0000-0000-000000000001" })
-        #expect(email.toolName == "email.send")
-        #expect(email.action == .allow)
-        #expect(email.scope == .exactTarget("a@x.com"))
-        #expect(email.duration == .forever)
-        #expect(email.grantedAt == Date(timeIntervalSince1970: 1000))
-        #expect(email.expiresAt == nil)
-        #expect(email.useCount == 2)
-        #expect(email.lastUsedAt == Date(timeIntervalSince1970: 1500))
-
-        let bash = try #require(migrated.first { $0.id.uuidString == "AAAAAAAA-0000-0000-0000-000000000002" })
-        #expect(bash.scope == .exactTarget("git status"))
-        #expect(bash.duration == .oneDay)
-        #expect(bash.expiresAt == Date(timeIntervalSince1970: 2000 + 86400))
-
-        let messages = try #require(migrated.first { $0.id.uuidString == "AAAAAAAA-0000-0000-0000-000000000005" })
-        #expect(messages.scope == .exactTarget("+15551234567"))
-
-        // Identical matching: the exactTarget scope reproduces the legacy
-        // target derivation, so the call the owner approved stays covered and a
-        // near-miss still prompts.
-        let sendCall = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"a@x.com"}"#)
-        let legacyTarget = ActionDescriptor.descriptor(for: sendCall, toolName: "email.send").target
-        #expect(legacyTarget == "a@x.com")
-        #expect(email.scope == .exactTarget(legacyTarget))
-        #expect(email.covers(toolName: "email.send", argumentsJSON: sendCall.argumentsJSON))
-        #expect(!email.covers(toolName: "email.send", argumentsJSON: #"{"to":"b@x.com"}"#))
-        #expect(!email.covers(toolName: "messages.send", argumentsJSON: sendCall.argumentsJSON))
-
-        // Copy-forward only: the legacy table survives with every row, and a
-        // second store reads the same migrated rules.
-        #expect(AccessRuleStoreTestSupport.rawRowCount(dbPath: dbURL.path, table: "trust_grants") == 5)
-        let second = SQLiteAccessRuleStore(dbPath: dbURL.path)
-        #expect(try await second.load().count == 3)
-
-        // Idempotent: a second migration run copies nothing new.
-        try await store.migrateLegacyIfNeeded()
-        #expect(try await store.load().count == 3)
-        #expect(AccessRuleStoreTestSupport.rawRowCount(dbPath: dbURL.path, table: "trust_grants") == 5)
-    }
-
-    @Test
-    func `migration sets the flag when the legacy table is absent`() async throws {
-        let (base, dbURL) = try AccessRuleStoreTestSupport.makeTempWorkspace()
-        defer { AccessRuleStoreTestSupport.cleanup(base) }
-
-        let store = SQLiteAccessRuleStore(dbPath: dbURL.path)
-        try await store.migrateLegacyIfNeeded()
-        #expect(try await store.load().isEmpty)
-
-        // A rule saved afterwards survives the already-completed migration.
-        let rule = try makeRule(id: 11, scope: .toolWide)
-        try await store.save([rule])
-        try await store.migrateLegacyIfNeeded()
-        #expect(try await store.load() == [rule])
-    }
+    // MARK: - Schema Evolution
 
     @Test
     func `an upgraded narrow access_rules table gains its additive columns and keeps its durable rules`() async throws {
@@ -403,10 +311,6 @@ struct AccessRuleStoreTests {
         #expect(try await store.load() == [expiredDeny])
 
         try await store.pruneExpired(at: Date(timeIntervalSince1970: 5000))
-        #expect(try await store.load() == [expiredDeny])
-
-        // Migration is a no-op for an in-memory store.
-        try await store.migrateLegacyIfNeeded()
         #expect(try await store.load() == [expiredDeny])
     }
 }

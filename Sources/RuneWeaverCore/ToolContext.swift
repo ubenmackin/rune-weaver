@@ -83,7 +83,7 @@ public struct ToolContext: Sendable, Equatable {
 extension ToolInput {
     /// Generous cap for arguments embedded in a persisted placeholder line. Bounds
     /// persistence and wire serialization when tool payloads grow large (e.g. email bodies),
-    /// while staying far above the legacy bound so ordinary calls persist intact.
+    /// while staying high enough so ordinary calls persist intact.
     public static let placeholderArgumentsLimit = 4000
 
     /// Builds the assistant placeholder stored when a turn contains only tool calls.

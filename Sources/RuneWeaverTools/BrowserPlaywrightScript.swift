@@ -286,8 +286,8 @@ enum BrowserPlaywrightScriptTail: Sendable {
     def _request_timeout_ms(req, default_ms):
         # The Swift gateway plumbs the configured `browser.timeout_seconds` as
         # `timeoutMs` so navigation and per-action waits honor the operator's
-        # setting instead of this helper's legacy literals; missing,
-        # non-numeric, or non-positive values keep the historical default for
+        # setting instead of hardcoded default literals; missing,
+        # non-numeric, or non-positive values keep the default for
         # callers that reach the bridge directly.
         try:
             value = int(req.get("timeoutMs"))

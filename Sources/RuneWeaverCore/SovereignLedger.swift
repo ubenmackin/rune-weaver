@@ -165,9 +165,6 @@ extension SovereignSigner {
 
 /// Keychain-backed Enclave signer: HMAC-SHA256 under a 256-bit Keychain key.
 public struct EnclaveHMACSigner: SovereignSigner {
-    /// Legacy file holding the signing key, migrated once into the Keychain
-    /// then removed. `~` is expanded on use.
-    public static let defaultKeyPath = "~/.runeweaver/sovereign-signing.key"
     /// Keychain account holding the base64 signing key.
     public static let signingKeyAccount = "sovereign.signing.key"
     /// Key length in bytes: a 256-bit HMAC-SHA256 key.
@@ -175,20 +172,15 @@ public struct EnclaveHMACSigner: SovereignSigner {
 
     /// Stable identity recorded on every vote.
     public let identity: String
-    /// Legacy file path migrated once into the Keychain then removed.
-    public let legacyKeyPath: String
     /// Keychain backing the signing key; never consulted via environment.
     public let secrets: SecretsManager
 
     /// Creates a signer. identity: Signing key identity recorded on votes.
-    /// legacyKeyPath: Legacy file migrated into the Keychain on first use.
     public init(
         identity: String = "runeweaver-enclave-hmac-sha256",
-        legacyKeyPath: String? = nil,
         secrets: SecretsManager? = nil
     ) {
         self.identity = identity
-        self.legacyKeyPath = legacyKeyPath ?? EnclaveHMACSigner.defaultKeyPath
         self.secrets = secrets ?? SecretsManager()
     }
 
@@ -209,9 +201,8 @@ public struct EnclaveHMACSigner: SovereignSigner {
         return Self.constantTimeEquals(Self.hex(Data(code)), candidate)
     }
 
-    /// Loads the Keychain key, migrating once from the legacy file or
-    /// minting on a genuine fresh install. A locked Keychain fails closed
-    /// with an unlock remedy; a stale file fails with a delete remedy.
+    /// Loads the Keychain key, minting on a genuine fresh install. A locked
+    /// Keychain fails closed with an unlock remedy.
     private func loadKey() async throws -> SymmetricKey {
         let stored: String?
         do {
@@ -221,16 +212,7 @@ public struct EnclaveHMACSigner: SovereignSigner {
                 reason: "sovereign signing key is locked in the Keychain; unlock the Keychain and retry"
             )
         }
-        let legacyURL = URL(fileURLWithPath: (legacyKeyPath as NSString).expandingTildeInPath)
         if let stored {
-            // A legacy file beside a live Keychain key means a migration left
-            // a stale copy behind (failed removal or a restored backup); the
-            // stale file is never silently preferred or ignored.
-            guard !FileManager.default.fileExists(atPath: legacyURL.path) else {
-                throw SovereignLedgerError.signingKeyUnavailable(
-                    reason: "a stale sovereign signing key file still exists at \(legacyURL.path) beside the Keychain key; delete the stale file and retry"
-                )
-            }
             let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let data = Data(base64Encoded: trimmed), data.count == Self.keyLength else {
                 throw SovereignLedgerError.signingKeyUnavailable(
@@ -238,9 +220,6 @@ public struct EnclaveHMACSigner: SovereignSigner {
                 )
             }
             return SymmetricKey(data: data)
-        }
-        if FileManager.default.fileExists(atPath: legacyURL.path) {
-            return try await migrateLegacyKey(at: legacyURL)
         }
         let fresh = try Self.randomBytes()
         do {
@@ -256,9 +235,9 @@ public struct EnclaveHMACSigner: SovereignSigner {
         return try await readStoredSigningKey()
     }
 
-    /// Reads the signing key back and validates its shape, so mint and
-    /// migration both converge on the stored winner. A missing or corrupt
-    /// item fails closed with the matching remedy.
+    /// Reads the signing key back and validates its shape, so mint
+    /// converges on the stored winner. A missing or corrupt item fails
+    /// closed with the matching remedy.
     private func readStoredSigningKey() async throws -> SymmetricKey {
         let adopted: String?
         do {
@@ -277,48 +256,6 @@ public struct EnclaveHMACSigner: SovereignSigner {
             )
         }
         return SymmetricKey(data: data)
-    }
-
-    /// Imports the legacy file into the Keychain then removes it, so the
-    /// file exists for exactly one migration.
-    private func migrateLegacyKey(at url: URL) async throws -> SymmetricKey {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let permissions = attributes?[.posixPermissions] as? NSNumber
-        guard let permissions, permissions.intValue & 0o077 == 0,
-              let data = try? Data(contentsOf: url),
-              data.count == Self.keyLength
-        else {
-            // A concurrent migration can import and remove the file between
-            // this check and the read; when the Keychain already holds a
-            // valid key the invariant holds and the winner is adopted.
-            if let winner = try? await readStoredSigningKey() {
-                return winner
-            }
-            throw SovereignLedgerError.signingKeyUnavailable(
-                reason: "sovereign signing key at \(url.path) is loose, unreadable, or not \(Self.keyLength) bytes; delete the stale file to mint a fresh key"
-            )
-        }
-        do {
-            // Add-only import: a concurrent mint's key is never clobbered by
-            // the file bytes, so both writers adopt the same stored winner.
-            _ = try await secrets.storeKeychainIfAbsent(key: Self.signingKeyAccount, secret: data.base64EncodedString())
-        } catch {
-            throw SovereignLedgerError.signingKeyUnavailable(
-                reason: "sovereign signing key could not be stored; unlock the Keychain and retry"
-            )
-        }
-        do {
-            try FileManager.default.removeItem(at: url)
-        } catch {
-            // A concurrent migration can remove the file first, so a failed
-            // removal only blocks while the stale copy is actually on disk.
-            guard !FileManager.default.fileExists(atPath: url.path) else {
-                throw SovereignLedgerError.signingKeyUnavailable(
-                    reason: "the imported sovereign signing key could not be removed from \(url.path); delete the stale file and retry"
-                )
-            }
-        }
-        return try await readStoredSigningKey()
     }
 
     /// Mints key bytes from the system CSPRNG.
@@ -395,11 +332,11 @@ public enum SovereignLedgerError: Error, Sendable, Equatable {
     case checkpointStale(path: String, ageSeconds: Int)
     /// The checkpoint could not be written.
     case checkpointWriteFailed(path: String)
-    /// The anchor could not be read from the Keychain. Carries the remedy so
-    /// fail-closed ceremonies name the unlock step.
+    /// The anchor could not be read from the primary store table. `account`
+    /// carries the database path for the fail-closed remedy.
     case anchorUnreadable(account: String, reason: String)
-    /// The anchor could not be written to the Keychain. Carries the remedy so
-    /// fail-closed ceremonies name the unlock step.
+    /// The anchor could not be written to the primary store table. `account`
+    /// carries the database path for the fail-closed remedy.
     case anchorWriteFailed(account: String, reason: String)
 }
 
@@ -446,13 +383,10 @@ extension SovereignLedgerError: LocalizedError {
 
 // MARK: - Sovereign Anchor
 
-/// Keychain anchor remembering the last attested head. Survives sidecar
-/// deletes, so a missing copy plus checkpoint with a live anchor reads as
-/// a loud orphan instead of a fresh install.
+/// Anchor metadata for the last attested head, persisted beside the primary
+/// history. Survives sidecar deletes, so a missing copy plus checkpoint with
+/// a live anchor reads as a loud orphan instead of a fresh install.
 public struct SovereignAnchor: Sendable, Equatable, Codable {
-    /// Allowed JSON fields; anything else is rejected as unknown.
-    static let allowedFields: Set<String> = ["tip", "episodeCount", "attestedAt"]
-
     /// Attested ledger head.
     public let tip: String
     /// Episodes the attested chain covered.
@@ -490,10 +424,6 @@ public actor SovereignLedger {
     public static let defaultSovereignCopyPath = "~/.runeweaver/memory/ledger.sovereign.jsonl"
     /// Default checkpoint path beside the other durable engine state.
     public static let defaultCheckpointPath = "~/.runeweaver/sovereign-checkpoint.json"
-    /// Keychain account holding the anchor JSON.
-    public static let anchorAccount = "sovereign.anchor"
-    /// Anchor JSON ceiling; longer payloads are refused, never truncated.
-    public static let maxAnchorJSONChars = 512
     /// A checkpoint older than this cannot arbitrate; the ceremony fails closed.
     public static let maxCheckpointAge: TimeInterval = 36 * 60 * 60
     /// Sovereign copy ceiling. A larger copy is refused, never truncated.
@@ -511,7 +441,7 @@ public actor SovereignLedger {
     private let checkpointPath: String
     /// Enclave signer backing checkpoint votes and copy-line HMACs.
     private let signer: SovereignSigner
-    /// Keychain backing the anchor; nil coalesces to the default manager.
+    /// Keychain backing the signing key; nil coalesces to the default manager.
     private let secrets: SecretsManager
     /// Clock source, injectable so staleness is exercised without sleeping.
     private let now: @Sendable () -> Date
@@ -555,7 +485,7 @@ public actor SovereignLedger {
         let primaryTip = chain.last?.hash ?? SovereignVerdict.emptyTip
 
         let copy = try await readSovereignCopy()
-        let checkpoint = try await readCheckpoint()
+        let checkpoint = try await readCheckpointAllowingStale()
         let checkpointTip = checkpoint?.tip
         let anchor = try await readAnchor()
 
@@ -564,6 +494,10 @@ public actor SovereignLedger {
             let prefixVerified = copy.count <= chain.count
                 && zip(copy, chain).allSatisfy { $0.hash == $1.hash }
             guard prefixVerified else {
+                // A stale vote cannot arbitrate a disagreement, so fail closed.
+                if let checkpoint {
+                    try throwIfCheckpointStale(checkpoint)
+                }
                 // The store no longer corroborates recorded history: the copy
                 // carries an episode the chain cannot reproduce, or the
                 // ledger shrank beneath the copy. Park, never repair.
@@ -580,6 +514,8 @@ public actor SovereignLedger {
                 // than a disagreement.
                 try await writeSovereignCopy(chain)
             }
+            // Every passing ceremony re-attests: an unchanged head still
+            // refreshes `signedAt`, so the 24h loop never ages past the bound.
             try await writeCheckpoint(tip: primaryTip, episodeCount: episodes.count)
             try await writeAnchor(tip: primaryTip, episodeCount: episodes.count)
             return SovereignVerdict(
@@ -625,6 +561,8 @@ public actor SovereignLedger {
             )
         }
         guard checkpoint.tip == primaryTip else {
+            // A stale vote cannot arbitrate a missing copy, so fail closed.
+            try throwIfCheckpointStale(checkpoint)
             // A signed vote exists but its copy is gone.
             return mismatchVerdict(
                 primaryTip: primaryTip,
@@ -940,65 +878,35 @@ extension SovereignLedger {
 // MARK: - Checkpoint
 
 extension SovereignLedger {
-    /// Reads the Keychain anchor fresh per ceremony. Corrupt payloads read
-    /// as absent; a locked Keychain fails closed with an unlock remedy.
+    /// Reads the anchor from the primary store fresh per ceremony.
     private func readAnchor() async throws -> SovereignAnchor? {
-        let raw: String?
         do {
-            raw = try await secrets.retrieveKeychain(key: Self.anchorAccount)
+            return try await episodeStore.readSovereignAnchor()
         } catch {
             throw SovereignLedgerError.anchorUnreadable(
-                account: Self.anchorAccount,
-                reason: "sovereign anchor is locked in the Keychain; unlock the Keychain and retry"
+                account: episodeStore.dbPath,
+                reason: error.localizedDescription
             )
         }
-        guard let raw, raw.count <= Self.maxAnchorJSONChars,
-              let data = raw.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data, options: []),
-              let dict = object as? [String: Any],
-              dict.keys.allSatisfy({ SovereignAnchor.allowedFields.contains($0) }),
-              let tipRaw = dict["tip"] as? String,
-              let tip = HealthSnapshotValue.normalizedTip(tipRaw),
-              let episodeCount = dict["episodeCount"] as? Int,
-              episodeCount >= 0,
-              let attestedAtSeconds = dict["attestedAt"] as? Double
-        else {
-            return nil
-        }
-        return SovereignAnchor(tip: tip, episodeCount: episodeCount, attestedAt: Date(timeIntervalSince1970: attestedAtSeconds))
     }
 
-    /// Persists the anchor for a passing head. Never called for orphan or
-    /// mismatch, so only attested heads survive sidecar deletes.
+    /// Persists the anchor for a passing head into the primary store. Never called
+    /// for orphan or mismatch, so only attested heads survive sidecar deletes.
     private func writeAnchor(tip: String, episodeCount: Int) async throws {
         guard let normalized = HealthSnapshotValue.normalizedTip(tip) else { return }
         let anchor = SovereignAnchor(tip: normalized, episodeCount: episodeCount, attestedAt: now())
-        let payload: [String: Any] = [
-            "tip": anchor.tip,
-            "episodeCount": anchor.episodeCount,
-            "attestedAt": anchor.attestedAt.timeIntervalSince1970
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
-              let raw = String(data: data, encoding: .utf8),
-              raw.count <= Self.maxAnchorJSONChars
-        else {
-            throw SovereignLedgerError.anchorWriteFailed(
-                account: Self.anchorAccount,
-                reason: "sovereign anchor could not be serialized within the JSON ceiling; refused, never truncated"
-            )
-        }
         do {
-            try await secrets.storeKeychain(key: Self.anchorAccount, secret: raw)
+            try await episodeStore.writeSovereignAnchor(anchor)
         } catch {
             throw SovereignLedgerError.anchorWriteFailed(
-                account: Self.anchorAccount,
-                reason: "sovereign anchor could not be stored; unlock the Keychain and retry"
+                account: episodeStore.dbPath,
+                reason: error.localizedDescription
             )
         }
     }
 
-    /// Reads, verifies, and age-checks the signed checkpoint.
-    private func readCheckpoint() async throws -> Checkpoint? {
+    /// Reads and verifies the signed checkpoint without judging its age.
+    private func readCheckpointAllowingStale() async throws -> Checkpoint? {
         let path = expanded(checkpointPath)
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let data: Data
@@ -1039,11 +947,15 @@ extension SovereignLedger {
         guard await signer.verify(challenge: checkpoint.signaturePayload(), signature: signature) else {
             throw SovereignLedgerError.checkpointSignatureInvalid(path: path)
         }
+        return checkpoint
+    }
+
+    /// Fails closed when a vote is past the arbitration bound.
+    private func throwIfCheckpointStale(_ checkpoint: Checkpoint) throws {
         let age = now().timeIntervalSince(checkpoint.signedAt)
         guard age <= Self.maxCheckpointAge else {
-            throw SovereignLedgerError.checkpointStale(path: path, ageSeconds: Int(age))
+            throw SovereignLedgerError.checkpointStale(path: expanded(checkpointPath), ageSeconds: Int(age))
         }
-        return checkpoint
     }
 
     /// Signs a fresh checkpoint for a head. tip: Ledger head to attest.

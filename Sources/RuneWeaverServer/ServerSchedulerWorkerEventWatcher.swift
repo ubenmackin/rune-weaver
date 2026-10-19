@@ -234,7 +234,7 @@ extension ServerSchedulerWorker {
 
     // MARK: - Email Watcher
 
-    /// Evaluates email watcher rules or legacy email poll triggering.
+    /// Evaluates email watcher rules or poll triggering.
     private func evaluateEmailWatcher(job: SchedulerJob, now: Date) async -> [SchedulerRunResult]? {
         let rule = job.pollRule ?? EmailPollRule(account: job.pollAccount ?? "default")
         if let last = lastPollCheck[job.id] {
@@ -275,7 +275,7 @@ extension ServerSchedulerWorker {
         seenPollIDs[job.id] = seen.union(currentIDs)
         guard !fresh.isEmpty else { return nil }
 
-        // Fall back to legacy single-prompt behavior if no rules are configured
+        // Default to single-prompt execution if no specific rules are configured
         let configuredRules = (job.rules ?? []).filter(\.enabled)
         if configuredRules.isEmpty {
             let reason = SchedulerFireReason.emailArrived(account: rule.trimmedAccount, count: fresh.count)

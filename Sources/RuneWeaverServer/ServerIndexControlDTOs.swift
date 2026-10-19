@@ -63,8 +63,6 @@ public struct IndexRunResponse: Content, Equatable {
         case indexAsOf
         case skippedReason
         case sources
-        case sourceOutcomes
-        case outcomes
     }
 
     /// Maps a coordinator summary onto the wire shape.
@@ -221,10 +219,7 @@ public struct IndexRunResponse: Content, Equatable {
         finishedAt = try container.decode(Date.self, forKey: .finishedAt)
         indexAsOf = try container.decodeIfPresent(Date.self, forKey: .indexAsOf)
         skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
-        let canonicalSources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
-        let aliasOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sourceOutcomes)
-        let legacyOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .outcomes)
-        sources = canonicalSources ?? aliasOutcomes ?? legacyOutcomes
+        sources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
     }
 
     /// Encodes a run response on the canonical keys so current dashboards

@@ -649,11 +649,11 @@ export function useChatWebSocketHandler({
           doneText,
           snapshotFullText,
         );
-        const legacyText =
+        const flatText =
           doneSegments.length > 0
             ? flatTextFromSegments(doneSegments)
             : (doneText ?? snapshotFullText ?? "");
-        const legacyActions = flatActionsFromSegments(doneSegments);
+        const flatActions = flatActionsFromSegments(doneSegments);
         const doneCompletedAt = normalizeCompletedAtMs(
           (data as unknown as Record<string, unknown>).completedAt,
         );
@@ -663,8 +663,8 @@ export function useChatWebSocketHandler({
         const finalMsg: MessageItem = {
           id: newSessionId(),
           role: "assistant",
-          text: legacyText,
-          toolActions: legacyActions.length > 0 ? legacyActions : undefined,
+          text: flatText,
+          toolActions: flatActions.length > 0 ? flatActions : undefined,
           segments: doneSegments.length > 0 ? doneSegments : undefined,
           ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
           ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),

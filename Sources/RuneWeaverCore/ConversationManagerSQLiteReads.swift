@@ -14,27 +14,7 @@ import Foundation
             var sessionsByID: [String: ConversationSession] = [:]
             var order: [String] = []
             var statement: OpaquePointer?
-            // The probe keeps the projection honest when the additive migrations have not landed:
-            // selecting a missing column would fail the whole read, while appending each link column
-            // only when present keeps old indices stable and decodes absent links as nil.
-            let sessionColumns = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
-            let hasGoalID = sessionColumns.contains("goal_id")
-            let hasParent = sessionColumns.contains("parent_session_id")
-            let hasArchived = sessionColumns.contains("is_archived")
-            // Link columns append in migration order, so the parent link always
-            // trails the goal link and the decode indices stay derivable from
-            // the two probes.
-            var selectColumns = "id, title, summary, created_at, updated_at, source"
-            if hasGoalID {
-                selectColumns += ", goal_id"
-            }
-            if hasParent {
-                selectColumns += ", parent_session_id"
-            }
-            if hasArchived {
-                selectColumns += ", is_archived"
-            }
-            let selectSQL = "SELECT \(selectColumns) FROM sessions;"
+            let selectSQL = "SELECT id, title, summary, created_at, updated_at, source, goal_id, parent_session_id, is_archived FROM sessions;"
             guard sqlite3_prepare_v2(handle, selectSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read sessions")
             }
@@ -43,7 +23,7 @@ import Foundation
                 guard let idText = columnText(statement, index: 0),
                       let id = UUID(uuidString: idText)
                 else { continue }
-                let fields = sessionFields(from: statement, hasGoalID: hasGoalID, hasParentLink: hasParent, hasArchived: hasArchived)
+                let fields = sessionFields(from: statement)
                 sessionsByID[idText] = ConversationSession(
                     id: id,
                     title: fields.title,
@@ -99,31 +79,15 @@ import Foundation
             }
         }
 
-        /// Loads one session row without messages. A missing `goal_id` or `parent_session_id`
-        /// column (pre-migration database) decodes as unlinked and unparented rather than failing
-        /// the lookup.
+        /// Loads one session row without messages. The projection always selects
+        /// `goal_id` and `parent_session_id`; tables predating those columns fail
+        /// the lookup closed instead of decoding as unlinked.
         static func loadSingleSessionBase(
             handle: OpaquePointer?,
             sessionID: UUID
         ) throws -> ConversationSession? {
             var statement: OpaquePointer?
-            let sessionColumns = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
-            let hasGoalID = sessionColumns.contains("goal_id")
-            let hasParent = sessionColumns.contains("parent_session_id")
-            let hasArchived = sessionColumns.contains("is_archived")
-            // Same migration-order projection as the all-sessions read, so the
-            // parent link trails the goal link in both statements.
-            var selectColumns = "id, title, summary, created_at, updated_at, source"
-            if hasGoalID {
-                selectColumns += ", goal_id"
-            }
-            if hasParent {
-                selectColumns += ", parent_session_id"
-            }
-            if hasArchived {
-                selectColumns += ", is_archived"
-            }
-            let sessionSQL = "SELECT \(selectColumns) FROM sessions WHERE id = ?;"
+            let sessionSQL = "SELECT id, title, summary, created_at, updated_at, source, goal_id, parent_session_id, is_archived FROM sessions WHERE id = ?;"
             guard sqlite3_prepare_v2(handle, sessionSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read session \(sessionID)")
             }
@@ -132,7 +96,7 @@ import Foundation
             guard sqlite3_step(statement) == SQLITE_ROW else {
                 return nil
             }
-            let fields = sessionFields(from: statement, hasGoalID: hasGoalID, hasParentLink: hasParent, hasArchived: hasArchived)
+            let fields = sessionFields(from: statement)
             return ConversationSession(
                 id: sessionID,
                 title: fields.title,
@@ -191,52 +155,27 @@ import Foundation
             let createdAt: Date
             let updatedAt: Date
             let source: String?
-            /// Linked goal, nil for unlinked sessions and for rows read from
-            /// tables that predate the goal-link column.
+            /// Linked goal, nil for unlinked sessions. The static projection
+            /// always selects `goal_id`.
             let goalID: UUID?
-            /// Parent session, nil for unparented sessions and for rows read
-            /// from tables that predate the parent-link column.
+            /// Parent session, nil for unparented sessions. The static projection
+            /// always selects `parent_session_id`.
             let parentSessionID: UUID?
             /// Whether this session is archived.
             let isArchived: Bool
         }
 
-        /// Decodes session field columns for one stepped row. Link columns are only read when the
-        /// projection includes them; older tables decode as unlinked and unparented.
-        static func sessionFields(
-            from statement: OpaquePointer?,
-            hasGoalID: Bool = false,
-            hasParentLink: Bool = false,
-            hasArchived: Bool = false
-        ) -> SessionFields {
+        /// Decodes session field columns for one stepped row. The static projection
+        /// always selects `goal_id`, `parent_session_id`, and `is_archived`.
+        static func sessionFields(from statement: OpaquePointer?) -> SessionFields {
             let title = nonemptyText(statement, index: 1)
             let summary = nonemptyText(statement, index: 2)
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
             let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
             let source = nonemptyText(statement, index: 5)
-            var nextIndex: Int32 = 6
-            let goalID: UUID?
-            if hasGoalID {
-                goalID = columnText(statement, index: nextIndex).flatMap { UUID(uuidString: $0) }
-                nextIndex += 1
-            } else {
-                goalID = nil
-            }
-            // The parent link trails the goal link in the projection, so its
-            // index shifts with the goal column; gating on the probe keeps a
-            // pre-migration table from reading the wrong column.
-            let parentSessionID: UUID?
-            if hasParentLink {
-                parentSessionID = columnText(statement, index: nextIndex).flatMap { UUID(uuidString: $0) }
-                nextIndex += 1
-            } else {
-                parentSessionID = nil
-            }
-            let isArchived: Bool = if hasArchived {
-                sqlite3_column_int(statement, nextIndex) != 0
-            } else {
-                false
-            }
+            let goalID = columnText(statement, index: 6).flatMap { UUID(uuidString: $0) }
+            let parentSessionID = columnText(statement, index: 7).flatMap { UUID(uuidString: $0) }
+            let isArchived = sqlite3_column_int(statement, 8) != 0
             return SessionFields(
                 title: title,
                 summary: summary,

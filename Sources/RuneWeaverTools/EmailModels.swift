@@ -234,7 +234,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     public let mailbox: String
     /// Owning account nickname (e.g. `personal`), so merged multi-account hits
     /// stay routable back to the account for follow-up `email.read`/`email.move`
-    /// calls. Empty only for legacy payloads predating per-hit labeling.
+    /// calls. Empty when unlabeled.
     public let account: String
     /// Whether the message has attachments.
     public let hasAttachments: Bool?
@@ -419,7 +419,7 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     public let mailbox: String?
     /// Folders actually searched, in search order.
     public let mailboxes: [String]?
-    /// Accounts successfully searched, in config sequence (nil on legacy payloads).
+    /// Accounts successfully searched, in config sequence.
     public let accounts: [String]?
     /// Accounts skipped due to credential or gateway failure, in config sequence.
     public let failedAccounts: [String]?
@@ -455,8 +455,7 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
         case failedAccounts
     }
 
-    /// Decodes an envelope tolerantly so legacy payloads lacking the multi-account keys
-    /// (`accounts`, `failedAccounts`) still parse.
+    /// Decodes a search envelope.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)

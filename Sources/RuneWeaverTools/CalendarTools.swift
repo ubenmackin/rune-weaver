@@ -43,11 +43,7 @@ public struct CalendarSearchArgs: Sendable, Equatable, Decodable {
     private enum CodingKeys: String, CodingKey {
         case query
         case eventID
-        case eventId
-        case eventIDUnderscore = "event_id"
-        case id
         case calendarNames
-        case calendarNamesUnderscore = "calendar_names"
         case since
         case until
         case limit
@@ -62,20 +58,12 @@ public struct CalendarSearchArgs: Sendable, Equatable, Decodable {
             )
         }
         let rawEventID = try container.decodeIfPresent(String.self, forKey: .eventID)
-        let rawEventId = try container.decodeIfPresent(String.self, forKey: .eventId)
-        let rawEventSnake = try container.decodeIfPresent(String.self, forKey: .eventIDUnderscore)
-        let rawID = try container.decodeIfPresent(String.self, forKey: .id)
-        for candidate in [rawEventID, rawEventId, rawEventSnake, rawID].compactMap(\.self) where candidate.contains("\0") {
+        if let rawEventID, rawEventID.contains("\0") {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "eventID must not contain null bytes.")
             )
         }
-        // Blank strings behave as omitted so a valid later alias still wins.
-        let eventID = [rawEventID, rawEventId, rawEventSnake, rawID].compactMap(\.self).first {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
         let rawNames = try container.decodeIfPresent([String].self, forKey: .calendarNames)
-            ?? container.decodeIfPresent([String].self, forKey: .calendarNamesUnderscore)
         if let rawNames {
             for name in rawNames where name.contains("\0") {
                 throw DecodingError.dataCorrupted(
@@ -96,7 +84,7 @@ public struct CalendarSearchArgs: Sendable, Equatable, Decodable {
             )
         }
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        self.init(query: rawQuery, eventID: eventID, calendarNames: rawNames, since: rawSince, until: rawUntil, limit: rawLimit)
+        self.init(query: rawQuery, eventID: rawEventID, calendarNames: rawNames, since: rawSince, until: rawUntil, limit: rawLimit)
     }
 
     private static func normalized(_ raw: String?) -> String? {

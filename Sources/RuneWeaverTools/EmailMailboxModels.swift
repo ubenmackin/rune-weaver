@@ -333,20 +333,13 @@ extension EmailBridgeParsing {
     }
 
     /// Decodes a bridge `list` stdout payload carrying mailboxes plus the hierarchy delimiter.
-    /// This is the single listing parser; the legacy bare-name parser was removed
-    /// so delimiter metadata cannot be silently dropped.
+    /// This is the canonical listing parser ensuring delimiter metadata is preserved.
     public static func parseMailboxListingPayload(_ data: Data) throws -> EmailMailboxListing {
         let response = try JSONDecoder().decode(MailboxListingResponse.self, from: data)
         if !response.ok {
             throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP list failed")
         }
         return EmailMailboxListing(mailboxes: response.mailboxes ?? [], delimiter: response.delimiter)
-    }
-
-    /// Compatibility shim over the single listing parser for existing callers.
-    /// Delegates to `parseMailboxListingPayload` so delimiter metadata stays canonical.
-    public static func parseListPayload(_ data: Data) throws -> [String] {
-        try parseMailboxListingPayload(data).mailboxes
     }
 
     /// Encodes selectable mailboxes as the `email.listMailboxes` tool output document.

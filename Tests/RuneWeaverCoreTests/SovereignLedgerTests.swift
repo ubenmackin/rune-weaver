@@ -9,7 +9,6 @@ private struct SovereignScratch: Sendable {
     let root: URL
     let copyPath: String
     let checkpointPath: String
-    let legacyKeyPath: String
     let dbPath: String
 
     /// Creates the scratch tree under the system temporary directory.
@@ -21,7 +20,6 @@ private struct SovereignScratch: Sendable {
             root: root,
             copyPath: root.appendingPathComponent("ledger.sovereign.jsonl").path,
             checkpointPath: root.appendingPathComponent("sovereign-checkpoint.json").path,
-            legacyKeyPath: root.appendingPathComponent("sovereign-signing.key").path,
             dbPath: root.appendingPathComponent("episodes.db").path
         )
     }
@@ -55,19 +53,6 @@ private func makeLedger(
     )
 }
 
-/// Writes a legacy signing-key fixture with owner-only permissions.
-@discardableResult
-private func writeLegacyKey(at path: String, bytes: Data) -> Bool {
-    FileManager.default.createFile(atPath: path, contents: bytes, attributes: [.posixPermissions: 0o600])
-}
-
-/// Decoded fields of the stored sovereign anchor.
-private struct StoredAnchor {
-    let tip: String
-    let episodeCount: Int
-    let attestedAt: TimeInterval
-}
-
 /// Parked-red state the orphan and re-baseline tests start from.
 private struct OrphanFixture {
     let scratch: SovereignScratch
@@ -76,17 +61,21 @@ private struct OrphanFixture {
     let attestedTip: String
 }
 
-/// Decodes the stored anchor JSON into its attested fields.
-private func readStoredAnchor(_ secrets: SecretsManager) async throws -> StoredAnchor? {
-    guard let raw = try await secrets.retrieveKeychain(key: SovereignLedger.anchorAccount),
-          let data = raw.data(using: .utf8),
-          let object = try? JSONSerialization.jsonObject(with: data, options: []),
-          let dict = object as? [String: Any],
-          let tip = dict["tip"] as? String,
-          let episodeCount = dict["episodeCount"] as? Int,
-          let attestedAt = dict["attestedAt"] as? Double
-    else { return nil }
-    return StoredAnchor(tip: tip, episodeCount: episodeCount, attestedAt: attestedAt)
+/// Reads the stored anchor from the primary episode store.
+private func readStoredAnchor(dbPath: String) async throws -> SovereignAnchor? {
+    let store = EpisodeStore(dbPath: dbPath)
+    return try await store.readSovereignAnchor()
+}
+
+/// Signed instant recorded on the checkpoint file.
+private func checkpointSignedAt(path: String) throws -> Date {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let seconds = object["signedAt"] as? Double
+    else {
+        throw CocoaError(.fileReadCorruptFile)
+    }
+    return Date(timeIntervalSince1970: seconds)
 }
 
 /// Drives a fresh install to its baseline, deletes both sidecars, and records
@@ -136,63 +125,13 @@ private struct LockedKeychainSigner: SovereignSigner {
 @Suite("Sovereign Keychain Identity")
 struct SovereignKeychainIdentityTests {
     @Test
-    func `Legacy key file migrates into the Keychain and is removed`() async throws {
-        let scratch = try SovereignScratch.make()
-        defer { scratch.remove() }
-        let secrets = freshTestSecrets()
-        let keyBytes = Data((0 ..< EnclaveHMACSigner.keyLength).map { UInt8($0) })
-        #expect(writeLegacyKey(at: scratch.legacyKeyPath, bytes: keyBytes))
-
-        let signer = EnclaveHMACSigner(legacyKeyPath: scratch.legacyKeyPath, secrets: secrets)
-        let signature = try await signer.sign(challenge: "migration")
-        // The file exists for exactly one migration, then never again.
-        #expect(!FileManager.default.fileExists(atPath: scratch.legacyKeyPath))
-        let stored = try #require(await secrets.retrieveKeychain(key: EnclaveHMACSigner.signingKeyAccount))
-        #expect(stored == keyBytes.base64EncodedString())
-        // A fresh signer over the same vault verifies the migrated key's work.
-        let successor = EnclaveHMACSigner(legacyKeyPath: scratch.legacyKeyPath, secrets: secrets)
-        #expect(await successor.verify(challenge: "migration", signature: signature))
-    }
-
-    @Test
-    func `Concurrent legacy migrations never refuse on the removed file`() async throws {
-        let scratch = try SovereignScratch.make()
-        defer { scratch.remove() }
-        let secrets = freshTestSecrets()
-        let keyBytes = Data((0 ..< EnclaveHMACSigner.keyLength).map { UInt8($0) })
-        #expect(writeLegacyKey(at: scratch.legacyKeyPath, bytes: keyBytes))
-
-        let signatures = try await withThrowingTaskGroup(of: String.self) { group -> [String] in
-            for _ in 0 ..< 4 {
-                group.addTask {
-                    let signer = EnclaveHMACSigner(legacyKeyPath: scratch.legacyKeyPath, secrets: secrets)
-                    return try await signer.sign(challenge: "migration-challenge")
-                }
-            }
-            var collected: [String] = []
-            for try await signature in group {
-                collected.append(signature)
-            }
-            return collected
-        }
-        // Every migrator finishes under one imported key and the file is gone.
-        #expect(signatures.count == 4)
-        #expect(Set(signatures).count == 1)
-        #expect(!FileManager.default.fileExists(atPath: scratch.legacyKeyPath))
-        let stored = try #require(await secrets.retrieveKeychain(key: EnclaveHMACSigner.signingKeyAccount))
-        #expect(stored == keyBytes.base64EncodedString())
-    }
-
-    @Test
     func `Concurrent fresh mints converge on one identity key`() async throws {
-        let scratch = try SovereignScratch.make()
-        defer { scratch.remove() }
         let secrets = freshTestSecrets()
 
         let signatures = try await withThrowingTaskGroup(of: String.self) { group -> [String] in
             for _ in 0 ..< 8 {
                 group.addTask {
-                    let signer = EnclaveHMACSigner(legacyKeyPath: scratch.legacyKeyPath, secrets: secrets)
+                    let signer = EnclaveHMACSigner(secrets: secrets)
                     return try await signer.sign(challenge: "fresh-install-challenge")
                 }
             }
@@ -223,33 +162,6 @@ struct SovereignKeychainIdentityTests {
         let second = try await secrets.storeKeychainIfAbsent(key: freshKey, secret: "second-writer")
         #expect(second == false)
         #expect(try await secrets.retrieveKeychain(key: freshKey) == "first-writer")
-    }
-
-    @Test
-    func `A stale legacy file beside a live key blocks with a delete remedy`() async throws {
-        let scratch = try SovereignScratch.make()
-        defer { scratch.remove() }
-        let secrets = freshTestSecrets()
-        try await secrets.storeKeychain(
-            key: EnclaveHMACSigner.signingKeyAccount,
-            secret: Data(repeating: 0x2C, count: EnclaveHMACSigner.keyLength).base64EncodedString()
-        )
-        #expect(writeLegacyKey(at: scratch.legacyKeyPath, bytes: Data(repeating: 0x51, count: EnclaveHMACSigner.keyLength)))
-
-        let signer = EnclaveHMACSigner(legacyKeyPath: scratch.legacyKeyPath, secrets: secrets)
-        do {
-            _ = try await signer.sign(challenge: "stale")
-            Issue.record("Expected the stale legacy file to block the ceremony")
-        } catch let error as SovereignLedgerError {
-            guard case let .signingKeyUnavailable(reason) = error else {
-                Issue.record("Expected signingKeyUnavailable, got \(error)")
-                return
-            }
-            #expect(reason.contains("stale"))
-            #expect(reason.contains("delete"))
-        }
-        // Fail-closed: the stale file is never silently preferred or consumed.
-        #expect(FileManager.default.fileExists(atPath: scratch.legacyKeyPath))
     }
 
     @Test
@@ -332,7 +244,7 @@ struct SovereignAnchorOrphanTests {
         let first = try await ledger.verifyChain()
         #expect(first.outcome == .empty)
         #expect(first.primaryTip == SovereignVerdict.emptyTip)
-        let anchor = try #require(await readStoredAnchor(secrets))
+        let anchor = try #require(await readStoredAnchor(dbPath: scratch.dbPath))
         #expect(anchor.tip == SovereignVerdict.emptyTip)
 
         let pulse = SystemHealthSnapshot()
@@ -360,10 +272,10 @@ struct SovereignAnchorOrphanTests {
         try await store.store(sessionID: UUID(), role: .user, content: "episode one")
         let verdictOne = try await first.verifyChain()
         #expect(verdictOne.outcome == .verified)
-        let anchorOne = try #require(await readStoredAnchor(secrets))
+        let anchorOne = try #require(await readStoredAnchor(dbPath: scratch.dbPath))
         #expect(anchorOne.tip == verdictOne.primaryTip)
         #expect(anchorOne.episodeCount == 1)
-        #expect(abs(anchorOne.attestedAt - t1.timeIntervalSince1970) < 0.5)
+        #expect(abs(anchorOne.attestedAt.timeIntervalSince1970 - t1.timeIntervalSince1970) < 0.5)
 
         try await store.store(sessionID: UUID(), role: .assistant, content: "episode two")
         let t2 = t1.addingTimeInterval(120)
@@ -371,10 +283,35 @@ struct SovereignAnchorOrphanTests {
         let verdictTwo = try await second.verifyChain()
         #expect(verdictTwo.outcome == .verified)
         #expect(verdictTwo.primaryTip != verdictOne.primaryTip)
-        let anchorTwo = try #require(await readStoredAnchor(secrets))
+        let anchorTwo = try #require(await readStoredAnchor(dbPath: scratch.dbPath))
         #expect(anchorTwo.tip == verdictTwo.primaryTip)
         #expect(anchorTwo.episodeCount == 2)
-        #expect(abs(anchorTwo.attestedAt - t2.timeIntervalSince1970) < 0.5)
+        #expect(abs(anchorTwo.attestedAt.timeIntervalSince1970 - t2.timeIntervalSince1970) < 0.5)
+    }
+
+    @Test
+    func `Unchanged head still refreshes the checkpoint past the staleness bound`() async throws {
+        let scratch = try SovereignScratch.make()
+        defer { scratch.remove() }
+        let secrets = freshTestSecrets()
+        let store = EpisodeStore(dbPath: scratch.dbPath)
+        let t1 = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.store(sessionID: UUID(), role: .user, content: "steady history")
+        let first = makeLedger(scratch: scratch, secrets: secrets, now: { t1 })
+        let verdictOne = try await first.verifyChain()
+        #expect(verdictOne.outcome == .verified)
+        let firstSignedAt = try checkpointSignedAt(path: scratch.checkpointPath)
+        #expect(abs(firstSignedAt.timeIntervalSince(t1)) < 1)
+
+        // Heads still agree 37h later, so the ceremony re-attests
+        // instead of failing closed on the aged vote.
+        let t2 = t1.addingTimeInterval(37 * 60 * 60)
+        let second = makeLedger(scratch: scratch, secrets: secrets, now: { t2 })
+        let verdictTwo = try await second.verifyChain()
+        #expect(verdictTwo.outcome == .verified)
+        #expect(verdictTwo.primaryTip == verdictOne.primaryTip)
+        let secondSignedAt = try checkpointSignedAt(path: scratch.checkpointPath)
+        #expect(abs(secondSignedAt.timeIntervalSince(t2)) < 1)
     }
 
     @Test
@@ -391,7 +328,7 @@ struct SovereignAnchorOrphanTests {
         // attests the last head prior attestation reached.
         #expect(!FileManager.default.fileExists(atPath: fixture.scratch.copyPath))
         #expect(!FileManager.default.fileExists(atPath: fixture.scratch.checkpointPath))
-        let anchor = try #require(await readStoredAnchor(fixture.secrets))
+        let anchor = try #require(await readStoredAnchor(dbPath: fixture.scratch.dbPath))
         #expect(anchor.tip == fixture.attestedTip)
     }
 
@@ -415,8 +352,8 @@ struct SovereignAnchorOrphanTests {
         // Re-baseline refreshes the anchor alongside the copy and checkpoint.
         #expect(FileManager.default.fileExists(atPath: fixture.scratch.copyPath))
         #expect(FileManager.default.fileExists(atPath: fixture.scratch.checkpointPath))
-        let anchor = try #require(await readStoredAnchor(fixture.secrets))
+        let anchor = try #require(await readStoredAnchor(dbPath: fixture.scratch.dbPath))
         #expect(anchor.tip == verdict.primaryTip)
-        #expect(abs(anchor.attestedAt - t3.timeIntervalSince1970) < 0.5)
+        #expect(abs(anchor.attestedAt.timeIntervalSince1970 - t3.timeIntervalSince1970) < 0.5)
     }
 }

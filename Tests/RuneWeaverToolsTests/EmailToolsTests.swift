@@ -1204,7 +1204,7 @@ struct EmailToolsTests {
         ])
         #expect(selectable == ["INBOX", "Archive"])
         let payload = Data(#"{"ok": true, "mailboxes": ["INBOX", "Archive"]}"#.utf8)
-        #expect(try EmailBridgeParsing.parseListPayload(payload) == ["INBOX", "Archive"])
+        #expect(try EmailBridgeParsing.parseMailboxListingPayload(payload).mailboxes == ["INBOX", "Archive"])
         let source = EmailIMAPBridgeScript.source
         #expect(source.contains("is_selectable") || source.contains("noselect"))
         #expect(source.lowercased().contains("noselect"))
@@ -1977,7 +1977,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         let listInput = ToolInput(toolName: "email.listMailboxes", argumentsJSON: #"{"account":"missing"}"#)
         let listResult = await bus.execute(toolCall: listInput, context: ToolContext(conversationID: UUID()))
         #expect(listResult.isError == true)
@@ -2008,7 +2008,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let aliased = ToolInput(
                 toolName: "email.move",
@@ -2038,7 +2038,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         let payloads = [
             #"{"account":"personal","id":"1;DROP","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
             #"{"account":"personal","id":"abc","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
@@ -2063,7 +2063,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",
@@ -2092,7 +2092,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",
@@ -2124,7 +2124,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in true }
+        await bus.setApprovalHandler { _, _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",
@@ -2680,13 +2680,13 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Legacy search hit without account decodes with empty account`() throws {
+    func `Search hit without account decodes with empty account`() throws {
         // Bridge payloads from before per-hit account labeling must still decode.
-        let legacy = Data(
+        let raw = Data(
             #"{"id":"42","subject":"Old wire","from":"boss@example.com","date":"Mon, 01 Sep 2025 09:00:00 +0000","snippet":"pre-account payload"}"#
                 .utf8
         )
-        let hit = try JSONDecoder().decode(EmailSearchHit.self, from: legacy)
+        let hit = try JSONDecoder().decode(EmailSearchHit.self, from: raw)
         #expect(hit.account == "")
         #expect(hit.mailbox == "INBOX")
         let encoded = try JSONEncoder().encode(hit)
@@ -2695,12 +2695,12 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Legacy search envelope without multi-account keys decodes tolerantly`() throws {
-        let legacy = Data(
+    func `Search envelope without multi-account keys decodes tolerantly`() throws {
+        let raw = Data(
             #"{"account":"personal","query":"hi","count":1,"messages":[{"id":"42","subject":"Old wire","from":"boss@example.com","date":"Mon, 01 Sep 2025 09:00:00 +0000","snippet":"pre-multi-account payload"}]}"#
                 .utf8
         )
-        let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: legacy)
+        let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: raw)
         #expect(envelope.account == "personal")
         #expect(envelope.accounts == nil)
         #expect(envelope.failedAccounts == nil)
@@ -2708,7 +2708,7 @@ struct EmailToolsTests {
         #expect(envelope.count == envelope.messages.count)
         #expect(envelope.messages[0].account == "")
         // Real tool output carries the multi-account keys even for one account: the search tool
-        // always passes `accounts:[name]` and `failedAccounts:[]`, so a decoded legacy envelope
+        // always passes `accounts:[name]` and `failedAccounts:[]`, so a decoded envelope
         // re-encoded like current tool output gains them rather than keeping the pre-multi-account.
         let encoded = try EmailBridgeParsing.encodeSearchEnvelope(
             account: "personal",

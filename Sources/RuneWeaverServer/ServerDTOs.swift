@@ -1311,7 +1311,6 @@ public struct LiveTurnResponse: Content, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case active
-        case isRunning
         case sessionID
         case text
         case reasoning
@@ -1321,14 +1320,10 @@ public struct LiveTurnResponse: Content, Equatable {
         case startedAt
     }
 
-    /// Decodes tolerantly so payloads from engines that predate the `active`
-    /// rename still parse via `isRunning`, and payloads predating `warnings`
-    /// or `startedAt` degrade to empty rather than failing the poll.
+    /// Decodes an in-flight turn snapshot.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let active = try container.decodeIfPresent(Bool.self, forKey: .active)
-        let legacy = try container.decodeIfPresent(Bool.self, forKey: .isRunning)
-        self.active = active ?? legacy ?? false
+        self.active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
         self.text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
         self.reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning) ?? ""
@@ -1338,12 +1333,10 @@ public struct LiveTurnResponse: Content, Equatable {
         self.startedAt = try container.decodeIfPresent(Double.self, forKey: .startedAt)
     }
 
-    /// Encodes the canonical `active` key plus the legacy `isRunning` alias so
-    /// older dashboards keep parsing while newer clients read `active`.
+    /// Encodes the in-flight turn snapshot under the canonical `active` key.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(active, forKey: .active)
-        try container.encode(active, forKey: .isRunning)
         try container.encode(sessionID, forKey: .sessionID)
         try container.encode(text, forKey: .text)
         try container.encode(reasoning, forKey: .reasoning)

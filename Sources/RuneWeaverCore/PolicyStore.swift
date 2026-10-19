@@ -452,11 +452,7 @@ extension PolicyStore {
         guard let node else { return .safeDefault }
 
         let mode: EgressMode = if case let .string(raw) = node.values["mode"] {
-            if raw.trimmingCharacters(in: .whitespacesAndNewlines) == "deny_by_default" {
-                .allowlistOnly
-            } else {
-                EgressMode(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .allowlistOnly
-            }
+            EgressMode(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .allowlistOnly
         } else {
             .allowlistOnly
         }

@@ -53,13 +53,10 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
         self.rootFolder = rootFolder
     }
 
-    /// Canonical-to-alias key map for compatibility-only decoding.
+    /// Wire key map for decoding.
     private enum CodingKeys: String, CodingKey {
         case service
-        case app
-        case target
         case action
-        case command
         case query
         case title
         case term
@@ -75,12 +72,7 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        // Compatibility-only service aliases kept out of the strict schema:
-        // canonical `service` wins, then legacy `app`/`target`, so drifted
-        // model output still decodes while the wire contract stays canonical-only.
         let rawService = try container.decodeIfPresent(String.self, forKey: .service)
-            ?? container.decodeIfPresent(String.self, forKey: .app)
-            ?? container.decodeIfPresent(String.self, forKey: .target)
         guard let rawService, let service = MediaArrService(rawValue: rawService.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .service,
@@ -90,10 +82,7 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
         }
         self.service = service
 
-        // Compatibility-only action alias kept out of the strict schema:
-        // canonical `action` wins, then legacy `command` for the same drift reason.
         let rawAction = try container.decodeIfPresent(String.self, forKey: .action)
-            ?? container.decodeIfPresent(String.self, forKey: .command)
         guard let rawAction, let action = MediaArrAction(rawValue: rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .action,

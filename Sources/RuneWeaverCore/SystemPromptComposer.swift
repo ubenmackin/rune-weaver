@@ -315,7 +315,7 @@ public enum SystemPromptComposer {
     }
 
     /// The stock identity sentence rendered for an untouched persona.
-    static let legacyIdentityLine = "You are Rune Weaver, a helpful personal assistant across mail, memory, files, and the web."
+    static let defaultIdentityLine = "You are Rune Weaver, a helpful personal assistant across mail, memory, files, and the web."
 
     /// The exact static preset sentence for one tone.
     static func presetSentence(for tone: PersonaTone) -> String {
@@ -351,7 +351,7 @@ public enum SystemPromptComposer {
             avatar: persona.avatar
         )
         guard !effective.isDefaultIdentity else {
-            return legacyIdentityLine
+            return defaultIdentityLine
         }
         var line = "You are \(effectiveName), \(presetSentence(for: persona.tone))"
         if let style = NormalizedText.value(clampedStyle) {

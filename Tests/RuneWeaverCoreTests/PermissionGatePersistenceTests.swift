@@ -1,4 +1,4 @@
-// Rune Weaver Tests — PermissionGate rule persistence, lifecycle administration, and the legacy carry-forward.
+// Rune Weaver Tests — PermissionGate rule persistence and lifecycle administration.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -380,72 +380,6 @@ struct PermissionGatePersistenceTests {
             return
         }
         #expect(abs(liveStamp.timeIntervalSince(restoredStamp)) < 0.001)
-    }
-
-    // MARK: - Legacy carry-forward
-
-    @Test
-    func `legacy trust_grants rows allow exactly the calls they covered`() async throws {
-        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
-        defer { try? FileManager.default.removeItem(atPath: dbPath) }
-
-        // A database from before the rule model existed: three legacy grants,
-        // one of which carries a blank target that no rule may reproduce.
-        let now = Date().timeIntervalSince1970
-        let legacyTable = """
-        CREATE TABLE trust_grants (
-            id TEXT PRIMARY KEY,
-            tool_name TEXT NOT NULL,
-            target TEXT NOT NULL,
-            granted_at REAL NOT NULL,
-            expires_at REAL,
-            duration TEXT NOT NULL
-        );
-        INSERT INTO trust_grants (id, tool_name, target, granted_at, expires_at, duration) VALUES
-            ('AAAAAAAA-0000-0000-0000-000000000001', 'email.send', 'a@x.com', \(now), NULL, 'forever'),
-            ('AAAAAAAA-0000-0000-0000-000000000002', 'messages.send', '+15551234567', \(now), NULL, 'forever'),
-            ('AAAAAAAA-0000-0000-0000-000000000003', 'email.send', '   ', \(now), NULL, 'forever');
-        """
-        #expect(RulePersistenceTestSupport.execRaw(dbPath: dbPath, sql: legacyTable))
-
-        // Boot carries the legacy table forward before anything reads rules.
-        let store = SQLiteAccessRuleStore(dbPath: dbPath)
-        let gate = await PermissionGate.load(ruleStore: store)
-
-        // Every carried row is an exact-target rule: the only scope that
-        // reproduces pre-migration grant matching byte-for-byte.
-        let rules = await gate.activeRules()
-        #expect(rules.count == 2)
-        #expect(rules.allSatisfy { $0.action == .allow })
-        let email = try #require(rules.first { $0.toolName == "email.send" })
-        #expect(email.scope == .exactTarget("a@x.com"))
-        #expect(email.duration == .forever)
-        let messages = try #require(rules.first { $0.toolName == "messages.send" })
-        #expect(messages.scope == .exactTarget("+15551234567"))
-
-        // The call the owner approved still runs, and a near miss still parks.
-        let covered = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":["a@x.com"]}"#)
-        #expect(await gate.checkPermission(toolCall: covered, tool: GateProbeTool(name: "email.send")) == .allowed)
-        let nearMiss = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"b@x.com"}"#)
-        guard case .requiresApproval = await gate.checkPermission(toolCall: nearMiss, tool: GateProbeTool(name: "email.send")) else {
-            Issue.record("Expected a near-miss recipient to park after migration")
-            return
-        }
-        // The canonical handle keeps covering the respelled recipient.
-        let respelled = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+1 (555) 123-4567","text":"hi"}"#)
-        #expect(await gate.checkPermission(toolCall: respelled, tool: GateProbeTool(name: "messages.send")) == .allowed)
-        let displayName = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"Rebecca Mackin","text":"hi"}"#)
-        guard case .requiresApproval = await gate.checkPermission(toolCall: displayName, tool: GateProbeTool(name: "messages.send")) else {
-            Issue.record("Expected a display-name recipient to park after migration")
-            return
-        }
-
-        // The blank target is the malformed-call signature, so it never became
-        // the tool-wide trust the old empty target implied.
-        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send")) == false)
-
-        // Copy-forward only: the legacy ledger survives with every row.
-        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "trust_grants") == 3)
     }
 
     // MARK: - Widen

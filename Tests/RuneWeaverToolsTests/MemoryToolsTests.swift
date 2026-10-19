@@ -137,7 +137,7 @@ struct MemoryToolsTests {
         // memory tools must still succeed without prompting.
         let bus = ToolBus(permissionGate: PermissionGate())
         await MemoryTools.register(on: bus, engine: engine, audit: { _ in })
-        await bus.setLegacyApprovalHandler { _, _ in false }
+        await bus.setApprovalHandler { _, _, _ in false }
         try await engine.storeEpisodic(content: "Sailed past the lighthouse at dawn", sessionID: UUID())
         let remembered = await bus.execute(
             toolCall: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"My favorite lighthouse is brass"}"#),

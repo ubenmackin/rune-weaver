@@ -637,12 +637,6 @@ extension ServerSchedulerWorker {
         }
         return Self.schedulerRunPrompt(for: fresh)
     }
-
-    /// Migrates legacy email-report markers into job cursors at boot.
-    @discardableResult
-    func migrateEmailReportMarkers(memoryEngine: MemoryEngine) async -> SchedulerMarkerMigrationReport {
-        await scheduler.migrateEmailReportMarkers(memoryEngine: memoryEngine)
-    }
 }
 
 // MARK: - Goal Advancement Execution

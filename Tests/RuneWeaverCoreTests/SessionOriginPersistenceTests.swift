@@ -57,39 +57,6 @@ struct SessionOriginPersistenceTests {
         #endif
     }
 
-    /// Builds a database as it looked before either session link existed: a
-    /// sessions table without `goal_id` or `parent_session_id` holding one
-    /// legacy row plus one message.
-    private func buildPreLinkFixture(dbPath: String, sessionID: UUID) -> Bool {
-        let now = Date().timeIntervalSince1970
-        let fixtureSQL = """
-        CREATE TABLE sessions(
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            summary TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            source TEXT
-        );
-        CREATE TABLE messages(
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tool_call_id TEXT,
-            is_error INTEGER,
-            created_at REAL NOT NULL,
-            error_kind TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        );
-        INSERT INTO sessions(id, title, summary, created_at, updated_at, source)
-        VALUES('\(sessionID.uuidString)', 'Legacy session', NULL, \(now), \(now), 'chat');
-        INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at, error_kind)
-        VALUES('\(UUID().uuidString)', '\(sessionID.uuidString)', 'user', 'legacy hello', NULL, NULL, \(now), NULL);
-        """
-        return execRaw(dbPath: dbPath, sql: fixtureSQL)
-    }
-
     @Test
     func `Parent link survives a persist and reload cycle`() async throws {
         #if canImport(SQLite3)
@@ -121,31 +88,6 @@ struct SessionOriginPersistenceTests {
             let summaries = await reopened.listSessions()
             let summary = try #require(summaries.first { $0.id == sessionID })
             #expect(summary.parentSessionID == parentID)
-        #endif
-    }
-
-    @Test
-    func `Pre-link database reads with nil links and no error`() throws {
-        #if canImport(SQLite3)
-            let (base, dbPath) = temporaryDBPath()
-            defer { try? FileManager.default.removeItem(at: base) }
-            let sessionID = UUID()
-            #expect(buildPreLinkFixture(dbPath: dbPath, sessionID: sessionID) == true)
-
-            // The legacy row survives the read with both links nil: an absent
-            // parent column must degrade to unparented, never fail the load.
-            let sessions = try SessionStoreIO.read(dbPath: dbPath)
-            let legacy = try #require(sessions.first { $0.id == sessionID })
-            #expect(legacy.parentSessionID == nil)
-            #expect(legacy.goalID == nil)
-            #expect(legacy.title == "Legacy session")
-            #expect(legacy.messages.map(\.content) == ["legacy hello"])
-
-            // The store's own open ran the additive migration, so the column
-            // now exists alongside the pre-existing ones.
-            let columns = rawColumnNames(dbPath: dbPath, table: "sessions")
-            #expect(columns.contains("parent_session_id") == true)
-            #expect(columns.contains("goal_id") == true)
         #endif
     }
 

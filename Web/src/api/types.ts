@@ -43,7 +43,7 @@ export interface HealthResponse {
   searchStage?: string | null;
   searchStartedAt?: number | null;
   // Verified system-pulse fields from the engine snapshot. Optional because older engines predate
-  // the pulse; absent means unknown and the card falls back to its legacy reading.
+  // the pulse; absent means unknown and the card falls back to its default reading.
   ledgerTip?: string | null;
   // Last explicit ledger verification as Unix seconds, mirroring searchStartedAt. Absent until
   // an explicit verification is stamped.
@@ -225,7 +225,7 @@ export function formatToolProgressCounts(progress: {
 }
 
 // Compares two actions chronologically: numbered rounds ascend oldest-first with untracked rounds
-// partitioning after tracked so mixed legacy+tracked history holds a total order.
+// partitioning after tracked so mixed untracked+tracked history holds a total order.
 export function compareToolActionsByRound(a: ToolAction, b: ToolAction): number {
   const left = normalizeRoundIndex(a.roundIndex);
   const right = normalizeRoundIndex(b.roundIndex);
@@ -261,12 +261,12 @@ export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
     }
   }
   // Numbered rounds sort independently of input order, so a late R0 never
-  // renders after R1 just because legacy actions interleaved it.
+  // renders after R1 just because untracked actions interleaved it.
   const orderedRounds = [...byRound.keys()].sort((a, b) => a - b);
   const groups = orderedRounds.map(
     (round) => byRound.get(round) as ToolAction[],
   );
-  // Untracked legacy actions trail every numbered round to match the sorted
+  // Untracked actions trail every numbered round to match the sorted
   // total order; a missing bucket stays absent rather than emitting empties.
   if (untracked.length > 0) {
     groups.push([...untracked]);
@@ -439,7 +439,7 @@ export interface PermissionRequest {
   egressHost?: string | null;
   // Engine-derived display target naming what "this target" covers. Optional
   // because payloads written before the field carry no key; absent degrades to
-  // the legacy argument scan in approvalsShared.
+  // the fallback argument scan in approvalsShared.
   displayTarget?: string | null;
   sandboxSummary?: string | null;
 }

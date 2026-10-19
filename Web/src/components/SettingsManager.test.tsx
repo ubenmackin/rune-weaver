@@ -1530,8 +1530,8 @@ describe("SettingsManager", () => {
     });
     await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
 
-    // The legacy editor is gone even though the server still returns the
-    // wire-compat field, and the compact pointer names the Access tab.
+    // The legacy editor is gone; the engine no longer exposes origin-config
+    // fields, and the compact pointer names the Access tab.
     expect(screen.queryByLabelText(/Allowed Origins \(one per line\)/i)).toBeNull();
     expect(screen.queryByText(/Homelab Allowed Origins/i)).toBeNull();
     expect(screen.queryByText(/SSRF guard reads that list/i)).toBeNull();

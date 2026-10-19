@@ -110,26 +110,14 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
 #if canImport(SQLite3)
     import SQLite3
 
-    /// Allowlisted tables eligible for schema probing.
+    /// Allowlisted table eligible for schema probing.
     package enum SQLiteKnownTable: Sendable {
-        /// Conversation sessions.
-        case sessions
-        /// Messages belonging to a session.
-        case messages
-        /// Graduated-trust grants.
-        case trustGrants
-        /// Execution audit log shared by chat turns, scheduler runs, and goal advancements.
-        case runLogs
-        /// Durable access rules replacing graduated-trust grants.
+        /// Durable access rules.
         case accessRules
 
         /// Fixed `PRAGMA` statement for the table.
         package var pragmaSQL: String {
             switch self {
-            case .sessions: "PRAGMA table_info(sessions);"
-            case .messages: "PRAGMA table_info(messages);"
-            case .trustGrants: "PRAGMA table_info(trust_grants);"
-            case .runLogs: "PRAGMA table_info(run_logs);"
             case .accessRules: "PRAGMA table_info(access_rules);"
             }
         }
@@ -503,6 +491,31 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
             let measured = try count(dbPath: dbPath)
             try clear(dbPath: dbPath)
             return measured
+        }
+
+        /// Anchor file path for JSON fallback mode.
+        private static func anchorFileURL(dbPath: String) -> URL {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded + ".anchor.json")
+        }
+
+        /// Reads the sovereign anchor in JSON mode.
+        static func readAnchor(dbPath: String) throws -> SovereignAnchor? {
+            let fileURL = anchorFileURL(dbPath: dbPath)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+            let data = try Data(contentsOf: fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .secondsSince1970
+            return try? decoder.decode(SovereignAnchor.self, from: data)
+        }
+
+        /// Writes the sovereign anchor in JSON mode.
+        static func writeAnchor(_ anchor: SovereignAnchor, dbPath: String) throws {
+            let fileURL = anchorFileURL(dbPath: dbPath)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .secondsSince1970
+            let data = try encoder.encode(anchor)
+            try data.write(to: fileURL, options: .atomic)
         }
     }
 #endif

@@ -54,8 +54,6 @@ public struct EventRuleCondition: Sendable, Codable, Equatable {
         case titleContainsSnake = "title_contains"
         case calendarNameContains
         case calendarNameContainsSnake = "calendar_name_contains"
-        case calendarNamesAlias = "calendarNames"
-        case calendarNamesSnakeAlias = "calendar_names"
         case locationContains
         case locationContainsSnake = "location_contains"
         case excludeAllDay
@@ -87,8 +85,8 @@ public struct EventRuleCondition: Sendable, Codable, Equatable {
     }
 
     /// Wire tolerance lives here so dashboard, config file, and durable rows agree: the canonical
-    /// keys stay camelCase while snake_case and the legacy `calendarNames` alias still decode, so a
-    /// renamed dashboard field or an older stored row never silently drops a filter.
+    /// keys stay camelCase while snake_case keys still decode, so a renamed dashboard field
+    /// or an older stored row never silently drops a filter.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         senderContains = try container.decodeIfPresent([String].self, forKey: .senderContains)
@@ -103,8 +101,6 @@ public struct EventRuleCondition: Sendable, Codable, Equatable {
             ?? container.decodeIfPresent([String].self, forKey: .titleContainsSnake)
         calendarNameContains = try container.decodeIfPresent([String].self, forKey: .calendarNameContains)
             ?? container.decodeIfPresent([String].self, forKey: .calendarNameContainsSnake)
-            ?? container.decodeIfPresent([String].self, forKey: .calendarNamesAlias)
-            ?? container.decodeIfPresent([String].self, forKey: .calendarNamesSnakeAlias)
         locationContains = try container.decodeIfPresent([String].self, forKey: .locationContains)
             ?? container.decodeIfPresent([String].self, forKey: .locationContainsSnake)
         excludeAllDay = try container.decodeIfPresent(Bool.self, forKey: .excludeAllDay)
