@@ -395,12 +395,27 @@ describe("AccessCredentialsSection", () => {
     expect(putCalls).toHaveLength(1);
     const sent = JSON.parse((putCalls[0][1] as RequestInit).body as string) as {
       policy: {
-        network: { allowed_domains: string[] };
-        credentials: Record<string, { allowed_hosts: string[] }>;
+        network: { allowedDomains: string[] };
+        credentials: Record<string, { allowedHosts: string[]; allowedMethods: string[]; allowedPathPrefixes: string[] }>;
       };
     };
-    expect(sent.policy.network.allowed_domains).toEqual(["2001:db8::1"]);
-    expect(sent.policy.credentials.IPV6_KEY.allowed_hosts).toEqual(["[2001:db8::1]"]);
+    expect(sent.policy.network.allowedDomains).toEqual(["2001:db8::1"]);
+    expect(sent.policy.credentials.IPV6_KEY.allowedHosts).toEqual(["[2001:db8::1]"]);
+    expect(sent.policy.credentials.IPV6_KEY.allowedMethods).toEqual(["GET"]);
+    expect(sent.policy.credentials.IPV6_KEY.allowedPathPrefixes).toEqual(["/v1"]);
+    // The wire carries camelCase only with no snake_case spellings.
+    const rawSent = JSON.parse((putCalls[0][1] as RequestInit).body as string) as {
+      policy: Record<string, unknown>;
+    };
+    const rawNetwork = (rawSent.policy as { network: Record<string, unknown> }).network;
+    expect(rawNetwork).not.toHaveProperty("allowed_domains");
+    expect(rawNetwork).not.toHaveProperty("blocked_domains");
+    const rawBinding = (
+      rawSent.policy as { credentials: Record<string, Record<string, unknown>> }
+    ).credentials.IPV6_KEY;
+    expect(rawBinding).not.toHaveProperty("allowed_hosts");
+    expect(rawBinding).not.toHaveProperty("allowed_methods");
+    expect(rawBinding).not.toHaveProperty("allowed_path_prefixes");
   });
 
   it("refuses a loaded binding host the supervisor confines", async () => {
@@ -798,5 +813,47 @@ describe("AccessCredentialsSection", () => {
     );
     expect(secretDeletes).toHaveLength(1);
     expect(deletedKeys).toEqual(["GITHUB_TOKEN"]);
+  });
+
+  it("round-trips typed allowed domains through the camelCase write payload", async () => {
+    let sentPolicy: Record<string, unknown> | null = null;
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: Record<string, unknown> };
+        sentPolicy = sent.policy;
+        return jsonResponse({ ...panePolicyPayload, policy: sent.policy });
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<AccessNetworkSection />);
+
+    await waitForPaneLoaded();
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "api.example.com");
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
+    });
+    // The echoed snapshot reloads into the editors, so the typed host persists.
+    expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toContain(
+      "api.example.com"
+    );
+    // The write carries camelCase only with the typed host and credential bindings.
+    expect(sentPolicy).not.toBeNull();
+    const sentNetwork = (sentPolicy as unknown as { network: Record<string, unknown> }).network;
+    expect(sentNetwork).toHaveProperty("allowedDomains", ["api.example.com"]);
+    expect(sentNetwork).not.toHaveProperty("allowed_domains");
+    expect(sentNetwork).not.toHaveProperty("blocked_domains");
+    expect(sentNetwork).not.toHaveProperty("localExemptions");
+    expect(sentNetwork).not.toHaveProperty("local_exemptions");
+    const sentCredentials = (sentPolicy as unknown as { credentials: Record<string, Record<string, unknown>> })
+      .credentials;
+    expect(sentCredentials.GITHUB_TOKEN).toHaveProperty("allowedHosts", ["api.github.com"]);
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_hosts");
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_methods");
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_path_prefixes");
   });
 });

@@ -70,26 +70,13 @@ interface LocalRecheckPreview {
 }
 
 // Whether a raw key is usable as a binding name.
-function isValidPolicyKey(rawKey: string): boolean {
-  return isValidBindingKey(rawKey ?? "");
-}
-
+function isValidPolicyKey(rawKey: string): boolean { return isValidBindingKey(rawKey ?? ""); }
 // Whether a stored value would break TOML quoting.
-function hasTomlBreakingChars(entry: string): boolean {
-  return containsTOMLBreakingScalar(entry ?? "");
-}
-
+function hasTomlBreakingChars(entry: string): boolean { return containsTOMLBreakingScalar(entry ?? ""); }
 // Splits multiline domain text into canonical entries.
-export function parseDomainLines(raw: string): string[] {
-  return parseTrimmedLines(raw ?? "").map((line) => line.toLowerCase());
-}
-
-// Joins stored domains for the multiline editor. One host per line keeps
-// diffs readable and prevents a stray comma from merging two hosts.
-export function formatDomainLines(domains: string[]): string {
-  const newline = String.fromCharCode(10);
-  return (domains ?? []).join(newline);
-}
+export function parseDomainLines(raw: string): string[] { return parseTrimmedLines(raw ?? "").map((line) => line.toLowerCase()); }
+// Joins stored domains for the multiline editor. One host per line keeps diffs readable.
+export function formatDomainLines(domains: string[]): string { return (domains ?? []).join(String.fromCharCode(10)); }
 
 // Whether one domain line could be stored. Only an exact host or a single leading star-dot edge
 // authorizes; every other star shape would never match at runtime yet would read as allowed, so it
@@ -265,9 +252,9 @@ export function canonicalPolicySnapshot(policy: PolicyDraft | null): string | nu
   });
 }
 
-// Normalizes a wire policy payload into the pane draft shape. Accepts the snake_case the engine
-// sends while tolerating camelCase from older doubles, so a drifted payload still loads instead of
-// blanking the form.
+// Normalizes a wire policy payload into the pane draft shape. Accepts the camelCase the engine
+// sends while tolerating snake_case fallback from older drafts, so a drifted payload still loads
+// instead of blanking the form.
 function normalizePolicyPayload(raw: unknown): PolicyDraft {
   const fallback: PolicyDraft = {
     version: 1,
@@ -282,32 +269,30 @@ function normalizePolicyPayload(raw: unknown): PolicyDraft {
       ? (networkRaw.mode as string).trim()
       : "allowlist_only";
   const allowedRaw =
-    (networkRaw.allowed_domains as unknown) ??
     (networkRaw.allowedDomains as unknown) ??
+    (networkRaw.allowed_domains as unknown) ??
     [];
   const blockedRaw =
-    (networkRaw.blocked_domains as unknown) ??
     (networkRaw.blockedDomains as unknown) ??
+    (networkRaw.blocked_domains as unknown) ??
     [];
-  const toList = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   const credentialsRaw = (payload.credentials ?? {}) as Record<string, unknown>;
   const credentials: Record<string, PolicyBindingDraft> = {};
   for (const [key, bindingRaw] of Object.entries(credentialsRaw)) {
     if (!bindingRaw || typeof bindingRaw !== "object") continue;
     const binding = bindingRaw as Record<string, unknown>;
     const hosts =
-      (binding.allowed_hosts as unknown) ?? (binding.allowedHosts as unknown) ?? [];
+      (binding.allowedHosts as unknown) ?? (binding.allowed_hosts as unknown) ?? [];
     const methods =
-      (binding.allowed_methods as unknown) ?? (binding.allowedMethods as unknown) ?? [];
+      (binding.allowedMethods as unknown) ?? (binding.allowed_methods as unknown) ?? [];
     const prefixes =
-      (binding.allowed_path_prefixes as unknown) ??
       (binding.allowedPathPrefixes as unknown) ??
+      (binding.allowed_path_prefixes as unknown) ??
       [];
     credentials[key] = {
-      allowed_hosts: toList(hosts),
-      allowed_methods: toList(methods).map((entry) => entry.trim().toUpperCase()).filter(Boolean),
-      allowed_path_prefixes: toList(prefixes),
+      allowed_hosts: toStringList(hosts),
+      allowed_methods: toStringList(methods).map((entry) => entry.trim().toUpperCase()).filter(Boolean),
+      allowed_path_prefixes: toStringList(prefixes),
     };
   }
   const versionRaw = payload.version;
@@ -319,25 +304,22 @@ function normalizePolicyPayload(raw: unknown): PolicyDraft {
     version: typeof versionRaw === "number" && Number.isInteger(versionRaw) ? versionRaw : 1,
     network: {
       mode: modeRaw,
-      allowed_domains: toList(allowedRaw),
-      blocked_domains: toList(blockedRaw),
-      localExemptions: toList(localRaw),
+      allowed_domains: toStringList(allowedRaw),
+      blocked_domains: toStringList(blockedRaw),
+      localExemptions: toStringList(localRaw),
     },
     credentials,
   };
 }
 
-// Normalizes a string list from the wire. Non-strings drop so a drifted
-// payload still loads instead of blanking the form.
+// Normalizes a string list from the wire. Non-strings drop.
 function toStringList(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 // Normalizes the local-access report the server returns alongside a policy
-// write. Accepts camelCase and snake_case spellings, defaulting every list
-// to [] so a missing report never crashes the disclosure.
+// write. Accepts camelCase; tolerates snake_case only for never_dialable,
+// defaulting every list to [] so a missing report never crashes the disclosure.
 function normalizeLocalAccessReport(raw: unknown): PolicyLocalAccessReport | null {
   if (!raw || typeof raw !== "object") return null;
   const payload = raw as Record<string, unknown>;
@@ -349,18 +331,30 @@ function normalizeLocalAccessReport(raw: unknown): PolicyLocalAccessReport | nul
   return { granted, removed, neverDialable };
 }
 
-// Builds the write payload for PUT and re-check endpoints. localExemptions
-// is server-owned display-only and is never sent as a write input (Shared
-// Contract C): the engine derives the stored set via classification.
+// Translates the snake_case draft into the camelCase wire shape. localExemptions
+// stays server-owned and never rides a write; binding methods normalize to upper case.
 function policyWritePayload(draft: PolicyDraft): unknown {
+  const credentials: Record<
+    string,
+    { allowedHosts: string[]; allowedMethods: string[]; allowedPathPrefixes: string[] }
+  > = {};
+  for (const [key, binding] of Object.entries(draft.credentials ?? {})) {
+    credentials[key] = {
+      allowedHosts: [...(binding.allowed_hosts ?? [])],
+      allowedMethods: [...(binding.allowed_methods ?? [])]
+        .map((entry) => (entry ?? "").trim().toUpperCase())
+        .filter(Boolean),
+      allowedPathPrefixes: [...(binding.allowed_path_prefixes ?? [])],
+    };
+  }
   return {
     version: draft.version,
     network: {
       mode: draft.network.mode,
-      allowed_domains: draft.network.allowed_domains ?? [],
-      blocked_domains: draft.network.blocked_domains ?? [],
+      allowedDomains: [...(draft.network.allowed_domains ?? [])],
+      blockedDomains: [...(draft.network.blocked_domains ?? [])],
     },
-    credentials: draft.credentials ?? {},
+    credentials,
   };
 }
 
@@ -856,24 +850,13 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
   }
 
   function handleModeChange(nextMode: string) {
-    markEdited((prev) => ({
-      ...prev,
-      network: { ...prev.network, mode: nextMode },
-    }));
+    markEdited((prev) => ({ ...prev, network: { ...prev.network, mode: nextMode } }));
   }
-
   function handleAllowedDomainsChangeFromEditor(domains: string[]) {
-    markEdited((prev) => ({
-      ...prev,
-      network: { ...prev.network, allowed_domains: domains },
-    }));
+    markEdited((prev) => ({ ...prev, network: { ...prev.network, allowed_domains: domains } }));
   }
-
   function handleBlockedDomainsChangeFromEditor(domains: string[]) {
-    markEdited((prev) => ({
-      ...prev,
-      network: { ...prev.network, blocked_domains: domains },
-    }));
+    markEdited((prev) => ({ ...prev, network: { ...prev.network, blocked_domains: domains } }));
   }
 
   function handleDeleteBinding(key: string) {
