@@ -102,26 +102,14 @@ describe("AccessNetworkSection", () => {
     return fetchMock;
   }
 
-  // Waits for the snapshot to land in the Network editors: the mode select
-  // proves the DTO arrived. Credentials live behind their sub-tab, so this
-  // gate stays Network-only and credential cases open the tab explicitly.
+  // Waits for the snapshot to land in the Network editors.
   async function waitForPaneLoaded() {
-    await waitFor(() => {
-      expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe(
-        "allowlist_only"
-      );
-    });
+    await waitFor(() => { expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe("allowlist_only"); });
   }
-
   // Opens the Credentials sub-tab and waits for the bindings list to render.
-  async function openCredentialsTab(
-    user: ReturnType<typeof userEvent.setup>,
-    expectedRows = 1
-  ) {
+  async function openCredentialsTab(user: ReturnType<typeof userEvent.setup>, expectedRows = 1) {
     await user.click(screen.getByTestId("policytab-credentials"));
-    await waitFor(() => {
-      expect(screen.getAllByTestId("credential-row").length).toBe(expectedRows);
-    });
+    await waitFor(() => { expect(screen.getAllByTestId("credential-row").length).toBe(expectedRows); });
   }
 
   it("loads the structured snapshot into network editors and the credentials list", async () => {
@@ -130,20 +118,11 @@ describe("AccessNetworkSection", () => {
     render(<AccessNetworkSection />);
 
     await waitForPaneLoaded();
-    expect(
-      (screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value
-    ).toContain("api.example.com");
-    expect(
-      (screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value
-    ).toContain("metadata.google.internal");
-    // Credentials stay behind their sub-tab: Network is default and the
-    // binding row is hidden until the tab opens.
+    expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toContain("api.example.com");
+    expect((screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value).toContain("metadata.google.internal");
+    // Credentials stay behind their sub-tab until the tab opens.
     expect(screen.getByTestId("policytab-network")).toBeDefined();
-    // The egress editors own their vertical rhythm, so the section carries the
-    // scoped spacing class that separates each hint from the next label.
-    expect(screen.getByTestId("network-egress-editors").className).toContain(
-      "policy-network-section"
-    );
+    expect(screen.getByTestId("network-egress-editors").className).toContain("policy-network-section");
     expect(screen.getByTestId("policy-network-section")).toBeDefined();
     expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
     expect(screen.queryByTestId("credentials-list")).toBeNull();
@@ -186,14 +165,30 @@ describe("AccessNetworkSection", () => {
     await waitForPaneLoaded();
     await user.click(screen.getByTestId("policy-save"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
     // The write carries the DTO only; the retired text field never rides along.
     expect(sentBody).not.toBeNull();
     expect(sentBody).toHaveProperty("policy");
     expect(sentBody).not.toHaveProperty("raw_toml");
     expect(sentBody).not.toHaveProperty("rawToml");
+    // The wire shape is camelCase only: network carries allowedDomains plus
+    // blockedDomains while the snake_case spellings never ride along.
+    const sentPolicy = (sentBody as unknown as { policy: Record<string, unknown> }).policy;
+    const sentNetwork = (sentPolicy as { network: Record<string, unknown> }).network;
+    expect(sentNetwork).toHaveProperty("allowedDomains", ["api.example.com"]);
+    expect(sentNetwork).toHaveProperty("blockedDomains", ["metadata.google.internal"]);
+    expect(sentNetwork).not.toHaveProperty("allowed_domains");
+    expect(sentNetwork).not.toHaveProperty("blocked_domains");
+    expect(sentNetwork).not.toHaveProperty("localExemptions");
+    expect(sentNetwork).not.toHaveProperty("local_exemptions");
+    const sentCredentials = (sentPolicy as { credentials: Record<string, Record<string, unknown>> })
+      .credentials;
+    expect(sentCredentials.GITHUB_TOKEN).toHaveProperty("allowedHosts", ["api.github.com"]);
+    expect(sentCredentials.GITHUB_TOKEN).toHaveProperty("allowedMethods", ["GET"]);
+    expect(sentCredentials.GITHUB_TOKEN).toHaveProperty("allowedPathPrefixes", ["/repos"]);
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_hosts");
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_methods");
+    expect(sentCredentials.GITHUB_TOKEN).not.toHaveProperty("allowed_path_prefixes");
     // Policy writes apply live, so the banner promises no restart and no
     // restart banner ever appears for policy.
     expect(screen.getByTestId("policy-saved").textContent).toContain("no restart");
@@ -214,21 +209,49 @@ describe("AccessNetworkSection", () => {
 
     await waitForPaneLoaded();
     await user.click(screen.getByTestId("policy-save"));
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
 
     // Any edit retires the stale success: the banner clears and the dirty
     // marker appears, so success never reads as covering the current draft.
     const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
     await user.clear(allowed);
     await user.type(allowed, "api.example.com\napi.other.com");
-    await waitFor(() => {
-      expect(screen.queryByTestId("policy-saved")).toBeNull();
+    await waitFor(() => { expect(screen.queryByTestId("policy-saved")).toBeNull(); });
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain("Unsaved changes");
+  });
+
+  it("round-trips typed allowed domains through the camelCase write payload", async () => {
+    let sentPolicy: Record<string, unknown> | null = null;
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: Record<string, unknown> };
+        sentPolicy = sent.policy;
+        return jsonResponse({ ...panePolicyPayload, policy: sent.policy });
+      }
+      return jsonResponse(panePolicyPayload);
     });
-    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
-      "Unsaved changes"
-    );
+    const user = userEvent.setup();
+    render(<AccessNetworkSection />);
+
+    await waitForPaneLoaded();
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "api.example.com");
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
+    // The echoed snapshot reloads into the editors, so the typed host persists.
+    expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toContain("api.example.com");
+    // The write carries camelCase only with the typed host.
+    expect(sentPolicy).not.toBeNull();
+    const sentNetwork = (sentPolicy as unknown as { network: Record<string, unknown> }).network;
+    expect(sentNetwork).toHaveProperty("allowedDomains", ["api.example.com"]);
+    expect(sentNetwork).not.toHaveProperty("allowed_domains");
+    expect(sentNetwork).not.toHaveProperty("blocked_domains");
+    expect(sentNetwork).not.toHaveProperty("localExemptions");
+    expect(sentNetwork).not.toHaveProperty("local_exemptions");
+    expect(sentPolicy).not.toHaveProperty("raw_toml");
+    expect(sentPolicy).not.toHaveProperty("rawToml");
   });
 
   it("surfaces invalid domain shapes inline and gates Save", async () => {
@@ -243,9 +266,7 @@ describe("AccessNetworkSection", () => {
     await user.clear(allowed);
     await user.type(allowed, "api.example.com\nfoo.*");
 
-    await waitFor(() => {
-      expect(screen.getByTestId("allowed-domains-error")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("allowed-domains-error")).toBeDefined(); });
     expect(screen.getByTestId("policy-field-errors")).toBeDefined();
     expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(true);
   });
@@ -480,9 +501,7 @@ describe("AccessNetworkSection", () => {
     await waitForPaneLoaded();
     await user.click(screen.getByTestId("policy-save"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
     expect(screen.getByTestId("policy-saved").textContent).toContain(
       "Local network access granted for: office-printer.local"
     );
@@ -494,6 +513,12 @@ describe("AccessNetworkSection", () => {
     const sentNetwork = (sentPolicy as unknown as { network: Record<string, unknown> }).network;
     expect(sentNetwork).not.toHaveProperty("localExemptions");
     expect(sentNetwork).not.toHaveProperty("local_exemptions");
+    // The write shape stays camelCase only with no retired document keys.
+    expect(sentNetwork).toHaveProperty("allowedDomains", ["api.example.com"]);
+    expect(sentNetwork).not.toHaveProperty("allowed_domains");
+    expect(sentNetwork).not.toHaveProperty("blocked_domains");
+    expect(sentPolicy).not.toHaveProperty("raw_toml");
+    expect(sentPolicy).not.toHaveProperty("rawToml");
   });
 
   it("warns on never-dialable hosts after save", async () => {
@@ -548,9 +573,7 @@ describe("AccessNetworkSection", () => {
     await waitForPaneLoaded();
     await user.click(screen.getByTestId("policy-save"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
     expect(screen.getByTestId("policy-local-removed")).toBeDefined();
     expect(screen.getByTestId("policy-local-removed").textContent).toContain(
       "Local network access removed for: old-device.local"
@@ -666,9 +689,7 @@ describe("AccessNetworkSection", () => {
     expect(confirm.disabled).toBe(false);
 
     await user.click(confirm);
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
     expect(screen.getByTestId("policy-saved").textContent).toContain(
       "Local network access granted for: new-printer.local"
     );
@@ -768,9 +789,7 @@ describe("AccessNetworkSection", () => {
         "foo bar"
       );
     });
-    await waitFor(() => {
-      expect(screen.getByTestId("allowed-domains-error")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("allowed-domains-error")).toBeDefined(); });
     expect(screen.getByTestId("allowed-domains-error").textContent).toContain("foo bar");
   });
 
@@ -857,9 +876,7 @@ describe("AccessNetworkSection", () => {
 
     // The Network edit survives the tab switch: the draft stays dirty and the
     // Network section restores the typed value on return.
-    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
-      "Unsaved changes"
-    );
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain("Unsaved changes");
     expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(
       false
     );
@@ -943,9 +960,7 @@ describe("AccessNetworkSection", () => {
     await waitForPaneLoaded();
     expect(screen.queryByTestId("toast")).toBeNull();
     await user.click(screen.getByTestId("policy-save"));
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
+    await waitFor(() => { expect(screen.getByTestId("policy-saved")).toBeDefined(); });
     expect(screen.getByTestId("toast").textContent).toContain("Policy saved");
   });
 

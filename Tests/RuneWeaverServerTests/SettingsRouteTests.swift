@@ -3,7 +3,7 @@
 import Foundation
 import RuneWeaverCore
 @testable import RuneWeaverServer
-import RuneWeaverTools
+@testable import RuneWeaverTools
 import Testing
 import Vapor
 
@@ -1949,6 +1949,32 @@ private struct RetiredRawTOMLPolicyBody: Content {
     let raw_toml: String
 }
 
+/// Snake-case credential body for the fallback PUT probe.
+private struct SnakeCredentialBody: Content {
+    let allowed_hosts: [String]
+    let allowed_methods: [String]
+    let allowed_path_prefixes: [String]
+}
+
+/// Snake-case network body for the fallback PUT probe.
+private struct SnakeNetworkBody: Content {
+    let mode: String
+    let allowed_domains: [String]
+    let blocked_domains: [String]
+}
+
+/// Snake-case policy body for the fallback PUT probe.
+private struct SnakePolicyBody: Content {
+    let version: Int
+    let network: SnakeNetworkBody
+    let credentials: [String: SnakeCredentialBody]
+}
+
+/// Snake-case update body for the fallback PUT probe.
+private struct SnakeUpdatePolicyBody: Content {
+    let policy: SnakePolicyBody
+}
+
 /// Builds one structured policy DTO for PUT and verify probes. mode: Wire mode
 /// string.
 private func structuredPolicyDTO(
@@ -2497,6 +2523,79 @@ struct SettingsPolicyRouteTests {
             #expect(payload.policy.network.blockedDomains == ["fe80::1"])
             #expect(payload.policy.credentials["IPV6_KEY"]?.allowedHosts == ["[2001:db8::1]"])
             #expect(payload.violations.isEmpty)
+        }
+    }
+
+    @Test
+    func `PUT accepts snake_case wire and GET returns camelCase`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // Raw snake wire from an older draft must persist without wiping
+            // the candidate, covering network lists plus binding lists.
+            let rawSnake = #"{"policy":{"version":1,"network":{"mode":"allowlist_only","allowed_domains":["api.example.com"],"blocked_domains":["blocked.example.com"]},"credentials":{"API_KEY":{"allowed_hosts":["api.example.com"],"allowed_methods":["GET"],"allowed_path_prefixes":["/v1"]}}}}"#
+            let decoded = try JSONDecoder().decode(UpdatePolicyRequest.self, from: Data(rawSnake.utf8))
+            #expect(decoded.policy.network.allowedDomains == ["api.example.com"])
+            #expect(decoded.policy.network.blockedDomains == ["blocked.example.com"])
+            #expect(decoded.policy.credentials["API_KEY"]?.allowedHosts == ["api.example.com"])
+
+            // Mixed spellings prefer camel so a partial migration never
+            // silently swaps in the legacy value.
+            let rawMixed = #"{"policy":{"version":1,"network":{"mode":"allowlist_only","allowedDomains":["camel.example.com"],"allowed_domains":["snake.example.com"],"blocked_domains":[]},"credentials":{"API_KEY":{"allowedHosts":["camel.example.com"],"allowed_hosts":["snake.example.com"],"allowed_methods":[],"allowed_path_prefixes":[]}}}}"#
+            let mixed = try JSONDecoder().decode(UpdatePolicyRequest.self, from: Data(rawMixed.utf8))
+            #expect(mixed.policy.network.allowedDomains == ["camel.example.com"])
+            #expect(mixed.policy.credentials["API_KEY"]?.allowedHosts == ["camel.example.com"])
+
+            // Missing keys default to empty so validation still gates shape.
+            let rawEmpty = #"{"policy":{"version":1,"network":{"mode":"allowlist_only"},"credentials":{}}}"#
+            let empty = try JSONDecoder().decode(UpdatePolicyRequest.self, from: Data(rawEmpty.utf8))
+            #expect(empty.policy.network.allowedDomains == [])
+            #expect(empty.policy.network.blockedDomains == [])
+
+            // The route accepts the same snake shape on the wire.
+            let snake = SnakeUpdatePolicyBody(
+                policy: SnakePolicyBody(
+                    version: 1,
+                    network: SnakeNetworkBody(
+                        mode: "allowlist_only",
+                        allowed_domains: ["api.example.com"],
+                        blocked_domains: ["blocked.example.com"]
+                    ),
+                    credentials: [
+                        "API_KEY": SnakeCredentialBody(
+                            allowed_hosts: ["api.example.com"],
+                            allowed_methods: ["GET"],
+                            allowed_path_prefixes: ["/v1"]
+                        )
+                    ]
+                )
+            )
+            // Hostnames classify via DNS, so stub to a public IP
+            // to keep the probe hermetic without live resolution.
+            let dnsProof: @Sendable (String) -> [String] = { _ in ["93.184.216.34"] }
+            let response = try await ApiSSRFGuard.$taskTestDNSResolver.withValue(dnsProof) {
+                try await settingsRequest(
+                    app: app, method: .PUT, path: "/settings/policy", body: snake
+                )
+            }
+            #expect(response.status == .ok)
+            let stored = try await store.snapshot()
+            #expect(stored.network.allowedDomains == ["api.example.com"])
+            #expect(stored.network.blockedDomains == ["blocked.example.com"])
+            #expect(stored.credentials["API_KEY"]?.allowedHosts == ["api.example.com"])
+
+            // GET encodes camelCase only for the dashboard contract.
+            let getResponse = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
+            #expect(getResponse.status == .ok)
+            let payload = try getResponse.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains == ["api.example.com"])
+            #expect(payload.policy.credentials["API_KEY"]?.allowedHosts == ["api.example.com"])
+            let bodyText = getResponse.body.string ?? ""
+            #expect(bodyText.contains("allowedDomains"))
+            #expect(bodyText.contains("allowedHosts"))
+            #expect(!bodyText.contains("allowed_domains"))
+            #expect(!bodyText.contains("allowed_hosts"))
         }
     }
 }

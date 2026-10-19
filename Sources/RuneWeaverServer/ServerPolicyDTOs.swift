@@ -22,16 +22,27 @@ public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case mode
         case allowedDomains
+        case allowedDomainsSnake = "allowed_domains"
         case blockedDomains
+        case blockedDomainsSnake = "blocked_domains"
         case localExemptions
+        case localExemptionsSnake = "local_exemptions"
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         mode = try container.decode(String.self, forKey: .mode)
-        allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? []
-        blockedDomains = try container.decodeIfPresent([String].self, forKey: .blockedDomains) ?? []
-        localExemptions = try container.decodeIfPresent([String].self, forKey: .localExemptions) ?? []
+        // Camel wins when both spellings arrive; absent keys stay empty
+        // so older drafts never wipe the candidate silently.
+        let camelAllowed = try container.decodeIfPresent([String].self, forKey: .allowedDomains)
+        let snakeAllowed = try container.decodeIfPresent([String].self, forKey: .allowedDomainsSnake)
+        allowedDomains = camelAllowed ?? snakeAllowed ?? []
+        let camelBlocked = try container.decodeIfPresent([String].self, forKey: .blockedDomains)
+        let snakeBlocked = try container.decodeIfPresent([String].self, forKey: .blockedDomainsSnake)
+        blockedDomains = camelBlocked ?? snakeBlocked ?? []
+        let camelExemptions = try container.decodeIfPresent([String].self, forKey: .localExemptions)
+        let snakeExemptions = try container.decodeIfPresent([String].self, forKey: .localExemptionsSnake)
+        localExemptions = camelExemptions ?? snakeExemptions ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -53,6 +64,37 @@ public struct CredentialBindingDTO: Content, Sendable, Equatable {
         self.allowedHosts = allowedHosts
         self.allowedMethods = allowedMethods
         self.allowedPathPrefixes = allowedPathPrefixes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case allowedHosts
+        case allowedHostsSnake = "allowed_hosts"
+        case allowedMethods
+        case allowedMethodsSnake = "allowed_methods"
+        case allowedPathPrefixes
+        case allowedPathPrefixesSnake = "allowed_path_prefixes"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Camel wins when both spellings arrive; absent keys stay empty
+        // so older drafts never wipe the candidate silently.
+        let camelHosts = try container.decodeIfPresent([String].self, forKey: .allowedHosts)
+        let snakeHosts = try container.decodeIfPresent([String].self, forKey: .allowedHostsSnake)
+        allowedHosts = camelHosts ?? snakeHosts ?? []
+        let camelMethods = try container.decodeIfPresent([String].self, forKey: .allowedMethods)
+        let snakeMethods = try container.decodeIfPresent([String].self, forKey: .allowedMethodsSnake)
+        allowedMethods = camelMethods ?? snakeMethods ?? []
+        let camelPrefixes = try container.decodeIfPresent([String].self, forKey: .allowedPathPrefixes)
+        let snakePrefixes = try container.decodeIfPresent([String].self, forKey: .allowedPathPrefixesSnake)
+        allowedPathPrefixes = camelPrefixes ?? snakePrefixes ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(allowedHosts, forKey: .allowedHosts)
+        try container.encode(allowedMethods, forKey: .allowedMethods)
+        try container.encode(allowedPathPrefixes, forKey: .allowedPathPrefixes)
     }
 }
 
