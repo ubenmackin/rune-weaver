@@ -59,7 +59,7 @@ describe("Wire API Casing Contract (Web)", () => {
     const filesToScan = [apiPath];
     if (existsSync(apiDir)) {
       for (const entry of readdirSync(apiDir)) {
-        if (entry.endsWith(".ts")) {
+        if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) {
           filesToScan.push(resolve(apiDir, entry));
         }
       }

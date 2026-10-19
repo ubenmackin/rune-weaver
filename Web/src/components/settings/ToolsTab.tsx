@@ -1,6 +1,9 @@
 // Rune Weaver Dashboard — Settings tools tab: tool toggles, plugin management, and workspace storage controls.
+import { useState } from "react";
 import type { PluginSummary, ToolInfo } from "../../api";
 import { AlertTriangleIcon, RefreshIcon, SearchIcon, SettingsIcon, WrenchIcon } from "../icons";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { countToolsAdvancedChanged } from "./settingsAdvancedCounts";
 import PluginsListSection from "./PluginsListSection";
 import {
   getCategoryConfigKey,
@@ -53,6 +56,7 @@ export interface ToolsTabProps {
   setPluginsMarketplaceIndexURL: (val: string) => void;
   pluginsAutoRescan: boolean;
   setPluginsAutoRescan: (val: boolean) => void;
+  validationError?: string | null;
 }
 
 export function ToolsTab({
@@ -99,7 +103,23 @@ export function ToolsTab({
   setPluginsMarketplaceIndexURL,
   pluginsAutoRescan,
   setPluginsAutoRescan,
+  validationError = null,
 }: ToolsTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedChangedCount = countToolsAdvancedChanged(
+    pluginsDir,
+    pluginsMarketplaceIndexURL,
+    pluginsAutoRescan
+  );
+
+  // Reset restores stock plugin location, catalog URL, and scan behavior.
+  const resetToolsAdvanced = () => {
+    setPluginsDir("~/.runeweaver/plugins");
+    setPluginsMarketplaceIndexURL(
+      "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+    );
+    setPluginsAutoRescan(true);
+  };
   const builtIns = safeTools.filter((t) => t.isBuiltIn);
   const q = toolSearchQuery.trim().toLowerCase();
   const filteredTools = builtIns.filter((tool) => {
@@ -118,6 +138,7 @@ export function ToolsTab({
   })).filter((cat) => cat.tools.length > 0);
 
   return (
+    <>
     <div className="settings-section card">
       <div className="settings-section-header">
         <div className="settings-section-title-group">
@@ -440,8 +461,23 @@ export function ToolsTab({
         </div>
       )}
 
-      {/* Plugin Configuration */}
-      <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+    </div>
+    <AdvancedDisclosure
+      tabName="Tools"
+      changedCount={advancedChangedCount}
+      summary={
+        advancedChangedCount > 0
+          ? `${advancedChangedCount} advanced tools ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+          : undefined
+      }
+      open={advancedOpen}
+      onOpenChange={setAdvancedOpen}
+      testId="advanced-tools"
+      validationError={validationError}
+      errorKeywords={["plugins directory", "marketplace", "rescan"]}
+      onReset={resetToolsAdvanced}
+    >
+      <div className="settings-section card">
         <div className="settings-section-title-group">
           <h4 style={{ margin: "0 0 4px 0" }}>Plugin Configuration</h4>
           <p className="settings-section-hint">
@@ -474,7 +510,7 @@ export function ToolsTab({
               required
             />
             <span className="form-group-hint">
-              Remote catalog URL for community runes.
+              Remote catalog URL for community runes. Endpoint override for the rune marketplace.
             </span>
           </div>
         </div>
@@ -492,7 +528,8 @@ export function ToolsTab({
           </div>
         </div>
       </div>
-    </div>
+    </AdvancedDisclosure>
+    </>
   );
 }
 

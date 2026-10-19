@@ -1,8 +1,11 @@
 // Rune Weaver Dashboard — LLM Providers tab pane.
 
+import { useState } from "react";
 import type { ProviderConfigData } from "../../api";
 import { CheckIcon, KeyIcon, PlusIcon, TrashIcon } from "../icons";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import type { ProviderEntry } from "./settingsTypes";
+import { countProvidersAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface ProvidersTabProps {
   defaultProvider: string;
@@ -26,6 +29,28 @@ export interface ProvidersTabProps {
     isStored: boolean,
   ) => void;
   setError: (err: string | null) => void;
+  validationError?: string | null;
+}
+
+const ADVANCED_ERROR_TOKENS = [
+  "contextLength",
+  "context_length",
+  "slotCount",
+  "slot_count",
+  "cachePrompt",
+  "cache_prompt",
+  "supportsVision",
+  "supports_vision",
+  "apiStyle",
+  "api_style",
+];
+
+function matchesAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return ADVANCED_ERROR_TOKENS.some((token) =>
+    lowered.includes(token.toLowerCase())
+  );
 }
 
 export function ProvidersTab({
@@ -42,7 +67,24 @@ export function ProvidersTab({
   secretStatus,
   onOpenStoreSecretModal,
   setError,
+  validationError,
 }: ProvidersTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const changedCount = countProvidersAdvancedChanged(providersList);
+  const advancedError = matchesAdvancedError(validationError)
+    ? validationError
+    : null;
+
+  const handleResetAdvanced = () => {
+    for (const item of providersList) {
+      handleProviderFieldChange(item.id, "apiStyle", "");
+      handleProviderFieldChange(item.id, "contextLength", undefined);
+      handleProviderFieldChange(item.id, "slotCount", undefined);
+      handleProviderFieldChange(item.id, "cachePrompt", undefined);
+      handleProviderFieldChange(item.id, "supportsVision", undefined);
+    }
+  };
+
   return (
     <div className="settings-section card">
       <div className="settings-section-header">
@@ -102,7 +144,7 @@ export function ProvidersTab({
         {providersList.map((item) => {
           const entry = item.config;
           const rawProviderType =
-            entry.providerType || entry.providerType || "";
+            entry.providerType || "";
           const knownProviderTypes = [
             "",
             "custom",
@@ -180,58 +222,38 @@ export function ProvidersTab({
                   />
                 </div>
 
-                <div className="form-row">
-                  <div className="form-group flex-1">
-                    <label htmlFor={`type-${item.id}`}>Provider Type</label>
-                    <select
-                      id={`type-${item.id}`}
-                      className="input-field"
-                      value={rawProviderType}
-                      onChange={(e) =>
-                        handleProviderFieldChange(
-                          item.id,
-                          "providerType",
-                          e.target.value
-                        )
-                      }
-                    >
-                      <option value="">(Auto from name)</option>
-                      <option value="custom">Custom</option>
-                      <option value="openrouter">OpenRouter</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="anthropic">Anthropic</option>
-                      <option value="gemini">Gemini</option>
-                      <option value="ollama">Ollama</option>
-                      <option value="mlx">MLX</option>
-                      <option value="lmstudio">LM Studio</option>
-                      <option value="llamacpp">llama.cpp</option>
-                      <option value="local">Local</option>
-                      {rawProviderType &&
-                        !knownProviderTypes.includes(rawProviderType) && (
-                          <option value={rawProviderType}>
-                            {rawProviderType}
-                          </option>
-                        )}
-                    </select>
-                  </div>
-
-                  <div className="form-group flex-1">
-                    <label htmlFor={`style-${item.id}`}>API Style (Optional)</label>
-                    <input
-                      id={`style-${item.id}`}
-                      type="text"
-                      className="input-field"
-                      value={entry.apiStyle || entry.apiStyle || ""}
-                      onChange={(e) =>
-                        handleProviderFieldChange(
-                          item.id,
-                          "apiStyle",
-                          e.target.value
-                        )
-                      }
-                      placeholder="e.g. chat-completions, responses"
-                    />
-                  </div>
+                <div className="form-group">
+                  <label htmlFor={`type-${item.id}`}>Provider Type</label>
+                  <select
+                    id={`type-${item.id}`}
+                    className="input-field"
+                    value={rawProviderType}
+                    onChange={(e) =>
+                      handleProviderFieldChange(
+                        item.id,
+                        "providerType",
+                        e.target.value
+                      )
+                    }
+                  >
+                    <option value="">(Auto from name)</option>
+                    <option value="custom">Custom</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="mlx">MLX</option>
+                    <option value="lmstudio">LM Studio</option>
+                    <option value="llamacpp">llama.cpp</option>
+                    <option value="local">Local</option>
+                    {rawProviderType &&
+                      !knownProviderTypes.includes(rawProviderType) && (
+                        <option value={rawProviderType}>
+                          {rawProviderType}
+                        </option>
+                      )}
+                  </select>
                 </div>
 
                 <div className="form-group">
@@ -240,7 +262,7 @@ export function ProvidersTab({
                     id={`server-${item.id}`}
                     type="text"
                     className="input-field"
-                    value={entry.serverURL || entry.serverURL || ""}
+                    value={entry.serverURL || ""}
                     onChange={(e) =>
                       handleProviderFieldChange(
                         item.id,
@@ -256,7 +278,7 @@ export function ProvidersTab({
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
                     <label htmlFor={`keyenv-${item.id}`}>API Key Env Var</label>
                     {(() => {
-                      const keyEnv = (entry.apiKeyEnv || entry.apiKeyEnv || "").trim();
+                      const keyEnv = (entry.apiKeyEnv || "").trim();
                       if (!keyEnv) return null;
                       const isStored = !!secretStatus[keyEnv];
                       return (
@@ -287,7 +309,7 @@ export function ProvidersTab({
                     id={`keyenv-${item.id}`}
                     type="text"
                     className="input-field"
-                    value={entry.apiKeyEnv || entry.apiKeyEnv || ""}
+                    value={entry.apiKeyEnv || ""}
                     onChange={(e) =>
                       handleProviderFieldChange(
                         item.id,
@@ -298,132 +320,180 @@ export function ProvidersTab({
                     placeholder="e.g. OPENROUTER_API_KEY or OPENAI_API_KEY"
                   />
                 </div>
-
-                <div className="form-group">
-                  <label htmlFor={`context-${item.id}`}>Context Length (Tokens)</label>
-                  <input
-                    id={`context-${item.id}`}
-                    type="number"
-                    min="1000"
-                    step="1000"
-                    className="input-field"
-                    value={entry.contextLength ?? entry.contextLength ?? ""}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      handleProviderFieldChange(
-                        item.id,
-                        "contextLength",
-                        raw === "" ? undefined : Number(raw)
-                      );
-                    }}
-                    placeholder="Backend default"
-                  />
-                </div>
-
-                <div className="form-row">
-                  <div className="form-group flex-1">
-                    <label htmlFor={`slot-${item.id}`}>Slot Count (llama.cpp)</label>
-                    <input
-                      id={`slot-${item.id}`}
-                      type="number"
-                      min="1"
-                      step="1"
-                      className="input-field"
-                      value={entry.slotCount ?? entry.slotCount ?? ""}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        handleProviderFieldChange(
-                          item.id,
-                          "slotCount",
-                          raw === "" ? undefined : Number(raw)
-                        );
-                      }}
-                      placeholder="Server auto-assign"
-                    />
-                  </div>
-
-                  <div className="form-group flex-1">
-                    <label htmlFor={`cache-${item.id}`}>Prefix Cache (llama.cpp)</label>
-                    <select
-                      id={`cache-${item.id}`}
-                      className="input-field"
-                      value={
-                        (entry.cachePrompt ?? entry.cachePrompt) === undefined
-                          ? ""
-                          : (entry.cachePrompt ?? entry.cachePrompt)
-                            ? "true"
-                            : "false"
-                      }
-                      onChange={(e) =>
-                        handleProviderFieldChange(
-                          item.id,
-                          "cachePrompt",
-                          e.target.value === "" ? undefined : e.target.value === "true"
-                        )
-                      }
-                    >
-                      <option value="">Default (enabled)</option>
-                      <option value="true">Enabled</option>
-                      <option value="false">Disabled</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="form-group">
-                  <label htmlFor={`vision-${item.id}`}>Supports Vision</label>
-                  <select
-                    id={`vision-${item.id}`}
-                    className="input-field"
-                    value={
-                      (entry.supportsVision ?? entry.supportsVision) === undefined
-                        ? ""
-                        : (entry.supportsVision ?? entry.supportsVision)
-                          ? "true"
-                          : "false"
-                    }
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      if (raw === "") {
-                        handleProviderFieldChange(
-                          item.id,
-                          "supportsVision",
-                          undefined
-                        );
-                        return;
-                      }
-                      if (raw === "true") {
-                        handleProviderFieldChange(
-                          item.id,
-                          "supportsVision",
-                          true
-                        );
-                        return;
-                      }
-                      if (raw === "false") {
-                        handleProviderFieldChange(
-                          item.id,
-                          "supportsVision",
-                          false
-                        );
-                        return;
-                      }
-                      const label =
-                        (item.name ?? "").trim() || "(unnamed)";
-                      setError(
-                        `Invalid supportsVision for provider "${label}": supportsVision must be true, false, or empty (unset).`
-                      );
-                    }}
-                  >
-                    <option value="">Default (Auto from provider)</option>
-                    <option value="true">Enabled (Accepts images/screenshots)</option>
-                    <option value="false">Disabled (Text-only)</option>
-                  </select>
-                </div>
               </div>
             </div>
           );
         })}
       </div>
+
+      <AdvancedDisclosure
+        tabName="Providers"
+        changedCount={changedCount}
+        summary={
+          changedCount > 0
+            ? `${changedCount} advanced provider ${changedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        validationError={advancedError}
+        onReset={handleResetAdvanced}
+      >
+        <div className="providers-grid">
+          {providersList.map((item) => {
+            const entry = item.config;
+            return (
+              <div key={`advanced-${item.id}`} className="provider-card">
+                <div className="provider-card-header">
+                  <div className="provider-header-left">
+                    <h4>{item.name || "(unnamed)"}</h4>
+                  </div>
+                </div>
+                <div className="provider-fields">
+                  <div className="form-group">
+                    <label htmlFor={`style-${item.id}`}>API Style (Optional)</label>
+                    <input
+                      id={`style-${item.id}`}
+                      type="text"
+                      className="input-field"
+                      value={entry.apiStyle || ""}
+                      onChange={(e) =>
+                        handleProviderFieldChange(
+                          item.id,
+                          "apiStyle",
+                          e.target.value
+                        )
+                      }
+                      placeholder="e.g. chat-completions, responses"
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor={`context-${item.id}`}>Context Length (Tokens)</label>
+                    <input
+                      id={`context-${item.id}`}
+                      type="number"
+                      min="1000"
+                      step="1000"
+                      className="input-field"
+                      value={entry.contextLength ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        handleProviderFieldChange(
+                          item.id,
+                          "contextLength",
+                          raw === "" ? undefined : Number(raw)
+                        );
+                      }}
+                      placeholder="Backend default"
+                    />
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group flex-1">
+                      <label htmlFor={`slot-${item.id}`}>Slot Count (llama.cpp)</label>
+                      <input
+                        id={`slot-${item.id}`}
+                        type="number"
+                        min="1"
+                        step="1"
+                        className="input-field"
+                        value={entry.slotCount ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          handleProviderFieldChange(
+                            item.id,
+                            "slotCount",
+                            raw === "" ? undefined : Number(raw)
+                          );
+                        }}
+                        placeholder="Server auto-assign"
+                      />
+                    </div>
+
+                    <div className="form-group flex-1">
+                      <label htmlFor={`cache-${item.id}`}>Prefix Cache (llama.cpp)</label>
+                      <select
+                        id={`cache-${item.id}`}
+                        className="input-field"
+                        value={
+                          entry.cachePrompt === undefined
+                            ? ""
+                            : entry.cachePrompt
+                              ? "true"
+                              : "false"
+                        }
+                        onChange={(e) =>
+                          handleProviderFieldChange(
+                            item.id,
+                            "cachePrompt",
+                            e.target.value === "" ? undefined : e.target.value === "true"
+                          )
+                        }
+                      >
+                        <option value="">Default (enabled)</option>
+                        <option value="true">Enabled</option>
+                        <option value="false">Disabled</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor={`vision-${item.id}`}>Supports Vision</label>
+                    <select
+                      id={`vision-${item.id}`}
+                      className="input-field"
+                      value={
+                        entry.supportsVision === undefined
+                          ? ""
+                          : entry.supportsVision
+                            ? "true"
+                            : "false"
+                      }
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          handleProviderFieldChange(
+                            item.id,
+                            "supportsVision",
+                            undefined
+                          );
+                          return;
+                        }
+                        if (raw === "true") {
+                          handleProviderFieldChange(
+                            item.id,
+                            "supportsVision",
+                            true
+                          );
+                          return;
+                        }
+                        if (raw === "false") {
+                          handleProviderFieldChange(
+                            item.id,
+                            "supportsVision",
+                            false
+                          );
+                          return;
+                        }
+                        const label =
+                          (item.name ?? "").trim() || "(unnamed)";
+                        setError(
+                          `Invalid supportsVision for provider "${label}": supportsVision must be true, false, or empty (unset).`
+                        );
+                      }}
+                    >
+                      <option value="">Default (Auto from provider)</option>
+                      <option value="true">Enabled (Accepts images/screenshots)</option>
+                      <option value="false">Disabled (Text-only)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </AdvancedDisclosure>
     </div>
   );
 }

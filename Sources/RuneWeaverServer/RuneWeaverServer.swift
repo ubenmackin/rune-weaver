@@ -156,6 +156,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerBrowserRoutes(app)
     registerSettingsRoutes(app)
     registerIndexRoutes(app)
+    registerOnboardingRoutes(app)
     registerFileRoutes(app)
     registerWebSocketRoute(app)
     registerDashboardRoutes(app, bundle: dashboardBundle)

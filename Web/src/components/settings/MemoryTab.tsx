@@ -1,6 +1,14 @@
 // Rune Weaver Dashboard — Memory & Persistence tab pane.
 
+import { useState } from "react";
 import type { EmbeddingsStatusResponse } from "../../api";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import {
+  countMemoryAdvancedChanged,
+  DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
+  DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER,
+  DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT,
+} from "./settingsAdvancedCounts";
 
 export interface MemoryTabProps {
   memoryEmbeddingBackend: string;
@@ -14,6 +22,26 @@ export interface MemoryTabProps {
   setMemoryEpisodesDBPath: (val: string) => void;
   memoryVectorDBPath: string;
   setMemoryVectorDBPath: (val: string) => void;
+  memoryRecallAutoLimit?: number | string;
+  setMemoryRecallAutoLimit?: (val: number | string) => void;
+  memoryRecallDocPoolMultiplier?: number | string;
+  setMemoryRecallDocPoolMultiplier?: (val: number | string) => void;
+  memoryRecallEpisodicWeight?: number | string;
+  setMemoryRecallEpisodicWeight?: (val: number | string) => void;
+  validationError?: string | null;
+}
+
+function matchesAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("docpool") ||
+    lowered.includes("doc_pool") ||
+    lowered.includes("episodic") ||
+    lowered.includes("embeddingbackend") ||
+    lowered.includes("embedding_backend") ||
+    lowered.includes("recall")
+  );
 }
 
 export function MemoryTab({
@@ -28,7 +56,32 @@ export function MemoryTab({
   setMemoryEpisodesDBPath,
   memoryVectorDBPath,
   setMemoryVectorDBPath,
+  memoryRecallAutoLimit = DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
+  setMemoryRecallAutoLimit,
+  memoryRecallDocPoolMultiplier = DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER,
+  setMemoryRecallDocPoolMultiplier,
+  memoryRecallEpisodicWeight = DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT,
+  setMemoryRecallEpisodicWeight,
+  validationError,
 }: MemoryTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const changedCount = countMemoryAdvancedChanged(
+    memoryRecallDocPoolMultiplier,
+    memoryRecallEpisodicWeight,
+    memoryRecallAutoLimit
+  );
+  const advancedError = matchesAdvancedError(validationError)
+    ? validationError
+    : null;
+
+  const handleResetAdvanced = () => {
+    setMemoryRecallAutoLimit?.(DEFAULT_MEMORY_RECALL_AUTO_LIMIT);
+    setMemoryRecallDocPoolMultiplier?.(
+      DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER
+    );
+    setMemoryRecallEpisodicWeight?.(DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT);
+  };
+
   return (
     <div className="settings-section card">
       <div className="settings-section-title-group">
@@ -138,6 +191,83 @@ export function MemoryTab({
           required
         />
       </div>
+
+      <AdvancedDisclosure
+        tabName="Memory"
+        changedCount={changedCount}
+        summary={
+          changedCount > 0
+            ? `${changedCount} advanced memory ${changedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        validationError={advancedError}
+        onReset={handleResetAdvanced}
+      >
+        <div className="form-group">
+          <label htmlFor="recall-auto-limit">Recall Limit</label>
+          <input
+            id="recall-auto-limit"
+            type="range"
+            className="input-field"
+            min={1}
+            max={50}
+            step={1}
+            value={Number(memoryRecallAutoLimit) || DEFAULT_MEMORY_RECALL_AUTO_LIMIT}
+            onChange={(e) =>
+              setMemoryRecallAutoLimit?.(Number(e.target.value))
+            }
+          />
+          <span className="form-group-hint">
+            Maximum hits injected as system context per turn ({String(memoryRecallAutoLimit)}). Recall depth lives here with the other recall knobs.
+          </span>
+        </div>
+        <div className="form-row" style={{ marginTop: "1rem" }}>
+          <div className="form-group flex-1">
+            <label htmlFor="recall-doc-pool">Document Pool Multiplier</label>
+            <input
+              id="recall-doc-pool"
+              type="number"
+              className="input-field"
+              min={1}
+              max={8}
+              step={1}
+              value={memoryRecallDocPoolMultiplier}
+              onChange={(e) =>
+                setMemoryRecallDocPoolMultiplier?.(
+                  e.target.value === "" ? "" : Number(e.target.value)
+                )
+              }
+              placeholder="4"
+            />
+            <span className="form-group-hint">
+              Widening factor for the document candidate pool (1–8).
+            </span>
+          </div>
+          <div className="form-group flex-1">
+            <label htmlFor="recall-episodic-weight">Episodic Weight</label>
+            <input
+              id="recall-episodic-weight"
+              type="number"
+              className="input-field"
+              min={0}
+              max={1}
+              step={0.05}
+              value={memoryRecallEpisodicWeight}
+              onChange={(e) =>
+                setMemoryRecallEpisodicWeight?.(
+                  e.target.value === "" ? "" : Number(e.target.value)
+                )
+              }
+              placeholder="0.25"
+            />
+            <span className="form-group-hint">
+              Weight mapping episodic rank scores onto the shared scale (0–1).
+            </span>
+          </div>
+        </div>
+      </AdvancedDisclosure>
     </div>
   );
 }

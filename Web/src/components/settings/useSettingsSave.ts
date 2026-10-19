@@ -123,7 +123,7 @@ export function useSettingsSave({
         form.populateForm(updated);
         onSettingsSaved?.();
         pushSuccessToast(
-          "Persona saved. The agent adopts the new identity on engine reload."
+          "Persona saved. Applies live with no restart."
         );
       } catch (failure) {
         setError(
@@ -286,6 +286,50 @@ export function useSettingsSave({
       return;
     }
 
+    const compactionNum = Number(form.compactionThresholdPercent);
+    if (
+      !Number.isInteger(compactionNum) ||
+      compactionNum < 10 ||
+      compactionNum > 100
+    ) {
+      setError(
+        "Invalid compaction threshold: threshold must be between 10 and 100."
+      );
+      setSaving(false);
+      return;
+    }
+
+    const fanoutWorkersRaw = form.fanoutMaxWorkers;
+    if (String(fanoutWorkersRaw).trim() !== "") {
+      const fanoutWorkersNum = Number(fanoutWorkersRaw);
+      if (
+        !Number.isInteger(fanoutWorkersNum) ||
+        fanoutWorkersNum < 1 ||
+        fanoutWorkersNum > 8
+      ) {
+        setError(
+          "Invalid fanout workers: max workers must be between 1 and 8."
+        );
+        setSaving(false);
+        return;
+      }
+    }
+    const fanoutTimeoutRaw = form.fanoutWorkerTimeoutSeconds;
+    if (String(fanoutTimeoutRaw).trim() !== "") {
+      const fanoutTimeoutNum = Number(fanoutTimeoutRaw);
+      if (
+        !Number.isInteger(fanoutTimeoutNum) ||
+        fanoutTimeoutNum < 0 ||
+        fanoutTimeoutNum > 86400
+      ) {
+        setError(
+          "Invalid fanout worker timeout: timeout must be between 0 and 86400 seconds."
+        );
+        setSaving(false);
+        return;
+      }
+    }
+
     const goalsValidationError = validateGoalsFields(
       form.goalsStepIntervalMinutes,
       form.goalsMaxActiveGoals,
@@ -434,6 +478,54 @@ export function useSettingsSave({
       return;
     }
 
+    const recallAutoNum = Number(
+      (form as unknown as { memoryRecallAutoLimit?: unknown })
+        .memoryRecallAutoLimit
+    );
+    if (
+      !Number.isInteger(recallAutoNum) ||
+      recallAutoNum < 1 ||
+      recallAutoNum > 50
+    ) {
+      setError("Invalid recall limit: limit must be between 1 and 50.");
+      setSaving(false);
+      return;
+    }
+    const recallPoolNum = Number(
+      (form as unknown as { memoryRecallDocPoolMultiplier?: unknown })
+        .memoryRecallDocPoolMultiplier
+    );
+    if (
+      !Number.isInteger(recallPoolNum) ||
+      recallPoolNum < 1 ||
+      recallPoolNum > 8
+    ) {
+      setError(
+        "Invalid document pool multiplier: multiplier must be between 1 and 8."
+      );
+      setSaving(false);
+      return;
+    }
+    const recallWeightNum = Number(
+      (form as unknown as { memoryRecallEpisodicWeight?: unknown })
+        .memoryRecallEpisodicWeight
+    );
+    if (
+      !Number.isFinite(recallWeightNum) ||
+      recallWeightNum < 0 ||
+      recallWeightNum > 1
+    ) {
+      setError("Invalid episodic weight: weight must be between 0 and 1.");
+      setSaving(false);
+      return;
+    }
+    const recallBackend = String(form.memoryEmbeddingBackend || "").trim();
+    if (!["local", "provider", "none"].includes(recallBackend)) {
+      setError("Invalid embedding backend: must be one of local, provider, none.");
+      setSaving(false);
+      return;
+    }
+
     const trimmedServerHostname = form.serverHostname.trim();
     if (!trimmedServerHostname) {
       setError("Server hostname cannot be empty.");
@@ -561,6 +653,11 @@ export function useSettingsSave({
         memoryEpisodesDBPath: form.memoryEpisodesDBPath,
         memoryEmbeddingModel: preservedEmbeddingModel,
         memoryEmbeddingBackend: form.memoryEmbeddingBackend,
+        ...( {
+          memoryRecallAutoLimit: recallAutoNum,
+          memoryRecallDocPoolMultiplier: recallPoolNum,
+          memoryRecallEpisodicWeight: recallWeightNum,
+        } as unknown as Record<string, unknown>),
         voiceSTTProvider: form.voiceSTTProvider,
         voiceWhisperModel: form.voiceWhisperModel,
         voiceTTSProvider: form.voiceTTSProvider,

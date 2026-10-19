@@ -1,13 +1,16 @@
 // Rune Weaver Dashboard — Goals & Proactive Suggestions tab pane.
 
+import { useState } from "react";
 import type { GoalsConfigData } from "../../api";
 import {
   DEFAULT_GOALS_MAX_ACTIVE_GOALS,
   DEFAULT_GOALS_MAX_STEPS_PER_GOAL,
   DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL,
+  DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS,
   DEFAULT_GOALS_STEP_INTERVAL_MINUTES,
   DEFAULT_IDEAS_MAX_PER_CYCLE,
   DEFAULT_IDEAS_TIMEOUT_SECONDS,
+  GOAL_CADENCE_OPTIONS,
   GOALS_MAX_ACTIVE_MAX,
   GOALS_MAX_ACTIVE_MIN,
   GOALS_STEP_INTERVAL_MAX_MINUTES,
@@ -16,6 +19,8 @@ import {
   TOOL_ROUNDS_MAX,
   TOOL_ROUNDS_MIN,
 } from "../../api";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { countGoalsAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface GoalsTabProps {
   goalsEnabled: boolean;
@@ -37,6 +42,7 @@ export interface GoalsTabProps {
   ideasTimeoutSeconds: number | string;
   setIdeasTimeoutSeconds: (val: number | string) => void;
   goalsConfig?: GoalsConfigData;
+  validationError?: string | null;
 }
 
 export function GoalsTab({
@@ -59,14 +65,32 @@ export function GoalsTab({
   ideasTimeoutSeconds,
   setIdeasTimeoutSeconds,
   goalsConfig,
+  validationError = null,
 }: GoalsTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedChangedCount = countGoalsAdvancedChanged(
+    goalsMaxActiveGoals,
+    goalsMaxStepsPerGoal,
+    goalsPlanTimeoutSeconds,
+    goalsMaxTriggersPerGoal
+  );
+
+  // Reset restores stock goals caps and budgets.
+  const resetGoalsAdvanced = () => {
+    setGoalsMaxActiveGoals(DEFAULT_GOALS_MAX_ACTIVE_GOALS);
+    setGoalsMaxStepsPerGoal(DEFAULT_GOALS_MAX_STEPS_PER_GOAL);
+    setGoalsPlanTimeoutSeconds(DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS);
+    setGoalsMaxTriggersPerGoal(DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL);
+  };
+
   return (
+    <>
     <div className="settings-section card" data-testid="goals-pane">
       <div className="settings-section-title-group">
         <h3>Goals</h3>
-        <p className="settings-section-hint">
-          Steady long-horizon pursuit and proactive suggestions. Takes effect after restart.
-        </p>
+      <p className="settings-section-hint">
+        Steady long-horizon pursuit and proactive suggestions. Applies live with no restart.
+      </p>
       </div>
       <div className="form-group checkbox-group">
         <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
@@ -109,74 +133,25 @@ export function GoalsTab({
             value={goalsStepIntervalMinutes}
             onChange={(e) => setGoalsStepIntervalMinutes(e.target.value)}
           />
+          <div
+            role="group"
+            aria-label="Cadence presets"
+            style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px" }}
+          >
+            {GOAL_CADENCE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`tools-category-pill${Number(goalsStepIntervalMinutes) === option.value ? " active" : ""}`}
+                aria-pressed={Number(goalsStepIntervalMinutes) === option.value}
+                onClick={() => setGoalsStepIntervalMinutes(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
             Cadence hint stored on each new goal. Range: {GOALS_STEP_INTERVAL_MIN_MINUTES}–{GOALS_STEP_INTERVAL_MAX_MINUTES}. Default is {DEFAULT_GOALS_STEP_INTERVAL_MINUTES} (daily).
-          </p>
-        </div>
-        <div className="form-group flex-1">
-          <label htmlFor="goals-max-active">Max Active Goals</label>
-          <input
-            id="goals-max-active"
-            type="number"
-            className="input-field"
-            min={GOALS_MAX_ACTIVE_MIN}
-            max={GOALS_MAX_ACTIVE_MAX}
-            step={1}
-            value={goalsMaxActiveGoals}
-            onChange={(e) => setGoalsMaxActiveGoals(e.target.value)}
-          />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-            Maximum goals in the active state at once. Range: {GOALS_MAX_ACTIVE_MIN}–{GOALS_MAX_ACTIVE_MAX}. Default is {DEFAULT_GOALS_MAX_ACTIVE_GOALS}.
-          </p>
-        </div>
-      </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
-        <div className="form-group flex-1">
-          <label htmlFor="goals-max-steps">Max Steps Per Goal</label>
-          <input
-            id="goals-max-steps"
-            type="number"
-            className="input-field"
-            min={1}
-            max={24}
-            step={1}
-            value={goalsMaxStepsPerGoal}
-            onChange={(e) => setGoalsMaxStepsPerGoal(e.target.value)}
-          />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-            Maximum plan steps generated per goal. Range: 1–24. Default is {DEFAULT_GOALS_MAX_STEPS_PER_GOAL}.
-          </p>
-        </div>
-        <div className="form-group flex-1">
-          <label htmlFor="goals-plan-timeout">Planning Timeout (seconds)</label>
-          <input
-            id="goals-plan-timeout"
-            type="number"
-            className="input-field"
-            min={0}
-            max={86400}
-            step={1}
-            value={goalsPlanTimeoutSeconds}
-            onChange={(e) => setGoalsPlanTimeoutSeconds(e.target.value)}
-          />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-            Timeout in seconds for model goal decomposition planning (0 for unlimited). Default is 0 (unlimited).
-          </p>
-        </div>
-        <div className="form-group flex-1">
-          <label htmlFor="goals-max-triggers">Max Triggers Per Goal</label>
-          <input
-            id="goals-max-triggers"
-            type="number"
-            className="input-field"
-            min={0}
-            max={32}
-            step={1}
-            value={goalsMaxTriggersPerGoal}
-            onChange={(e) => setGoalsMaxTriggersPerGoal(e.target.value)}
-          />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-            Event wake-up triggers allowed per goal. Range: 0–32. Default is {DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL}.
           </p>
         </div>
       </div>
@@ -218,6 +193,93 @@ export function GoalsTab({
         </div>
       </div>
     </div>
+    <AdvancedDisclosure
+      tabName="Goals"
+      changedCount={advancedChangedCount}
+      summary={
+        advancedChangedCount > 0
+          ? `${advancedChangedCount} advanced goals ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+          : undefined
+      }
+      open={advancedOpen}
+      onOpenChange={setAdvancedOpen}
+      testId="advanced-goals"
+      validationError={validationError}
+      errorKeywords={["goals cap", "max active", "plan length", "max steps", "planning timeout", "plan timeout", "triggers budget", "max triggers"]}
+      onReset={resetGoalsAdvanced}
+    >
+      <div className="settings-section card">
+        <div className="form-row">
+          <div className="form-group flex-1">
+            <label htmlFor="goals-max-active">Max Active Goals</label>
+            <input
+              id="goals-max-active"
+              type="number"
+              className="input-field"
+              min={GOALS_MAX_ACTIVE_MIN}
+              max={GOALS_MAX_ACTIVE_MAX}
+              step={1}
+              value={goalsMaxActiveGoals}
+              onChange={(e) => setGoalsMaxActiveGoals(e.target.value)}
+            />
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Maximum goals in the active state at once. Range: {GOALS_MAX_ACTIVE_MIN}–{GOALS_MAX_ACTIVE_MAX}. Default is {DEFAULT_GOALS_MAX_ACTIVE_GOALS}.
+            </p>
+          </div>
+        </div>
+        <div className="form-row" style={{ marginTop: "1rem" }}>
+          <div className="form-group flex-1">
+            <label htmlFor="goals-max-steps">Max Steps Per Goal</label>
+            <input
+              id="goals-max-steps"
+              type="number"
+              className="input-field"
+              min={1}
+              max={24}
+              step={1}
+              value={goalsMaxStepsPerGoal}
+              onChange={(e) => setGoalsMaxStepsPerGoal(e.target.value)}
+            />
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Maximum plan steps generated per goal. Range: 1–24. Default is {DEFAULT_GOALS_MAX_STEPS_PER_GOAL}.
+            </p>
+          </div>
+          <div className="form-group flex-1">
+            <label htmlFor="goals-plan-timeout">Planning Timeout (seconds)</label>
+            <input
+              id="goals-plan-timeout"
+              type="number"
+              className="input-field"
+              min={0}
+              max={86400}
+              step={1}
+              value={goalsPlanTimeoutSeconds}
+              onChange={(e) => setGoalsPlanTimeoutSeconds(e.target.value)}
+            />
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Timeout in seconds for model goal decomposition planning (0 for unlimited). Default is 0 (unlimited).
+            </p>
+          </div>
+          <div className="form-group flex-1">
+            <label htmlFor="goals-max-triggers">Max Triggers Per Goal</label>
+            <input
+              id="goals-max-triggers"
+              type="number"
+              className="input-field"
+              min={0}
+              max={32}
+              step={1}
+              value={goalsMaxTriggersPerGoal}
+              onChange={(e) => setGoalsMaxTriggersPerGoal(e.target.value)}
+            />
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Event wake-up triggers allowed per goal. Range: 0–32. Default is {DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL}.
+            </p>
+          </div>
+        </div>
+      </div>
+    </AdvancedDisclosure>
+    </>
   );
 }
 

@@ -1,8 +1,10 @@
 // Rune Weaver Dashboard — Web (SearXNG & Browser Automation) tab pane.
 
 import type React from "react";
+import { useState } from "react";
 import {
   DEFAULT_SEARCH_SEARXNG_URL,
+  DEFAULT_SEARCH_TIMEOUT_SECONDS,
   searchStageCopy,
 } from "../../api";
 import { CloseIcon, RefreshIcon, SearchIcon, StopIcon, TrashIcon, WrenchIcon } from "../icons";
@@ -11,6 +13,8 @@ import {
   BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT,
   browserStageCopy,
 } from "./settingsTypes";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { countWebAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface WebSearchTabProps {
   searchActionBusy: boolean;
@@ -46,6 +50,7 @@ export interface WebSearchTabProps {
   browserPythonPath: string | null;
   pendingRemoveSearch: boolean;
   handleConfirmRemoveSearch: () => Promise<void>;
+  validationError?: string | null;
 }
 
 export function WebSearchTab({
@@ -82,8 +87,26 @@ export function WebSearchTab({
   browserPythonPath,
   pendingRemoveSearch,
   handleConfirmRemoveSearch,
+  validationError = null,
 }: WebSearchTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedChangedCount = countWebAdvancedChanged(
+    searchSearxngURL,
+    searchTimeoutSeconds
+  );
+
+  // Reset restores stock SearXNG endpoint plus timeout defaults.
+  const resetWebAdvanced = () => {
+    setSearchSearxngURL(DEFAULT_SEARCH_SEARXNG_URL);
+    setSearchTimeoutSeconds(DEFAULT_SEARCH_TIMEOUT_SECONDS);
+  };
+
+  // Browser provision failures ride the shared disclosure error channel
+  // so its force-open path alone owns venv fallback visibility.
+  const advancedError = validationError || browserError;
+
   return (
+    <>
     <div className="settings-section card">
       <div className="settings-section-title-group">
         <h3>Web</h3>
@@ -160,56 +183,21 @@ export function WebSearchTab({
       </div>
 
       <div className="form-group">
-        <label htmlFor="search-searxng-url">SearXNG URL</label>
+        <label htmlFor="search-max-results">Max Results (Provider Pick)</label>
         <input
-          id="search-searxng-url"
-          type="url"
+          id="search-max-results"
+          type="number"
+          min={1}
+          max={50}
+          step={1}
           className="input-field"
-          value={searchSearxngURL}
-          onChange={(e) => setSearchSearxngURL(e.target.value)}
-          placeholder={DEFAULT_SEARCH_SEARXNG_URL}
+          value={searchMaxResults}
+          onChange={(e) => setSearchMaxResults(e.target.value)}
           required
         />
         <span className="form-group-hint">
-          Base URL of the local SearXNG service (default {DEFAULT_SEARCH_SEARXNG_URL}). Saved to searxng_url under [browser]; changes need a restart to take effect.
+          Max results per query (1 to 50). Saved to max_results under [browser]. Provider pick for the Simple web surface.
         </span>
-      </div>
-
-      <div className="form-row">
-        <div className="form-group flex-1">
-          <label htmlFor="search-timeout">Timeout (seconds)</label>
-          <input
-            id="search-timeout"
-            type="number"
-            min={1}
-            max={120}
-            step={1}
-            className="input-field"
-            value={searchTimeoutSeconds}
-            onChange={(e) => setSearchTimeoutSeconds(e.target.value)}
-            required
-          />
-          <span className="form-group-hint">
-            Per-request timeout in seconds (1 to 120). Saved to search_timeout_seconds under [browser].
-          </span>
-        </div>
-        <div className="form-group flex-1">
-          <label htmlFor="search-max-results">Max Results</label>
-          <input
-            id="search-max-results"
-            type="number"
-            min={1}
-            max={50}
-            step={1}
-            className="input-field"
-            value={searchMaxResults}
-            onChange={(e) => setSearchMaxResults(e.target.value)}
-            required
-          />
-          <span className="form-group-hint">
-            Max results per query (1 to 50). Saved to max_results under [browser].
-          </span>
-        </div>
       </div>
 
       <span data-testid="search-health-text" className="search-health-line">
@@ -352,14 +340,60 @@ export function WebSearchTab({
             </pre>
           </details>
         ) : null}
-
-        <details
-          ref={browserAdvancedRef}
-          className="muted text-sm"
-          data-testid="browser-advanced"
-          style={{ margin: "8px 0 0 0" }}
-        >
-          <summary>Advanced</summary>
+      </div>
+    </div>
+    <AdvancedDisclosure
+      tabName="Web"
+      changedCount={advancedChangedCount}
+      summary={
+        advancedChangedCount > 0
+          ? `${advancedChangedCount} advanced web ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+          : undefined
+      }
+      open={advancedOpen}
+      onOpenChange={setAdvancedOpen}
+      testId="advanced-web"
+      validationError={advancedError}
+      errorKeywords={["searxng", "search timeout", "searxng url", "browser", "playwright", "python", "venv", "chromium"]}
+      onReset={resetWebAdvanced}
+      detailsRef={browserAdvancedRef}
+    >
+      <div className="settings-section card">
+        <div className="form-group">
+          <label htmlFor="search-searxng-url">SearXNG URL (Endpoint Override)</label>
+          <input
+            id="search-searxng-url"
+            type="url"
+            className="input-field"
+            value={searchSearxngURL}
+            onChange={(e) => setSearchSearxngURL(e.target.value)}
+            placeholder={DEFAULT_SEARCH_SEARXNG_URL}
+            required
+          />
+          <span className="form-group-hint">
+            Base URL of the local SearXNG service (default {DEFAULT_SEARCH_SEARXNG_URL}). Saved to searxng_url under [browser]; applies live with no restart.
+          </span>
+        </div>
+        <div className="form-row">
+          <div className="form-group flex-1">
+            <label htmlFor="search-timeout">Timeout (seconds)</label>
+            <input
+              id="search-timeout"
+              type="number"
+              min={1}
+              max={120}
+              step={1}
+              className="input-field"
+              value={searchTimeoutSeconds}
+              onChange={(e) => setSearchTimeoutSeconds(e.target.value)}
+              required
+            />
+            <span className="form-group-hint">
+              Per-request timeout in seconds (1 to 120). Saved to search_timeout_seconds under [browser].
+            </span>
+          </div>
+        </div>
+        <div className="muted text-sm" style={{ marginTop: "12px" }}>
           <p style={{ margin: "8px 0 0 0" }}>
             Managed Python at {browserVenvPath}. Override with RUNEWEAVER_PYTHON_BIN, then managed venv, then PATH python3; pipx and brew playwright-cli do not provide import playwright.
           </p>
@@ -375,8 +409,9 @@ export function WebSearchTab({
             </code>{" "}
             (on Linux also run {browserVenvPath}/bin/python -m playwright install-deps or install system browser dependencies manually). Offline installs fail closed without changing the existing venv.
           </p>
-        </details>
+        </div>
       </div>
+    </AdvancedDisclosure>
 
       {pendingRemoveSearch ? (
         <Modal
@@ -424,7 +459,7 @@ export function WebSearchTab({
           </div>
         </Modal>
       ) : null}
-    </div>
+    </>
   );
 }
 

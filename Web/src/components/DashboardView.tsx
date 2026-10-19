@@ -1,23 +1,25 @@
 // Rune Weaver Dashboard — Executive Control Center & Mission Overview.
 
-import { useCallback, useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  goalNeedsInput,
-  isActiveRunStatus,
-  isGoalUnplanned,
-  listApprovals,
+  deleteGoal,
   listGoals,
-  personaAssistantName,
-  personaAvatarColor,
+  listSessions,
   personaUserName,
-  type Goal,
   type HealthResponse,
-  type PermissionRequest,
   type RunLogEntry,
 } from "../api";
+import { fetchJson } from "../api/http";
+import type { OnboardingStatus as ApiOnboardingStatus } from "../api/onboarding";
 import type { Tab } from "./TopNav";
 import DashboardPromptBar from "./dashboard/DashboardPromptBar";
+import GettingStartedCard, {
+  deriveChecklistItems,
+  countCompletedItems,
+  CHECKLIST_TOTAL,
+  type ChecklistItemId,
+} from "./dashboard/GettingStartedCard";
+import { finishOnboardingWithVerifiedSeed } from "./onboarding/seedPrompt";
 import MorningRecommendations from "./dashboard/MorningRecommendations";
 import NeedsActionQueue from "./dashboard/NeedsActionQueue";
 import WorkingNowStream from "./dashboard/WorkingNowStream";
@@ -26,17 +28,16 @@ import UpcomingSchedules from "./dashboard/UpcomingSchedules";
 import RecentReports from "./dashboard/RecentReports";
 import SystemPulseCard from "./dashboard/SystemPulseCard";
 import RunDetailModal from "./RunDetailModal";
+import { usePersonaSignals } from "./PersonaAvatar";
 import {
-  MAX_TIMER_DELAY_MS,
-  PersonaAvatar,
-  resolveAvatarState,
-  usePersonaSignals,
-  useSleepWakeNow,
-} from "./PersonaAvatar";
-import {
-  getSharedRecentRuns,
-  getSharedRunTitle,
-} from "./dashboard/sharedRuns";
+  DEMO_GOAL_STATEMENT,
+  DEMO_GOAL_TITLE,
+  getGreeting,
+  isDemoGoal,
+} from "./dashboard/dashboardGreeting";
+
+export { DEMO_GOAL_TITLE, DEMO_GOAL_STATEMENT, isDemoGoal };
+import DashboardGreetingIdentity from "./dashboard/DashboardGreetingIdentity";
 import {
   useSharedWebSocket,
   type WSIncomingFrame,
@@ -49,273 +50,200 @@ export interface DashboardViewProps {
   onSelectTab: (tab: Tab) => void;
   onOpenChatWithPrompt?: (prompt: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  onboardingStatus?: ApiOnboardingStatus | null;
+  onOnboardingRefresh?: () => Promise<void>;
+  onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
 }
 
-function getGreeting(): string {
-  const hour = new Date().getHours();
-  if (hour < 12) return "Good morning";
-  if (hour < 18) return "Good afternoon";
-  return "Good evening";
-}
-
-// Rendered avatar edge: large enough to read the sprite's eyes and state ring
-// at a glance, without overwhelming the headline it shares a row with.
-const GREETING_AVATAR_SIZE = 112;
-
-// Caption budget for the in-flight title: one line beside the name, so a runaway
-// scheduler message truncates instead of pushing the greeting row taller.
-const WORKING_TITLE_LIMIT = 60;
-
-// Live poll cadence while work is in flight, mirroring the Working Right Now
-// stream so the caption title stays fresh without extra network. Clamped to
-// the shared platform timer ceiling so the interval can never overflow it.
-const GREETING_POLL_MS = Math.min(4000, MAX_TIMER_DELAY_MS);
-
-// Shortens a run title to one caption line. Truncation keeps the raw message
-// intact everywhere else (the Working Right Now card shows it whole); the
-// ellipsis marks the cut so a clipped title never reads as the full one.
-function truncateWorkingTitle(title: string): string {
-  const trimmed = title.trim();
-  if (trimmed.length <= WORKING_TITLE_LIMIT) return trimmed;
-  return `${trimmed.slice(0, WORKING_TITLE_LIMIT).trimEnd()}…`;
-}
-
-// Run-title fallback lives once in `dashboard/sharedRuns` (`getSharedRunTitle`) with a single trim
-// policy, so the caption and the Working Right Now stream never disagree on what the agent is doing
-// — including leading/trailing whitespace.
-
-// Greeting-row identity cluster: avatar, assistant name, and one-line state caption.
-function DashboardGreetingIdentity({
+// Checklist above the queue; Finish owns the verified seed plus the demo goal.
+function DashboardGettingStarted({
   onSelectTab,
+  onOpenChatWithPrompt,
+  onboardingStatus,
+  onOnboardingRefresh,
+  onOnboardingComplete,
 }: {
   onSelectTab: (tab: Tab) => void;
+  onOpenChatWithPrompt?: (prompt: string) => void;
+  onboardingStatus?: ApiOnboardingStatus | null;
+  onOnboardingRefresh?: () => Promise<void>;
+  onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
 }) {
-  // Persona name, attention, working, and idle clock come from the shared store: Settings publishes
-  // the persona, ChatView publishes activity and the working flag, TopNav mirrors attention from the
-  // badges it already owns.
-  const {
-    persona,
-    attention: storeAttention,
-    working: storeWorking,
-    lastActivityAtMs,
-  } = usePersonaSignals();
-  const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
-  const [blockedGoals, setBlockedGoals] = useState<Goal[]>([]);
-  const [allGoalsCount, setAllGoalsCount] = useState(0);
-  const [activeRuns, setActiveRuns] = useState<RunLogEntry[]>([]);
-  const [allRunsCount, setAllRunsCount] = useState(0);
-  // False until the first snapshot settles: an absent caption while loading
-  // reads as "still looking" rather than a confident idle claim.
+  // App-owned status is the single live source when injected; local fetch stays
+  // as the isolated fallback so the card still renders without the shell.
+  const hasExternal = onboardingStatus !== undefined;
+  const [raw, setRaw] = useState<Record<string, unknown> | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [hasChat, setHasChat] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState<string | null>(null);
+  const creatingDemoRef = useRef(false);
+  const refreshInFlightRef = useRef(false);
+  const refreshPendingRef = useRef(false);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Live snapshot of the signals the sections below already fetch.
-  const fetchGreetingSnapshot = useCallback(
-    async (forceRefresh = false): Promise<void> => {
-      try {
-        const [approvalsRes, goalsRes, runRows] = await Promise.all([
-          listApprovals(20).catch(() => ({ approvals: [], count: 0 })),
-          listGoals().catch(() => ({ goals: [], count: 0 })),
-          getSharedRecentRuns(30, { forceRefresh }).catch(
-            () => [] as RunLogEntry[],
-          ),
-        ]);
-        const approvalRows = Array.isArray(approvalsRes.approvals)
-          ? approvalsRes.approvals
-          : [];
-        const goalRows = Array.isArray(goalsRes.goals) ? goalsRes.goals : [];
-        const runs = Array.isArray(runRows) ? runRows : [];
-        setApprovals(approvalRows);
-        // Single blocked-goal predicate shared with the Needs Action queue so
-        // both surfaces agree on which statuses count as needing input:
-        // goals parked awaiting owner input OR unplanned goals not yet planning.
-        setBlockedGoals(
-          goalRows.filter(
-            (goal) =>
-              goalNeedsInput(goal.status) ||
-              (isGoalUnplanned(goal.status) && !goal.isPlanning),
-          ),
-        );
-        setAllGoalsCount(goalRows.length);
-        setActiveRuns(runs.filter((run) => isActiveRunStatus(run.status)));
-        setAllRunsCount(runs.length);
-      } finally {
-        setLoaded(true);
+  const refreshAll = useCallback(async () => {
+    // Coalesce overlapping lifecycle frames so concurrent polls collapse to one fetch.
+    if (refreshInFlightRef.current) {
+      refreshPendingRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    try {
+      if (hasExternal) {
+        // Live truth rides the App-owned hook; no second status GET here.
+        if (onOnboardingRefresh) {
+          try {
+            await onOnboardingRefresh();
+          } catch {
+            // Stale snapshot still renders; next focus converges.
+          }
+        }
+      } else {
+        try {
+          setRaw((await fetchJson<Record<string, unknown>>("/onboarding/status")) ?? null);
+        } catch {
+          setRaw(null);
+        } finally {
+          setLoaded(true);
+        }
       }
-    },
-    [],
-  );
+      try {
+        const sessions = await listSessions();
+        setHasChat(Array.isArray(sessions.sessions) && sessions.sessions.length > 0);
+      } catch {
+        setHasChat(false);
+      }
+      // Single-flight with Finish creation so a concurrent seed never gets purged.
+      if (creatingDemoRef.current) return;
+      try {
+        const res = await listGoals();
+        const goals = Array.isArray(res.goals) ? res.goals : [];
+        const demo = goals.find((goal) => isDemoGoal(goal));
+        if (demo && goals.some((goal) => !isDemoGoal(goal))) {
+          await deleteGoal(demo.id, true).catch(() => {});
+        }
+      } catch {
+        // Fail-closed: a missed purge retries on the next goal push.
+      }
+    } finally {
+      refreshInFlightRef.current = false;
+      if (refreshPendingRef.current) {
+        refreshPendingRef.current = false;
+        void refreshAll();
+      }
+    }
+  }, [hasExternal, onOnboardingRefresh]);
 
   useEffect(() => {
-    void fetchGreetingSnapshot();
-  }, [fetchGreetingSnapshot]);
+    void refreshAll();
+  }, [refreshAll]);
 
-  // Lifecycle refresh keeps the caption/avatar from sticking to a mount-time
-  // snapshot while the stream moves on: approvals and goal updates refresh the
-  // queue signals, run frames force the shared runs cache past its window.
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
+  }, []);
+
   const handleWSFrame = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as { type?: string }).type;
-      if (
-        frameType === "approval" ||
-        frameType === "approval_decided" ||
-        frameType === "goal_updated" ||
-        frameType === "run_started" ||
-        frameType === "run_completed"
-      ) {
-        void fetchGreetingSnapshot(
-          frameType === "run_started" || frameType === "run_completed",
-        );
+      if (frameType === "goal_updated" || frameType === "run_started" || frameType === "run_completed") {
+        // Trailing debounce keeps run-frame bursts to one refresh per window.
+        if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = setTimeout(() => {
+          void refreshAll();
+        }, 300);
       }
     },
-    [fetchGreetingSnapshot],
+    [refreshAll],
   );
+  useSharedWebSocket(handleWSFrame);
 
-  const handleSocketOpen = useCallback(() => {
-    void fetchGreetingSnapshot(true);
-  }, [fetchGreetingSnapshot]);
-
-  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
-
-  useEffect(() => {
-    function handleVisibility() {
-      if (document.visibilityState === "visible") {
-        void fetchGreetingSnapshot(true);
-      }
+  function handleStart(itemId: ChecklistItemId): void {
+    if (itemId === "chat") {
+      onSelectTab("chat");
+      return;
     }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () =>
-      document.removeEventListener("visibilitychange", handleVisibility);
-  }, [fetchGreetingSnapshot]);
-
-  const approvalsCount = approvals.length;
-  const blockedCount = blockedGoals.length;
-  const totalAttention = approvalsCount + blockedCount;
-  // Single-sourced liveness: the REST snapshot OR the store mirrors. Either
-  // publisher lights the state so the greeting never disagrees with the nav
-  // badges or the chat working flag it already mirrors.
-  const hasAttention = storeAttention || totalAttention > 0;
-  const isWorking = storeWorking || activeRuns.length > 0;
-
-  // Shared sleep-wake clock owns the clamp/re-arm in one place, so idle→sleeping lands without
-  // polling and without a second timer copy. Attention and working short-circuit sleeping, so no
-  // timer arms while either is active.
-  const nowMs = useSleepWakeNow(hasAttention, isWorking, lastActivityAtMs);
-
-  const resolvedState = resolveAvatarState({
-    hasAttention,
-    isWorking,
-    lastActivityAtMs,
-    nowMs,
-  });
-
-  // Polls while work is in flight so the caption title tracks the stream
-  // without waiting for the next lifecycle frame. Rides the shared freshness
-  // window like the stream, so concurrent polls still collapse to one fetch.
-  useEffect(() => {
-    if (!isWorking) return;
-    const interval = setInterval(() => {
-      void fetchGreetingSnapshot();
-    }, GREETING_POLL_MS);
-    return () => clearInterval(interval);
-  }, [isWorking, fetchGreetingSnapshot]);
-
-  // Stock fallback keeps the cluster word-for-word intact when no persona is
-  // saved; the colorway helper degrades to violet inside the avatar.
-  const personaName = personaAssistantName(persona) ?? "Rune Weaver Agent";
-  const personaColor = personaAvatarColor(persona);
-
-  // One line per resolved state. Attention is a button because it routes; working names the first
-  // active run truncated to the caption budget; sleeping rests until the next run and idle confirms
-  // the queue is clear.
-  let caption: ReactNode = null;
-  if (loaded) {
-    if (hasAttention) {
-      // REST counts own the label; the store mirror only lights the state.
-      // When the store fires before the snapshot catches up, a count-less
-      // fallback keeps the button honest instead of claiming zero.
-      const label =
-        totalAttention === 1
-          ? "1 waiting on you"
-          : totalAttention > 1
-            ? `${totalAttention} waiting on you`
-            : "Waiting on you";
-      const destination = approvalsCount > 0 ? "approvals" : "goals";
-      caption = (
-        <button
-          type="button"
-          className="dashboard-greeting-caption-button"
-          data-testid="dashboard-persona-caption"
-          onClick={() => onSelectTab(destination)}
-          aria-label={`${label} — open ${destination}`}
-        >
-          {label}
-        </button>
-      );
-    } else if (isWorking) {
-      // The shared fallback names the run exactly as the stream does; when
-      // the store working flag fires before the runs snapshot catches up,
-      // the bare working copy holds the state without inventing a title.
-      const workingTitle =
-        activeRuns.length > 0
-          ? `Working on ${truncateWorkingTitle(getSharedRunTitle(activeRuns[0]))}`
-          : "Working…";
-      caption = (
-        <span
-          className="dashboard-greeting-caption"
-          data-testid="dashboard-persona-caption"
-        >
-          {workingTitle}
-        </span>
-      );
-    } else if (resolvedState === "sleeping") {
-      caption = (
-        <span
-          className="dashboard-greeting-caption"
-          data-testid="dashboard-persona-caption"
-        >
-          Resting — back on next run
-        </span>
-      );
-    } else if (
-      lastActivityAtMs > 0 ||
-      allGoalsCount > 0 ||
-      allRunsCount > 0
-    ) {
-      caption = (
-        <span
-          className="dashboard-greeting-caption"
-          data-testid="dashboard-persona-caption"
-        >
-          All caught up
-        </span>
-      );
-    } else {
-      caption = null;
+    onSelectTab("settings");
+    if (itemId === "policy" && typeof window !== "undefined") {
+      window.location.hash = "#settings/access";
     }
   }
 
+  async function handleFinish(): Promise<void> {
+    if (finishing || creatingDemoRef.current) return;
+    setFinishing(true);
+    setFinishError(null);
+    creatingDemoRef.current = true;
+    try {
+      let seedRaw: Record<string, unknown> | null;
+      if (hasExternal) {
+        // Single source: prompt derives from the App-owned snapshot.
+        seedRaw = (onboardingStatus ?? null) as unknown as Record<string, unknown> | null;
+      } else {
+        seedRaw = raw;
+        try {
+          seedRaw = await fetchJson<Record<string, unknown>>("/onboarding/status");
+          setRaw(seedRaw ?? null);
+          setLoaded(true);
+        } catch {
+          // Stale snapshot still seeds fail-closed to the generic prompt.
+        }
+      }
+      // Fail-closed finish: a refused completion surfaces and blocks nav.
+      const prompt = await finishOnboardingWithVerifiedSeed({
+        status: seedRaw,
+        complete: onOnboardingComplete,
+      });
+      // Completion closes the App gate; refresh keeps live truth before nav.
+      if (!onOnboardingComplete) await refreshAll().catch(() => {});
+      if (hasExternal) await refreshAll();
+      if (onOpenChatWithPrompt) onOpenChatWithPrompt(prompt);
+      else onSelectTab("chat");
+    } catch (err) {
+      setFinishError(err instanceof Error ? err.message : "Failed to finish onboarding");
+    } finally {
+      creatingDemoRef.current = false;
+      setFinishing(false);
+    }
+  }
+
+  const effectiveRaw: Record<string, unknown> | null = hasExternal
+    ? ((onboardingStatus as unknown as Record<string, unknown> | null) ?? null)
+    : raw;
+  const effectiveLoaded = hasExternal ? true : loaded;
+  if (!effectiveLoaded || effectiveRaw === null) return null;
+  const completed = effectiveRaw.completedAt ?? effectiveRaw.completed_at;
+  if (typeof completed === "string" && completed.trim()) return null;
+  const checklistInput = { ...(effectiveRaw as Record<string, unknown>), firstChatSent: hasChat, hasChat };
+  const items = deriveChecklistItems(checklistInput);
+  if (countCompletedItems(items) >= CHECKLIST_TOTAL) return null;
+  const dismissedValue = effectiveRaw.checklistDismissed ?? effectiveRaw.checklist_dismissed;
+  const dismissed = dismissedValue === true || dismissedValue === 1;
+
   return (
-    <div
-      className="dashboard-greeting-identity"
-      data-testid="dashboard-greeting-identity"
-    >
-      <PersonaAvatar
-        color={personaColor}
-        state={resolvedState}
-        size={GREETING_AVATAR_SIZE}
-        label=""
-        dataTestId="dashboard-persona-avatar"
-      />
-      <div className="dashboard-greeting-identity-text">
-        <span
-          className="dashboard-greeting-assistant"
-          data-testid="dashboard-persona-name"
+    <>
+      {finishError ? (
+        <div
+          className="notice-banner error"
+          role="alert"
+          data-testid="getting-started-finish-error"
         >
-          {personaName}
-        </span>
-        {caption}
-      </div>
-    </div>
+          {finishError}
+        </div>
+      ) : null}
+      <GettingStartedCard
+        status={checklistInput}
+        dismissed={dismissed}
+        finishing={finishing}
+        onDismiss={() => void refreshAll()}
+        onExpand={() => void refreshAll()}
+        onStart={handleStart}
+        onSelectTab={onSelectTab}
+        onFinish={() => void handleFinish()}
+      />
+    </>
   );
 }
 
@@ -326,6 +254,9 @@ export default function DashboardView({
   onSelectTab,
   onOpenChatWithPrompt,
   onOpenSession,
+  onboardingStatus,
+  onOnboardingRefresh,
+  onOnboardingComplete,
 }: DashboardViewProps) {
   const [inspectedRun, setInspectedRun] = useState<RunLogEntry | null>(null);
   const [goalsRefreshTrigger, setGoalsRefreshTrigger] = useState(0);
@@ -381,6 +312,13 @@ export default function DashboardView({
       <div className="dashboard-main-grid">
         {/* Left Column: Primary Workstream (Approvals, Working Now, Recent Reports) */}
         <div className="dashboard-stream-column">
+          <DashboardGettingStarted
+            onSelectTab={onSelectTab}
+            onOpenChatWithPrompt={onOpenChatWithPrompt}
+            onboardingStatus={onboardingStatus}
+            onOnboardingRefresh={onOnboardingRefresh}
+            onOnboardingComplete={onOnboardingComplete}
+          />
           <NeedsActionQueue
             onOpenSession={handleOpenSession}
             onOpenGoals={() => onSelectTab("goals")}
