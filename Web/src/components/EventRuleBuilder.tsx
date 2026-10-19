@@ -351,8 +351,7 @@ export default function EventRuleBuilder({
                               type="text"
                               placeholder="e.g. Work, Personal"
                               value={csvToArray(
-                                rule.condition.calendarNameContains ??
-                                  rule.condition.calendarNames,
+                                rule.condition.calendarNameContains,
                               )}
                               onChange={(e) =>
                                 handleUpdateRule(idx, {
@@ -570,12 +569,12 @@ export default function EventRuleBuilder({
                                   EventRuleAction,
                                   { type: "directTool" }
                                 >;
-                                const needsLegacyOption =
+                                const isDisallowedOption =
                                   current.toolName &&
                                   !ALLOWED_DIRECT_TOOL_NAMES.includes(
                                     current.toolName,
                                   );
-                                return needsLegacyOption ? (
+                                return isDisallowedOption ? (
                                   <option
                                     key={current.toolName}
                                     value={current.toolName}

@@ -41,17 +41,6 @@ struct EmbeddingsConfigTests {
     }
 
     @Test
-    func `Legacy apple backend auto-migrates to local`() throws {
-        let text = """
-        [memory]
-        embedding_backend = "apple"
-        """
-        let root = try TOMLParser.parse(text)
-        let config = try RuneWeaverConfig(decoding: root)
-        #expect(config.memory.embeddingBackend == "local")
-    }
-
-    @Test
     func `Provider backend round-trips`() throws {
         try assertBackendRoundTrips("provider")
     }

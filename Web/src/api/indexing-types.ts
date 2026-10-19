@@ -140,29 +140,18 @@ export interface IndexSourceRunOutcome {
   skippedReason?: string | null;
 }
 
-// Resolves the per-source outcome list from any run shape. The canonical wire key is `sources`;
-// `sourceOutcomes` and `outcomes` are decode-only back-compat with the first present winning.
+// Resolves the per-source outcome list from any run shape under canonical `sources`.
 export function resolveIndexSourceOutcomes(
   run:
     | Pick<IndexLastRunStatus, "sources">
     | Pick<IndexRunResponse, "sources">
-    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | { sources?: unknown }
     | null
     | undefined,
 ): IndexSourceRunOutcome[] {
   if (!run || typeof run !== "object") return [];
-  const record = run as {
-    sources?: unknown;
-    sourceOutcomes?: unknown;
-    outcomes?: unknown;
-  };
-  const candidate = Array.isArray(record.sources)
-    ? record.sources
-    : Array.isArray(record.sourceOutcomes)
-      ? record.sourceOutcomes
-      : Array.isArray(record.outcomes)
-        ? record.outcomes
-        : null;
+  const record = run as { sources?: unknown };
+  const candidate = Array.isArray(record.sources) ? record.sources : null;
   if (!candidate) return [];
   const cleaned: IndexSourceRunOutcome[] = [];
   for (const entry of candidate) {
@@ -205,7 +194,7 @@ export function indexSourceOutcomeForKind(
   run:
     | Pick<IndexLastRunStatus, "sources">
     | Pick<IndexRunResponse, "sources">
-    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | { sources?: unknown }
     | null
     | undefined,
   kind: string,
@@ -224,7 +213,7 @@ export function resolveIndexSourceSkippedReason(
   run:
     | Pick<IndexLastRunStatus, "sources">
     | Pick<IndexRunResponse, "sources">
-    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | { sources?: unknown }
     | null
     | undefined,
   kind: string,

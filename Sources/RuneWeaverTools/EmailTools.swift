@@ -164,8 +164,7 @@ public struct EmailSearchTool: Tool, Sendable {
         guard !resolvedAccounts.isEmpty else {
             return .failure("No email accounts configured. Add an [[email.accounts]] entry to config.toml.", callID: input.callID)
         }
-        // Gateway validation surfaces by localized copy so both the current validation case and
-        // any legacy bridge case with identical copy read the same here; no case matching needed.
+        // Gateway validation surfaces by localized copy; no case matching needed.
         do {
             if resolvedAccounts.count == 1 {
                 return try await singleAccountOutput(

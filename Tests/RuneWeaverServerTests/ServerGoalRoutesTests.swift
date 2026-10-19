@@ -684,12 +684,10 @@ struct GoalSettingsMergeTests {
     }
 }
 
-@Suite("Goal WS Tolerant Decode")
-struct GoalWSTolerantDecodeTests {
+@Suite("Goal WS Decode")
+struct GoalWSDecodeTests {
     @Test
-    func `Snapshot tolerantly decodes origin aliases`() throws {
-        // Pushes written under either of the camelCase origin keys land on
-        // the one snapshot field instead of failing the live update.
+    func `Snapshot round trips origin session under canonical wire spelling`() throws {
         let id = UUID()
         let origin = UUID()
         let now = Date()
@@ -708,39 +706,10 @@ struct GoalWSTolerantDecodeTests {
         let data = try JSONEncoder().encode(snapshot)
         let text = try #require(String(data: data, encoding: .utf8))
         #expect(text.contains("originSessionId"))
+        #expect(!text.contains("originSessionID"))
 
-        for alias in ["originSessionId", "originSessionID"] {
-            let aliased = text.replacingOccurrences(of: "\"originSessionId\"", with: "\"\(alias)\"")
-            let decoded = try JSONDecoder().decode(WSGoalSnapshot.self, from: Data(aliased.utf8))
-            #expect(decoded.originSessionID == origin)
-            #expect(decoded.id == id)
-        }
-    }
-
-    @Test
-    func `Snapshot canonical origin wins when several ride together`() throws {
-        // When old and new keys arrive in one payload the canonical spelling
-        // decides, keeping the snapshot deterministic.
-        let now = Date()
-        let canonicalID = UUID()
-        let legacyID = UUID()
-        let snapshot = WSGoalSnapshot(
-            id: UUID(),
-            title: "Tend herbs",
-            statement: "Keep basil alive",
-            status: GoalStatus.active.rawValue,
-            progress: WSGoalProgress(done: 0, total: 1),
-            stepIntervalMinutes: 60,
-            nextDueAt: now,
-            originSessionID: canonicalID,
-            createdAt: now,
-            updatedAt: now
-        )
-        let data = try JSONEncoder().encode(snapshot)
-        var dict = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        dict["originSessionID"] = legacyID.uuidString
-        let merged = try JSONSerialization.data(withJSONObject: dict)
-        let decoded = try JSONDecoder().decode(WSGoalSnapshot.self, from: merged)
-        #expect(decoded.originSessionID == canonicalID)
+        let decoded = try JSONDecoder().decode(WSGoalSnapshot.self, from: data)
+        #expect(decoded.originSessionID == origin)
+        #expect(decoded.id == id)
     }
 }

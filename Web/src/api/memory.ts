@@ -15,9 +15,9 @@ export function searchMemory(
     q: query,
     limit: String(limit),
   });
-  // The abort signal stays optional so legacy callers keep working while the
-  // dashboard can cancel a stale recall when the owner submits a fresh query.
-  // An aborted fetch rejects and the caller decides whether silence is honest.
+  // The abort signal stays optional while the dashboard can cancel a stale recall
+  // when the owner submits a fresh query. An aborted fetch rejects and the caller
+  // decides whether silence is honest.
   return fetchJson<MemorySearchResponse>(`/memory/search?${params.toString()}`, {
     signal,
   });

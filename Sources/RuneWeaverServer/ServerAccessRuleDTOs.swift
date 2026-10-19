@@ -284,7 +284,7 @@ public struct AccessRuleResponse: Content, Equatable, Sendable {
     }
 
     /// Decodes a rule row, tolerating payloads written before usage counters
-    /// or the derived display label existed so legacy rows still read.
+    /// or the derived display label existed.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)

@@ -63,9 +63,8 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Only the three owned invariants decide the verdict: legacy filesystem and tool tables
-        // parse for compatibility but never fail verification, so an old file with those sections
-        // still verifies when its network and credential bindings are sound.
+        // Only the three owned invariants decide the verdict: credential confinement,
+        // rule shadow prevention, and local exemption safety.
         let violations = PolicyInvariantVerifier.verify(parsed)
         if violations.isEmpty {
             print(TerminalStyle.success("✓ PASSED: All 3 formal security invariants verified successfully."))

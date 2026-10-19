@@ -315,10 +315,6 @@ public actor SchedulerStore {
     var scheduledSends: [UUID: ScheduledSend] = [:]
     /// Optional filesystem path for SQLite persistence.
     public let dbPath: String?
-    /// Process-local half of the one-shot marker-migration latch, covering stores without a durable
-    /// path. Durable stores read their flag from `scheduler_marker_migrations` instead; see
-    /// `migrateEmailReportMarkers`.
-    var markerMigrationConsumed = false
 
     /// Creates an empty store.
     /// - Parameter dbPath: Optional SQLite path for durable persistence.
@@ -648,10 +644,6 @@ public actor SchedulerStore {
     public func toSchedulerConfig() async -> SchedulerConfig {
         await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
     }
-
-    // The legacy email-report marker migration lives in
-    // `SchedulerStoreMarkerMigration.swift` beside its durable latch table, so
-    // this actor stays focused on CRUD and persistence.
 }
 
 extension SchedulerJob {

@@ -232,7 +232,7 @@ struct ApiRequestToolSupervisionTests {
         try Data(
             """
             [network]
-            mode = "deny_by_default"
+            mode = "allowlist_only"
             allowed_domains = []
             blocked_domains = []
             """.utf8

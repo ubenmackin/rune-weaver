@@ -116,14 +116,13 @@ public struct IdeaDTO: Content, Sendable, Equatable {
         case title
         case body
         case goalId
-        case goalID
         case status
         case createdAt
         case updatedAt
     }
 
-    /// Decodes tolerantly across the goal-identifier spellings through the shared alias helper so a
-    /// pushed or hand-built payload lands on one field.
+    /// Decodes the canonical `goalId` key only; an absent payload degrades goal linkage to nil
+    /// and a blank title fails loudly.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -138,7 +137,7 @@ public struct IdeaDTO: Content, Sendable, Equatable {
         }
         self.title = rawTitle
         self.body = try container.decode(String.self, forKey: .body)
-        self.goalID = BrowserNavigateWire.decodeFirst(container, keys: [.goalId, .goalID])
+        self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalId)
         self.status = try container.decode(String.self, forKey: .status)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)

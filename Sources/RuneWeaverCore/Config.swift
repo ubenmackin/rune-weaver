@@ -426,11 +426,6 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     /// Closed set of valid `embedding_backend` selectors.
     public static let allowedEmbeddingBackends = [embeddingBackendLocal, embeddingBackendProvider, embeddingBackendNone]
 
-    /// Migrates a stored `embedding_backend` value, mapping legacy `apple` to `local`.
-    public static func migratedEmbeddingBackend(_ raw: String) -> String {
-        (raw == "apple") ? embeddingBackendLocal : raw
-    }
-
     /// Default SQLite database path for episodic memory, run logs, and scheduler jobs.
     public static let defaultEpisodesDBPath = "~/.runeweaver/memory/episodes.db"
 
@@ -457,14 +452,13 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         case recallBudgets
     }
 
-    /// Decodes a memory config, defaulting an absent backend to `local` and migrating legacy `apple` to `local`.
+    /// Decodes a memory config, defaulting an absent backend to `local`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.vectorDBPath = try container.decode(String.self, forKey: .vectorDBPath)
         self.episodesDBPath = try container.decode(String.self, forKey: .episodesDBPath)
         self.embeddingModel = try container.decode(String.self, forKey: .embeddingModel)
-        let rawBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendLocal
-        self.embeddingBackend = Self.migratedEmbeddingBackend(rawBackend)
+        self.embeddingBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendLocal
         self.recallBudgets = try container.decodeIfPresent(RecallBudgets.self, forKey: .recallBudgets) ?? RecallBudgets()
     }
 }
@@ -1083,8 +1077,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// Voice pipeline providers.
     public var voice: VoiceConfig
     /// Unified container runtime policy for sandboxed execution.
-    /// An absent `[containers]` table keeps the documented defaults; legacy
-    /// `[sandbox]` keys are ignored on load with a logged note and never migrated.
+    /// An absent `[containers]` table keeps the documented defaults.
     public var containers = ContainersConfig()
     /// File-tool access policy (deny list plus allowed roots).
     public var files = FilesConfig()

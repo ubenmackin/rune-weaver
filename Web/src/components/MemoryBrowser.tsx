@@ -20,11 +20,9 @@ import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
 import { CloseIcon, PlusIcon, SearchIcon, TrashIcon } from "./icons";
 
-// Inner memory views plus the outer shell views. The legacy "memory" value is
-// kept so the app shell container still compiles; it normalizes to the Search
-// tab for rendering. Indexing stays as the status pane.
+// Inner memory views plus the indexing status view.
 export type MemoryInnerTab = "search" | "facts" | "episodes";
-export type MemoryTab = MemoryInnerTab | "memory" | "indexing";
+export type MemoryTab = MemoryInnerTab | "indexing";
 
 export interface MemoryBrowserProps {
   view?: MemoryTab;
@@ -41,16 +39,7 @@ export function getInitialMemoryTab(): MemoryTab {
   if (hash.includes("memory/episodes")) return "episodes";
   if (hash.includes("memory/facts")) return "facts";
   if (hash.includes("memory/search")) return "search";
-  if (hash.includes("memory")) return "search";
   return "search";
-}
-
-// Normalizes the legacy shell value to an inner tab for rendering. The shell
-// passes "memory" as a container meaning any inner tab, so it reads as Search
-// until the owner picks another pane.
-function normalizeRenderTab(tab: MemoryTab): MemoryInnerTab | "indexing" {
-  if (tab === "memory") return "search";
-  return tab;
 }
 
 function hashContent(content: string): string {
@@ -96,29 +85,17 @@ const EPISODES_PAGE_SIZE = 20;
 export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
   const [localTab, setLocalTab] = useState<MemoryTab>(() => {
     if (view !== undefined) {
-      // The shell container "memory" means any inner tab: honor a deep link
-      // when it names one, otherwise start on Search.
-      if (view === "memory") {
-        const initial = getInitialMemoryTab();
-        if (initial === "facts" || initial === "episodes" || initial === "search") {
-          return initial;
-        }
-        return "search";
-      }
       return view;
     }
     return getInitialMemoryTab();
   });
 
-  // The shell pins Index Status; the memory container follows local state so
-  // inner tabs can switch without remounting. Standalone follows the URL.
+  // The shell pins Index Status; standalone follows local tab state.
   const activeTab: MemoryTab =
     view === "indexing"
       ? "indexing"
-      : view === "memory"
-        ? (localTab === "indexing" ? "search" : localTab)
-        : localTab;
-  const renderTab = normalizeRenderTab(activeTab);
+      : localTab;
+  const renderTab = activeTab;
 
   function selectInnerTab(next: MemoryInnerTab) {
     setLocalTab(next);
@@ -180,8 +157,7 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
         }
         return;
       }
-      const normalized: MemoryTab = next === "memory" ? "search" : next;
-      setLocalTab((previous) => (previous === normalized ? previous : normalized));
+      setLocalTab((previous) => (previous === next ? previous : next));
     }
     window.addEventListener("hashchange", syncTabFromUrl);
     window.addEventListener("popstate", syncTabFromUrl);

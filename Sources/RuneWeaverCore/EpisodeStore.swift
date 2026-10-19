@@ -253,6 +253,24 @@ public actor EpisodeStore {
             try EpisodeStoreIO.rebuildFTS(dbPath: dbPath)
         }
     }
+
+    // MARK: - Sovereign Anchor
+
+    /// Reads the stored sovereign anchor from the database.
+    public func readSovereignAnchor() async throws -> SovereignAnchor? {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try EpisodeStoreIO.readAnchor(dbPath: dbPath)
+        }
+    }
+
+    /// Stores the sovereign anchor in the database.
+    public func writeSovereignAnchor(_ anchor: SovereignAnchor) async throws {
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run {
+            try EpisodeStoreIO.writeAnchor(anchor, dbPath: dbPath)
+        }
+    }
 }
 
 // MARK: - Store I/O
@@ -421,6 +439,24 @@ enum EpisodeStoreIO {
             return
         #endif
     }
+
+    /// Reads the sovereign anchor, if present.
+    static func readAnchor(dbPath: String) throws -> SovereignAnchor? {
+        #if canImport(SQLite3)
+            return try SQLiteEpisodeStore.readAnchor(dbPath: dbPath)
+        #else
+            return try JSONEpisodeStore.readAnchor(dbPath: dbPath)
+        #endif
+    }
+
+    /// Persists the sovereign anchor.
+    static func writeAnchor(_ anchor: SovereignAnchor, dbPath: String) throws {
+        #if canImport(SQLite3)
+            try SQLiteEpisodeStore.writeAnchor(anchor, dbPath: dbPath)
+        #else
+            try JSONEpisodeStore.writeAnchor(anchor, dbPath: dbPath)
+        #endif
+    }
 }
 
 #if canImport(SQLite3)
@@ -456,57 +492,16 @@ enum EpisodeStoreIO {
                     DELETE FROM episodes_fts WHERE rowid = old.rowid;
                     INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
                 END;
+                CREATE TABLE IF NOT EXISTS sovereign_anchor(
+                    key TEXT PRIMARY KEY,
+                    tip TEXT NOT NULL,
+                    episode_count INTEGER NOT NULL,
+                    attested_at REAL NOT NULL
+                );
                 """,
                 failure: EpisodeStoreError.persistenceFailed
             )
-            // One-time repair for databases created with the earlier broken VALUES('delete', ...)
-            // triggers.
-            try repairLegacyTriggersIfNeeded(handle: handle)
             return handle
-        }
-
-        /// Replaces legacy FTS5 delete-command triggers exactly once.
-        private static func repairLegacyTriggersIfNeeded(handle: OpaquePointer?) throws {
-            guard hasLegacyDeleteTrigger(handle: handle) else { return }
-            try SQLiteHelpers.exec(
-                handle: handle,
-                sql: """
-                DROP TRIGGER IF EXISTS episodes_ad;
-                CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
-                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
-                END;
-                DROP TRIGGER IF EXISTS episodes_au;
-                CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
-                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
-                    INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
-                END;
-                """,
-                failure: EpisodeStoreError.persistenceFailed
-            )
-        }
-
-        /// Whether `episodes_ad`/`episodes_au` still carry the legacy delete-command body.
-        private static func hasLegacyDeleteTrigger(handle: OpaquePointer?) -> Bool {
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(
-                handle,
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name IN ('episodes_ad', 'episodes_au');",
-                -1,
-                &statement,
-                nil
-            ) == SQLITE_OK else {
-                return false
-            }
-            defer { sqlite3_finalize(statement) }
-            while sqlite3_step(statement) == SQLITE_ROW {
-                if let sql = SQLiteHelpers.columnText(statement, index: 0) {
-                    let lowered = sql.lowercased()
-                    if lowered.contains("'delete'") || lowered.contains("\"delete\"") {
-                        return true
-                    }
-                }
-            }
-            return false
         }
 
         /// Executes a multi-statement SQL string.
@@ -1075,6 +1070,55 @@ enum EpisodeStoreIO {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             try exec(handle: handle, sql: "INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild');")
+        }
+
+        /// Reads the sovereign anchor from the database.
+        static func readAnchor(dbPath: String) throws -> SovereignAnchor? {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded), let handle = try open(dbPath: dbPath) else { return nil }
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            let sql = "SELECT tip, episode_count, attested_at FROM sovereign_anchor WHERE key = 'current' LIMIT 1;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw EpisodeStoreError.persistenceFailed("Could not prepare sovereign anchor query")
+            }
+            defer { sqlite3_finalize(statement) }
+            if sqlite3_step(statement) == SQLITE_ROW {
+                guard let tip = SQLiteHelpers.columnText(statement, index: 0) else { return nil }
+                let episodeCount = Int(sqlite3_column_int64(statement, 1))
+                let attestedAtSeconds = sqlite3_column_double(statement, 2)
+                return SovereignAnchor(
+                    tip: tip,
+                    episodeCount: episodeCount,
+                    attestedAt: Date(timeIntervalSince1970: attestedAtSeconds)
+                )
+            }
+            return nil
+        }
+
+        /// Writes or updates the sovereign anchor in the database.
+        static func writeAnchor(_ anchor: SovereignAnchor, dbPath: String) throws {
+            guard let handle = try open(dbPath: dbPath) else { return }
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            let sql = """
+            INSERT INTO sovereign_anchor(key, tip, episode_count, attested_at)
+            VALUES('current', ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                tip = excluded.tip,
+                episode_count = excluded.episode_count,
+                attested_at = excluded.attested_at;
+            """
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw EpisodeStoreError.persistenceFailed("Could not prepare sovereign anchor insert")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: anchor.tip)
+            sqlite3_bind_int64(statement, 2, Int64(anchor.episodeCount))
+            sqlite3_bind_double(statement, 3, anchor.attestedAt.timeIntervalSince1970)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw EpisodeStoreError.persistenceFailed("Could not write sovereign anchor")
+            }
         }
     }
 #endif

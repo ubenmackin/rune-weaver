@@ -19,8 +19,8 @@ import {
   type MessageItem,
 } from "./chatTypes";
 
-// Folds flat summaries from an ordered timeline so legacy readers that only know
-// `text`/`toolActions` still see the same content that segmented rendering shows.
+// Folds flat summaries from an ordered timeline so readers that inspect
+// `text`/`toolActions` see the same content that segmented rendering shows.
 export function flatTextFromSegments(segments: ChatSegment[]): string {
   return segments
     .filter((segment) => segment.kind === "text")
@@ -30,7 +30,7 @@ export function flatTextFromSegments(segments: ChatSegment[]): string {
     .trim();
 }
 
-// Flattens tool batches oldest-first so the legacy bucket matches segment order.
+// Flattens tool batches oldest-first matching segment order.
 export function flatActionsFromSegments(segments: ChatSegment[]): ToolAction[] {
   const flat: ToolAction[] = [];
   for (const segment of segments) {
@@ -509,8 +509,8 @@ export function reconstructMessages(
     if (current == null) return candidate;
     return Math.max(current, candidate);
   };
-  // Flushes one turn's ordered timeline while keeping flat summaries for legacy
-  // readers: text joins text segments and actions flatten tool batches in order.
+  // Flushes one turn's ordered timeline while keeping flat summaries:
+  // text joins text segments and actions flatten tool batches in order.
   const flushTurn = (
     segments: ChatSegment[],
     id: string,

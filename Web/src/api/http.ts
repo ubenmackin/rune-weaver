@@ -73,18 +73,6 @@ export function extractHtmlErrorDetail(
 // Single-owner authentication (HttpOnly session cookie + optional bearer)
 // ---------------------------------------------------------------------------
 
-// Legacy sessionStorage key naming the single owner-token slot in older versions.
-// Retained only to purge any stale tokens previously written to storage.
-export const AUTH_TOKEN_STORAGE_KEY = "runeWeaverToken";
-
-// Immediately purge any legacy token left in sessionStorage to prevent XSS exfiltration
-if (typeof window !== "undefined") {
-  try {
-    window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-  } catch {
-    // Ignore storage unavailability in sandbox / private browsing mode
-  }
-}
 
 // In-memory bearer token for headless / script callers that explicitly supply one.
 // Normal browser UI authentication uses HttpOnly cookies (`rw_session`) so credentials
@@ -144,27 +132,19 @@ export function setAuthToken(token: string): void {
   notifyAuthState();
 }
 
-// Clears authentication state from memory, purges any legacy session storage,
-// and instructs the engine to expire the HttpOnly session cookie via DELETE /auth/session.
+// Clears authentication state from memory and instructs the engine to expire the HttpOnly session cookie via DELETE /auth/session.
 export function clearAuthToken(): void {
   const hadAuth = isSessionAuthenticated();
   authToken = null;
   sessionAuthenticated = false;
-  if (typeof window !== "undefined") {
+  if (typeof window !== "undefined" && hadAuth) {
     try {
-      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      fetch("/auth/session", {
+        method: "DELETE",
+        credentials: "same-origin",
+      }).catch(() => {});
     } catch {
       // Ignore
-    }
-    if (hadAuth) {
-      try {
-        fetch("/auth/session", {
-          method: "DELETE",
-          credentials: "same-origin",
-        }).catch(() => {});
-      } catch {
-        // Ignore
-      }
     }
   }
   if (hadAuth) {
@@ -187,13 +167,6 @@ function handleUnauthorized(): void {
   if (!isSessionAuthenticated()) return;
   authToken = null;
   sessionAuthenticated = false;
-  if (typeof window !== "undefined") {
-    try {
-      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-    } catch {
-      // Ignore
-    }
-  }
   notifyAuthState();
 }
 
@@ -223,13 +196,6 @@ export async function authenticateWithToken(token: string): Promise<Authenticati
   }
   if (response.ok) {
     sessionAuthenticated = true;
-    if (typeof window !== "undefined") {
-      try {
-        window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-      } catch {
-        // Ignore
-      }
-    }
     notifyAuthState();
     return "ok";
   }

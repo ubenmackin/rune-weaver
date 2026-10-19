@@ -62,27 +62,10 @@ export function useIsMobile(breakpoint: number = MOBILE_BREAKPOINT_PX): boolean 
     const handleChange = (event: MediaQueryListEvent) => {
       setIsMobile(event.matches);
     };
-    // Modern browsers expose addEventListener; older Safari exposes only the
-    // legacy addListener pair, so support both without branching the cleanup.
-    if (typeof query.addEventListener === "function") {
-      query.addEventListener("change", handleChange);
-      return () => {
-        query.removeEventListener("change", handleChange);
-      };
-    }
-    // Legacy fallback keeps the same listener identity for add/remove so the
-    // cleanup below detaches exactly what was attached above.
-    const legacyQuery = query as unknown as {
-      addListener: (listener: (event: MediaQueryListEvent) => void) => void;
-      removeListener: (listener: (event: MediaQueryListEvent) => void) => void;
+    query.addEventListener("change", handleChange);
+    return () => {
+      query.removeEventListener("change", handleChange);
     };
-    if (typeof legacyQuery.addListener === "function") {
-      legacyQuery.addListener(handleChange);
-      return () => {
-        legacyQuery.removeListener(handleChange);
-      };
-    }
-    return;
   }, [resolved]);
 
   return isMobile;

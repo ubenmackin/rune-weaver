@@ -465,12 +465,12 @@ public enum ProactiveMode: String, Sendable, Codable, CaseIterable, Equatable {
 
 /// `[proactive]` — interruption policy for background scheduler and goal turns.
 public struct ProactiveConfig: Sendable, Equatable {
-    /// Surfacing mode. Defaults to `all` for byte-for-byte legacy behavior.
+    /// Surfacing mode. Defaults to `all`.
     public var mode: ProactiveMode
     /// Seconds the guarded judge may spend before the gate fails open.
     public var judgeTimeoutSeconds: Int
 
-    /// Default keeps every interruption surfacing like the legacy notifier.
+    /// Default keeps every interruption surfacing.
     public static let defaultMode = ProactiveMode.all
     /// Default judge budget waits out slow local models without stalling the tick.
     public static let defaultJudgeTimeoutSeconds = 15

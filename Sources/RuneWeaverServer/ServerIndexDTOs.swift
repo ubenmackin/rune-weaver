@@ -229,8 +229,6 @@ public struct IndexLastRunStatus: Content, Equatable {
         case truncatedCount
         case truncated
         case sources
-        case sourceOutcomes
-        case outcomes
     }
 
     /// Decodes a last-run row, defaulting absent counts and the skip reason to nil so payloads
@@ -250,10 +248,7 @@ public struct IndexLastRunStatus: Content, Equatable {
         let canonicalTruncated = try container.decodeIfPresent(Int.self, forKey: .truncatedCount)
         let aliasTruncated = try container.decodeIfPresent(Int.self, forKey: .truncated)
         truncatedCount = canonicalTruncated ?? aliasTruncated
-        let canonicalSources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
-        let aliasOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sourceOutcomes)
-        let legacyOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .outcomes)
-        sources = canonicalSources ?? aliasOutcomes ?? legacyOutcomes
+        sources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
     }
 
     /// Encodes a last-run row, omitting absent counts and the skip reason. retired and truncated

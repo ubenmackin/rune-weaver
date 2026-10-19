@@ -2090,17 +2090,14 @@ struct SettingsPolicyRouteTests {
             let loadedFromDisk = await store.loadedFromDisk
             #expect(loadedFromDisk == false)
 
-            // The retired mode name keeps its fail-closed intent by mapping
-            // to the surviving posture instead of refusing the save.
+            // Retired mode name is refused as invalid.
             let legacyResponse = try await settingsRequest(
                 app: app,
                 method: .PUT,
                 path: "/settings/policy",
                 body: UpdatePolicyRequest(policy: structuredPolicyDTO(mode: "deny_by_default"))
             )
-            #expect(legacyResponse.status == .ok)
-            let legacyPayload = try legacyResponse.content.decode(PolicyResponse.self)
-            #expect(legacyPayload.policy.network.mode == EgressMode.allowlistOnly.rawValue)
+            #expect(legacyResponse.status == .badRequest)
         }
     }
 

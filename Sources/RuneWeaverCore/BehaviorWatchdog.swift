@@ -83,8 +83,6 @@ public struct BrakeDecision: Sendable, Equatable {
 public enum WatchdogHealth: String, Sendable, Codable {
     /// Quiet including gestation; the countdown rides info notes, never the dot.
     case green
-    /// Legacy wire-compat only, never produced; gestation stays green-quiet.
-    case yellow
     /// Fail-closed: the brake is engaged and an inbox card is pending.
     case red
 }

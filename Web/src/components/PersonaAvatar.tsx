@@ -305,16 +305,14 @@ function readPrefersReducedMotion(): boolean {
 // Minimal structural shape for the reduced-motion query.
 type ReducedMotionQuery = {
   matches: boolean;
-  addEventListener?: (
+  addEventListener: (
     type: string,
     listener: (e: { matches: boolean }) => void,
   ) => void;
-  removeEventListener?: (
+  removeEventListener: (
     type: string,
     listener: (e: { matches: boolean }) => void,
   ) => void;
-  addListener?: (listener: (e: { matches: boolean }) => void) => void;
-  removeListener?: (listener: (e: { matches: boolean }) => void) => void;
 };
 
 function usePrefersReducedMotion(): boolean {
@@ -355,19 +353,10 @@ function usePrefersReducedMotion(): boolean {
     const onChange = (event: { matches: boolean }) => {
       setReduced(event.matches === true);
     };
-    if (typeof current.addEventListener === "function") {
-      current.addEventListener("change", onChange);
-      return () => {
-        current.removeEventListener?.("change", onChange);
-      };
-    }
-    if (typeof current.addListener === "function") {
-      current.addListener(onChange);
-      return () => {
-        current.removeListener?.(onChange);
-      };
-    }
-    return;
+    current.addEventListener("change", onChange);
+    return () => {
+      current.removeEventListener("change", onChange);
+    };
   }, []);
   return reduced;
 }

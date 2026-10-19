@@ -126,8 +126,6 @@ export default function ScheduleWizardModal({
   const [name, setName] = useState(jobToEdit?.name ?? "");
   const [enabled, setEnabled] = useState(jobToEdit?.enabled ?? true);
   const [prompt, setPrompt] = useState(jobToEdit?.prompt ?? "");
-  // Normalize stored rules on load so legacy calendar aliases populate the
-  // current form instead of rendering as blank filters.
   const [rules, setRules] = useState<EventRule[]>(() =>
     (jobToEdit?.rules ?? []).map((rule) => normalizeEventRule(rule)),
   );
@@ -314,8 +312,6 @@ export default function ScheduleWizardModal({
           return;
         }
       }
-      // Encode the canonical engine spelling so legacy aliases never reach
-      // the wire even when an older stored row populated the form.
       const canonicalRules = rules.map((rule) => normalizeEventRule(rule));
 
       if (triggerType === "cron") {

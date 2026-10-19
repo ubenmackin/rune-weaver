@@ -6,21 +6,19 @@ import { isMobileViewport, useIsMobile } from "./useIsMobile";
 import { MOBILE_BREAKPOINT_PX } from "../components/navigationConfig";
 
 // Minimal MediaQueryList double capturing the change subscriber so tests can
-// drive viewport transitions without a layout engine. Modern and legacy
-// subscribe paths share one listener slot to mirror the production branching.
+// drive viewport transitions without a layout engine. Production and this
+// double subscribe through the single standard addEventListener path.
 interface MockQuery {
   matches: boolean;
   media: string;
   addEventListener: ReturnType<typeof vi.fn>;
   removeEventListener: ReturnType<typeof vi.fn>;
-  addListener: ReturnType<typeof vi.fn>;
-  removeListener: ReturnType<typeof vi.fn>;
   fire: (matches: boolean) => void;
 }
 
 function installMatchMedia(
   matches: boolean,
-  options: { legacyOnly?: boolean; queries?: string[] } = {},
+  options: { queries?: string[] } = {},
 ): { query: MockQuery; queries: string[] } {
   const queries: string[] = options.queries ?? [];
   let listener: ((event: { matches: boolean }) => void) | null = null;
@@ -39,20 +37,8 @@ function installMatchMedia(
     removeEventListener: vi.fn(() => {
       listener = null;
     }),
-    addListener: vi.fn((cb: (e: { matches: boolean }) => void) => {
-      listener = cb;
-    }),
-    removeListener: vi.fn(() => {
-      listener = null;
-    }),
     fire,
   } as unknown as MockQuery;
-  // Legacy-only doubles expose no modern subscribe pair so the hook must fall
-  // back to addListener without branching the cleanup identity.
-  if (options.legacyOnly) {
-    (query as unknown as Record<string, unknown>).addEventListener = undefined;
-    (query as unknown as Record<string, unknown>).removeEventListener = undefined;
-  }
   const stub = vi.fn((mediaQuery: string) => {
     queries.push(mediaQuery);
     query.media = mediaQuery;
@@ -85,12 +71,6 @@ function installViewport(widthPx: number): { queries: string[] } {
         listeners.add(cb);
       }),
       removeEventListener: vi.fn((_event: string, cb: (e: { matches: boolean }) => void) => {
-        listeners.delete(cb);
-      }),
-      addListener: vi.fn((cb: (e: { matches: boolean }) => void) => {
-        listeners.add(cb);
-      }),
-      removeListener: vi.fn((cb: (e: { matches: boolean }) => void) => {
         listeners.delete(cb);
       }),
     };
@@ -204,17 +184,6 @@ describe("useIsMobile breakpoint contract", () => {
     expect(query.removeEventListener).toHaveBeenCalledTimes(1);
   });
 
-  it("supports the legacy addListener pair where modern events are absent", () => {
-    const { query } = installMatchMedia(false, { legacyOnly: true });
-    const { result, unmount } = renderHook(() => useIsMobile());
-    expect(query.addListener).toHaveBeenCalledTimes(1);
-    act(() => {
-      query.fire(true);
-    });
-    expect(result.current).toBe(true);
-    unmount();
-    expect(query.removeListener).toHaveBeenCalledTimes(1);
-  });
 
   it("honors an explicit breakpoint override for experiments", () => {
     const { queries } = installMatchMedia(true);

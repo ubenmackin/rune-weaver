@@ -63,50 +63,7 @@ enum SessionStoreIO {
 #if canImport(SQLite3)
     /// Minimal SQLite store for sessions and their messages.
     enum SQLiteSessionStore {
-        /// Lock-guarded record of paths already probed for migrations.
-        private final class MigrationPathCache: Sendable {
-            /// Probed standardized paths guarded by OSAllocatedUnfairLock.
-            private let paths = OSAllocatedUnfairLock(initialState: Set<String>())
-
-            /// Creates an empty cache.
-            init() {}
-
-            /// Checks whether a path was already probed.
-            /// - Parameter key: Standardized path.
-            /// - Returns: True when already recorded.
-            func contains(_ key: String) -> Bool {
-                paths.withLock { $0.contains(key) }
-            }
-
-            /// Records a path, evicting deterministically at capacity.
-            func insert(_ key: String, maxCapacity: Int) {
-                paths.withLock { set in
-                    if set.count >= maxCapacity, let victim = set.sorted().first {
-                        set.remove(victim)
-                    }
-                    set.insert(key)
-                }
-            }
-        }
-
-        /// Paths already probed for migrations in this process.
-        private static let migratedPaths = MigrationPathCache()
-        /// Bounds the migration cache so distinct database paths never grow
-        /// memory without bound, matching the session-cap discipline.
-        private static let maxMigratedPaths = 500
-
-        /// Standardized cache key for a database path.
-        private static func migrationCacheKey(_ dbPath: String) -> String {
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            return URL(fileURLWithPath: expanded).standardizedFileURL.path
-        }
-
-        /// Records a migrated path, evicting deterministically at capacity.
-        private static func noteMigrated(_ key: String) {
-            migratedPaths.insert(key, maxCapacity: maxMigratedPaths)
-        }
-
-        /// Opens (creating parent directories) and migrates the database.
+        /// Opens the database, creating parent directories and ensuring the schema.
         /// - Parameter dbPath: SQLite file path. `~` is expanded.
         /// - Returns: Open database handle. Caller must close it.
         private static func open(dbPath: String) throws -> OpaquePointer? {
@@ -143,64 +100,8 @@ enum SessionStoreIO {
                 """,
                 failure: ConversationManagerError.persistenceFailed
             )
-            migrateSchemaIfNeeded(handle: handle, dbPath: dbPath)
             try SQLiteHelpers.exec(handle: handle, sql: "PRAGMA foreign_keys = ON;", failure: ConversationManagerError.persistenceFailed)
             return handle
-        }
-
-        /// Runs column additions for existing databases that were created with older schemas.
-        private static func migrateSchemaIfNeeded(handle: OpaquePointer?, dbPath: String) {
-            let cacheKey = migrationCacheKey(dbPath)
-            // Snapshot the migration cache without holding the lock across blocking SQLite I/O, so
-            // concurrent opens never block on disk work. A duplicate migration from a concurrent
-            // open is safe because the probe plus conditional `ALTER` is idempotent.
-            guard !migratedPaths.contains(cacheKey) else { return }
-
-            // Best-effort migration for existing databases created without title, source,
-            // goal-link, parent-link, error-flag, or error-category columns.
-            let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
-            let sessionColumnsToAdd: [(name: String, sql: String)] = [
-                ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
-                ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;"),
-                ("goal_id", "ALTER TABLE sessions ADD COLUMN goal_id TEXT;"),
-                ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;"),
-                ("is_archived", "ALTER TABLE sessions ADD COLUMN is_archived INTEGER DEFAULT 0;")
-            ]
-            for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
-                do {
-                    try SQLiteHelpers.exec(
-                        handle: handle,
-                        sql: alterSQL,
-                        failure: ConversationManagerError.persistenceFailed
-                    )
-                } catch {
-                    let code = sqlite3_errcode(handle)
-                    RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
-                }
-            }
-            let existingMessages = SQLiteHelpers.columnNames(handle: handle, table: .messages)
-            let messageColumnsToAdd: [(name: String, sql: String)] = [
-                ("is_error", "ALTER TABLE messages ADD COLUMN is_error INTEGER;"),
-                ("error_kind", "ALTER TABLE messages ADD COLUMN error_kind TEXT;"),
-                ("reasoning", "ALTER TABLE messages ADD COLUMN reasoning TEXT;"),
-                ("exit_code", "ALTER TABLE messages ADD COLUMN exit_code INTEGER;")
-            ]
-            for (col, alterSQL) in messageColumnsToAdd where !existingMessages.contains(col) {
-                do {
-                    try SQLiteHelpers.exec(
-                        handle: handle,
-                        sql: alterSQL,
-                        failure: ConversationManagerError.persistenceFailed
-                    )
-                } catch {
-                    let code = sqlite3_errcode(handle)
-                    RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
-                }
-            }
-            // Record through the lock-guarded box so only the cache
-            // mutation is serialized while the probe and `ALTER` above
-            // run unlocked.
-            noteMigrated(cacheKey)
         }
 
         /// Executes a multi-statement SQL string.

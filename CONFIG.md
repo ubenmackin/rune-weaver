@@ -157,7 +157,7 @@ Unified container policy for sandboxed execution and detonation work.
 | `max_concurrent` | integer | `5` | Maximum containers running at once (`1`–`32`). |
 | `ttl_minutes` | integer | `60` | Idle lifetime in minutes before reclamation (`5`–`1440`). |
 
-Container images are pinned in code and carry no config key: strict per-turn and machine-scoped workspace containers run `debian:stable-slim`; detonation containers run `alpine:3.22`. Legacy `[sandbox]` keys (`container_base_image`, `archive_session_ttl_minutes`, `max_concurrent_machines`) are ignored on load with a logged note and shed on resave.
+Container images are pinned in code and carry no config key: strict per-turn and machine-scoped workspace containers run `debian:stable-slim`; detonation containers run `alpine:3.22`.
 
 ```toml
 [containers]

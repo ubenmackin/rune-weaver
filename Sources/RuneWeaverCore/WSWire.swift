@@ -101,7 +101,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public var toolActions: [ToolAction]?
     /// Highest round index in this turn, when any tool ran. Lets clients that only
     /// inspect the terminal frame learn the turn had multiple rounds without scanning
-    /// every action; nil for text-only or legacy turns.
+    /// every action; nil for text-only turns.
     public var roundIndex: Int?
     /// Billed tokens accumulated across LLM rounds in this turn.
     public var totalTokens: Int?
@@ -1024,8 +1024,6 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         case nextDueAt
         /// Origin session under the canonical wire spelling.
         case originSessionId
-        /// Origin session under the legacy capital-ID spelling.
-        case originSessionID
         /// Creation instant.
         case createdAt
         /// Last-change instant.
@@ -1045,12 +1043,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         self.progress = try container.decode(WSGoalProgress.self, forKey: .progress)
         self.stepIntervalMinutes = try container.decode(Int.self, forKey: .stepIntervalMinutes)
         self.nextDueAt = try container.decodeIfPresent(Date.self, forKey: .nextDueAt)
-        // Canonical `originSessionId` wins when several spellings ride together.
-        let originSessionID: UUID? = BrowserNavigateWire.decodeFirst(
-            container,
-            keys: [.originSessionId, .originSessionID]
-        )
-        self.originSessionID = originSessionID
+        self.originSessionID = try container.decodeIfPresent(UUID.self, forKey: .originSessionId)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         self.isPlanning = try container.decodeIfPresent(Bool.self, forKey: .isPlanning)
@@ -1146,8 +1139,6 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         case sessionID
         /// Owning goal under the canonical spelling.
         case goalId
-        /// Owning goal under the legacy capital-ID spelling.
-        case goalID
     }
 
     /// Decodes a proactive frame, defaulting a missing discriminator while rejecting blank card
@@ -1171,12 +1162,7 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         }
         self.headline = headline
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
-        // Canonical `goalId` wins when several spellings ride together.
-        let goalID: UUID? = BrowserNavigateWire.decodeFirst(
-            container,
-            keys: [.goalId, .goalID]
-        )
-        self.goalID = goalID
+        self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalId)
     }
 
     /// Encodes under the canonical spellings so older decoders see no new key.

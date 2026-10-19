@@ -321,9 +321,6 @@ private func classifyRecheckLocalExemptions(candidateAllowed: Set<String>, store
 /// Resolves the validated egress posture. Only the two surviving spellings persist.
 private func validatedPolicyMode(_ rawValue: String) throws -> EgressMode {
     let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmed == "deny_by_default" {
-        return .allowlistOnly
-    }
     guard trimmed == EgressMode.allowlistOnly.rawValue || trimmed == EgressMode.unrestricted.rawValue else {
         throw Abort(
             .badRequest,

@@ -488,8 +488,6 @@ public actor SystemHealthSnapshot {
         case .red:
             status = .red
             reasons.append(Self.watchdogBrakeReason)
-        case .yellow:
-            notes.append(Self.gestationNote(days: watchdogGestationDays ?? 14))
         case .green, nil:
             if let days = watchdogGestationDays {
                 notes.append(Self.gestationNote(days: days))

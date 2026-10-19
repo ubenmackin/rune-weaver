@@ -16,11 +16,7 @@ export interface EventRuleCondition {
   contentContains?: string[];
   titleContains?: string[];
   // Canonical calendar filter key matching the engine encoding, so rule
-  // payloads round-trip without a silently dropped filter.
   calendarNameContains?: string[];
-  // Legacy alias decoded from older stored rows; never encoded on new saves,
-  // which always use the canonical key above.
-  calendarNames?: string[];
   locationContains?: string[];
   excludeAllDay?: boolean;
   groupChatFilter?: GroupChatFilter;
@@ -118,26 +114,20 @@ function normalizeFilterList(value: unknown): string[] | undefined {
   return trimmed;
 }
 
-// Reads one string list under both dashboard camelCase and durable snake_case
-// spellings so older rows still populate the form after a key migration.
+// Reads one string list under both dashboard camelCase and durable snake_case spellings.
 function readFilterList(
   record: Record<string, unknown>,
   camelKey: string,
   snakeKey: string,
-  legacyCamelKey?: string,
-  legacySnakeKey?: string,
 ): string[] | undefined {
   return (
     normalizeFilterList(record[camelKey]) ??
-    normalizeFilterList(record[snakeKey]) ??
-    (legacyCamelKey ? normalizeFilterList(record[legacyCamelKey]) : undefined) ??
-    (legacySnakeKey ? normalizeFilterList(record[legacySnakeKey]) : undefined)
+    normalizeFilterList(record[snakeKey])
   );
 }
 
-// Normalizes one rule condition to the canonical camelCase shape, folding the
-// legacy calendar alias and any snake_case keys so saves always encode the
-// engine spelling and reads never lose a filter.
+// Normalizes one rule condition to the canonical camelCase shape so saves
+// always encode the engine spelling and reads never lose a filter.
 export function normalizeEventRuleCondition(
   condition: EventRuleCondition,
 ): EventRuleCondition {
@@ -151,11 +141,7 @@ export function normalizeEventRuleCondition(
       record,
       "calendarNameContains",
       "calendar_name_contains",
-      "calendarNames",
-      "calendar_names",
-    ) ??
-    normalizeFilterList(fallback.calendarNameContains) ??
-    normalizeFilterList(fallback.calendarNames);
+    ) ?? normalizeFilterList(fallback.calendarNameContains);
   return {
     senderContains:
       readFilterList(record, "senderContains", "sender_contains") ??
@@ -198,8 +184,8 @@ export function normalizeEventRuleCondition(
   };
 }
 
-// Normalizes one rule action to the canonical camelCase shape, accepting the
-// durable snake_case keys and legacy type aliases so older rows still decode.
+// Normalizes one rule action to the canonical camelCase shape, accepting
+// durable snake_case keys so rows still decode.
 export function normalizeEventRuleAction(
   action: EventRuleAction,
 ): EventRuleAction {
@@ -238,8 +224,7 @@ export function normalizeEventRuleAction(
   return action;
 }
 
-// Normalizes one rule to the canonical wire shape: legacy calendar keys fold
-// to the engine spelling and the deprecated alias is dropped on encode.
+// Normalizes one rule to the canonical wire shape.
 export function normalizeEventRule(rule: EventRule): EventRule {
   if (!isRecord(rule)) return rule;
   const record = rule as unknown as Record<string, unknown>;
@@ -255,19 +240,10 @@ export function normalizeEventRule(rule: EventRule): EventRule {
     action: normalizeEventRuleAction(rule.action),
     stopProcessing: rawStopProcessing,
   };
-  // The legacy alias is read-only tolerance: canonical saves carry only the
-  // engine key so future reads never depend on the deprecated spelling.
-  if (
-    normalized.condition &&
-    typeof normalized.condition === "object" &&
-    "calendarNames" in normalized.condition
-  ) {
-    delete (normalized.condition as { calendarNames?: string[] }).calendarNames;
-  }
   return normalized;
 }
 
-// Normalizes one stored job so legacy rule spellings render in the current
+// Normalizes one stored job so rule spellings render in the current
 // form instead of arriving as blank filters.
 export function normalizeSchedulerJob(job: SchedulerJob): SchedulerJob {
   if (!isRecord(job)) return job;
@@ -299,7 +275,7 @@ export function isEventRuleConditionEmpty(
     condition.subjectContains,
     condition.contentContains,
     condition.titleContains,
-    condition.calendarNameContains ?? condition.calendarNames,
+    condition.calendarNameContains,
     condition.locationContains,
   ];
   for (const list of lists) {
@@ -473,8 +449,8 @@ export interface UpdateSchedulerJobInput {
 
 export function listJobs(limit?: number): Promise<SchedulerJobsResponse> {
   const query = limit != null && limit > 0 ? `?limit=${encodeURIComponent(limit)}` : "";
-  // Normalize rule spellings on read so legacy calendar aliases and snake_case
-  // keys render in the current form instead of arriving as blank filters.
+  // Normalize rule spellings on read so snake_case keys render in the current
+  // form instead of arriving as blank filters.
   return fetchJson<SchedulerJobsResponse>(`/scheduler/jobs${query}`).then(
     normalizeSchedulerJobsResponse,
   );

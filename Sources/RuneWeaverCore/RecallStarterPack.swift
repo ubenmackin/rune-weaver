@@ -91,7 +91,7 @@ public enum RecallStarterPack: Sendable {
         }
         let joined = lines.joined(separator: "\n")
         // Reserve one char so the whole pack stays strictly under `totalLimit`
-        // (`< 600` per blueprint) while sharing the single truncation helper.
+        // while sharing the single truncation helper.
         return Message(role: .system, content: MemoryEngine.truncateRecallBlock(joined, maxChars: max(1, totalLimit - 1)))
     }
 

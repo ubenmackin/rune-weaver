@@ -229,7 +229,7 @@ export function useChatHistoryLoader({
         ) {
           return;
         }
-        const isLiveActive = live.active ?? live.isRunning ?? false;
+        const isLiveActive = live.active ?? false;
         if (live && isLiveActive) {
           const current = inFlightTurnRef.current;
           const currentHasData =

@@ -100,7 +100,7 @@ struct OrchestratorPersonaTests {
         let messages = try #require(llm.capturedMessages.first)
         let systemMessage = try #require(messages.first { $0.role == .system })
 
-        #expect(systemMessage.content.contains(SystemPromptComposer.legacyIdentityLine))
+        #expect(systemMessage.content.contains(SystemPromptComposer.defaultIdentityLine))
     }
 
     @Test

@@ -16,10 +16,6 @@ public protocol AccessRuleStoring: Sendable {
     /// Deletes expired allow rules; deny rules never expire.
     /// - Parameter date: Threshold date.
     func pruneExpired(at date: Date) async throws
-    /// Copies legacy `trust_grants` rows forward once, idempotently. The legacy table is read here
-    /// and only here: after the migration flag is set it is never read again, and it is never
-    /// deleted.
-    func migrateLegacyIfNeeded() async throws
 }
 
 /// In-memory ``AccessRuleStoring`` for tests and ephemeral sessions.
@@ -50,9 +46,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         // A deny rule is a refusal, not trust, so it never ages out.
         rules.removeAll { $0.action == .allow && $0.isExpired(at: date) }
     }
-
-    /// No-op: an in-memory store has no legacy database to copy forward.
-    public func migrateLegacyIfNeeded() async throws {}
 }
 
 #if canImport(SQLite3)
@@ -72,8 +65,7 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
             case glob
         }
 
-        /// Fixed insert projection shared by `save` and the legacy migration so
-        /// one row shape cannot drift between the two writers.
+        /// Fixed insert projection for `save`.
         static let insertSQL = """
         INSERT INTO access_rules (id, tool_name, scope_kind, scope_data, action, granted_at, expires_at, duration, use_count, last_used_at, reason)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
@@ -115,8 +107,7 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
             return handle
         }
 
-        /// Adds the rule columns that arrived additively to older `access_rules` schemas, mirroring
-        /// the session-store migration idiom.
+        /// Adds the rule columns that arrived additively to older `access_rules` schemas.
         private static func migrateColumnsIfNeeded(handle: OpaquePointer?) throws {
             let existing = SQLiteHelpers.columnNames(handle: handle, table: .accessRules)
             guard !existing.isEmpty else { return }
@@ -361,183 +352,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
             }
         }
     }
-
-    /// Internal SQLite helper for the one-time legacy trust-grant carry-forward.
-    enum SQLiteAccessRuleMigration {
-        private struct MigrationError: Error {
-            let message: String
-        }
-
-        /// Meta key whose value marks the carry-forward complete.
-        private static let flagKey = "legacy_trust_grants_migrated"
-
-        /// Raw fields of one legacy trust-grant row.
-        private struct LegacyTrustGrantRow {
-            let id: UUID
-            let toolName: String
-            let target: String
-            let grantedAt: Date
-            let expiresAt: Date?
-            let duration: TrustDuration
-            let useCount: Int
-            let lastUsedAt: Date?
-        }
-
-        static func migrateLegacyIfNeeded(dbPath: String) throws {
-            let handle = try SQLiteAccessRuleStorage.open(dbPath: dbPath)
-            guard let handle else {
-                throw MigrationError(message: "unexpected nil handle opening \(dbPath)")
-            }
-            defer { sqlite3_close(handle) }
-            if migrationFlag(handle: handle) == "1" {
-                return
-            }
-            let legacyRows = readLegacyTrustGrants(handle: handle)
-            // One transaction for the whole copy: the rows and the flag commit
-            // together, so a failure anywhere rolls the flag back with the rows
-            // and a later retry re-reads the legacy table.
-            guard sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else {
-                throw MigrationError(message: "could not begin legacy access-rule migration")
-            }
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, SQLiteAccessRuleStorage.insertSQL, -1, &statement, nil) == SQLITE_OK else {
-                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
-                throw MigrationError(message: "could not prepare legacy access-rule insert")
-            }
-            var succeeded = true
-            for row in legacyRows {
-                // A non-durable duration or a blank target shapes no durable
-                // rule, so that row is skipped instead of aborting the copy.
-                guard let rule = rule(from: row) else { continue }
-                if !SQLiteAccessRuleStorage.insert(rule: rule, statement: statement) {
-                    succeeded = false
-                    break
-                }
-            }
-            sqlite3_finalize(statement)
-            if !succeeded {
-                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
-                throw MigrationError(message: "could not copy a legacy trust grant row")
-            }
-            var failure: Error?
-            do {
-                try writeMigrationFlag(handle: handle)
-                if sqlite3_exec(handle, "COMMIT;", nil, nil, nil) != SQLITE_OK {
-                    failure = MigrationError(message: "could not commit the legacy access-rule migration")
-                }
-            } catch {
-                failure = error
-            }
-            if let failure {
-                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
-                throw failure
-            }
-        }
-
-        /// Maps one legacy grant row to a rule, or nil when it cannot survive.
-        private static func rule(from row: LegacyTrustGrantRow) -> AccessRule? {
-            guard var rule = AccessRule(
-                id: row.id,
-                toolName: row.toolName,
-                scope: .exactTarget(row.target),
-                action: .allow,
-                grantedAt: row.grantedAt,
-                duration: row.duration,
-                expiresAt: row.expiresAt,
-                reason: nil
-            ) else { return nil }
-            rule.useCount = row.useCount
-            rule.lastUsedAt = row.lastUsedAt
-            return rule
-        }
-
-        /// Reads every legacy trust-grant row; an absent table reads empty.
-        private static func readLegacyTrustGrants(handle: OpaquePointer?) -> [LegacyTrustGrantRow] {
-            let columns = SQLiteHelpers.columnNames(handle: handle, table: .trustGrants)
-            // An absent (or unusable) legacy table means there is nothing to
-            // copy forward, not a failure to surface.
-            guard columns.contains("id"), columns.contains("tool_name"), columns.contains("target") else { return [] }
-            // Counter columns arrived additively in the legacy schema, so
-            // project whichever survived instead of failing the whole read.
-            var projection = "id, tool_name, target, granted_at, expires_at, duration"
-            if columns.contains("use_count") {
-                projection += ", use_count"
-            }
-            if columns.contains("last_used_at") {
-                projection += ", last_used_at"
-            }
-            let hasUseCount = columns.contains("use_count")
-            let hasLastUsedAt = columns.contains("last_used_at")
-            // Counter positions shift with the projection, so resolve them from
-            // the same probe that built it.
-            let useCountIndex: Int32? = hasUseCount ? 6 : nil
-            let lastUsedIndex: Int32? = hasLastUsedAt ? (hasUseCount ? 7 : 6) : nil
-            let sql = "SELECT \(projection) FROM trust_grants;"
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
-            defer { sqlite3_finalize(statement) }
-            var rows: [LegacyTrustGrantRow] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
-                guard let idText = SQLiteHelpers.columnText(statement, index: 0),
-                      let id = UUID(uuidString: idText),
-                      let toolName = SQLiteHelpers.columnText(statement, index: 1),
-                      let target = SQLiteHelpers.columnText(statement, index: 2),
-                      let durationText = SQLiteHelpers.columnText(statement, index: 5),
-                      let duration = TrustDuration(rawValue: durationText)
-                else { continue }
-                let grantedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 3))
-                let expiresAt: Date? = sqlite3_column_type(statement, 4) == SQLITE_NULL
-                    ? nil
-                    : Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 4))
-                var useCount = 0
-                if let useCountIndex, let rawCount = SQLiteHelpers.columnInt64(statement, index: useCountIndex) {
-                    useCount = max(0, Int(rawCount))
-                }
-                var lastUsedAt: Date?
-                if let lastUsedIndex, sqlite3_column_type(statement, lastUsedIndex) != SQLITE_NULL {
-                    lastUsedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: lastUsedIndex))
-                }
-                rows.append(LegacyTrustGrantRow(
-                    id: id,
-                    toolName: toolName,
-                    target: target,
-                    grantedAt: grantedAt,
-                    expiresAt: expiresAt,
-                    duration: duration,
-                    useCount: useCount,
-                    lastUsedAt: lastUsedAt
-                ))
-            }
-            return rows
-        }
-
-        /// Reads the migration flag; nil when the row is absent or unreadable.
-        private static func migrationFlag(handle: OpaquePointer?) -> String? {
-            let sql = "SELECT value FROM access_rule_meta WHERE key = ?;"
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
-            defer { sqlite3_finalize(statement) }
-            SQLiteHelpers.bindText(statement, index: 1, value: flagKey)
-            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-            return SQLiteHelpers.columnText(statement, index: 0)
-        }
-
-        private static func writeMigrationFlag(handle: OpaquePointer?) throws {
-            let sql = """
-            INSERT INTO access_rule_meta(key, value) VALUES(?, '1')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-            """
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                throw MigrationError(message: "could not prepare the migration flag write")
-            }
-            defer { sqlite3_finalize(statement) }
-            SQLiteHelpers.bindText(statement, index: 1, value: flagKey)
-            guard sqlite3_step(statement) == SQLITE_DONE else {
-                throw MigrationError(message: "could not write the migration flag")
-            }
-        }
-    }
 #endif
 
 /// SQLite-backed ``AccessRuleStoring`` persisted in `episodes.db` under `access_rules`.
@@ -579,17 +393,6 @@ public struct SQLiteAccessRuleStore: AccessRuleStoring, Sendable {
         #if canImport(SQLite3)
             try await SQLiteSerialIO.run {
                 try SQLiteAccessRuleStorage.pruneExpired(at: date, dbPath: dbPath)
-            }
-        #endif
-    }
-
-    /// Copies legacy `trust_grants` rows forward once; a no-op thereafter.
-    /// - Throws: When the copy cannot be completed, leaving the migration flag
-    ///   unset so a later call retries.
-    public func migrateLegacyIfNeeded() async throws {
-        #if canImport(SQLite3)
-            try await SQLiteSerialIO.run {
-                try SQLiteAccessRuleMigration.migrateLegacyIfNeeded(dbPath: dbPath)
             }
         #endif
     }

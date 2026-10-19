@@ -111,16 +111,6 @@ public actor PermissionGate {
     public func bootstrap() async {
         guard let ruleStore else { return }
         let now = Date()
-        // The legacy grant table is carried forward before anything reads the
-        // rule store, so an upgraded install observes its pre-migration trust
-        // exactly once instead of starting from an empty rule set.
-        do {
-            try await ruleStore.migrateLegacyIfNeeded()
-        } catch is CancellationError {
-            return
-        } catch {
-            RuneWeaverLog.stores.debug("PermissionGate: failed to migrate legacy trust grants at bootstrap: \(error.localizedDescription)")
-        }
         do {
             try await ruleStore.pruneExpired(at: now)
         } catch is CancellationError {

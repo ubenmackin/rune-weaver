@@ -278,10 +278,7 @@ export function parseGoalSnapshot(value: unknown): Goal | null {
     typeof intervalRaw === "number" && Number.isFinite(intervalRaw)
       ? Math.max(0, Math.floor(intervalRaw))
       : 0;
-  // Canonical `originSessionId` wins when several historical spellings ride
-  // together, mirroring the engine's alias-tolerant decoder.
-  const originRaw =
-    value.originSessionId ?? value.originSessionID;
+  const originRaw = value.originSessionId;
   const originSessionId =
     typeof originRaw === "string" && originRaw.trim() ? originRaw : null;
   // Runtime-validate each timestamp instead of casting: a drifted object or

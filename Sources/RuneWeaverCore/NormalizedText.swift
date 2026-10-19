@@ -19,7 +19,7 @@ public enum NormalizedText: Sendable {
         self.value(value) ?? fallback
     }
 
-    /// Folds CRLF and legacy CR line endings to LF so narration parsing agrees with history
+    /// Folds CRLF and standalone CR line endings to LF so narration parsing agrees with history
     /// coverage, which folds the same shapes before matching plumbing lines.
     public static func normalizedLineEndings(_ text: String) -> String {
         text

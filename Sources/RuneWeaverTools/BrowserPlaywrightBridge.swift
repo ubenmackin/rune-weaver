@@ -760,8 +760,8 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public let egressSupervisor: OutboundEgressSupervisor?
 
     /// Resolves the Python executable from the explicit path or the env override.
-    /// Single-sourced so the legacy and config-bound inits cannot drift on
-    /// trim versus env precedence; nil keeps the managed-venv fast path.
+    /// Single-sourced so inits cannot drift on trim versus env precedence;
+    /// nil keeps the managed-venv fast path.
     private static func resolvePythonBin(explicit: String?) -> String? {
         if let trimmed = NormalizedText.value(explicit) {
             return trimmed
@@ -1073,7 +1073,7 @@ enum BrowserSubprocessIO {
     }
 
     /// Builds the navigate request document sent to the helper. `timeoutMs` carries the configured
-    /// budget so `page.goto` honors it instead of the helper's legacy 30s literal; every navigate
+    /// budget so `page.goto` honors it instead of a hardcoded default literal; every navigate
     /// key stays assembled in one place.
     static func navigatePayload(
         url: String,
@@ -1093,7 +1093,7 @@ enum BrowserSubprocessIO {
 
     /// Builds the act request document sent to the helper.
     /// `timeoutMs` carries the same configured budget so per-action waits
-    /// honor it instead of the helper's legacy 10s literal.
+    /// honor it instead of a hardcoded default literal.
     static func actPayload(
         url: String,
         action: String,

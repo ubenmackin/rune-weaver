@@ -135,20 +135,18 @@ export function parseRuleExpiry(
   return parseRunTimestamp(value);
 }
 
-// Normalizes a rule payload from the engine into the client model. The engine encodes `action`
-// ("allow" | "deny") while older client mocks and legacy frames used `effect`; both spellings bridge
-// to the two UI keys.
+// Normalizes a rule payload from the engine into the client model.
 export function normalizeAccessRule(raw: unknown): AccessRule {
   if (!isRecord(raw)) {
     throw new ApiError("Access rule response is malformed", 0);
   }
-  const record = raw as Record<string, unknown>;
-  const rawEffect = typeof record.action === "string" ? record.action : record.effect;
-  if (rawEffect !== "allow" && rawEffect !== "deny") {
+  const record = raw;
+  const rawAction = record.action;
+  if (rawAction !== "allow" && rawAction !== "deny") {
     throw new ApiError("Access rule response is malformed", 0);
   }
-  const action = rawEffect as AccessRuleEffect;
-  const rawTool = typeof record.toolName === "string" ? record.toolName : record.tool;
+  const action = rawAction as AccessRuleEffect;
+  const rawTool = record.toolName;
   if (typeof rawTool !== "string" || rawTool.trim().length === 0) {
     throw new ApiError("Access rule response is malformed", 0);
   }
@@ -168,6 +166,8 @@ export function normalizeAccessRule(raw: unknown): AccessRule {
   }
   return {
     ...(record as unknown as AccessRule),
+    // Also mirrors the rule under both client-key names (`tool`/`action`/`effect`) so UI
+    // consumers keyed to either name read one normalized shape.
     toolName,
     tool: toolName,
     action,
@@ -253,13 +253,14 @@ export async function createRule(
   if (!isAccessRuleInput(input)) {
     throw new ApiError("Access rule request is malformed", 0);
   }
-  const toolName = (input.toolName ?? input.tool)!.trim();
+  // Resolves the tool exactly as the fail-closed guard above does, so every
+  // input shape the guard admits normalizes instead of crashing pre-wire.
+  const resolvedTool = (typeof input.toolName === "string" ? input.toolName : input.tool) as string;
+  const toolName = resolvedTool.trim();
   const action = (typeof input.action === "string" ? input.action : input.effect) as AccessRuleEffect;
   const wirePayload: Record<string, unknown> = {
     toolName,
     action,
-    tool: toolName,
-    effect: action,
     scope: input.scope,
     duration: input.duration,
   };

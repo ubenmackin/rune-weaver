@@ -103,20 +103,6 @@ struct PolicyStoreTests {
     }
 
     @Test
-    func `Legacy deny_by_default mode parses as allowlist_only`() throws {
-        // Older files stored the fail-closed posture under a retired name;
-        // the parse boundary maps it to the surviving spelling so its intent
-        // survives the rename instead of falling through to a default.
-        let toml = """
-        [network]
-        mode = "deny_by_default"
-        """
-
-        let policy = try PolicyStore.parse(toml)
-        #expect(policy.network.mode == .allowlistOnly)
-    }
-
-    @Test
     func `Legacy filesystem and tool tables are ignored on load`() throws {
         // A file carrying only retired sections must still load: the tables
         // are tolerated and dropped, leaving the network-plus-credentials

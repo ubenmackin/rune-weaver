@@ -130,7 +130,7 @@ public enum AttributedBodyTextDecoder: Sendable {
         return typedStreamText(from: data)
     }
 
-    /// Walks a legacy typedstream blob to its first string payload.
+    /// Walks an Apple typedstream blob to its first string payload.
     /// - Parameter data: Raw blob bytes.
     /// - Returns: UTF-8 string payload, or nil when none can be read safely.
     private static func typedStreamText(from data: Data) -> String? {

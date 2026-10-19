@@ -7,9 +7,8 @@ import Foundation
 extension RuneWeaverConfig {
     static func decodeDesktop(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let desktop = root.tables["desktop"] else { return }
-        // Single-gate contract: retired `screen_capture_enabled`, `control_enabled`, and legacy
-        // `enabled` keys are silently ignored when present so old files load without migration;
-        // enablement flows solely through the persisted tool-state toggle.
+        // Enablement flows solely through the persisted tool-state toggle; this section
+        // decodes capture knobs only.
         if let dim = try desktop.strictInt("max_image_dimension", field: "desktop.max_image_dimension") {
             config.desktop.maxImageDimension = dim
         }

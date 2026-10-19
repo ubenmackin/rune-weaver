@@ -165,7 +165,7 @@ export function resolveStatusEffort(status: unknown): {
     typeof nested?.preset === "string" && nested.preset.trim()
       ? nested.preset.trim()
       : null;
-  // Preserve unknown future presets verbatim while mapping legacy aliases
+  // Preserve unknown future presets verbatim while mapping aliases
   // onto canonical ids so an upgraded engine still renders honestly.
   let preset: string | null = null;
   if (rawPreset != null) {

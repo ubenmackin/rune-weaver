@@ -324,10 +324,7 @@ struct OutcomeGateTests {
     }
 
     @Test
-    func `Proactive message frame tolerantly decodes goal aliases`() throws {
-        // The frame encodes the goal link under canonical `goalId`; the
-        // decoder still accepts the historical `goalID` and `goal_id`
-        // spellings so older payloads keep linking.
+    func `Proactive message frame round trips goal link under canonical wire spelling`() throws {
         let goalID = UUID()
         let frame = WSProactiveMessageFrame(
             kind: "goalStepDone",
@@ -341,29 +338,9 @@ struct OutcomeGateTests {
         #expect(!text.contains("\"goalID\""))
         #expect(!text.contains("\"goal_id\""))
 
-        for alias in ["goalId", "goalID"] {
-            let aliased = text.replacingOccurrences(of: "\"goalId\"", with: "\"\(alias)\"")
-            let decoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: Data(aliased.utf8))
-            #expect(decoded.goalID == goalID)
-            #expect(decoded == frame)
-        }
-
-        // When several spellings ride together the canonical key wins, keeping
-        // the link deterministic instead of last-write-wins.
-        let canonicalID = UUID()
-        let legacyID = UUID()
-        let canonicalFrame = WSProactiveMessageFrame(
-            kind: "goalStepDone",
-            title: "Tend herbs",
-            headline: "Watered the basil.",
-            goalID: canonicalID
-        )
-        let canonicalData = try JSONEncoder().encode(canonicalFrame)
-        var dict = try #require(try JSONSerialization.jsonObject(with: canonicalData) as? [String: Any])
-        dict["goalID"] = legacyID.uuidString
-        let merged = try JSONSerialization.data(withJSONObject: dict)
-        let mergedDecoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: merged)
-        #expect(mergedDecoded.goalID == canonicalID)
+        let decoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: data)
+        #expect(decoded.goalID == goalID)
+        #expect(decoded == frame)
     }
 
     @Test

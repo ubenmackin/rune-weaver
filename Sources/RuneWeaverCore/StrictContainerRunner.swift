@@ -42,7 +42,7 @@ public enum StrictContainerRunner: Sendable {
     public static let maxProcessOutputBytes = 11 * 1024 * 1024
     /// Maximum stderr bytes retained for diagnostics.
     public static let maxProcessErrorBytes = 64 * 1024
-    /// Legacy detonation name shapes kept inside the reclamation scope. Longer `runeweaver-` names
+    /// Detonation name shapes kept inside the reclamation scope. Longer `runeweaver-` names
     /// (the SearXNG service container, the workspace container) are never derived from this list.
     public static let detonationNamePrefixes = ["runeweaver-session-", "runeweaver-attach-"]
 

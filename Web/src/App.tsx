@@ -382,7 +382,7 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
           ) : null}
           {tab === "memory" ? (
             <Suspense fallback={<SectionProgress />}>
-              <MemoryBrowser view="memory" />
+              <MemoryBrowser />
             </Suspense>
           ) : null}
           {tab === "indexing" ? (

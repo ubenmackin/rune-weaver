@@ -218,7 +218,7 @@ struct ApprovalTargetMatchingTests {
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: MessagesSendProbeTool())
         let handlerCalls = HandlerCallCounter()
-        await bus.setLegacyApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, _ in
             await handlerCalls.increment()
             let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
             await gate.grantTrust(for: descriptor, duration: .forever)
@@ -260,7 +260,7 @@ struct ApprovalTargetMatchingTests {
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: MessagesSendProbeTool())
         let handlerCalls = HandlerCallCounter()
-        await bus.setLegacyApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, _ in
             await handlerCalls.increment()
             let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
             await gate.grantTrust(for: descriptor, duration: .forever)

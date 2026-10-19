@@ -56,7 +56,7 @@ public struct ToolResult: Sendable, Codable, Equatable {
                 // second-guesses it.
                 self.errorKind = kind
             } else if output.content.lowercased().hasPrefix("invalid ") {
-                // Legacy best-effort sniff for tools that predate explicit kinds and phrase
+                // Best-effort sniff for tools that lack explicit kinds and phrase
                 // argument validation as "Invalid <tool> arguments: ...".
                 self.errorKind = .invalidSyntax
             } else {
@@ -278,15 +278,6 @@ public actor ToolBus {
         return lower.contains("egress supervisor")
             || lower.contains("security policy violation")
             || lower.contains("ssrf denied")
-    }
-
-    /// Sets or clears the approval hook with a handler that ignores invocation context.
-    public func setLegacyApprovalHandler(_ handler: (@Sendable (any Tool, ToolInput) async -> Bool)?) {
-        if let handler {
-            approvalHandler = { tool, call, _ in await handler(tool, call) }
-        } else {
-            approvalHandler = nil
-        }
     }
 
     /// Registers a tool, replacing any existing tool with the same name.

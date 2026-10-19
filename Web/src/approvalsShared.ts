@@ -34,8 +34,8 @@ export function isSystemNoticeTool(toolName: string): boolean {
 // stay in the View arguments disclosure.
 const MAX_TARGET_LENGTH = 80;
 
-// Argument keys the legacy target derivation reads, in the engine's priority
-// order, so the preview line names the same thing a stored rule would cover.
+// Argument keys target derivation reads, in priority order, so the preview
+// line names the same thing a stored rule would cover.
 const TARGET_ARGUMENT_KEYS = [
   "to",
   "recipient",
@@ -81,7 +81,7 @@ function trimmedArg(record: Record<string, unknown>, key: string): string | null
 
 // Best-effort preview of the request's own target. The stored displayTarget wins when present;
 // older payloads predating the field fall back to the egress host first, then the bash command, then
-// the legacy key scan.
+// the argument key scan.
 export function deriveRequestTarget(
   request: PermissionRequest,
 ): string | null {

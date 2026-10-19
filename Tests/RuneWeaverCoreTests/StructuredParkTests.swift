@@ -899,7 +899,7 @@ extension StructuredParkTests {
         let gateway = AdmissionMessagesGateway()
         await bus.register(tool: MessagesSendTool(gateway: gateway, resolver: resolver))
         let handlerCalls = BusApprovalCallCounter()
-        await bus.setLegacyApprovalHandler { _, _ in
+        await bus.setApprovalHandler { _, _, _ in
             await handlerCalls.increment()
             return true
         }
@@ -929,7 +929,7 @@ extension StructuredParkTests {
         let gateway = AdmissionMessagesGateway()
         await bus.register(tool: MessagesSendTool(gateway: gateway))
         let handlerCalls = BusApprovalCallCounter()
-        await bus.setLegacyApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, _ in
             await handlerCalls.increment()
             let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
             await gate.grantTrust(for: descriptor, duration: .forever)
@@ -963,7 +963,7 @@ extension StructuredParkTests {
         let gateway = AdmissionMessagesGateway()
         await bus.register(tool: MessagesSendTool(gateway: gateway))
         let handlerCalls = BusApprovalCallCounter()
-        await bus.setLegacyApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, _ in
             await handlerCalls.increment()
             let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
             await gate.grantTrust(for: descriptor, duration: .forever)
@@ -999,7 +999,7 @@ extension StructuredParkTests {
         let gateway = AdmissionMessagesGateway()
         await bus.register(tool: MessagesSendTool(gateway: gateway))
         let handlerCalls = BusApprovalCallCounter()
-        await bus.setLegacyApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, _ in
             await handlerCalls.increment()
             let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
             await gate.grantTrust(for: descriptor, duration: .forever)

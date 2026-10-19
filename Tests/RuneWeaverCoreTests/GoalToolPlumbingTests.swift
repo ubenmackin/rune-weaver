@@ -176,7 +176,7 @@ struct GoalToolPlumbingTests {
         for tool in tools {
             await bus.register(tool: tool)
         }
-        await bus.setLegacyApprovalHandler { _, _ in false }
+        await bus.setApprovalHandler { _, _, _ in false }
         let listed = await bus.toolNames()
         #expect(Set(listed) == Set(GoalTools.toolNames))
     }

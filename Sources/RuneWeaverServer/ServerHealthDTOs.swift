@@ -180,7 +180,7 @@ public struct HealthResponse: Content, Equatable {
         }
         let rawHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts)
         serverAllowedHosts = Self.normalizedAllowedHosts(rawHosts)
-        // Pulse keys normalize like the init so a hostile or legacy payload
+        // Pulse keys normalize like the init so a hostile or unnormalized payload
         // with over-long digests or a reason flood degrades to the same
         // bounded shape the route serves instead of failing the probe.
         ledgerTip = try HealthSnapshotValue.normalizedTip(container.decodeIfPresent(String.self, forKey: .ledgerTip))
