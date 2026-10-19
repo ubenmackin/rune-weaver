@@ -60,7 +60,7 @@ public actor LlamaEmbeddingSupervisor {
     public let tcpPort: Int?
     /// Number of layers to offload to Apple Silicon Metal GPU (default 99).
     public let gpuLayers: Int
-    /// Context size tokens (default 2048).
+    /// Context size tokens (default 8192).
     public let ctxSize: Int
     /// Pooling type (default "mean").
     public let pooling: String
@@ -119,7 +119,7 @@ public actor LlamaEmbeddingSupervisor {
         logPath: String = defaultLogPath,
         tcpPort: Int? = nil,
         gpuLayers: Int = 99,
-        ctxSize: Int = 2048,
+        ctxSize: Int = 8192,
         pooling: String = "mean",
         customBinaryURL: URL? = nil,
         testRunner: (@Sendable () async throws -> Void)? = nil

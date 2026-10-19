@@ -7,9 +7,6 @@ import Foundation
 // MARK: - Value helpers
 
 extension MailIndexer {
-    /// Maximum number of chunks sent in a single `/v1/embeddings` request during mail indexing.
-    static let maxEmbeddingChunksPerRequest = 64
-
     /// Watermark update policy when indexing a page of mail messages.
     enum PageWatermarkMode: Sendable {
         /// Advance the watermark to each message's UID when `uid > 0`.
@@ -454,7 +451,8 @@ extension MailIndexer {
         let count: Int
     }
 
-    /// Embeds pending chunk texts across a page of prepared messages in sub-batches of up to 64 chunks.
+    /// Embeds pending chunk texts across a page of prepared messages in sub-batches
+    /// of up to 32 chunks / 12,000 UTF-8 bytes via `FilesIndexer.nextEmbeddingSubBatchEnd`.
     private func embedPreparedMailBatch(_ prepared: [PreparedMailMessage]) async throws -> [Int: [[Float]]] {
         guard let embedder else { return [:] }
         var flatTexts: [String] = []
@@ -471,7 +469,7 @@ extension MailIndexer {
         var offset = 0
         while offset < flatTexts.count {
             try Task.checkCancellation()
-            let end = min(offset + Self.maxEmbeddingChunksPerRequest, flatTexts.count)
+            let end = FilesIndexer.nextEmbeddingSubBatchEnd(in: flatTexts, from: offset)
             let subBatch = Array(flatTexts[offset ..< end])
             do {
                 let vectors = try await embedder.embed(subBatch)

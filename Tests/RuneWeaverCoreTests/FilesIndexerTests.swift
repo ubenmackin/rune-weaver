@@ -1609,6 +1609,76 @@ struct FilesIndexerTests {
         #expect(lastWithQueues?.vectorChunks == 1)
         #expect(lastWithQueues?.keywordChunks == 1)
     }
+
+    @Test
+    func `Walk-time fingerprint preflight excludes unchanged files from modality queue lanes while advancing scanned`() async {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let jsonURL = base.appendingPathComponent("config.json")
+        let unchangedURL = base.appendingPathComponent("unchanged.md")
+        let modifiedURL = base.appendingPathComponent("modified.md")
+        writeFile("{\"a\":1}", at: jsonURL)
+        writeFile("stable markdown body", at: unchangedURL)
+        writeFile("initial body", at: modifiedURL)
+
+        let first = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            embedder: FilesIndexerBatchRecordingEmbedder(),
+            workerCountOverride: 2
+        )
+        let firstReport = await first.run()
+        #expect(firstReport.filesScanned == 3)
+        #expect(firstReport.filesIndexed == 3)
+
+        // Modify only 1 of the 3 files; the other 2 must be filtered during the walk
+        // so they advance `scanned` and `unchanged` without entering the modality queues.
+        writeFile("updated body with new length so fingerprint misses", at: modifiedURL)
+
+        let captured = OSAllocatedUnfairLock(initialState: [ToolProgress]())
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            embedder: FilesIndexerBatchRecordingEmbedder(),
+            workerCountOverride: 2,
+            progress: { frame in
+                captured.withLock { $0.append(frame) }
+            }
+        )
+        let secondReport = await second.run()
+
+        #expect(secondReport.filesScanned == 3)
+        #expect(secondReport.filesUnchanged == 2)
+        #expect(secondReport.filesIndexed == 1)
+
+        let frames = captured.withLock { $0 }
+        let lastWithQueues = frames.last { ($0.queues?.isEmpty == false) }
+        let queues = lastWithQueues?.queues ?? []
+        #expect(queues.first { $0.lane == "keywordData" }?.queued == 0)
+        #expect(queues.first { $0.lane == "fastText" }?.queued == 1)
+        #expect(queues.first { $0.lane == "fastText" }?.processed == 1)
+        #expect(queues.first { $0.lane == "fastText" }?.indexed == 1)
+    }
+
+    @Test
+    func `Character-bounded embedding sub-batches split large prompt batches below 12000 UTF-8 bytes`() {
+        let threeKB = String(repeating: "a", count: 3000)
+        let sixChunks = Array(repeating: threeKB, count: 6)
+        // 4 * 3000 = 12,000 bytes fits in the first sub-batch; the 5th chunk pushes it to 15,000.
+        let firstEnd = FilesIndexer.nextEmbeddingSubBatchEnd(in: sixChunks, from: 0)
+        #expect(firstEnd == 4)
+        let secondEnd = FilesIndexer.nextEmbeddingSubBatchEnd(in: sixChunks, from: firstEnd)
+        #expect(secondEnd == 6)
+
+        // A single oversized chunk (> 12,000 bytes) still advances by 1 to guarantee progress.
+        let oversized = [String(repeating: "b", count: 15000), threeKB]
+        #expect(FilesIndexer.nextEmbeddingSubBatchEnd(in: oversized, from: 0) == 1)
+    }
 }
 
 private final class FilesIndexerBatchRecordingEmbedder: EmbeddingsBackend, Sendable {

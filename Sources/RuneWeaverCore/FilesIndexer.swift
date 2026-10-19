@@ -325,14 +325,21 @@ extension FilesIndexer {
         await emit(message: Self.startMessage, counters: counters, current: nil, start: start)
 
         let budget = FileIndexBudget(limit: config.nightlyBudget)
-        let candidates = await collectAllCandidates(workers: workers, budget: budget, counters: &counters)
+        let preloadedFingerprints = try? await store.storedFingerprints(source: .files)
+        let candidates = await collectAllCandidates(
+            workers: workers,
+            budget: budget,
+            start: start,
+            preloadedFingerprints: preloadedFingerprints,
+            counters: &counters
+        )
 
-        await runParallelGroup(
+        await runQueuedModalityPipeline(
             candidates: candidates,
             workers: workers,
             budget: budget,
-            runID: runID,
             start: start,
+            preloadedFingerprints: preloadedFingerprints,
             counters: &counters
         )
 
@@ -343,7 +350,13 @@ extension FilesIndexer {
     }
 
     /// Collects candidate files across all configured roots and partitions them into modality queues.
-    private func collectAllCandidates(workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
+    private func collectAllCandidates(
+        workers: Int,
+        budget: FileIndexBudget,
+        start: ContinuousClock.Instant,
+        preloadedFingerprints: [String: DocStoredFingerprint]?,
+        counters: inout Counters
+    ) async -> [(file: URL, root: URL)] {
         var candidates: [(file: URL, root: URL)] = []
         for root in config.roots {
             if cancelBox.isSet || Task.isCancelled || isCancelled {
@@ -367,29 +380,11 @@ extension FilesIndexer {
             let rootURL = resolvedRootURL(root)
             await candidates.append(contentsOf: collectCandidates(rootURL: rootURL, rawRoot: root, workers: workers, budget: budget, counters: &counters))
         }
-        let partitioned = Self.partitionCandidatesWithLanes(
-            candidates: candidates,
-            maxVectorBytes: vectorPolicy.maxBytes
-        )
-        counters.queueLanes = partitioned.lanes
-        return partitioned.candidates
-    }
-
-    /// Dispatches candidate processing through the multi-queue modality and batching pipeline.
-    private func runParallelGroup(
-        candidates: [(file: URL, root: URL)],
-        workers: Int,
-        budget: FileIndexBudget,
-        runID: String,
-        start: ContinuousClock.Instant,
-        counters: inout Counters
-    ) async {
-        await runQueuedModalityPipeline(
-            candidates: candidates,
-            workers: workers,
+        return await preflightAndPartitionCandidates(
+            discovered: candidates,
             budget: budget,
-            runID: runID,
             start: start,
+            preloadedFingerprints: preloadedFingerprints,
             counters: &counters
         )
     }
@@ -479,7 +474,9 @@ extension FilesIndexer {
             isCancelled = true
             cancelBox.set()
         }
-        counters.scanned += 1
+        if !outcome.preScanned {
+            counters.scanned += 1
+        }
         Self.recordQueueLaneOutcome(outcome, lanes: &counters.queueLanes)
         switch outcome.kind {
         case let .indexed(chunks, vectors, truncated):
@@ -548,6 +545,7 @@ extension FilesIndexer {
             current: Self.safeRelative(relative),
             start: start
         )
+        await Task.yield()
     }
 
     /// Emits one progress frame. message: Human-readable status line, safe to

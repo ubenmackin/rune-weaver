@@ -467,6 +467,7 @@ export interface IndexPipelineStep {
   id: "discovering" | "queues" | "embedding" | "committing";
   label: string;
   state: "pending" | "active" | "done";
+  metric?: string;
 }
 
 // Resolves the 4 pipeline stages from the polled live snapshot so the user can see items flow
@@ -479,18 +480,36 @@ export function resolveIndexPipelineSteps(
   const scanned = floorPositive(live?.scanned);
   const indexed = floorPositive(live?.indexed);
   const vectors = floorPositive(live?.vectorChunks);
-  const hasQueues =
-    Array.isArray(live?.queues) &&
-    live.queues.some((lane) => floorPositive(lane.queued) > 0);
+  const queues = Array.isArray(live?.queues) ? live.queues : [];
+  const totalQueued = queues.reduce((sum, lane) => sum + floorPositive(lane.queued), 0);
+  const totalProcessed = queues.reduce((sum, lane) => sum + floorPositive(lane.processed), 0);
+  const hasQueues = totalQueued > 0;
+  const discoveringMetric = scanned > 0 ? `${formatIndexCount(scanned)} scanned` : undefined;
+  const queuesMetric =
+    totalQueued > 0
+      ? `${formatIndexCount(totalProcessed)} / ${formatIndexCount(totalQueued)}`
+      : undefined;
+  const embeddingMetric = vectors > 0 ? `${formatIndexCount(vectors)} vectors` : undefined;
+  const committingMetric = indexed > 0 ? `${formatIndexCount(indexed)} indexed` : undefined;
   if (cancelling) {
     return [
-      { id: "discovering", label: "Walk & Classify", state: "done" },
-      { id: "queues", label: "Modality Queues", state: "active" },
-      { id: "embedding", label: "Batch Embed", state: vectors > 0 ? "done" : "pending" },
-      { id: "committing", label: "SQLite Commit", state: indexed > 0 ? "done" : "pending" },
+      { id: "discovering", label: "Walk & Classify", state: "done", metric: discoveringMetric },
+      { id: "queues", label: "Modality Queues", state: "active", metric: queuesMetric },
+      {
+        id: "embedding",
+        label: "Batch Embed",
+        state: vectors > 0 ? "done" : "pending",
+        metric: embeddingMetric,
+      },
+      {
+        id: "committing",
+        label: "SQLite Commit",
+        state: indexed > 0 ? "done" : "pending",
+        metric: committingMetric,
+      },
     ];
   }
-  const isDiscovering = phase === "discovering" && scanned === 0 && !hasQueues;
+  const isDiscovering = phase === "discovering" && !hasQueues && indexed === 0;
   const isCommitting = phase === "committing";
   const isEmbedding =
     phase === "embedding" || (!isDiscovering && !isCommitting && vectors > 0);
@@ -499,21 +518,25 @@ export function resolveIndexPipelineSteps(
       id: "discovering",
       label: "Walk & Classify",
       state: isDiscovering ? "active" : "done",
+      metric: discoveringMetric,
     },
     {
       id: "queues",
       label: "Modality Queues",
       state: isDiscovering ? "pending" : isCommitting ? "done" : "active",
+      metric: queuesMetric,
     },
     {
       id: "embedding",
       label: "Batch Embed",
       state: isCommitting ? "done" : isEmbedding ? "active" : "pending",
+      metric: embeddingMetric,
     },
     {
       id: "committing",
       label: "SQLite Commit",
       state: isCommitting || indexed > 0 ? "active" : "pending",
+      metric: committingMetric,
     },
   ];
 }
