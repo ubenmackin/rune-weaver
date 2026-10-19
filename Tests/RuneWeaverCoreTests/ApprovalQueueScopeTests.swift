@@ -95,20 +95,24 @@ struct ApprovalQueueScopeTests {
     }
 
     @Test
-    func `empty derived target stores nothing instead of widening`() async {
+    func `empty derived target widens to tool-wide`() async {
         let gate = PermissionGate()
         let queue = ApprovalQueue(permissionGate: gate)
         let request = await queue.enqueue(
-            toolName: "goal.create",
-            description: "Create goal.",
-            input: ToolInput(toolName: "goal.create", argumentsJSON: "{}")
+            toolName: "goal.progress",
+            description: "Advance goal.",
+            input: ToolInput(toolName: "goal.progress", argumentsJSON: #"{"stepOrdinal":0,"status":"done"}"#)
         )
 
-        // A malformed call derives an empty target, which is the malformed-call
-        // signature rather than a tool-wide scope, so nothing is minted while
-        // the decision itself still resolves.
+        // Empty target means tool-wide: ledger tools carry no target, so the
+        // decision mints a tool-wide rule the allow check later covers.
         #expect(await queue.decide(id: request.id, approved: true, duration: .forever) == true)
-        #expect(await gate.activeRules().isEmpty == true)
+        let rules = await gate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.toolName == "goal.progress")
+        #expect(rules.first?.scope == .toolWide)
+        #expect(rules.first?.action == .allow)
+        #expect(rules.first?.duration == .forever)
         #expect(await queue.count() == 0)
     }
 

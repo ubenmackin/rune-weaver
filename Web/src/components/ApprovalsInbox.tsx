@@ -5,10 +5,12 @@ import {
   ApiError,
   decideApproval,
   listApprovals,
+  listRules,
   listSessions,
+  parseRuleExpiry,
   respondToQuestion,
+  type AccessRule,
   type AccessScopeDTO,
-  type ImpactSeverity,
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
@@ -19,14 +21,23 @@ import {
   truncateTarget,
 } from "../approvalsShared";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
-import {
-  approvalSessionID,
-  mergeApprovalFrame,
-  normalizeSessionID,
-} from "../approvalsSession";
+import { mergeApprovalFrame, normalizeSessionID } from "../approvalsSession";
 import { isRecord } from "../typeGuards";
+import { BRAKE_TOOL_NAME, buildGroups } from "./approvalsInboxGroups";
+import {
+  MAX_RECIPIENT_SET_MEMBERS,
+  SCOPE_EDITOR_COPY,
+  buildCustomScope,
+  describeScope,
+  scopeEditorKind,
+  scopePrefill,
+  scopeToText,
+  type ScopeChoice,
+  type ScopeDraft,
+} from "./approvalsInboxScope";
 import InlineQuestionCard from "./InlineQuestionCard";
 import SystemNoticeCard from "./SystemNoticeCard";
+import ApprovalActiveTrust from "./ApprovalActiveTrust";
 import ApprovalHistory from "./ApprovalHistory";
 import BashTierLine from "./BashTierLine";
 import EphemeralTrustChip from "./EphemeralTrustChip";
@@ -34,258 +45,23 @@ import { resolveEgressHost, resolveSandboxSummary } from "./InlineApprovalBanner
 import Modal from "./Modal";
 import { ApprovalsIcon, CloseIcon, RefreshIcon } from "./icons";
 
-// Watchdog brake card identity, mirroring the engine's brake tool name: the
-// one card whose complete decision is releasing the parked turns.
-const BRAKE_TOOL_NAME = "behavior.brake";
-
-// Group key and header for the system notices: engine-filed items carry no
-// session, so they read under System instead of Unattributed.
-const SYSTEM_NOTICE_KEY = "__system__";
-const SYSTEM_NOTICE_TITLE = "System";
-
-// Group key and header for requests no session claims: the brake card, older
-// payloads without a session tag, and headless filings all read here.
-const UNATTRIBUTED_KEY = "__unattributed__";
-const UNATTRIBUTED_TITLE = "Unattributed";
-
 // Deep link into the Settings → Access pane that owns standing rules.
 const STANDING_RULES_HREF = "#settings?access=rules";
 
-// Engine recipient-set bound, mirrored so the editor refuses a set the rule
-// store would reject instead of failing at the wire.
-const MAX_RECIPIENT_SET_MEMBERS = 50;
-
-// One ordering scale shared by cards and groups: dangerous over moderate over
-// safe, so a consequential card never sinks below a quieter one.
-function severityRank(severity: ImpactSeverity): number {
-  switch (severity) {
-    case "dangerous":
-      return 3;
-    case "moderate":
-      return 2;
-    default:
-      return 1;
-  }
-}
-
-// A nil assessment is the pending state and sorts as moderate, so an
-// unassessed card never outranks a valued dangerous one nor sinks below a
-// valued safe one while background enrichment is still in flight.
-function requestSeverity(request: PermissionRequest): ImpactSeverity {
-  return request.assessment?.severity ?? "moderate";
-}
-
-// Editor shape a custom scope takes, keyed to what the wire scope vocabulary can carry for the
-// tool: a recipient set for the send tools, one host for an egress-parked request, and a single
-// exact-target string for path, pattern, and generic calls.
-type ScopeEditorKind = "recipients" | "hosts" | "paths" | "pattern";
-
-const SCOPE_EDITOR_COPY: Record<
-  ScopeEditorKind,
-  { label: string; hint: string }
-> = {
-  recipients: {
-    label: "Recipients",
-    hint: "One canonical recipient per line. Every listed recipient is covered.",
-  },
-  hosts: {
-    label: "Hosts / domains",
-    hint: "One host or domain per line. The first entry becomes the rule's host.",
-  },
-  paths: {
-    label: "Paths",
-    hint: "One path per line. The first entry becomes the rule's target.",
-  },
-  pattern: {
-    label: "Pattern",
-    hint: "One pattern or exact target per line. The first entry becomes the rule's target.",
-  },
-};
-
-function scopeEditorKind(request: PermissionRequest): ScopeEditorKind {
-  if (resolveEgressHost(request)) return "hosts";
-  if (request.toolName === "messages.send" || request.toolName === "email.send") {
-    return "recipients";
-  }
-  if (request.toolName === "bash.exec") return "pattern";
-  if (request.toolName.startsWith("files.")) return "paths";
-  return "pattern";
-}
-
-// Editor prefill: the request's own target for the kind that can carry it, so
-// narrowing starts from what is about to run. Everything else opens blank.
-function scopePrefill(request: PermissionRequest): string {
-  switch (scopeEditorKind(request)) {
-    case "hosts":
-      return resolveEgressHost(request) ?? "";
-    default:
-      return deriveRequestTarget(request) ?? "";
-  }
-}
-
-// Splits editor text into deduplicated, non-blank entries. The
-// case-insensitive dedupe matches the recipient normalization the rule store
-// applies, so a repeated spelling never reads as two members.
-function splitScopeEntries(text: string): string[] {
-  const seen = new Set<string>();
-  const entries: string[] = [];
-  for (const rawLine of text.split("\n")) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) continue;
-    const key = trimmed.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    entries.push(trimmed);
-  }
-  return entries;
-}
-
-// Builds the wire scope from editor text.
-function buildCustomScope(
-  kind: ScopeEditorKind,
-  text: string,
-): AccessScopeDTO | null {
-  const entries = splitScopeEntries(text);
-  if (entries.length === 0) return null;
-  switch (kind) {
-    case "recipients":
-      return { kind: "recipientSet", handles: entries };
-    case "hosts":
-      return { kind: "domain", host: entries[0] };
-    default:
-      return { kind: "exactTarget", target: entries[0] };
-  }
-}
-
-// Editor text for a staged scope, so reopening the modal shows exactly what
-// the next decision would ship.
-function scopeToText(scope: AccessScopeDTO): string {
-  switch (scope.kind) {
-    case "tool":
-      return "";
-    case "exactTarget":
-      return scope.target;
-    case "recipientSet":
-      return scope.handles.join("\n");
-    case "domain":
-      return scope.host;
-  }
-}
-
-// One-line reading of a staged scope for the card summary.
-function describeScope(scope: AccessScopeDTO): string {
-  switch (scope.kind) {
-    case "tool":
-      return "all targets";
-    case "exactTarget":
-      return scope.target;
-    case "recipientSet":
-      return `${scope.handles.length} recipients`;
-    case "domain":
-      return scope.host;
-  }
-}
-
-type ScopeChoice = "thisTarget" | "allTargets" | "custom";
-
-// Resolves the scope one decision carries.
-function decisionScopeFor(
+// Resolves the scope one decision carries. An empty target names tool-wide
+// trust, so a missing egress host plus a missing derived target mints kind tool.
+export function decisionScopeFor(
   request: PermissionRequest,
   choice: ScopeChoice,
   custom: AccessScopeDTO | undefined,
 ): AccessScopeDTO | undefined {
   if (choice === "allTargets") return { kind: "tool" };
   if (choice === "custom") return custom;
-  const host = resolveEgressHost(request);
-  return host ? { kind: "domain", host } : undefined;
-}
-
-interface ApprovalGroup {
-  key: string;
-  title: string;
-  requests: PermissionRequest[];
-  // Newest filing position inside the group, kept as the stable tiebreak
-  // between groups of equal maximum severity.
-  newestIndex: number;
-}
-
-// System notices file under their own System header, the brake card parks every running turn
-// rather than one session's call so it always reads under Unattributed even when the watchdog
-// tagged a session, and everything else groups by its owning session.
-function groupKeyFor(request: PermissionRequest): string {
-  if (isSystemNoticeTool(request.toolName)) return SYSTEM_NOTICE_KEY;
-  if (request.toolName === BRAKE_TOOL_NAME) return UNATTRIBUTED_KEY;
-  return normalizeSessionID(approvalSessionID(request)) || UNATTRIBUTED_KEY;
-}
-
-// The wire carries no filing timestamp, so payload position is the filing signal: the engine lists
-// pending entries oldest-first, which makes a later position the more recent filing.
-function buildGroups(
-  approvals: PermissionRequest[],
-  titles: Map<string, string>,
-): ApprovalGroup[] {
-  const buckets = new Map<
-    string,
-    {
-      rawID: string;
-      entries: Array<{ request: PermissionRequest; index: number }>;
-    }
-  >();
-  approvals.forEach((request, index) => {
-    const key = groupKeyFor(request);
-    const bucket = buckets.get(key);
-    if (bucket) {
-      bucket.entries.push({ request, index });
-      if (!bucket.rawID) bucket.rawID = (approvalSessionID(request) ?? "").trim();
-      return;
-    }
-    buckets.set(key, {
-      rawID: (approvalSessionID(request) ?? "").trim(),
-      entries: [{ request, index }],
-    });
-  });
-
-  const groups: ApprovalGroup[] = [];
-  for (const [key, bucket] of buckets) {
-    const ordered = [...bucket.entries].sort((a, b) => {
-      const bySeverity =
-        severityRank(requestSeverity(b.request)) -
-        severityRank(requestSeverity(a.request));
-      return bySeverity !== 0 ? bySeverity : b.index - a.index;
-    });
-    const titled = titles.get(key);
-    groups.push({
-      key,
-      title:
-        key === SYSTEM_NOTICE_KEY
-          ? SYSTEM_NOTICE_TITLE
-          : key === UNATTRIBUTED_KEY
-            ? UNATTRIBUTED_TITLE
-            : titled || bucket.rawID || UNATTRIBUTED_TITLE,
-      requests: ordered.map((entry) => entry.request),
-      newestIndex: Math.max(...bucket.entries.map((entry) => entry.index)),
-    });
-  }
-
-  return groups.sort((a, b) => {
-    const bySeverity =
-      maxSeverityRank(b.requests) - maxSeverityRank(a.requests);
-    return bySeverity !== 0 ? bySeverity : b.newestIndex - a.newestIndex;
-  });
-}
-
-function maxSeverityRank(requests: PermissionRequest[]): number {
-  return requests.reduce(
-    (highest, request) =>
-      Math.max(highest, severityRank(requestSeverity(request))),
-    0,
-  );
-}
-
-interface ScopeDraft {
-  id: string;
-  kind: ScopeEditorKind;
-  text: string;
+  const rawHost = resolveEgressHost(request);
+  const host = typeof rawHost === "string" ? rawHost.trim() : "";
+  if (host) return { kind: "domain", host };
+  if (!deriveRequestTarget(request)) return { kind: "tool" };
+  return undefined;
 }
 
 interface ApprovalsInboxProps {
@@ -319,10 +95,12 @@ export default function ApprovalsInbox({
   // commits a scope, so a half-typed list can never reach a decision.
   const [scopeDraft, setScopeDraft] = useState<ScopeDraft | null>(null);
   const [scopeDraftError, setScopeDraftError] = useState<string | null>(null);
-  // Pending versus History pane. Pending is the default so the inbox keeps
-  // opening on the decidable queue; History swaps the groups for the durable
-  // decision log while the header row stays put.
-  const [view, setView] = useState<"pending" | "history">("pending");
+  // Three panes sharing one header row. Pending stays the default so the inbox
+  // keeps opening on the decidable queue; Active-timed mirrors dated trust and
+  // History swaps the groups for the durable decision log.
+  const [view, setView] = useState<"pending" | "active-timed" | "history">("pending");
+  // Timed count for the Active-timed tab label, settled from the rules route.
+  const [activeTimedCount, setActiveTimedCount] = useState<number | null>(null);
 
   // Session titles name the group headers. Best-effort: a sessions outage
   // keeps the prior map, and a header without a title falls back to the raw
@@ -343,6 +121,31 @@ export default function ApprovalsInbox({
     }
   }, []);
 
+  // Timed tally for the Active-timed tab. Failures keep the last count so a
+  // transient read never blanks the label.
+  const refreshActiveCount = useCallback(async () => {
+    try {
+      const response = await listRules();
+      const nowMs = Date.now();
+      const timed = (response.rules ?? []).filter((rule: AccessRule) => {
+        const effect = rule.effect ?? rule.action;
+        if (effect !== "allow") return false;
+        if (
+          rule.duration !== "fiveMinutes" &&
+          rule.duration !== "oneHour" &&
+          rule.duration !== "oneDay"
+        ) {
+          return false;
+        }
+        const expiresAt = parseRuleExpiry(rule.expiresAt);
+        return expiresAt !== null && expiresAt.getTime() > nowMs;
+      });
+      setActiveTimedCount(timed.length);
+    } catch {
+      // Keep prior tally; the poll and frames re-probe.
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -357,6 +160,29 @@ export default function ApprovalsInbox({
       setLoading(false);
     }
   }, [refreshSessions]);
+
+  // Tab tally settles on mount plus the rule and decision broadcasts below.
+  useEffect(() => {
+    void refreshActiveCount();
+  }, [refreshActiveCount]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refreshActiveCount();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [refreshActiveCount]);
+
+  useEffect(() => {
+    function handleCountVisibility() {
+      if (document.visibilityState === "visible") {
+        void refreshActiveCount();
+      }
+    }
+    document.addEventListener("visibilitychange", handleCountVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", handleCountVisibility);
+  }, [refreshActiveCount]);
 
   // Initial load: pending approvals plus the session titles that name the
   // group headers. Both stay best-effort so a sessions outage never clears
@@ -388,10 +214,14 @@ export default function ApprovalsInbox({
   // Live approval prompts arrive over the shared socket; same-id frames merge in place so
   // enrichment swaps the pending badge for the valued one without remounting the card. Socket
   // reopen resyncs the whole list, so a notice decided while offline still settles here.
+  // Rule broadcasts only retouch the Active-timed tally here; the mirror owns its rows.
   const handleWSApproval = useCallback((data: unknown) => {
     if (isRecord(data)) {
       const frame = data as Record<string, unknown>;
-      if (frame.type === "access_rules_changed") return;
+      if (frame.type === "access_rules_changed") {
+        void refreshActiveCount();
+        return;
+      }
       if (
         frame.type === "approval_decided" ||
         frame.type === "approval_resolved"
@@ -405,6 +235,7 @@ export default function ApprovalsInbox({
             previous.filter((item) => item.id !== decidedID),
           );
         }
+        void refreshActiveCount();
         return;
       }
     }
@@ -415,7 +246,7 @@ export default function ApprovalsInbox({
         ? previous.map((item) => (item.id === request.id ? request : item))
         : [...previous, request],
     );
-  }, []);
+  }, [refreshActiveCount]);
 
   useSharedWebSocket(handleWSApproval, undefined, refresh);
 
@@ -787,15 +618,14 @@ export default function ApprovalsInbox({
                   onChange={() => selectScopeChoice(request, "thisTarget")}
                 />
                 <span>
-                  {egressHost
-                    ? "This host"
-                    : request.toolName === "messages.send" ||
-                        request.toolName === "email.send"
-                      ? "This recipient"
-                      : "This target"}
                   {derivedTarget ? (
                     <>
-                      {" "}
+                      {egressHost && egressHost.trim()
+                        ? "This host"
+                        : request.toolName === "messages.send" ||
+                            request.toolName === "email.send"
+                          ? "This recipient"
+                          : "This target"}{" "}
                       <code
                         className="approval-scope-target"
                         title={derivedTarget}
@@ -803,7 +633,9 @@ export default function ApprovalsInbox({
                         {truncateTarget(derivedTarget)}
                       </code>
                     </>
-                  ) : null}
+                  ) : (
+                    `All calls to ${request.toolName}`
+                  )}
                 </span>
               </label>
               <label className="approval-scope-option">
@@ -940,22 +772,44 @@ export default function ApprovalsInbox({
 
         <div className="row">
           <div
-            role="group"
-            aria-label="Inbox view"
+            role="tablist"
+            aria-label="Inbox views"
             className="approvals-view-toggle"
           >
             <button
               type="button"
+              role="tab"
+              id="inbox-tab-pending"
               data-testid="inbox-view-pending"
+              aria-selected={view === "pending"}
               aria-pressed={view === "pending"}
+              aria-controls="inbox-panel-pending"
               onClick={() => setView("pending")}
             >
-              Pending
+              {`Pending (${approvals.length})`}
             </button>
             <button
               type="button"
+              role="tab"
+              id="inbox-tab-active-timed"
+              data-testid="inbox-view-active-timed"
+              aria-selected={view === "active-timed"}
+              aria-pressed={view === "active-timed"}
+              aria-controls="inbox-panel-active-timed"
+              onClick={() => setView("active-timed")}
+            >
+              {activeTimedCount !== null
+                ? `Active-timed (${activeTimedCount})`
+                : "Active-timed"}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="inbox-tab-history"
               data-testid="inbox-view-history"
+              aria-selected={view === "history"}
               aria-pressed={view === "history"}
+              aria-controls="inbox-panel-history"
               onClick={() => setView("history")}
             >
               History
@@ -978,7 +832,12 @@ export default function ApprovalsInbox({
       </div>
 
       {view === "pending" ? (
-        <>
+        <div
+          id="inbox-panel-pending"
+          role="tabpanel"
+          aria-labelledby="inbox-tab-pending"
+          aria-label="Pending"
+        >
           {/* Ephemeral session trust for the filtered session, above the pending
               groups: it lists what stays auto-approved for that conversation with
               a per-line revoke. Nothing renders while no session is filtered. */}
@@ -1007,10 +866,28 @@ export default function ApprovalsInbox({
               </div>
             ))}
           </div>
-        </>
-      ) : (
-        <ApprovalHistory />
-      )}
+        </div>
+      ) : null}
+      {view === "active-timed" ? (
+        <div
+          id="inbox-panel-active-timed"
+          role="tabpanel"
+          aria-labelledby="inbox-tab-active-timed"
+          aria-label="Active-timed"
+        >
+          <ApprovalActiveTrust sessionID={sessionID} />
+        </div>
+      ) : null}
+      {view === "history" ? (
+        <div
+          id="inbox-panel-history"
+          role="tabpanel"
+          aria-labelledby="inbox-tab-history"
+          aria-label="History"
+        >
+          <ApprovalHistory />
+        </div>
+      ) : null}
 
       {/* Scope editor through the shared modal so the dialog portals above
           page stacking contexts with Escape support; only the modal save
