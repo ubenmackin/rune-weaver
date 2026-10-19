@@ -286,10 +286,12 @@ describe("browser python state-aware header", () => {
 
     // Setup internals stay collapsed during normal use so the pane shows one
     // action rather than venv paths.
-    const advanced = screen.getByTestId("browser-advanced") as HTMLDetailsElement;
+    const advanced = screen.getByTestId("advanced-web") as HTMLDetailsElement;
     expect(advanced.tagName.toLowerCase()).toBe("details");
     expect(advanced.open).toBe(false);
-    expect(advanced.querySelector("summary")?.textContent).toBe("Advanced");
+    expect(advanced.querySelector("summary")?.textContent).toContain(
+      "Advanced Web settings"
+    );
     expect(advanced.textContent).toContain("Managed Python at");
     expect(advanced.textContent).toContain("Manual fallback");
     expect(advanced.textContent).toContain("pip install playwright==1.49.1");
@@ -305,7 +307,7 @@ describe("browser python state-aware header", () => {
         screen.getByTestId("browser-health-error").textContent,
       ).toContain("Playwright install failed.");
       expect(
-        (screen.getByTestId("browser-advanced") as HTMLDetailsElement).open,
+        (screen.getByTestId("advanced-web") as HTMLDetailsElement).open,
       ).toBe(true);
     });
   });

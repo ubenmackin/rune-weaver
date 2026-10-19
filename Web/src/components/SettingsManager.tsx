@@ -1,23 +1,13 @@
 // Rune Weaver Dashboard — Settings manager coordinator shell for config.toml configuration.
-
 import { useState } from "react";
+import { reopenOnboarding } from "../api/onboarding";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
-import AccessPane from "./AccessPane";
 import { MenuIcon, RefreshIcon } from "./icons";
-import { IndexPolicyPanel } from "./IndexingPanel";
-import { EmailTab } from "./settings/EmailTab";
-import { EngineTab } from "./settings/EngineTab";
-import { GoalsTab } from "./settings/GoalsTab";
-import { MemoryTab } from "./settings/MemoryTab";
-import { NetworkTab } from "./settings/NetworkTab";
-import { PersonaTab } from "./settings/PersonaTab";
-import { ProvidersTab } from "./settings/ProvidersTab";
-import { SecurityTab } from "./settings/SecurityTab";
-import { getToolCategory } from "./settings/settingsHelpers";
 import { SettingsModals } from "./settings/SettingsModals";
 import SettingsSidenav from "./settings/SettingsSidenav";
+import { SettingsFormPanels } from "./settings/SettingsFormPanels";
 import {
   browserElapsedSeconds,
   BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT,
@@ -37,14 +27,12 @@ import {
   type SettingsManagerProps,
   type SettingsTab,
 } from "./settings/settingsTypes";
+import { getToolCategory } from "./settings/settingsHelpers";
 import { ToolConfigModals } from "./settings/ToolConfigModals";
-import { ToolsTab } from "./settings/ToolsTab";
 import { useSettingsFormState } from "./settings/useSettingsFormState";
 import { useSettingsLifecycle } from "./settings/useSettingsLifecycle";
 import { useSettingsSave } from "./settings/useSettingsSave";
 import { useSettingsServices } from "./settings/useSettingsServices";
-import { VoiceTab } from "./settings/VoiceTab";
-import { WebSearchTab } from "./settings/WebSearchTab";
 import { ToastStack } from "./Toast";
 
 // Export the public API contract for backwards compatibility with test suites and callers.
@@ -67,9 +55,14 @@ export {
 };
 export type { SettingsManagerProps };
 
+export type SettingsManagerWithReopenProps = SettingsManagerProps & {
+  onReopenOnboarding?: () => Promise<void> | void;
+};
+
 export default function SettingsManager({
   onSettingsSaved,
-}: SettingsManagerProps = {}) {
+  onReopenOnboarding,
+}: SettingsManagerWithReopenProps = {}) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
     if (typeof window !== "undefined") {
       if (hasAccessSectionLink()) return "access";
@@ -175,6 +168,29 @@ export default function SettingsManager({
           <button
             type="button"
             className="ghost icon-text-btn"
+            data-testid="replay-setup"
+            onClick={() => {
+              void (async () => {
+                try {
+                  // Single App-owned status stays live; direct reopen is fallback.
+                  if (onReopenOnboarding) await onReopenOnboarding();
+                  else await reopenOnboarding();
+                  if (typeof window !== "undefined") {
+                    window.location.hash = "dashboard";
+                  }
+                } catch (err) {
+                  pushErrorToast(err instanceof Error ? err.message : "Failed to reopen setup");
+                }
+              })();
+            }}
+            title="Reopen setup wizard"
+            aria-label="Replay setup"
+          >
+            <span>Replay setup</span>
+          </button>
+          <button
+            type="button"
+            className="ghost icon-text-btn"
             onClick={() => void refresh()}
             disabled={loading || save.saving}
           >
@@ -208,264 +224,16 @@ export default function SettingsManager({
         />
 
         <div className="settings-content">
-          {activeTab === "access" ? <AccessPane /> : null}
-          {activeTab === "indexing" ? <IndexPolicyPanel /> : null}
-          {activeTab !== "access" && activeTab !== "indexing" ? (
-            <form onSubmit={save.handleSave} className="settings-form">
-              {activeTab === "providers" && (
-                <ProvidersTab
-                  providersList={form.providersList}
-                  defaultProvider={form.defaultProvider}
-                  setDefaultProvider={form.setDefaultProvider}
-                  fallbackProvider={form.fallbackProvider}
-                  setFallbackProvider={form.setFallbackProvider}
-                  providerNames={form.providersList.map((p) => p.name)}
-                  handleAddProvider={form.handleAddProvider}
-                  handleRemoveProvider={form.handleRemoveProvider}
-                  handleProviderNameChange={form.handleProviderNameChange}
-                  handleProviderFieldChange={(id, field, val) =>
-                    form.handleProviderFieldChange(
-                      id,
-                      field,
-                      val as string | boolean | number | undefined,
-                      save.setError
-                    )
-                  }
-                  secretStatus={services.secretStatus}
-                  onOpenStoreSecretModal={services.handleOpenStoreSecretModal}
-                  setError={save.setError}
-                />
-              )}
-              {activeTab === "persona" && (
-                <PersonaTab
-                  personaAssistantNameDraft={form.personaAssistantNameDraft}
-                  setPersonaAssistantNameDraft={form.setPersonaAssistantNameDraft}
-                  personaToneDraft={form.personaToneDraft}
-                  setPersonaToneDraft={form.setPersonaToneDraft}
-                  personaStyleDraft={form.personaStyleDraft}
-                  setPersonaStyleDraft={form.setPersonaStyleDraft}
-                  personaUserNameDraft={form.personaUserNameDraft}
-                  setPersonaUserNameDraft={form.setPersonaUserNameDraft}
-                  personaAvatarDraft={form.personaAvatarDraft}
-                  setPersonaAvatarDraft={form.setPersonaAvatarDraft}
-                />
-              )}
-              {activeTab === "goals" && (
-                <GoalsTab
-                  goalsEnabled={form.goalsEnabled}
-                  setGoalsEnabled={form.setGoalsEnabled}
-                  goalsStepIntervalMinutes={form.goalsStepIntervalMinutes}
-                  setGoalsStepIntervalMinutes={form.setGoalsStepIntervalMinutes}
-                  goalsMaxActiveGoals={form.goalsMaxActiveGoals}
-                  setGoalsMaxActiveGoals={form.setGoalsMaxActiveGoals}
-                  goalsMaxStepsPerGoal={form.goalsMaxStepsPerGoal}
-                  setGoalsMaxStepsPerGoal={form.setGoalsMaxStepsPerGoal}
-                  goalsPlanTimeoutSeconds={form.goalsPlanTimeoutSeconds}
-                  setGoalsPlanTimeoutSeconds={form.setGoalsPlanTimeoutSeconds}
-                  goalsMaxTriggersPerGoal={form.goalsMaxTriggersPerGoal}
-                  setGoalsMaxTriggersPerGoal={form.setGoalsMaxTriggersPerGoal}
-                  ideasEnabled={form.ideasEnabled}
-                  setIdeasEnabled={form.setIdeasEnabled}
-                  ideasMaxPerCycle={form.ideasMaxPerCycle}
-                  setIdeasMaxPerCycle={form.setIdeasMaxPerCycle}
-                  ideasTimeoutSeconds={form.ideasTimeoutSeconds}
-                  setIdeasTimeoutSeconds={form.setIdeasTimeoutSeconds}
-                  goalsConfig={form.settings?.goals}
-                />
-              )}
-              {activeTab === "engine" && (
-                <EngineTab
-                  engineName={form.engineName}
-                  setEngineName={form.setEngineName}
-                  logLevel={form.logLevel}
-                  setLogLevel={form.setLogLevel}
-                  compactionThresholdPercent={form.compactionThresholdPercent}
-                  setCompactionThresholdPercent={
-                    form.setCompactionThresholdPercent
-                  }
-                  maxToolIterations={form.maxToolIterations}
-                  setMaxToolIterations={form.setMaxToolIterations}
-                  proactiveMode={form.proactiveMode}
-                  setProactiveMode={form.setProactiveMode}
-                  proactiveJudgeTimeoutSeconds={
-                    form.proactiveJudgeTimeoutSeconds
-                  }
-                  setProactiveJudgeTimeoutSeconds={
-                    form.setProactiveJudgeTimeoutSeconds
-                  }
-                  settings={form.settings}
-                />
-              )}
-              {activeTab === "tools" && (
-                <ToolsTab
-                  safeTools={services.allTools}
-                  pluginsList={services.pluginsList}
-                  rescanLoading={services.rescanLoading}
-                  handleRescanPlugins={() => void services.handleRescanPlugins()}
-                  handleToggleEnable={services.handleToggleEnable}
-                  setPendingUninstallPlugin={services.setPendingUninstallPlugin}
-                  handleToggleTool={services.handleToggleTool}
-                  handleToggleCategory={services.handleToggleCategory}
-                  onConfigureTool={(name) => save.setConfiguringToolName(name)}
-                  handlePermissionChange={services.handlePermissionChange}
-                  toolSearchQuery={services.toolSearchQuery}
-                  setToolSearchQuery={services.setToolSearchQuery}
-                  selectedToolCategory={services.selectedToolCategory}
-                  setSelectedToolCategory={services.setSelectedToolCategory}
-                  togglingCategory={services.togglingCategory}
-                  togglingToolName={services.togglingToolName}
-                  updatingPluginId={services.updatingPluginId}
-                  pluginsDir={form.pluginsDir}
-                  setPluginsDir={form.setPluginsDir}
-                  pluginsMarketplaceIndexURL={
-                    form.pluginsMarketplaceIndexURL
-                  }
-                  setPluginsMarketplaceIndexURL={
-                    form.setPluginsMarketplaceIndexURL
-                  }
-                  pluginsAutoRescan={form.pluginsAutoRescan}
-                  setPluginsAutoRescan={form.setPluginsAutoRescan}
-                  workspaceLoading={services.workspaceLoading}
-                  pruningWorkspace={services.pruningWorkspace}
-                  workspaceUsage={services.workspaceUsage}
-                  refreshWorkspaceUsage={services.refreshWorkspaceUsage}
-                  setPendingPruneWorkspace={services.setPendingPruneWorkspace}
-                  workspaceError={services.workspaceError}
-                  workspaceMachine={services.workspaceMachine}
-                  workspaceMachineLoading={services.workspaceMachineLoading}
-                  workspaceMachineError={services.workspaceMachineError}
-                  workspaceMachineAction={services.workspaceMachineAction}
-                  handleStopWorkspaceMachine={services.handleStopWorkspaceMachine}
-                  handleRecycleWorkspaceMachine={services.handleRecycleWorkspaceMachine}
-                  workspaceQuotaMB={form.workspaceQuotaMB}
-                  setWorkspaceQuotaMB={form.setWorkspaceQuotaMB}
-                  workspaceQuotaFiles={form.workspaceQuotaFiles}
-                  setWorkspaceQuotaFiles={form.setWorkspaceQuotaFiles}
-                  workspaceTmpTTLDays={form.workspaceTmpTTLDays}
-                  setWorkspaceTmpTTLDays={form.setWorkspaceTmpTTLDays}
-                  pendingCount={pendingCount}
-                  tamperedCount={tamperedCount}
-                />
-              )}
-              {activeTab === "security" && (
-                <SecurityTab
-                  containersMemoryMB={form.containersMemoryMB}
-                  setContainersMemoryMB={form.setContainersMemoryMB}
-                  containersMaxConcurrent={form.containersMaxConcurrent}
-                  setContainersMaxConcurrent={form.setContainersMaxConcurrent}
-                  containersTTLMinutes={form.containersTTLMinutes}
-                  setContainersTTLMinutes={form.setContainersTTLMinutes}
-                  rotateError={services.rotateError}
-                  rotating={services.rotating}
-                  onPromptRotate={() => {
-                    services.setRotateError(null);
-                    services.setRotateConfirmStep(1);
-                  }}
-                  handleLogout={services.handleLogout}
-                  hasOwnerSession={services.hasOwnerSession}
-                />
-              )}
-              {activeTab === "memory" && (
-                <MemoryTab
-                  memoryEmbeddingBackend={form.memoryEmbeddingBackend}
-                  setMemoryEmbeddingBackend={form.setMemoryEmbeddingBackend}
-                  embeddingsStatus={services.embeddingsStatus}
-                  refreshEmbeddingsStatus={services.refreshEmbeddingsStatus}
-                  embeddingsLoading={services.embeddingsLoading}
-                  handleEnsureEmbeddings={services.handleEnsureEmbeddings}
-                  embeddingsActionBusy={services.embeddingsActionBusy}
-                  memoryEpisodesDBPath={form.memoryEpisodesDBPath}
-                  setMemoryEpisodesDBPath={form.setMemoryEpisodesDBPath}
-                  memoryVectorDBPath={form.memoryVectorDBPath}
-                  setMemoryVectorDBPath={form.setMemoryVectorDBPath}
-                />
-              )}
-              {activeTab === "voice" && (
-                <VoiceTab
-                  voiceSTTProvider={form.voiceSTTProvider}
-                  setVoiceSTTProvider={form.setVoiceSTTProvider}
-                  voiceTTSProvider={form.voiceTTSProvider}
-                  setVoiceTTSProvider={form.setVoiceTTSProvider}
-                  voiceWhisperModel={form.voiceWhisperModel}
-                  setVoiceWhisperModel={form.setVoiceWhisperModel}
-                />
-              )}
-              {activeTab === "search" && (
-                <WebSearchTab
-                  searchActionBusy={services.searchActionBusy}
-                  searchRunning={services.searchRunning}
-                  handleToggleSearch={services.handleToggleSearch}
-                  searchAction={services.searchAction}
-                  setPendingRemoveSearch={services.setPendingRemoveSearch}
-                  searchRemoveEnabled={services.searchRemoveEnabled}
-                  searchSearxngURL={form.searchSearxngURL}
-                  setSearchSearxngURL={form.setSearchSearxngURL}
-                  searchTimeoutSeconds={form.searchTimeoutSeconds}
-                  setSearchTimeoutSeconds={form.setSearchTimeoutSeconds}
-                  searchMaxResults={form.searchMaxResults}
-                  setSearchMaxResults={form.setSearchMaxResults}
-                  searchStage={services.searchStage}
-                  searchStartElapsed={services.searchStartElapsed}
-                  searchHealthLoading={services.searchHealthLoading}
-                  searchReachable={services.searchReachable}
-                  searchHealthError={services.searchHealthError}
-                  searchDiagnostics={services.searchDiagnostics}
-                  browserActionBusy={services.browserActionBusy}
-                  browserStage={services.browserStage}
-                  browserElapsed={services.browserElapsed}
-                  browserReady={services.browserReady}
-                  refreshBrowserHealth={services.refreshBrowserHealth}
-                  browserHealthLoading={services.browserHealthLoading}
-                  handleEnsureBrowser={services.handleEnsureBrowser}
-                  browserAction={services.browserAction}
-                  browserError={services.browserError}
-                  browserDiagnostics={services.browserDiagnostics}
-                  browserAdvancedRef={services.browserAdvancedRef}
-                  browserVenvPath={services.browserVenvPath}
-                  browserPythonPath={services.browserPythonPath}
-                  pendingRemoveSearch={services.pendingRemoveSearch}
-                  handleConfirmRemoveSearch={services.handleConfirmRemoveSearch}
-                />
-              )}
-              {activeTab === "email" && (
-                <EmailTab
-                  emailAccountsList={form.emailAccountsList}
-                  handleAddEmailAccount={form.handleAddEmailAccount}
-                  handleRemoveEmailAccount={form.handleRemoveEmailAccount}
-                  handleEmailFieldChange={form.handleEmailFieldChange}
-                  secretStatus={services.secretStatus}
-                  onOpenStoreSecretModal={services.handleOpenStoreSecretModal}
-                />
-              )}
-              {activeTab === "network" && (
-                <NetworkTab
-                  settings={form.settings}
-                  serverHostname={form.serverHostname}
-                  setServerHostname={form.setServerHostname}
-                  serverHostnameCustom={form.serverHostnameCustom}
-                  setServerHostnameCustom={form.setServerHostnameCustom}
-                  serverPort={form.serverPort}
-                  setServerPort={form.setServerPort}
-                  serverAllowedHostsText={form.serverAllowedHostsText}
-                  setServerAllowedHostsText={form.setServerAllowedHostsText}
-                  serverAllowedHostsError={serverAllowedHostsError}
-                  serverAllowedHostsCount={serverAllowedHostsCount}
-                  liveServerBind={form.liveServerBind}
-                  serverRestartRequired={form.serverRestartRequired}
-                  hasOwnerSession={services.hasOwnerSession}
-                />
-              )}
-              <div className="settings-footer">
-                <button
-                  type="submit"
-                  className="primary-button save-button"
-                  disabled={save.saving}
-                >
-                  {save.saving ? "Saving…" : "Save"}
-                </button>
-              </div>
-            </form>
-          ) : null}
+          <SettingsFormPanels
+            activeTab={activeTab}
+            form={form}
+            services={services}
+            save={save}
+            pendingCount={pendingCount}
+            tamperedCount={tamperedCount}
+            serverAllowedHostsCount={serverAllowedHostsCount}
+            serverAllowedHostsError={serverAllowedHostsError}
+          />
         </div>
       </div>
 

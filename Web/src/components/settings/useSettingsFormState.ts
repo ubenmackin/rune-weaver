@@ -65,6 +65,12 @@ import type {
   ProviderEntry,
 } from "./settingsTypes";
 
+import {
+  DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
+  DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER,
+  DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT,
+} from "./settingsAdvancedCounts";
+
 export function useSettingsFormState() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
 
@@ -84,6 +90,14 @@ export function useSettingsFormState() {
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
   const [memoryEmbeddingBackend, setMemoryEmbeddingBackend] = useState("local");
+  const [memoryRecallAutoLimit, setMemoryRecallAutoLimit] = useState<
+    number | string
+  >(DEFAULT_MEMORY_RECALL_AUTO_LIMIT);
+  const [memoryRecallDocPoolMultiplier, setMemoryRecallDocPoolMultiplier] =
+    useState<number | string>(DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER);
+  const [memoryRecallEpisodicWeight, setMemoryRecallEpisodicWeight] = useState<
+    number | string
+  >(DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT);
 
   // Voice state
   const [voiceSTTProvider, setVoiceSTTProvider] = useState("");
@@ -435,6 +449,27 @@ export function useSettingsFormState() {
       setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
       setMemoryEmbeddingModel(data.memoryEmbeddingModel);
       setMemoryEmbeddingBackend(data.memoryEmbeddingBackend ?? "local");
+      const rawMemory = data as unknown as Record<string, unknown>;
+      const autoRaw = rawMemory["memoryRecallAutoLimit"];
+      if (typeof autoRaw === "number" && Number.isFinite(autoRaw)) {
+        setMemoryRecallAutoLimit(autoRaw);
+      } else {
+        setMemoryRecallAutoLimit(DEFAULT_MEMORY_RECALL_AUTO_LIMIT);
+      }
+      const poolRaw = rawMemory["memoryRecallDocPoolMultiplier"];
+      if (typeof poolRaw === "number" && Number.isFinite(poolRaw)) {
+        setMemoryRecallDocPoolMultiplier(poolRaw);
+      } else {
+        setMemoryRecallDocPoolMultiplier(
+          DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER
+        );
+      }
+      const weightRaw = rawMemory["memoryRecallEpisodicWeight"];
+      if (typeof weightRaw === "number" && Number.isFinite(weightRaw)) {
+        setMemoryRecallEpisodicWeight(weightRaw);
+      } else {
+        setMemoryRecallEpisodicWeight(DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT);
+      }
       setVoiceSTTProvider(data.voiceSTTProvider);
       setVoiceWhisperModel(data.voiceWhisperModel);
       setVoiceTTSProvider(data.voiceTTSProvider);
@@ -730,6 +765,12 @@ export function useSettingsFormState() {
     setMemoryEmbeddingModel,
     memoryEmbeddingBackend,
     setMemoryEmbeddingBackend,
+    memoryRecallAutoLimit,
+    setMemoryRecallAutoLimit,
+    memoryRecallDocPoolMultiplier,
+    setMemoryRecallDocPoolMultiplier,
+    memoryRecallEpisodicWeight,
+    setMemoryRecallEpisodicWeight,
     voiceSTTProvider,
     setVoiceSTTProvider,
     voiceWhisperModel,

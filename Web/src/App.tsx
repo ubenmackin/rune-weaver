@@ -11,6 +11,8 @@ import {
 import LoginView from "./components/LoginView";
 import MobileBottomNav from "./components/MobileBottomNav";
 import TopNav, { type Tab } from "./components/TopNav";
+import GettingStartedWizard from "./components/onboarding/GettingStartedWizard";
+import { useOnboardingStatus } from "./hooks/useOnboardingStatus";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
 // Route-level chunks for the tab-switched surfaces.
@@ -204,6 +206,21 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
     clearGoalsAttention = () => {},
   } = useWebNotifications();
 
+  // Wizard gate stays behind authentication: this shell only mounts after the
+  // owner gate reports authenticated, and standalone never fetches or shows.
+  // The wizard shows until completion alone; dismissal only hides the
+  // post-complete checklist and never strands pre-complete onboarding.
+  const onboarding = useOnboardingStatus({ disabled: isStandalone });
+  const showWizard =
+    !isStandalone &&
+    !onboarding.isLoading &&
+    onboarding.error == null &&
+    onboarding.status != null &&
+    !onboarding.isCompleted;
+  // A failed status fetch never hides silently; the error renders its own gate.
+  const showWizardError =
+    !isStandalone && !onboarding.isLoading && onboarding.error != null;
+
   useEffect(() => {
     if (isStandalone) return;
     function handleHashChange() {
@@ -362,6 +379,9 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
                 onSelectTab={handleSelectTab}
                 onOpenChatWithPrompt={handleOpenChatWithPrompt}
                 onOpenSession={handleOpenSession}
+                onboardingStatus={onboarding.status}
+                onOnboardingRefresh={onboarding.refresh}
+                onOnboardingComplete={onboarding.complete}
               />
             </Suspense>
           ) : null}
@@ -402,7 +422,7 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
           ) : null}
           {tab === "settings" ? (
             <Suspense fallback={<SectionProgress />}>
-              <SettingsManager onSettingsSaved={onRefreshHealth} />
+              <SettingsManager onSettingsSaved={onRefreshHealth} onReopenOnboarding={onboarding.reopen} />
             </Suspense>
           ) : null}
         </div>
@@ -422,6 +442,53 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
         approvalsBadge={approvalsBadge}
         goalsBadge={goalsAttention}
       />
+      {showWizard && onboarding.status ? (
+        <GettingStartedWizard
+          initialSkippedSteps={onboarding.status.skippedSteps}
+          onboardingStatus={onboarding.status}
+          onOnboardingRefresh={onboarding.refresh}
+          onOnboardingComplete={onboarding.complete}
+          onOnboardingSkip={onboarding.skip}
+          onFinished={() => {
+            void onboarding.refresh().finally(() => handleSelectTab("chat"));
+          }}
+        />
+      ) : null}
+      {showWizardError ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Getting started"
+        >
+          <div
+            className="modal-container wizard-modal"
+            data-testid="getting-started-error"
+          >
+            <div className="modal-header">
+              <div>
+                <h3>Getting started</h3>
+              </div>
+            </div>
+            <div className="modal-body wizard-body">
+              <div className="error-banner" role="alert">
+                {onboarding.error}
+              </div>
+            </div>
+            <div className="modal-footer wizard-footer">
+              <div className="wizard-footer-right">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void onboarding.refresh()}
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

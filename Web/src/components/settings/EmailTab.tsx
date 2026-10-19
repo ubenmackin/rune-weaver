@@ -1,9 +1,12 @@
 // Rune Weaver Dashboard — Email Accounts tab pane.
 
+import { useState } from "react";
 import type { EmailAccountData } from "../../api";
 import { CheckIcon, KeyIcon, MailIcon, PlusIcon, TrashIcon } from "../icons";
+import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import { getEmailPasswordEnv } from "./settingsHelpers";
 import type { EmailEntry } from "./settingsTypes";
+import { countEmailAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface EmailTabProps {
   emailAccountsList: EmailEntry[];
@@ -20,6 +23,19 @@ export interface EmailTabProps {
     title: string,
     isStored: boolean,
   ) => void;
+  validationError?: string | null;
+}
+
+function matchesAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("smtp") ||
+    lowered.includes("batch") ||
+    lowered.includes("watermark") ||
+    lowered.includes("archive") ||
+    lowered.includes("uid")
+  );
 }
 
 export function EmailTab({
@@ -29,7 +45,22 @@ export function EmailTab({
   handleEmailFieldChange,
   secretStatus,
   onOpenStoreSecretModal,
+  validationError,
 }: EmailTabProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const changedCount = countEmailAdvancedChanged(emailAccountsList);
+  const advancedError = matchesAdvancedError(validationError)
+    ? validationError
+    : null;
+
+  const handleResetAdvanced = () => {
+    for (const item of emailAccountsList) {
+      handleEmailFieldChange(item.id, "smtpHost", "");
+      handleEmailFieldChange(item.id, "smtpPort", "");
+      handleEmailFieldChange(item.id, "smtpSecurity", "auto");
+    }
+  };
+
   return (
     <div className="settings-section card">
       <div className="settings-section-header">
@@ -163,60 +194,6 @@ export function EmailTab({
                       required
                     />
                   </div>
-
-                  <div className="form-group">
-                    <label htmlFor={`email-smtp-host-${item.id}`}>
-                      SMTP Host (Optional)
-                    </label>
-                    <input
-                      id={`email-smtp-host-${item.id}`}
-                      type="text"
-                      className="input-field"
-                      value={acc.smtpHost ?? acc.smtpHost ?? ""}
-                      onChange={(e) =>
-                        handleEmailFieldChange(item.id, "smtpHost", e.target.value)
-                      }
-                      placeholder="Blank means derived host"
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor={`email-smtp-port-${item.id}`}>
-                      SMTP Port (Optional)
-                    </label>
-                    <input
-                      id={`email-smtp-port-${item.id}`}
-                      type="number"
-                      className="input-field"
-                      value={acc.smtpPort ?? acc.smtpPort ?? ""}
-                      onChange={(e) =>
-                        handleEmailFieldChange(
-                          item.id,
-                          "smtpPort",
-                          e.target.value === "" ? "" : Number(e.target.value)
-                        )
-                      }
-                      placeholder="Blank means 587 then 465"
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor={`email-smtp-security-${item.id}`}>
-                      SMTP Security
-                    </label>
-                    <select
-                      id={`email-smtp-security-${item.id}`}
-                      className="input-field"
-                      value={acc.smtpSecurity ?? acc.smtpSecurity ?? "auto"}
-                      onChange={(e) =>
-                        handleEmailFieldChange(item.id, "smtpSecurity", e.target.value)
-                      }
-                    >
-                      <option value="auto">Auto (STARTTLS then SSL)</option>
-                      <option value="starttls">STARTTLS</option>
-                      <option value="ssl">SSL (implicit TLS)</option>
-                    </select>
-                  </div>
                 </div>
 
                 <div className="email-env-hint" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
@@ -264,6 +241,95 @@ export function EmailTab({
           })}
         </div>
       )}
+      <AdvancedDisclosure
+        tabName="Email"
+        changedCount={changedCount}
+        summary={
+          changedCount > 0
+            ? `${changedCount} advanced email ${changedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        validationError={advancedError}
+        onReset={handleResetAdvanced}
+      >
+        <div className="email-accounts-list">
+          {emailAccountsList.length === 0 ? (
+            <p className="muted text-sm">
+              Add an account above to tune delivery overrides, batch sizes, and archive handling.
+            </p>
+          ) : (
+            emailAccountsList.map((item) => {
+              const acc = item.account;
+              return (
+                <div key={`advanced-${item.id}`} className="email-account-card">
+                  <div className="email-card-header">
+                    <div className="email-card-title">
+                      <h4>{acc.name || "Untitled Account"}</h4>
+                    </div>
+                  </div>
+                  <div className="email-fields-grid">
+                    <div className="form-group">
+                      <label htmlFor={`email-smtp-host-${item.id}`}>
+                        SMTP Host (Optional)
+                      </label>
+                      <input
+                        id={`email-smtp-host-${item.id}`}
+                        type="text"
+                        className="input-field"
+                        value={acc.smtpHost ?? ""}
+                        onChange={(e) =>
+                          handleEmailFieldChange(item.id, "smtpHost", e.target.value)
+                        }
+                        placeholder="Blank means derived host"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor={`email-smtp-port-${item.id}`}>
+                        SMTP Port (Optional)
+                      </label>
+                      <input
+                        id={`email-smtp-port-${item.id}`}
+                        type="number"
+                        className="input-field"
+                        value={acc.smtpPort ?? ""}
+                        onChange={(e) =>
+                          handleEmailFieldChange(
+                            item.id,
+                            "smtpPort",
+                            e.target.value === "" ? "" : Number(e.target.value)
+                          )
+                        }
+                        placeholder="Blank means 587 then 465"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor={`email-smtp-security-${item.id}`}>
+                        SMTP Security
+                      </label>
+                      <select
+                        id={`email-smtp-security-${item.id}`}
+                        className="input-field"
+                        value={acc.smtpSecurity ?? "auto"}
+                        onChange={(e) =>
+                          handleEmailFieldChange(item.id, "smtpSecurity", e.target.value)
+                        }
+                      >
+                        <option value="auto">Auto (STARTTLS then SSL)</option>
+                        <option value="starttls">STARTTLS</option>
+                        <option value="ssl">SSL (implicit TLS)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </AdvancedDisclosure>
     </div>
   );
 }
