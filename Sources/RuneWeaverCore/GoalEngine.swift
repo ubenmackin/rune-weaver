@@ -10,6 +10,8 @@ public enum GoalEngineError: Error, Sendable, Equatable {
     case capReached(limit: Int)
     /// The referenced goal does not exist.
     case notFound(UUID)
+    /// The goal is not active and refuses manual advancement without side effects.
+    case notActive(status: String)
 }
 
 extension GoalEngineError: LocalizedError {
@@ -21,6 +23,8 @@ extension GoalEngineError: LocalizedError {
             "Active goal cap \(limit) reached. Pause or complete a goal first."
         case let .notFound(id):
             "No goal \(id)."
+        case let .notActive(status):
+            "Goal is \(status). Resume it before working on it now."
         }
     }
 }

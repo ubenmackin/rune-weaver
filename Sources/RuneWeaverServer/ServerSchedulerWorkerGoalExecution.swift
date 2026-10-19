@@ -397,6 +397,7 @@ extension ServerSchedulerWorker {
         guard let goal = try await store.goal(id: goalID) else {
             throw GoalStoreError.notFound("No goal \(goalID)")
         }
+        guard goal.status == .active else { throw GoalEngineError.notActive(status: goal.status.rawValue) }
         let startTime = Date()
         guard await !isGoalBusy(id: goal.id), await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
             _ = await recordGoalSkipped(goal: goal, startTime: startTime)

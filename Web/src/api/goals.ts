@@ -126,6 +126,25 @@ export function goalStatusLabel(status: string): string {
   }
 }
 
+// Advanceable states for manual Work on it now. Only active and unplanned run;
+// resting and terminal states stay disabled so no run row is created for them.
+export function isGoalAdvanceable(status: string): boolean {
+  return status === "active" || status === "unplanned";
+}
+
+// Blocked tooltip for Work on it now. Resting names resume as the recovery;
+// terminal and unknown states read as finished and no longer workable.
+export function goalAdvanceBlockedTitle(status: string): string {
+  if (
+    status === "paused" ||
+    status === "needs_input" ||
+    status === "needsInput"
+  ) {
+    return "Resume this goal before working on it now.";
+  }
+  return "This goal is finished and can no longer be worked on.";
+}
+
 // Run-status pill tone reused by goal cards so goal and run surfaces share one color language:
 // active pursuit reads like a running turn, parked-on-owner like a parked approval, achieved like an
 // ok run, abandoned like an error, and paused like a skipped row.
