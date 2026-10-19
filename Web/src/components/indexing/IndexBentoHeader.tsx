@@ -1,4 +1,5 @@
 // Rune Weaver Dashboard — Indexing hero run header with progress and stage indicators.
+import { Fragment } from "react";
 import { StopIcon, TrashIcon } from "../icons";
 import type {
   IndexLiveQueueLane,
@@ -8,6 +9,7 @@ import type {
 import {
   formatIndexCount,
   sourceLabel,
+  type IndexPipelineStep,
 } from "./indexHelpers";
 
 interface IndexBentoHeaderProps {
@@ -20,7 +22,7 @@ interface IndexBentoHeaderProps {
   showLiveBlock: boolean;
   liveHeaderText: string;
   liveCurrent: string | null;
-  pipelineSteps: Array<{ id: string; label: string; state: string }>;
+  pipelineSteps: IndexPipelineStep[];
   queueLanes: IndexLiveQueueLane[];
   liveSources: IndexLiveSourceStatus[];
   reclaimSummary: string | null;
@@ -154,17 +156,47 @@ export default function IndexBentoHeader({
             data-testid="index-live-pipeline"
             aria-label="Indexing pipeline stages"
           >
-            {pipelineSteps.map((step) => (
-              <div
-                key={step.id}
-                className={`index-pipeline-step ${step.state}`}
-                data-testid={`index-pipeline-step-${step.id}`}
-                data-state={step.state}
-              >
-                <span className="index-pipeline-node" aria-hidden="true" />
-                <span className="index-pipeline-label">{step.label}</span>
-              </div>
-            ))}
+            {pipelineSteps.map((step, index) => {
+              const nextStep = pipelineSteps[index + 1];
+              const connectorState =
+                step.state === "done" && nextStep && nextStep.state !== "pending"
+                  ? "flowing"
+                  : step.state === "active"
+                    ? "active"
+                    : "pending";
+              return (
+                <Fragment key={step.id}>
+                  <div
+                    className={`index-pipeline-step ${step.state}`}
+                    data-testid={`index-pipeline-step-${step.id}`}
+                    data-state={step.state}
+                  >
+                    <span className="index-pipeline-node" aria-hidden="true" />
+                    <div className="index-pipeline-step-body">
+                      <span className="index-pipeline-label">{step.label}</span>
+                      {step.metric ? (
+                        <span
+                          className="index-pipeline-metric muted text-xs"
+                          data-testid={`index-pipeline-metric-${step.id}`}
+                        >
+                          {step.metric}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  {index < pipelineSteps.length - 1 ? (
+                    <div
+                      className={`index-pipeline-connector ${connectorState}`}
+                      data-testid={`index-pipeline-connector-${step.id}`}
+                      data-state={connectorState}
+                      aria-hidden="true"
+                    >
+                      <span className="index-pipeline-connector-flow" />
+                    </div>
+                  ) : null}
+                </Fragment>
+              );
+            })}
           </div>
 
           {queueLanes.length > 0 ? (

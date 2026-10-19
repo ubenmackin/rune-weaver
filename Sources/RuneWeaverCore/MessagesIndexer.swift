@@ -530,7 +530,7 @@ public actor MessagesIndexer {
                 var offset = 0
                 while offset < texts.count {
                     try Task.checkCancellation()
-                    let end = min(offset + 64, texts.count)
+                    let end = FilesIndexer.nextEmbeddingSubBatchEnd(in: texts, from: offset)
                     let subBatch = Array(texts[offset ..< end])
                     do {
                         let subVectors = try await embedder.embed(subBatch)

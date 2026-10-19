@@ -65,6 +65,19 @@
   outline-offset: -2px;
 }
 
+/* Phone widths tighten the three-up tab bar so labels like "Index Status"
+ * stay on one line; the 44px touch height is unchanged. */
+@media (max-width: 460px) {
+  .memory-tab,
+  .policy-tab,
+  .access-tab {
+    min-width: 0;
+    padding: 10px 6px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+}
+
 /* Access Pane Shell & Tabs */
 .access-pane {
   display: flex;

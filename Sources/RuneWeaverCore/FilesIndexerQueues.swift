@@ -7,7 +7,11 @@ extension FilesIndexer {
     static let maxStagedCandidatesPerBatch = 32
 
     /// Maximum number of text chunks sent in a single `/v1/embeddings` request.
-    static let maxEmbeddingChunksPerRequest = 64
+    static let maxEmbeddingChunksPerRequest = 32
+
+    /// Maximum UTF-8 bytes sent in a single `/v1/embeddings` request (~3,000–3,500 tokens),
+    /// keeping every request comfortably below `llama-server`'s 8,192-token context/ubatch window.
+    static let maxEmbeddingSubBatchBytes = 12000
 
     /// Maximum number of unchanged file paths accumulated before a `markSeenBatch` SQLite transaction.
     static let maxPendingSeenBatchSize = 256
@@ -141,6 +145,89 @@ extension FilesIndexer {
         }
     }
 
+    /// Filters discovered candidates against preloaded fingerprints and walk policies so only
+    /// new or modified files enter the 4 modality queues, while `counters.scanned` advances
+    /// across all inspected files during the walk.
+    func preflightAndPartitionCandidates(
+        discovered: [(file: URL, root: URL)],
+        budget: FileIndexBudget,
+        start: ContinuousClock.Instant,
+        preloadedFingerprints: [String: DocStoredFingerprint]?,
+        counters: inout Counters
+    ) async -> [(file: URL, root: URL)] {
+        let services = CandidateServices(
+            store: store,
+            extractor: extractor,
+            embedder: embedder,
+            embeddingsPool: embeddingsPool,
+            accessGuard: accessGuard,
+            vectorPolicy: vectorPolicy,
+            preloadedFingerprints: preloadedFingerprints
+        )
+        let policy = CandidatePolicy(
+            config: config,
+            homeDirectoryURL: homeDirectoryURL,
+            evictedCheck: evictedCheck,
+            downloadStarter: downloadStarter,
+            fileReader: fileReader
+        )
+        let state = CandidateRunState(budget: budget, cancellation: cancelBox)
+        var readyCandidates: [(file: URL, root: URL)] = []
+        readyCandidates.reserveCapacity(discovered.count)
+        var pendingSeenPaths: [String] = []
+        var sinceYield = 0
+
+        for item in discovered {
+            sinceYield += 1
+            if sinceYield >= 64 {
+                sinceYield = 0
+                await Task.yield()
+            }
+            if isCancelled || cancelBox.isSet || Task.isCancelled {
+                break
+            }
+            let identity = CandidateIdentity(
+                fileURL: item.file,
+                root: item.root,
+                runID: counters.runID
+            )
+            let resolved = Self.resolveCandidate(identity: identity, policy: policy)
+            switch await Self.preflightCandidate(
+                identity: identity,
+                services: services,
+                policy: policy,
+                state: state,
+                resolved: resolved
+            ) {
+            case .ready:
+                counters.scanned += 1
+                readyCandidates.append(item)
+                await reportWork(resolved.relative, counters: counters, start: start)
+            case let .finished(outcome):
+                if let seenPath = outcome.pendingSeenPath {
+                    pendingSeenPaths.append(seenPath)
+                    if pendingSeenPaths.count >= Self.maxPendingSeenBatchSize {
+                        await flushPendingSeenPaths(
+                            &pendingSeenPaths,
+                            runID: counters.runID,
+                            counters: &counters
+                        )
+                    }
+                }
+                await foldOutcome(outcome, counters: &counters, start: start)
+            }
+        }
+        if !isCancelled, !cancelBox.isSet, !Task.isCancelled {
+            await flushPendingSeenPaths(&pendingSeenPaths, runID: counters.runID, counters: &counters)
+        }
+        let partitioned = Self.partitionCandidatesWithLanes(
+            candidates: readyCandidates,
+            maxVectorBytes: vectorPolicy.maxBytes
+        )
+        counters.queueLanes = partitioned.lanes
+        return partitioned.candidates
+    }
+
     /// Mutable batch accumulation state for the multi-queue modality pipeline.
     private struct ModalityPipelineBatchState {
         let totalCandidates: Int
@@ -157,13 +244,14 @@ extension FilesIndexer {
         candidates: [(file: URL, root: URL)],
         workers: Int,
         budget: FileIndexBudget,
-        runID: String,
         start: ContinuousClock.Instant,
+        preloadedFingerprints: [String: DocStoredFingerprint]?,
         counters: inout Counters
     ) async {
-        guard !candidates.isEmpty else { return }
-        await emit(message: Self.startMessage, counters: counters, current: nil, start: start)
-        let preloadedFingerprints = try? await store.storedFingerprints(source: .files)
+        guard !candidates.isEmpty, !isCancelled, !cancelBox.isSet, !Task.isCancelled else { return }
+        let runID = counters.runID
+        lastReportInstant = nil
+        await emit(message: Self.workMessage(counters: counters), counters: counters, current: nil, start: start)
         let services = CandidateServices(
             store: store,
             extractor: extractor,
@@ -256,7 +344,8 @@ extension FilesIndexer {
         counters: inout Counters
     ) async {
         switch result {
-        case let .outcome(outcome):
+        case var .outcome(outcome):
+            outcome.preScanned = true
             if let seenPath = outcome.pendingSeenPath {
                 batchState.pendingSeenPaths.append(seenPath)
                 if batchState.pendingSeenPaths.count >= Self.maxPendingSeenBatchSize {
@@ -273,7 +362,12 @@ extension FilesIndexer {
                 return
             }
             guard await batchState.budget.tryClaim() else {
-                let overBudget = FileOutcome(kind: .overBudget, relative: candidate.resolved.relative)
+                let overBudget = FileOutcome(
+                    kind: .overBudget,
+                    relative: candidate.resolved.relative,
+                    lane: candidate.identity.lane,
+                    preScanned: true
+                )
                 await foldOutcome(overBudget, counters: &counters, start: batchState.start)
                 return
             }
@@ -288,7 +382,13 @@ extension FilesIndexer {
                 Self.maxStagedCandidatesPerBatch
             }
             let pendingPrompts = batchState.stagedBatch.reduce(0) { $0 + $1.pendingPromptTexts.count }
-            if batchState.stagedBatch.count >= batchLimit || pendingPrompts >= Self.maxEmbeddingChunksPerRequest {
+            let pendingPromptBytes = batchState.stagedBatch.reduce(0) { total, item in
+                total + item.pendingPromptTexts.reduce(0) { $0 + $1.utf8.count }
+            }
+            if batchState.stagedBatch.count >= batchLimit
+                || pendingPrompts >= Self.maxEmbeddingChunksPerRequest
+                || pendingPromptBytes >= Self.maxEmbeddingSubBatchBytes
+            {
                 await flushStagedBatch(
                     &batchState.stagedBatch,
                     budget: batchState.budget,
@@ -299,7 +399,7 @@ extension FilesIndexer {
         }
     }
 
-    /// Runs `stageCandidate` and stamps `identity.lane` onto any immediate `FileOutcome`.
+    /// Runs `stageCandidate` and stamps `identity.lane` and `preScanned` onto any immediate `FileOutcome`.
     static func stageCandidateWithLane(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -309,6 +409,7 @@ extension FilesIndexer {
         switch await stageCandidate(identity: identity, services: services, policy: policy, state: state) {
         case var .outcome(outcome):
             outcome.lane = identity.lane
+            outcome.preScanned = true
             return .outcome(outcome)
         case let .staged(candidate):
             return .staged(candidate)
@@ -611,7 +712,8 @@ extension FilesIndexer {
                         truncated: truncated
                     ),
                     relative: item.resolved.relative,
-                    lane: item.identity.lane
+                    lane: item.identity.lane,
+                    preScanned: true
                 )
                 if cancelBox.isSet || Task.isCancelled {
                     outcome.propagateCancel = true
@@ -643,7 +745,26 @@ extension FilesIndexer {
         let count: Int
     }
 
-    /// Embeds all pending prompt texts across a staged batch in sub-batches of up to 64 chunks.
+    /// Computes the upper bound index for the next `/v1/embeddings` sub-batch, bounded by both
+    /// `maxEmbeddingChunksPerRequest` (32) and `maxEmbeddingSubBatchBytes` (12,000 UTF-8 bytes).
+    /// Always advances by at least 1 chunk even if a single chunk exceeds the byte threshold.
+    static func nextEmbeddingSubBatchEnd(in texts: [String], from start: Int) -> Int {
+        guard start < texts.count else { return texts.count }
+        let maxEnd = min(start + maxEmbeddingChunksPerRequest, texts.count)
+        var end = start
+        var accumulatedBytes = 0
+        while end < maxEnd {
+            let chunkBytes = texts[end].utf8.count
+            if end > start, accumulatedBytes + chunkBytes > maxEmbeddingSubBatchBytes {
+                break
+            }
+            accumulatedBytes += chunkBytes
+            end += 1
+        }
+        return max(start + 1, end)
+    }
+
+    /// Embeds all pending prompt texts across a staged batch in character- and chunk-bounded sub-batches.
     private func embedStagedBatchTexts(_ batch: [StagedCandidate]) async -> [Int: [[Float]]] {
         var flatTexts: [String] = []
         var slices: [StagedPromptSlice] = []
@@ -672,44 +793,66 @@ extension FilesIndexer {
             if isCancelled || cancelBox.isSet || Task.isCancelled {
                 return [:]
             }
-            let end = min(offset + Self.maxEmbeddingChunksPerRequest, flatTexts.count)
+            let end = Self.nextEmbeddingSubBatchEnd(in: flatTexts, from: offset)
             let subBatch = Array(flatTexts[offset ..< end])
-            do {
-                let rawVectors: [[Float]]
-                if let embeddingsPool {
-                    rawVectors = try await embeddingsPool.withBackend { backend in
-                        try await backend.embed(subBatch)
-                    }
-                } else if let embedder {
-                    rawVectors = try await embedder.embed(subBatch)
-                } else {
-                    return [:]
-                }
-                guard let validated = Self.validatedEmbedVectors(
-                    rawVectors,
-                    expectedCount: subBatch.count,
-                    expectedDimension: expectedDim
-                ) else {
-                    return [:]
-                }
+            if let validated = await embedSingleSubBatch(subBatch, expectedDimension: expectedDim) {
                 allVectors.append(contentsOf: validated)
-            } catch is CancellationError {
-                isCancelled = true
-                cancelBox.set()
+            } else if isCancelled || cancelBox.isSet || Task.isCancelled {
                 return [:]
-            } catch {
-                RuneWeaverLog.stores.error("FilesIndexer: Batched embedding failed: \(error.localizedDescription)")
-                return [:]
+            } else if subBatch.count > 1 {
+                for singleText in subBatch {
+                    if isCancelled || cancelBox.isSet || Task.isCancelled {
+                        return [:]
+                    }
+                    if let singleVec = await embedSingleSubBatch([singleText], expectedDimension: expectedDim),
+                       let first = singleVec.first
+                    {
+                        allVectors.append(first)
+                    } else {
+                        allVectors.append([])
+                    }
+                }
+            } else {
+                allVectors.append([])
             }
             offset = end
         }
 
         var result: [Int: [[Float]]] = [:]
         for slice in slices {
-            let sub = Array(allVectors[slice.start ..< (slice.start + slice.count)])
-            result[slice.candidateIndex] = sub
+            // Preserve per-index empties so one failed chunk stays keyword-only
+            // without dropping later successes in the same candidate.
+            result[slice.candidateIndex] = Array(allVectors[slice.start ..< (slice.start + slice.count)])
         }
         return result
+    }
+
+    /// Invokes the embeddings pool or backend for a single sub-batch of texts.
+    private func embedSingleSubBatch(_ subBatch: [String], expectedDimension: Int?) async -> [[Float]]? {
+        do {
+            let rawVectors: [[Float]]
+            if let embeddingsPool {
+                rawVectors = try await embeddingsPool.withBackend { backend in
+                    try await backend.embed(subBatch)
+                }
+            } else if let embedder {
+                rawVectors = try await embedder.embed(subBatch)
+            } else {
+                return nil
+            }
+            return Self.validatedEmbedVectors(
+                rawVectors,
+                expectedCount: subBatch.count,
+                expectedDimension: expectedDimension
+            )
+        } catch is CancellationError {
+            isCancelled = true
+            cancelBox.set()
+            return nil
+        } catch {
+            RuneWeaverLog.stores.error("FilesIndexer: Batched embedding failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Fallback per-document commit used only if a batched SQLite transaction fails, isolating the
@@ -744,7 +887,8 @@ extension FilesIndexer {
                         truncated: truncated
                     ),
                     relative: item.resolved.relative,
-                    lane: item.identity.lane
+                    lane: item.identity.lane,
+                    preScanned: true
                 )
                 await foldOutcome(outcome, counters: &counters, start: start)
             } catch is CancellationError {
@@ -763,6 +907,7 @@ extension FilesIndexer {
                     onto: Self.failedOutcome(relative: item.resolved.relative, reason: "store write failed")
                 )
                 failed.lane = item.identity.lane
+                failed.preScanned = true
                 await foldOutcome(failed, counters: &counters, start: start)
             }
         }

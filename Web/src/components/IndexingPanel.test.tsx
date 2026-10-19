@@ -2660,31 +2660,29 @@ describe("IndexingPanel", () => {
 
     render(<IndexingPanel />);
 
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-pipeline")).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByTestId("index-live-pipeline")).toBeInTheDocument());
     expect(screen.getByTestId("index-pipeline-step-discovering")).toHaveAttribute("data-state", "done");
     expect(screen.getByTestId("index-pipeline-step-queues")).toHaveAttribute("data-state", "active");
     expect(screen.getByTestId("index-pipeline-step-embedding")).toHaveAttribute("data-state", "active");
     expect(screen.getByTestId("index-pipeline-step-committing")).toHaveAttribute("data-state", "active");
-
+    expect(screen.getByTestId("index-pipeline-connector-discovering")).toHaveAttribute("data-state", "flowing");
+    expect(screen.getByTestId("index-pipeline-connector-queues")).toHaveAttribute("data-state", "active");
+    expect(screen.getByTestId("index-pipeline-connector-embedding")).toHaveAttribute("data-state", "active");
+    expect(screen.getByTestId("index-pipeline-metric-discovering")).toHaveTextContent("120 scanned");
+    expect(screen.getByTestId("index-pipeline-metric-queues")).toHaveTextContent("52 / 120");
+    expect(screen.getByTestId("index-pipeline-metric-embedding")).toHaveTextContent("90 vectors");
+    expect(screen.getByTestId("index-pipeline-metric-committing")).toHaveTextContent("45 indexed");
     expect(screen.getByTestId("index-live-queues")).toBeInTheDocument();
     expect(screen.getByTestId("index-queue-counts-keywordData")).toHaveTextContent("30 / 30");
     expect(screen.getByTestId("index-queue-counts-fastText")).toHaveTextContent("20 / 70");
     expect(screen.getByTestId("index-queue-counts-imageOCR")).toHaveTextContent("2 / 15");
     expect(screen.getByTestId("index-queue-counts-mediaSpeech")).toHaveTextContent("0 / 5");
-
     expect(screen.getByTestId("index-live-sources")).toBeInTheDocument();
     expect(screen.getByTestId("index-live-source-files")).toHaveTextContent("Files");
     expect(screen.getByTestId("index-live-source-files")).toHaveTextContent("Running · 40 indexed");
     expect(screen.getByTestId("index-live-source-calendars")).toHaveTextContent("Done · 2 indexed");
     expect(screen.getByTestId("index-live-source-files")).toHaveClass("running");
     expect(screen.getByTestId("index-live-source-calendars")).toHaveClass("completed");
-
-    // A cold mount mid-run adopts the committed snapshot as its baseline, so
-    // the cumulative live counters stay suppressed instead of stacking onto it
-    // (settled baseline: 100 documents, 250 chunks). Delta projection from a
-    // pre-run anchor is covered by the dedicated tests above.
     expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("100");
     expect(screen.queryByTestId("index-stat-documents-live")).toBeNull();
     expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("250");

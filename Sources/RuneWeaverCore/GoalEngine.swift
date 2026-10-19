@@ -278,7 +278,10 @@ public actor GoalEngine {
         }
         do {
             try await store.replacePlan(goalID: goal.id, steps: steps)
-            try await store.setStatus(goalID: goal.id, status: .active)
+            let current = try await store.goal(id: goal.id)
+            if current?.status == .unplanned {
+                try await store.setStatus(goalID: goal.id, status: .active)
+            }
             await invalidateAnswerCache()
         } catch {
             RuneWeaverLog.scheduler.error("GoalEngine: failed to persist plan for goal \(goal.id): \(error.localizedDescription)")

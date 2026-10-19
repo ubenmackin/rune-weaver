@@ -34,6 +34,8 @@ extension FilesIndexer {
         var pendingSeenPath: String?
         /// Modality queue lane this candidate was scheduled in, when known.
         var lane: FilesModalityLane?
+        /// Whether `counters.scanned` was already incremented for this candidate during walk preflight.
+        var preScanned = false
     }
 
     /// Result of stamping one visited file as seen by the current run.

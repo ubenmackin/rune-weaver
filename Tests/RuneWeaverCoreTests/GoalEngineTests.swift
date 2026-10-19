@@ -197,7 +197,8 @@ struct GoalEngineTests {
         defer { try? FileManager.default.removeItem(at: base) }
         let llm = StubGoalLLM(texts: [#"[{"title":"Step one"}]"#])
         let (engine, store) = makeEngine(dbPath: path, llm: llm) { $0.maxActiveGoals = 1 }
-        _ = try await engine.create(title: "First", statement: "First goal")
+        let first = try await engine.create(title: "First", statement: "First goal")
+        await engine.waitForPendingPlan(goalID: first.id)
         #expect(try await store.activeGoalCount() == 1)
         do {
             _ = try await engine.create(title: "Second", statement: "Second goal")
@@ -361,6 +362,7 @@ struct GoalEngineTests {
         defer { try? FileManager.default.removeItem(at: base) }
         let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: [#"[{"title":"Step one"}]"#]))
         let created = try await engine.create(title: "Persist", statement: "Stay with it")
+        await engine.waitForPendingPlan(goalID: created.id)
 
         try await engine.pause(goalID: created.id)
         let pausedStatus = try await store.goal(id: created.id)?.status
