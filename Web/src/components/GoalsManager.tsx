@@ -9,6 +9,7 @@ import {
   dismissIdea,
   formatGoalNextAdvance,
   getSettings,
+  goalAdvanceBlockedTitle,
   goalCadenceLabel,
   goalEventKindLabel,
   goalProgressPercent,
@@ -16,6 +17,7 @@ import {
   goalStatusTone,
   ideaKindLabel,
   isActiveRunStatus,
+  isGoalAdvanceable,
   isIdeaProposedProactive,
   listGoals,
   listIdeas,
@@ -723,14 +725,17 @@ export default function GoalsManager({
                     disabled={
                       advancingGoalId === goal.id ||
                       isTerminal ||
-                      Boolean(goal.isPlanning)
+                      Boolean(goal.isPlanning) ||
+                      !isGoalAdvanceable(goal.status)
                     }
                     title={
                       goal.isPlanning
                         ? "Planning in progress"
                         : goal.status === "unplanned"
-                        ? "Plan goal with agent"
-                        : "Work on it now"
+                          ? "Plan goal with agent"
+                          : isGoalAdvanceable(goal.status)
+                            ? "Work on it now"
+                            : goalAdvanceBlockedTitle(goal.status)
                     }
                     aria-label={
                       goal.isPlanning
@@ -750,7 +755,7 @@ export default function GoalsManager({
                   <button
                     type="button"
                     className={`status-toggle-btn ${
-                      goal.status === "active" ? "enabled" : "disabled"
+                      goal.status === "active" ? "is-pause" : "is-resume"
                     }`}
                     onClick={() => void handleToggleStatus(goal)}
                     disabled={

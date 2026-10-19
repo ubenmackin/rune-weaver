@@ -244,6 +244,72 @@ describe("GoalsManager", () => {
     });
   });
 
+  it("disables advance and keeps resume enabled for a paused goal", async () => {
+    installSocket();
+    const advanceCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [goal({ status: "paused" })], count: 1 });
+        }
+        if (input.endsWith("/advance")) {
+          advanceCalls.push(input);
+          return jsonResponse({ runID: "run-1", sessionID: "session-1", goalId: GOAL_ID });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    const resume = screen.getByRole("button", { name: "Resume" });
+    expect(resume).toBeEnabled();
+    expect(resume).not.toHaveAttribute("disabled");
+    expect(resume).toHaveClass("status-toggle-btn");
+    expect(resume).toHaveClass("is-resume");
+    const work = screen.getByRole("button", { name: "Work on it now" });
+    expect(work).toBeDisabled();
+    expect(work).toHaveAttribute("title", "Resume this goal before working on it now.");
+    await user.click(work);
+    expect(advanceCalls).toHaveLength(0);
+  });
+
+  it("enables advance and pause for an active goal", async () => {
+    installSocket();
+    const advanceCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [goal({ status: "active" })], count: 1 });
+        }
+        if (input.endsWith("/advance") && init?.method === "POST") {
+          advanceCalls.push(input);
+          return jsonResponse({ runID: "run-1", sessionID: "session-1", goalId: GOAL_ID });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    const pause = screen.getByRole("button", { name: "Pause" });
+    expect(pause).toBeEnabled();
+    expect(pause).not.toHaveAttribute("disabled");
+    expect(pause).toHaveClass("is-pause");
+    const work = screen.getByRole("button", { name: "Work on it now" });
+    expect(work).toBeEnabled();
+    await user.click(work);
+    await waitFor(() => {
+      expect(advanceCalls).toHaveLength(1);
+    });
+  });
+
   it("issues a step PATCH when a plan checkbox is toggled", async () => {
     installSocket();
     const patches: Array<{ path: string; body: string }> = [];

@@ -3,11 +3,13 @@
 import { useEffect, useState, type RefObject } from "react";
 import {
   formatRunDuration,
+  goalAdvanceBlockedTitle,
   goalEventKindLabel,
   goalProgressPercent,
   goalStatusLabel,
   goalStatusTone,
   isActiveRunStatus,
+  isGoalAdvanceable,
   parseRunTimestamp,
   type Goal,
 } from "../api";
@@ -280,7 +282,7 @@ export default function GoalDrawer({
         <button
           type="button"
           className={`status-toggle-btn ${
-            goal?.status === "active" ? "enabled" : "disabled"
+            goal?.status === "active" ? "is-pause" : "is-resume"
           }`}
           onClick={() => {
             if (goal) void toggleStatus(goal);
@@ -300,8 +302,14 @@ export default function GoalDrawer({
           onClick={() => {
             if (goal) void advance(goal);
           }}
-          disabled={advancing || isTerminal || !goal}
-          title="Work on it now"
+          disabled={
+            advancing || isTerminal || !goal || !isGoalAdvanceable(goal.status)
+          }
+          title={
+            goal && isGoalAdvanceable(goal.status)
+              ? "Work on it now"
+              : goalAdvanceBlockedTitle(goal?.status ?? "")
+          }
           aria-label="Work on it now"
         >
           {advancing ? "Working…" : "Work on it now"}

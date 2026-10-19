@@ -564,6 +564,34 @@
   color: var(--text-muted);
 }
 
+/* Goal pause/resume stays actionable in both states; only :disabled dims. */
+.status-toggle-btn.is-pause {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.status-toggle-btn.is-resume {
+  background: rgba(139, 92, 246, 0.15);
+  color: #c4b5fd;
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.status-toggle-btn.is-resume:hover {
+  border-color: #8b5cf6;
+  color: #ddd6fe;
+}
+
+.status-toggle-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.status-toggle-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .schedule-card-prompt {
   margin-top: 10px;
   font-size: 13px;
