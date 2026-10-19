@@ -699,22 +699,7 @@ private func handleWebSocketTurnCancellation(
     initialEntry: RunLogEntry,
     startTime: Date
 ) async {
-    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-    // Release the tracker slot before publishing the terminal row so observers
-    // polling the run log never see a settled row with a stale active slot.
-    // Stale tokens are ignored, keeping a same-session replacement intact.
-    await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
-    let entry = await context.runs.update(
-        id: initialEntry.id,
-        status: "cancelled",
-        durationMs: durationMs
-    ) ?? initialEntry
-    // Terminal settlement runs inside the cancelled turn task. Broadcasts
-    // deliver terminal settlement to viewers without unmonitored detached spawns
-    // while the event-path guard keeps emitting zero further deltas.
-    let cancelledText = encodeWSFrame(WSCancelledFrame(sessionID: sessionID))
-    await context.hub.broadcastTerminalCancellation(run: entry, frameText: cancelledText)
-    await context.steeringQueue.clear(for: sessionID)
+    await settleTurnCancelled(context: context, sessionID: sessionID, token: registrationToken, entry: initialEntry, startTime: startTime)
 }
 
 /// Spawns a background liveness heartbeat task for long inference turns.
@@ -742,17 +727,7 @@ private func startHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Voi
 func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, context: ServerContext) async {
     var cancelled = false
     if let sid = message.sessionID {
-        cancelled = await context.activeTurns.cancel(sessionID: sid)
-        LLMCancelRegistry.shared.cancel(sessionID: sid)
-        await context.steeringQueue.clear(for: sid)
-        let cancelledRuns = await context.runs.cancelRunning(sessionID: sid)
-        for run in cancelledRuns {
-            let cancelledText = encodeWSFrame(WSCancelledFrame(sessionID: sid))
-            await context.hub.broadcastTerminalCancellation(run: run, frameText: cancelledText)
-        }
-        if !cancelledRuns.isEmpty {
-            cancelled = true
-        }
+        cancelled = await requestTurnCancellation(context: context, sessionID: sid)
     }
     let cancelledFrame = WSCancelledFrame(sessionID: message.sessionID, cancelled: cancelled)
     if let frame = encodeWSFrame(cancelledFrame) {

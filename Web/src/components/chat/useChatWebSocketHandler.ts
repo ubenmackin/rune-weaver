@@ -554,6 +554,8 @@ export function useChatWebSocketHandler({
         }
         if (cancelledRef.current) {
           setInFlightTurn(null);
+          inFlightTurnRef.current = null;
+          pendingRef.current = false;
           setPending(false);
           return;
         }
@@ -716,6 +718,8 @@ export function useChatWebSocketHandler({
         activeTurnStartMsRef.current = null;
         pendingSteerRef.current = [];
         pendingNormalRef.current = null;
+        inFlightTurnRef.current = null;
+        pendingRef.current = false;
         setInFlightTurn(null);
         setPending(false);
       } else if (frameType === "error") {
@@ -811,6 +815,7 @@ export function useChatWebSocketHandler({
         activeTurnStartMsRef.current = null;
         setInFlightTurn(null);
         inFlightTurnRef.current = null;
+        pendingRef.current = false;
         setPending(false);
       } else if (frameType === "run_started" || frameType === "run_completed") {
         const nestedRun: unknown = (data as unknown as Record<string, unknown>).run;
@@ -830,11 +835,27 @@ export function useChatWebSocketHandler({
           ) {
             markBackgroundRunning(normalizedOwner, true);
             if (normalizedOwner === normalizeSessionID(sessionIDRef.current)) {
-              setPending(true);
-              pendingRef.current = true;
-              turnSessionIDRef.current = normalizedOwner;
-              activeTurnStartMsRef.current = Date.now();
-              armTurnTimeout();
+              // Never re-arm a settled turn: ghost run_started frames after
+              // cancel arrive with no live turn and must leave pending false.
+              // A resumed turn still needs correlation even before it is live.
+              if (!cancelledRef.current) {
+                const wasLive = turnSessionIDRef.current != null;
+                if (turnSessionIDRef.current == null) {
+                  turnSessionIDRef.current = normalizedOwner;
+                  if (activeTurnStartMsRef.current == null) {
+                    activeTurnStartMsRef.current = Date.now();
+                  }
+                }
+                if (wasLive) {
+                  setPending(true);
+                  pendingRef.current = true;
+                  turnSessionIDRef.current = normalizedOwner;
+                  activeTurnStartMsRef.current = Date.now();
+                  armTurnTimeout();
+                } else {
+                  armTurnTimeout();
+                }
+              }
             } else {
               const existing = parkedFlightsRef.current.get(normalizedOwner);
               if (!existing) {
@@ -920,6 +941,10 @@ export function useChatWebSocketHandler({
           setPending(true);
           pendingRef.current = true;
           activeTurnStartMsRef.current = Date.now();
+          // Resumed turns start without correlation; seed it so run_started validates.
+          if (turnSessionIDRef.current == null && !cancelledRef.current) {
+            turnSessionIDRef.current = frameSessionID;
+          }
         }
         refreshApprovals();
       }

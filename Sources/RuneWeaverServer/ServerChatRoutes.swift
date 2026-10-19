@@ -77,6 +77,11 @@ func registerChatRoute(_ app: Application) {
             } onCancel: {
                 chatTask.cancel()
             }
+            // A late cancel between process return and settle takes the cancellation path so no done is emitted.
+            guard !Task.isCancelled else {
+                await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
+                throw Abort(.gone, reason: "Turn was cancelled by user")
+            }
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
             // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
             // decision can transition the same session entry. The per-turn parked flag keeps a
@@ -98,17 +103,14 @@ func registerChatRoute(_ app: Application) {
             )
             return response
         } catch is CancellationError {
-            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            // Clear queued steering on cancel so stale guidance does not leak into the next turn.
-            await context.steeringQueue.clear(for: sessionID)
-            await updateRESTChatRunAndBroadcast(
-                context: context,
-                initialEntry: initialEntry,
-                startTime: startTime,
-                status: "cancelled"
-            )
+            await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
             throw Abort(.gone, reason: "Turn was cancelled by user")
         } catch {
+            // A failure racing a cancel still settles as cancelled so no error overwrites it.
+            if Task.isCancelled {
+                await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
+                throw Abort(.gone, reason: "Turn was cancelled by user")
+            }
             try await handleRESTChatError(
                 error,
                 context: context,
@@ -218,15 +220,8 @@ private func updateRESTChatRunAndBroadcast(
 private func registerChatCancelRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat), PathComponent.constant("cancel")) { req async throws -> CancelChatResponse in
         let body = try req.content.decode(CancelChatRequest.self)
-        let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
-        LLMCancelRegistry.shared.cancel(sessionID: body.sessionID)
-        // Clear queued steering on cancel so stale guidance does not leak into the next turn.
-        await req.application.runeWeaver.steeringQueue.clear(for: body.sessionID)
-        let cancelledRuns = await req.application.runeWeaver.runs.cancelRunning(sessionID: body.sessionID)
-        for run in cancelledRuns {
-            await req.application.runeWeaver.hub.broadcastRun(run)
-        }
-        return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled || !cancelledRuns.isEmpty)
+        let cancelled = await requestTurnCancellation(context: req.application.runeWeaver, sessionID: body.sessionID)
+        return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
     }
 }
 

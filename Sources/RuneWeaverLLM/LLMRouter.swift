@@ -63,6 +63,10 @@ public actor LLMRouter {
     /// Carries the chat identifier to session-aware chunk providers so sticky
     /// slots follow the turn; nil preserves the session-agnostic path.
     public func chat(messages: [Message], tools: [any Tool], sessionID: String? = nil) -> AsyncStream<LLMResponse> {
+        // Cancelled callers settle empty so no provider sees the turn.
+        if Task.isCancelled {
+            return AsyncStream { $0.finish() }
+        }
         let providers = self.providers
         let circuitBreaker = self.circuitBreaker
         return AsyncStream { continuation in
@@ -89,11 +93,10 @@ public actor LLMRouter {
                             sessionID: sessionID,
                             continuation: continuation
                         )
-                        if let message = step.lastError {
-                            lastError = message
-                            await circuitBreaker.recordFailure(provider: provider, error: message)
-                        } else if step.didFinish {
-                            await circuitBreaker.recordSuccess(provider: provider)
+                        // A cancelled turn never falls through: the live turn is already settled.
+                        if await Self.recordStep(step, provider: provider, breaker: circuitBreaker, lastError: &lastError) {
+                            didFinish = false
+                            break
                         }
                         if step.shouldContinue {
                             continue
@@ -108,15 +111,11 @@ public actor LLMRouter {
                         sessionID: sessionID,
                         continuation: continuation
                     )
-                    if let message = step.lastError {
-                        lastError = message
-                        await circuitBreaker.recordFailure(provider: provider, error: message)
-                    } else if step.didFinish {
-                        await circuitBreaker.recordSuccess(provider: provider)
+                    // A cancelled turn never falls through: the live turn is already settled.
+                    if await Self.recordStep(step, provider: provider, breaker: circuitBreaker, lastError: &lastError) {
+                        didFinish = false
+                        break
                     }
-                    // A clean failure before any content streams falls through
-                    // to the next provider exactly like the chunked path, so a
-                    // failing primary never pins the turn while it still cools.
                     if step.shouldContinue {
                         continue
                     }
@@ -136,6 +135,27 @@ public actor LLMRouter {
     /// Normalizes to the string form so sticky-slot hashing sees one shape.
     public func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
         chat(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
+    /// Records one drain outcome unless the turn was cancelled.
+    /// - Returns: True when cancelled so the caller settles without fallback.
+    private static func recordStep(
+        _ step: ChunkedDrainResult,
+        provider: any LLMProvider,
+        breaker: ProviderCircuitBreaker,
+        lastError: inout String?
+    ) async -> Bool {
+        // Cancellation is not provider failure so it never cools the provider.
+        if Task.isCancelled {
+            return true
+        }
+        if let message = step.lastError {
+            lastError = message
+            await breaker.recordFailure(provider: provider, error: message)
+        } else if step.didFinish {
+            await breaker.recordSuccess(provider: provider)
+        }
+        return false
     }
 
     /// Drains one chunk-streaming provider, preserving mid-stream error propagation.
@@ -175,13 +195,18 @@ public actor LLMRouter {
         }
         if let failureMessage {
             if !yieldedText {
+                // Cancelled turns never advance the fallback chain.
+                // Cancellation carries no provider error.
+                if Task.isCancelled {
+                    return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
+                }
                 return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: true)
             }
             if !Task.isCancelled {
                 continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: failureMessage))
                 return ChunkedDrainResult(didFinish: true, lastError: failureMessage, shouldContinue: false)
             }
-            return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: false)
+            return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
         }
         if !Task.isCancelled {
             continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: lastUsage))
@@ -224,12 +249,17 @@ public actor LLMRouter {
         }
         if let failureMessage {
             if !yieldedContent {
+                // Cancelled turns never advance the fallback chain.
+                // Cancellation carries no provider error.
+                if Task.isCancelled {
+                    return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
+                }
                 return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: true)
             }
             if !Task.isCancelled {
                 return ChunkedDrainResult(didFinish: true, lastError: failureMessage, shouldContinue: false)
             }
-            return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: false)
+            return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
         }
         if Task.isCancelled {
             return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
