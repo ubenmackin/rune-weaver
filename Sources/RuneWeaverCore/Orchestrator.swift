@@ -855,9 +855,12 @@ extension Orchestrator {
         } else {
             nil
         }
-        let effectiveMessages = VisionGate.stripMessages(messages, supportsVision: llm.modelInfo.supportsVision)
-        let stream = llm.chat(messages: effectiveMessages, tools: tools, session: sessionID)
         do {
+            // Cancelled turns never open a new stream so a late cancel between
+            // tool rounds cannot start another HTTP request.
+            try Task.checkCancellation()
+            let effectiveMessages = VisionGate.stripMessages(messages, supportsVision: llm.modelInfo.supportsVision)
+            let stream = llm.chat(messages: effectiveMessages, tools: tools, session: sessionID)
             try await withTaskCancellationHandler {
                 for await chunk in stream {
                     try Task.checkCancellation()
@@ -890,6 +893,9 @@ extension Orchestrator {
                         break
                     }
                 }
+                // A cancelled stream settles as cancellation even after partial
+                // content when the provider suppresses its terminal marker.
+                try Task.checkCancellation()
             } onCancel: {
                 if let sessionID {
                     LLMCancelRegistry.shared.cancel(sessionID: sessionID)

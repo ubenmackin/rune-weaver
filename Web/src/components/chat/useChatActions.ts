@@ -219,7 +219,14 @@ export function useChatActions({
 
   const handleSteer = useCallback(() => {
     const text = input.trim();
-    if (!text || !pending) return;
+    if (!text) return;
+    // A steer raced with cancel has no live turn; surface the miss instead
+    // of sending into a settled turn.
+    if (cancelledRef.current) {
+      setError("No active turn — steering was not applied because the turn was cancelled.");
+      return;
+    }
+    if (!pending) return;
     if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
       setError(
         `Message too long — keep steering under ${MAX_CHAT_TEXT_LENGTH} characters.`,
@@ -306,7 +313,7 @@ export function useChatActions({
         : withSteer;
       return withoutShed.slice(-MAX_MESSAGES);
     });
-  }, [input, pending, sendMessage, sessionID, lastSteerTimestampRef, setInput, inputHistoryRef, historyIndexRef, draftRef, textareaRef, pendingSteerRef, inFlightTurnRef, setInFlightTurn, userHasScrolledUpRef, setMessages, setError]);
+  }, [input, pending, cancelledRef, sendMessage, sessionID, lastSteerTimestampRef, setInput, inputHistoryRef, historyIndexRef, draftRef, textareaRef, pendingSteerRef, inFlightTurnRef, setInFlightTurn, userHasScrolledUpRef, setMessages, setError]);
 
   const handleCancel = useCallback(async () => {
     if (!pending) return;
@@ -322,6 +329,8 @@ export function useChatActions({
     clearAllToolProgress();
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
+    pendingRef.current = false;
+    inFlightTurnRef.current = null;
     pendingSteerRef.current = [];
     pendingNormalRef.current = null;
     parkedFlightsRef.current.delete(parkedFlightKey(cancelSID));
@@ -337,10 +346,12 @@ export function useChatActions({
     } catch {
       // Best-effort cancellation
     } finally {
+      inFlightTurnRef.current = null;
+      pendingRef.current = false;
       setInFlightTurn(null);
       setPending(false);
     }
-  }, [pending, lastSteerTimestampRef, turnSessionIDRef, sessionIDRef, sessionID, cancelledRef, clearTurnTimeout, clearAllToolProgress, activeTurnStartMsRef, pendingSteerRef, pendingNormalRef, parkedFlightsRef, markBackgroundRunning, isOpen, sendMessage, setInFlightTurn, setPending, setError]);
+  }, [pending, lastSteerTimestampRef, turnSessionIDRef, sessionIDRef, sessionID, cancelledRef, pendingRef, inFlightTurnRef, clearTurnTimeout, clearAllToolProgress, activeTurnStartMsRef, pendingSteerRef, pendingNormalRef, parkedFlightsRef, markBackgroundRunning, isOpen, sendMessage, setInFlightTurn, setPending, setError]);
 
   const send = useCallback(
     async (overrideText?: string, overrideSessionID?: string) => {

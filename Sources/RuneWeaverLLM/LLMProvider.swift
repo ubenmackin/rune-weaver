@@ -229,6 +229,10 @@ extension ChunkStreamingProvider {
     /// Carries the chat identifier end to end so sticky-slot backends can reuse
     /// the cached prefix instead of always falling back to auto-assignment.
     public func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse> {
+        // Cancelled callers settle empty before any chunk stream exists.
+        if Task.isCancelled {
+            return AsyncStream { $0.finish() }
+        }
         let definitions = toolDefinitions(for: tools)
         let chunks = chatChunks(messages: messages, tools: definitions, sessionID: sessionID)
         return AsyncStream { continuation in
@@ -252,11 +256,16 @@ extension ChunkStreamingProvider {
                             break chunkLoop
                         }
                     case let .done(meta):
-                        continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: meta.usage?.totalTokens))
+                        // Cancelled turns finish empty without a success marker.
+                        if !Task.isCancelled {
+                            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: meta.usage?.totalTokens))
+                        }
                         break chunkLoop
                     case let .error(message):
-                        let detail = message.isEmpty ? "unknown error" : message
-                        continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: detail))
+                        if !Task.isCancelled {
+                            let detail = message.isEmpty ? "unknown error" : message
+                            continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: detail))
+                        }
                         break chunkLoop
                     }
                 }
@@ -869,6 +878,10 @@ struct OpenAICompatibleHTTPClient: Sendable {
             AsyncStream<LLMResponseChunk>.Continuation
         ) async -> Void
     ) -> AsyncStream<LLMResponseChunk> {
+        // Cancelled callers settle empty before any URLRequest exists.
+        if Task.isCancelled {
+            return AsyncStream { $0.finish() }
+        }
         let body: Data
         do {
             body = try makeBody()
@@ -987,6 +1000,10 @@ struct OpenAICompatibleHTTPClient: Sendable {
     /// - Parameter texts: Texts to embed.
     /// - Returns: One vector per input text, in order.
     func requestEmbeddings(texts: [String]) async throws -> [[Float]] {
+        // Cancelled callers fail before any URLRequest exists.
+        if Task.isCancelled {
+            throw CancellationError()
+        }
         let payload: [String: Any] = ["model": model, "input": texts]
         let body = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         guard let request = makeRequest(path: "/embeddings", body: body, timeout: 60) else {
@@ -995,7 +1012,15 @@ struct OpenAICompatibleHTTPClient: Sendable {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await URLSession.shared.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            throw CancellationError()
         } catch {
+            // Cancellation stays cancellation so callers skip fallback.
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
                 throw LLMProviderError.unavailable(
                     "Embeddings cleartext HTTP was blocked by macOS App Transport Security. " +
@@ -1025,7 +1050,8 @@ struct OpenAICompatibleHTTPClient: Sendable {
     /// Probes `GET <base>/models` without throwing.
     /// - Returns: True when the server answers with 2xx.
     func ping() async -> Bool {
-        guard let url = URL(string: targetBaseURL + "/models") else { return false }
+        // Cancelled probes skip the network.
+        guard !Task.isCancelled, let url = URL(string: targetBaseURL + "/models") else { return false }
         var request = URLRequest(url: url, timeoutInterval: 3)
         request.httpMethod = "GET"
         if let apiKey, !apiKey.isEmpty {
