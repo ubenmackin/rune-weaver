@@ -98,7 +98,7 @@ extension PermissionKind {
             "Full Disk Access lets Rune Weaver read your local Messages database for search, read, and send "
                 + "confirmation. macOS has no prompt for this permission, so add Rune Weaver in System Settings."
         case .contacts:
-            "Lets Rune Weaver resolve names like \"Rebecca Mackin\" to phone numbers and email addresses."
+            "Lets Rune Weaver resolve names like \"Jane Doe\" to phone numbers and email addresses."
         case .calendars:
             "Lets Rune Weaver search your calendars and create events when you ask it to."
         case .reminders:

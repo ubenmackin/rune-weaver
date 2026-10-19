@@ -45,8 +45,8 @@ public final class PermissionsWindowController: NSObject {
         let permissionsWindow = SingleInstanceHostedWindow.makeWindow(
             title: "Permissions",
             autosaveName: "RuneWeaverPermissionsWindow",
-            initialRect: NSRect(x: 0, y: 0, width: 640, height: 560),
-            minSize: NSSize(width: 560, height: 480),
+            initialRect: NSRect(x: 0, y: 0, width: 600, height: 480),
+            minSize: NSSize(width: 520, height: 360),
             contentView: NSHostingView(
                 rootView: PermissionsView(viewModel: viewModel) { [weak self] in
                     self?.window?.close()
