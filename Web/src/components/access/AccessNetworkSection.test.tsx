@@ -14,19 +14,19 @@ const panePolicyPayload = {
     version: 1,
     network: {
       mode: "allowlist_only",
-      allowed_domains: ["api.example.com"],
-      blocked_domains: ["metadata.google.internal"],
+      allowedDomains: ["api.example.com"],
+      blockedDomains: ["metadata.google.internal"],
     },
     credentials: {
       GITHUB_TOKEN: {
-        allowed_hosts: ["api.github.com"],
-        allowed_methods: ["GET"],
-        allowed_path_prefixes: ["/repos"],
+        allowedHosts: ["api.github.com"],
+        allowedMethods: ["GET"],
+        allowedPathPrefixes: ["/repos"],
       },
     },
   },
   path: "/Users/test/.runeweaver/policy.toml",
-  loaded_from_disk: true,
+  loadedFromDisk: true,
   violations: [],
 };
 
@@ -448,16 +448,16 @@ describe("AccessNetworkSection", () => {
     expect(hint).toContain("link-local");
   });
 
-  it("tolerates snake_case local_exemptions on decode", async () => {
+  it("loads camelCase localExemptions on decode", async () => {
     const payload = {
       ...panePolicyPayload,
       policy: {
         version: 1,
         network: {
           mode: "allowlist_only",
-          allowed_domains: ["api.example.com"],
-          blocked_domains: ["metadata.google.internal"],
-          local_exemptions: ["airflow.int.volcrypt.com"],
+          allowedDomains: ["api.example.com"],
+          blockedDomains: ["metadata.google.internal"],
+          localExemptions: ["airflow.int.volcrypt.com"],
         },
         credentials: panePolicyPayload.policy.credentials,
       },

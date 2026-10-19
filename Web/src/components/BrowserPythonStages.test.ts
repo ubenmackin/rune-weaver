@@ -21,7 +21,7 @@ const mockSettings = {
     mlx: {
       enabled: true,
       model: "gemma-4-9b",
-      server_url: "http://localhost:8080",
+      serverURL: "http://localhost:8080",
     },
   },
   memoryVectorDBPath: "memory/vectors",

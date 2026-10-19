@@ -3541,19 +3541,19 @@ const structuredPolicyPayload = {
     version: 1,
     network: {
       mode: "allowlist_only",
-      allowed_domains: ["api.example.com"],
-      blocked_domains: ["metadata.google.internal"],
+      allowedDomains: ["api.example.com"],
+      blockedDomains: ["metadata.google.internal"],
     },
     credentials: {
       GITHUB_TOKEN: {
-        allowed_hosts: ["api.github.com"],
-        allowed_methods: ["GET"],
-        allowed_path_prefixes: ["/repos"],
+        allowedHosts: ["api.github.com"],
+        allowedMethods: ["GET"],
+        allowedPathPrefixes: ["/repos"],
       },
     },
   },
   path: "/Users/test/.runeweaver/policy.toml",
-  loaded_from_disk: true,
+  loadedFromDisk: true,
   violations: [],
 };
 
@@ -4088,7 +4088,7 @@ describe("SettingsManager persona pane", () => {
           planTimeoutSeconds: 120,
           maxTriggersPerGoal: 4,
         },
-        ideas: { enabled: false, maxPerCycle: 3, timeout_seconds: 60 },
+        ideas: { enabled: false, maxPerCycle: 3, timeoutSeconds: 60 },
         proactive: { mode: "all", judgeTimeoutSeconds: 20 },
       },
     });
@@ -4156,7 +4156,7 @@ describe("SettingsManager persona pane", () => {
         planTimeoutSeconds: 120,
         maxTriggersPerGoal: 4,
       },
-      ideas: { enabled: false, maxPerCycle: 3, timeout_seconds: 60 },
+      ideas: { enabled: false, maxPerCycle: 3, timeoutSeconds: 60 },
       proactive: { mode: "all", judgeTimeoutSeconds: 20 },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -4416,12 +4416,12 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
       ...mockSettings,
       bash: {
         enabled: true,
-        default_action: "ask",
+        defaultAction: "ask",
         rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
+        timeoutSeconds: 30,
+        cpuSeconds: 60,
         memoryMb: 512,
-        allow_network: false,
+        allowNetwork: false,
       },
       workspace: { quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7 },
     };
@@ -4455,12 +4455,12 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
       ...mockSettings,
       bash: {
         enabled: true,
-        default_action: "ask",
+        defaultAction: "ask",
         rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
+        timeoutSeconds: 30,
+        cpuSeconds: 60,
         memoryMb: 512,
-        allow_network: false,
+        allowNetwork: false,
       },
       workspace: { quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7 },
     };
