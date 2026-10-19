@@ -208,4 +208,18 @@ struct CalendarsRemindersOnboardingTests {
         #expect(probes.requestCalls.isEmpty)
         #expect(probes.statusCalls == [.calendars, .reminders])
     }
+
+    @Test
+    func `contacts rationale uses fictional placeholder`() {
+        // Fictional placeholder keeps user-visible copy free of real names.
+        #expect(
+            PermissionKind.contacts.rationale
+                == "Lets Rune Weaver resolve names like \"Jane Doe\" to phone numbers and email addresses."
+        )
+        #expect(PermissionKind.contacts.rationale.contains("Jane Doe"))
+        #expect(!PermissionKind.contacts.rationale.contains("Rebecca Mackin"))
+        #expect(
+            !PermissionKind.allCases.map(\.rationale).contains(where: { $0.contains("Rebecca Mackin") })
+        )
+    }
 }
