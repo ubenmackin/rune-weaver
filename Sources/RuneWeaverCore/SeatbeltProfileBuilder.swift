@@ -14,7 +14,8 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     public var deniedPaths: Set<String>
     /// Whether outbound and inbound network access is permitted.
     public var allowNetwork: Bool
-    /// Declared egress hosts constraining sandboxed network dials.
+    /// Declared hosts for supervisor screening; SBPL stays blanket.
+    /// This value never narrows the profile: per-host enforcement lives in the supervisor.
     public var allowedEgressHosts: [String]
 
     /// Default system read paths essential for standard binaries and runtimes.
@@ -247,22 +248,15 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
-    /// Appends the network access policy with blanket-allow plus supervisor screening.
+    /// Appends blanket network posture; supervisor remains the per-host gate.
+    /// SBPL host filters stay inexpressible, so the flag alone decides.
     private func appendNetworkPolicy(to lines: inout [String]) {
         lines.append(";; Network access policy")
-        guard allowNetwork else {
+        if allowNetwork {
+            lines.append("(allow network*)")
+        } else {
             lines.append("(deny network*)")
-            return
         }
-        let scopedHosts = Self.sanitizedEgressHosts(allowedEgressHosts)
-        if !scopedHosts.isEmpty {
-            let declaredHostCount = allowedEgressHosts.count
-            let validHostCount = scopedHosts.count
-            RuneWeaverLog.sandbox.info(
-                "SeatbeltProfileBuilder: blanket-allow network with supervisor screening (validHosts=\(validHostCount) declared=\(declaredHostCount))."
-            )
-        }
-        lines.append("(allow network*)")
     }
 
     /// Appends process and system-service compat for deny-default launch.

@@ -19,11 +19,30 @@ public enum UnixSocketHTTPClient {
         timeoutSeconds: Int = 15
     ) throws -> Data {
         #if canImport(Darwin)
+            let fd = try connect(socketPath: socketPath, timeoutSeconds: timeoutSeconds)
+            defer { Darwin.close(fd) }
+
+            let toSend = try buildRequestData(
+                method: method,
+                path: path,
+                body: body,
+                contentType: contentType
+            )
+            try write(fd: fd, data: toSend)
+
+            let rawResponse = try readResponse(fd: fd)
+            return try parseResponseBody(from: rawResponse)
+        #else
+            throw EmbeddingsError.unavailable
+        #endif
+    }
+
+    #if canImport(Darwin)
+        private static func connect(socketPath: String, timeoutSeconds: Int) throws -> Int32 {
             let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else {
                 throw EmbeddingsError.unavailable
             }
-            defer { Darwin.close(fd) }
 
             var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
             Darwin.setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
@@ -33,12 +52,15 @@ public enum UnixSocketHTTPClient {
             addr.sun_family = sa_family_t(AF_UNIX)
             let pathBytes = socketPath.utf8CString
             guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+                Darwin.close(fd)
                 throw EmbeddingsError.unavailable
             }
             withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
                 let rawPtr = UnsafeMutableRawPointer(ptr)
                 pathBytes.withUnsafeBytes { src in
-                    rawPtr.copyMemory(from: src.baseAddress!, byteCount: src.count)
+                    if let base = src.baseAddress {
+                        rawPtr.copyMemory(from: base, byteCount: src.count)
+                    }
                 }
             }
 
@@ -48,9 +70,19 @@ public enum UnixSocketHTTPClient {
                 }
             }
             guard connectResult == 0 else {
+                Darwin.close(fd)
                 throw EmbeddingsError.unavailable
             }
 
+            return fd
+        }
+
+        private static func buildRequestData(
+            method: String,
+            path: String,
+            body: Data?,
+            contentType: String?
+        ) throws -> Data {
             let bodyData = body ?? Data()
             var headerString = "\(method) \(path) HTTP/1.1\r\n"
             headerString += "Host: localhost\r\n"
@@ -68,15 +100,24 @@ public enum UnixSocketHTTPClient {
 
             var toSend = headerData
             toSend.append(bodyData)
+            return toSend
+        }
 
-            let totalToSend = toSend.count
+        private static func write(fd: Int32, data: Data) throws {
+            let totalToSend = data.count
             var sentSoFar = 0
-            try toSend.withUnsafeBytes { buffer in
+            try data.withUnsafeBytes { buffer in
+                guard let base = buffer.baseAddress else {
+                    if totalToSend > 0 {
+                        throw EmbeddingsError.invalidInput
+                    }
+                    return
+                }
                 while sentSoFar < totalToSend {
                     if Task.isCancelled {
                         throw CancellationError()
                     }
-                    let chunk = Darwin.write(fd, buffer.baseAddress! + sentSoFar, totalToSend - sentSoFar)
+                    let chunk = Darwin.write(fd, base + sentSoFar, totalToSend - sentSoFar)
                     if chunk <= 0 {
                         if errno == EINTR {
                             continue
@@ -89,8 +130,9 @@ public enum UnixSocketHTTPClient {
                     sentSoFar += chunk
                 }
             }
+        }
 
-            // Read response until EOF
+        private static func readResponse(fd: Int32) throws -> Data {
             var rawResponse = Data()
             var readBuffer = [UInt8](repeating: 0, count: 4096)
             while true {
@@ -112,8 +154,10 @@ public enum UnixSocketHTTPClient {
                 }
                 rawResponse.append(readBuffer, count: bytesRead)
             }
+            return rawResponse
+        }
 
-            // Split HTTP headers and body (separated by \r\n\r\n)
+        private static func parseResponseBody(from rawResponse: Data) throws -> Data {
             let separator = Data([0x0D, 0x0A, 0x0D, 0x0A])
             guard let range = rawResponse.range(of: separator) else {
                 throw EmbeddingsError.embeddingFailed
@@ -127,10 +171,8 @@ public enum UnixSocketHTTPClient {
             }
 
             return rawResponse.subdata(in: range.upperBound ..< rawResponse.count)
-        #else
-            throw EmbeddingsError.unavailable
-        #endif
-    }
+        }
+    #endif
 
     /// Probes health of a service listening on a Unix domain socket.
     public static func probeHealth(socketPath: String, path: String = "/health") -> Bool {

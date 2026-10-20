@@ -17,7 +17,11 @@ public enum EmbeddingGemmaPrompts {
 
     /// Formats a document body or chunk with its title/filename.
     public static func document(title: String?, text: String) -> String {
-        let effectiveTitle = (title?.isEmpty ?? true) ? "none" : title!
+        let effectiveTitle = if let title, !title.isEmpty {
+            title
+        } else {
+            "none"
+        }
         return "title: \(effectiveTitle) | text: \(text)"
     }
 }

@@ -9,6 +9,9 @@ public struct SubprocessToolBridge: Tool, Sendable {
     public let description: String
     public let inputSchema: JSONSchema
     public let permissionLevel: PermissionLevel
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Plugin identifier owning this tool.
     public let pluginID: String
@@ -26,6 +29,19 @@ public struct SubprocessToolBridge: Tool, Sendable {
     /// Defaults to false so plugin code never inherits host privileges silently; bypassing
     /// confinement must be a deliberate choice at the construction site.
     public let allowUnsandboxedExecution: Bool
+    /// Optional declared capabilities required by the tool.
+    public let capabilities: PluginCapabilities?
+    /// Optional secrets manager used to resolve declared env variables and sweep output.
+    public let secrets: SecretsManager?
+    /// Egress evaluator screening declared hosts before spawn.
+    public let egressEvaluator: any EgressPolicyEvaluator?
+    /// Scaffold plus interpreter-search keys that declared secrets must never overwrite.
+    /// Blocked interpreter paths prevent operator secrets from becoming code-loading directives.
+    private static let protectedEnvKeys: Set<String> = [
+        "PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "RUNEWEAVER_PLUGIN",
+        "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "NODE_OPTIONS"
+    ]
 
     /// Creates a subprocess bridge tool.
     public init(
@@ -35,9 +51,12 @@ public struct SubprocessToolBridge: Tool, Sendable {
         entrypoint: String,
         runtime: PluginRuntime,
         permissionOverride: PermissionLevel? = nil,
+        capabilities: PluginCapabilities? = nil,
+        secrets: SecretsManager? = nil,
         timeoutSeconds: TimeInterval = 30.0,
         maxOutputBytes: Int = 1_048_576,
-        allowUnsandboxedExecution: Bool = false
+        allowUnsandboxedExecution: Bool = false,
+        egressEvaluator: any EgressPolicyEvaluator? = nil
     ) throws {
         if let permissionOverride, permissionOverride == .trusted {
             throw PluginManifestError.trustedPermissionProhibited(
@@ -62,6 +81,9 @@ public struct SubprocessToolBridge: Tool, Sendable {
         self.timeoutSeconds = timeoutSeconds
         self.maxOutputBytes = maxOutputBytes
         self.allowUnsandboxedExecution = allowUnsandboxedExecution
+        self.capabilities = capabilities ?? declaration.capabilities
+        self.secrets = secrets
+        self.egressEvaluator = egressEvaluator
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -76,6 +98,14 @@ public struct SubprocessToolBridge: Tool, Sendable {
         let resolvedScript = scriptURL.resolvingSymlinksInPath().standardizedFileURL.path
         guard resolvedScript.hasPrefix(dirPrefix) else {
             return .failure("Plugin entrypoint escapes its plugin directory.", callID: input.callID)
+        }
+        // Ignored names stay unhashed, so an entrypoint beneath them would run untracked bytes.
+        let resolvedRelative = String(resolvedScript.dropFirst(normalizedDir.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !PluginSecurity.isEntrypointUnderIgnoredPath(entrypoint),
+              !PluginSecurity.isEntrypointUnderIgnoredPath(resolvedRelative)
+        else {
+            return .failure("Plugin entrypoint resolves under an ignored path.", callID: input.callID)
         }
         guard FileManager.default.fileExists(atPath: scriptURL.path) else {
             return .failure("Plugin entrypoint not found at '\(entrypoint)'.", callID: input.callID)
@@ -124,11 +154,37 @@ public struct SubprocessToolBridge: Tool, Sendable {
             return .failure("Failed to serialize JSON-RPC request for tool '\(name)': \(error.localizedDescription)", callID: input.callID)
         }
 
+        var resolvedSecrets: [String] = []
+        var injectedEnv: [String: String] = [:]
+        if let envKeys = capabilities?.env {
+            for key in envKeys {
+                if Self.protectedEnvKeys.contains(key) {
+                    continue
+                }
+                if let secrets {
+                    do {
+                        guard let val = try await secrets.resolve(key), !val.isEmpty else {
+                            continue
+                        }
+                        injectedEnv[key] = val
+                        resolvedSecrets.append(val)
+                    } catch {
+                        continue
+                    }
+                }
+            }
+        }
+        if let refusal = await screenDeclaredEgress(callID: input.callID, sessionID: context.sessionID) {
+            return refusal
+        }
+
         return try await executeSubprocess(
             executableURL: executableURL,
             arguments: arguments,
             requestData: requestData,
-            input: input
+            input: input,
+            injectedEnv: injectedEnv,
+            resolvedSecrets: resolvedSecrets
         )
     }
 
@@ -138,13 +194,17 @@ public struct SubprocessToolBridge: Tool, Sendable {
         let workingDirectory: URL
         let inputData: Data
         let callID: String
+        let injectedEnv: [String: String]
+        let resolvedSecrets: [String]
     }
 
     private func executeSubprocess(
         executableURL: URL,
         arguments: [String],
         requestData: Data,
-        input: ToolInput
+        input: ToolInput,
+        injectedEnv: [String: String],
+        resolvedSecrets: [String]
     ) async throws -> ToolOutput {
         // Track the child in a Sendable box so cancellation reaches the exact process even though
         // the child is spawned on this executor and the cancel handler runs elsewhere.
@@ -154,7 +214,9 @@ public struct SubprocessToolBridge: Tool, Sendable {
             arguments: arguments,
             workingDirectory: pluginDirectory,
             inputData: requestData,
-            callID: input.callID
+            callID: input.callID,
+            injectedEnv: injectedEnv,
+            resolvedSecrets: resolvedSecrets
         )
         do {
             let output = try await withTaskCancellationHandler {
@@ -184,38 +246,6 @@ public struct SubprocessToolBridge: Tool, Sendable {
         }
     }
 
-    private func prepareProcess(
-        invocation: SubprocessInvocation,
-        isSandboxAvailable: Bool,
-        sandboxExecPath: String
-    ) -> Process {
-        let process = Process()
-        let sandboxExecURL = URL(fileURLWithPath: sandboxExecPath)
-        if isSandboxAvailable {
-            let profile = SeatbeltProfileBuilder(
-                allowedReadPaths: [invocation.workingDirectory.path],
-                allowedWritePaths: [invocation.workingDirectory.path],
-                allowNetwork: false
-            ).buildProfile()
-            process.executableURL = sandboxExecURL
-            process.arguments = ["-p", profile, invocation.executableURL.path] + invocation.arguments
-        } else {
-            RuneWeaverLog.tools.warning(
-                "SubprocessToolBridge: sandbox-exec unavailable, running plugin '\(name)' without sandbox confinement by explicit opt-in."
-            )
-            process.executableURL = invocation.executableURL
-            process.arguments = invocation.arguments
-        }
-        process.currentDirectoryURL = invocation.workingDirectory
-
-        var env = ProcessInfo.processInfo.environment
-        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL"]
-        env = env.filter { allowedKeys.contains($0.key) }
-        env["RUNEWEAVER_PLUGIN"] = "1"
-        process.environment = env
-        return process
-    }
-
     private func subprocessSandboxFailure(
         isSandboxAvailable: Bool,
         callID: String
@@ -225,6 +255,34 @@ public struct SubprocessToolBridge: Tool, Sendable {
         guard !isSandboxAvailable, !allowUnsandboxedExecution else { return nil }
         RuneWeaverLog.tools.error("SubprocessToolBridge: sandbox-exec unavailable, refusing to execute plugin '\(name)' without sandbox confinement.")
         return .failure("Plugin sandbox unavailable (sandbox-exec missing); execution refused.", callID: callID)
+    }
+
+    private func screenDeclaredEgress(callID: String, sessionID: UUID) async -> ToolOutput? {
+        // Host-free tools need no screening and still proceed.
+        let declared = capabilities?.network ?? []
+        guard !declared.isEmpty else { return nil }
+        let validated: [String]
+        do {
+            validated = try SeatbeltProfileBuilder.validatedDeclaredHosts(declared)
+        } catch let error as SeatbeltProfileBuilder.DeclaredHostValidationError {
+            return .failure(error.message, callID: callID)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        // Fail-closed without supervision; network tools never run unscreened.
+        guard let evaluator = egressEvaluator else {
+            RuneWeaverLog.tools.warning("SubprocessToolBridge: denying network-capable plugin '\(name)' without egress supervision.")
+            return .failure("Egress supervision unavailable; denying network-capable plugin '\(name)' fail-closed.", callID: callID)
+        }
+        for host in validated {
+            switch await evaluator.evaluateHostStatus(for: host, sessionID: sessionID) {
+            case .allowed:
+                break
+            case let .explicitlyBlocked(reason), let .unlisted(reason):
+                return .failure(reason, callID: callID)
+            }
+        }
+        return nil
     }
 
     private func runSubprocess(
@@ -293,7 +351,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
                     buffers: buffers,
                     didTimeOut: timedOut.withLock { $0 },
                     budgets: budgets,
-                    callID: invocation.callID
+                    callID: invocation.callID,
+                    resolvedSecrets: invocation.resolvedSecrets
                 )
                 resumeOnceBox.resume(with: .success(output))
             }
@@ -323,34 +382,94 @@ public struct SubprocessToolBridge: Tool, Sendable {
             }
         }
     }
+}
 
+// MARK: - Process Preparation
+
+extension SubprocessToolBridge {
+    private func prepareProcess(
+        invocation: SubprocessInvocation,
+        isSandboxAvailable: Bool,
+        sandboxExecPath: String
+    ) -> Process {
+        let process = Process()
+        let sandboxExecURL = URL(fileURLWithPath: sandboxExecPath)
+        if isSandboxAvailable {
+            // Invalid declarations deny network rather than widening scope.
+            let declaredHosts = capabilities?.network ?? []
+            let validatedHosts: [String]
+            do {
+                validatedHosts = try SeatbeltProfileBuilder.validatedDeclaredHosts(declaredHosts)
+            } catch {
+                validatedHosts = []
+            }
+            // SBPL cannot filter hosts, so the profile stays blanket;
+            // OutboundEgressSupervisor remains the sole per-host gate.
+            let profile = SeatbeltProfileBuilder(
+                allowedReadPaths: [invocation.workingDirectory.path],
+                allowedWritePaths: [invocation.workingDirectory.path],
+                allowNetwork: !validatedHosts.isEmpty
+            ).buildProfile()
+            process.executableURL = sandboxExecURL
+            process.arguments = ["-p", profile, invocation.executableURL.path] + invocation.arguments
+        } else {
+            RuneWeaverLog.tools.warning(
+                "SubprocessToolBridge: sandbox-exec unavailable, running plugin '\(name)' without sandbox confinement by explicit opt-in."
+            )
+            process.executableURL = invocation.executableURL
+            process.arguments = invocation.arguments
+        }
+        process.currentDirectoryURL = invocation.workingDirectory
+
+        var env = ProcessInfo.processInfo.environment
+        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL"]
+        env = env.filter { allowedKeys.contains($0.key) }
+        env["RUNEWEAVER_PLUGIN"] = "1"
+        for (envKey, envValue) in invocation.injectedEnv {
+            if Self.protectedEnvKeys.contains(envKey) {
+                continue
+            }
+            env[envKey] = envValue
+        }
+        process.environment = env
+        return process
+    }
+}
+
+// MARK: - Response Parsing
+
+extension SubprocessToolBridge {
     func parseSubprocessResponse(
         stdoutData: Data,
         stderrData: Data,
         terminationStatus: Int32,
         maxOutputBytes: Int,
-        callID: String
+        callID: String,
+        resolvedSecrets: [String] = []
     ) -> ToolOutput {
         if terminationStatus != 0 {
-            let errText = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawErrText = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let errText = resolvedSecrets.isEmpty ? rawErrText : SecretsManager.sweepResolved(rawErrText, secrets: resolvedSecrets)
             let message = errText.isEmpty ? "Process exited with code \(terminationStatus)." : errText
             return .failure(message, callID: callID)
         }
 
         let boundedData = stdoutData.prefix(maxOutputBytes)
-        guard let stdoutStr = String(data: boundedData, encoding: .utf8) else {
+        guard let rawStdoutStr = String(data: boundedData, encoding: .utf8) else {
             return .failure("Tool returned invalid non-UTF8 output.", callID: callID)
         }
+        let stdoutStr = resolvedSecrets.isEmpty ? rawStdoutStr : SecretsManager.sweepResolved(rawStdoutStr, secrets: resolvedSecrets)
 
         // Parse JSON-RPC 2.0 response
         if let parsed = try? JSONSerialization.jsonObject(with: boundedData) as? [String: Any] {
             if let errorObj = parsed["error"] as? [String: Any],
-               let errMsg = errorObj["message"] as? String
+               let rawErrMsg = errorObj["message"] as? String
             {
+                let errMsg = resolvedSecrets.isEmpty ? rawErrMsg : SecretsManager.sweepResolved(rawErrMsg, secrets: resolvedSecrets)
                 return .failure(errMsg, callID: callID)
             }
             if let result = parsed["result"] {
-                let content: String = if let str = result as? String {
+                var content: String = if let str = result as? String {
                     str
                 } else if let dict = result as? [String: Any],
                           let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
@@ -359,6 +478,9 @@ public struct SubprocessToolBridge: Tool, Sendable {
                     str
                 } else {
                     String(describing: result)
+                }
+                if !resolvedSecrets.isEmpty {
+                    content = SecretsManager.sweepResolved(content, secrets: resolvedSecrets)
                 }
                 return .success(content, callID: callID)
             }

@@ -246,4 +246,112 @@ struct PluginDiscoveryTests {
         let available = await bus.availableTools()
         #expect(!available.contains(where: { $0.name == "tamper.run" }))
     }
+
+    @Test
+    func `SubprocessToolBridge contentTrustLevel is untrustedExternal`() throws {
+        let decl = PluginToolDeclaration(
+            name: "test.tool",
+            description: "Test tool",
+            inputSchema: "{}",
+            permissionLevel: .readOnly
+        )
+        let bridge = try SubprocessToolBridge(
+            pluginID: "test.plugin",
+            declaration: decl,
+            pluginDirectory: URL(fileURLWithPath: "/tmp"),
+            entrypoint: "main.py",
+            runtime: .python
+        )
+        #expect(bridge.contentTrustLevel == .untrustedExternal)
+    }
+
+    @Test
+    func `SubprocessToolBridge sweeps secrets from output`() throws {
+        let decl = PluginToolDeclaration(
+            name: "test.tool",
+            description: "Test tool",
+            inputSchema: "{}",
+            permissionLevel: .readOnly
+        )
+        let bridge = try SubprocessToolBridge(
+            pluginID: "test.plugin",
+            declaration: decl,
+            pluginDirectory: URL(fileURLWithPath: "/tmp"),
+            entrypoint: "main.py",
+            runtime: .python
+        )
+
+        let secret = "super_secret_token_12345"
+        let jsonResponse = """
+        {"jsonrpc":"2.0","id":"call-1","result":"Received authorization: \(secret)"}
+        """
+        let output = bridge.parseSubprocessResponse(
+            stdoutData: Data(jsonResponse.utf8),
+            stderrData: Data(),
+            terminationStatus: 0,
+            maxOutputBytes: 1024,
+            callID: "call-1",
+            resolvedSecrets: [secret]
+        )
+        #expect(!output.isError)
+        #expect(output.content.contains("[redacted]"))
+        #expect(!output.content.contains(secret))
+    }
+
+    @Test
+    func `PluginSecurity ignores .mm directory during directory hashing`() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-mm-ignore-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try "test-content".write(to: tempDir.appendingPathComponent("rune.json"), atomically: true, encoding: .utf8)
+        let hashBefore = PluginSecurity.calculateDirectoryHash(at: tempDir)
+        #expect(hashBefore != nil)
+
+        // Create .mm session directory
+        let mmDir = tempDir.appendingPathComponent(".mm")
+        try FileManager.default.createDirectory(at: mmDir, withIntermediateDirectories: true)
+        try "session-pickle-data".write(to: mmDir.appendingPathComponent("mm_session.pickle"), atomically: true, encoding: .utf8)
+
+        let hashAfter = PluginSecurity.calculateDirectoryHash(at: tempDir)
+        #expect(hashAfter == hashBefore)
+    }
+
+    @Test
+    func `PluginDiscoveryService discovers dropped-in monarch-money plugin`() async throws {
+        let tempBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-dropin-monarch-\(UUID().uuidString)")
+        let pluginsDir = tempBase.appendingPathComponent("plugins")
+        let dbPath = tempBase.appendingPathComponent("episodes.db").path
+        try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        // Copy Plugins/community.monarch-money from repo into pluginsDir
+        // Resolve fixtures relative to the test source so CWD never decides the result.
+        let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let repoMonarchDir = repoRoot
+            .appendingPathComponent("Plugins/community.monarch-money")
+        guard FileManager.default.fileExists(atPath: repoMonarchDir.path) else {
+            Issue.record("Plugins/community.monarch-money not found")
+            return
+        }
+        let targetMonarchDir = pluginsDir.appendingPathComponent("community.monarch-money")
+        try FileManager.default.copyItem(at: repoMonarchDir, to: targetMonarchDir)
+
+        let store = ToolRegistryStore(dbPath: dbPath)
+        let discovery = PluginDiscoveryService(pluginsDirectory: pluginsDir, store: store)
+        let bus = ToolBus()
+
+        let discovered = await discovery.discoverAndSync(toolBus: bus)
+        #expect(discovered.count == 1)
+        #expect(discovered[0].manifest.id == "community.monarch-money")
+        #expect(discovered[0].record.status == .discovered)
+        #expect(!discovered[0].record.isEnabled)
+        #expect(discovered[0].manifest.tools.count == 4)
+
+        // Before enable, tools are hidden
+        let availableBefore = await bus.availableTools()
+        #expect(!availableBefore.contains(where: { $0.name.hasPrefix("monarch.") }))
+    }
 }

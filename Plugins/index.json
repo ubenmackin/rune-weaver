@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "community.monarch-money",
+      "name": "Monarch Money",
+      "version": "1.0.0",
+      "author": "Rune Weaver Community",
+      "description": "Query accounts, balances, transactions, budgets, cashflow, and holdings, or update transactions and budgets via Monarch Money.",
+      "downloadURL": "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/Plugins/community.monarch-money/rune.json",
+      "tags": [
+        "finance",
+        "budgeting",
+        "monarch",
+        "transactions"
+      ],
+      "runtime": "python",
+      "declaredTools": [
+        "monarch.accounts",
+        "monarch.transactions",
+        "monarch.finances",
+        "monarch.mutate"
+      ],
+      "path": "Plugins/community.monarch-money",
+      "files": [
+        "rune.json",
+        "main.py",
+        "requirements.txt",
+        "README.md"
+      ]
+    }
+  ]
+}

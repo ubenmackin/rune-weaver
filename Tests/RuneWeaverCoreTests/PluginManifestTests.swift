@@ -123,14 +123,14 @@ struct PluginManifestTests {
             "foo/../../bar.py"
         ]
 
-        for ep in invalidEntrypoints {
+        for entrypoint in invalidEntrypoints {
             let json = """
             {
                 "id": "community.traversal",
                 "name": "Traversal Tool",
                 "version": "1.0.0",
                 "runtime": "python",
-                "entrypoint": "\(ep)",
+                "entrypoint": "\(entrypoint)",
                 "tools": [
                     {
                         "name": "traversal.run",
@@ -175,5 +175,58 @@ struct PluginManifestTests {
         #expect(throws: PluginManifestError.self) {
             try PluginManifest.from(jsonData: data)
         }
+    }
+
+    @Test
+    func `Monarch Money plugin manifest in Plugins directory is valid`() throws {
+        // Resolve fixtures relative to the test source so CWD never decides the result.
+        let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let manifestURL = repoRoot
+            .appendingPathComponent("Plugins/community.monarch-money/rune.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            Issue.record("Plugins/community.monarch-money/rune.json does not exist at \(manifestURL.path)")
+            return
+        }
+        let data = try Data(contentsOf: manifestURL)
+        let manifest = try PluginManifest.from(jsonData: data)
+
+        #expect(manifest.id == "community.monarch-money")
+        #expect(manifest.runtime == .python)
+        #expect(manifest.entrypoint == "main.py")
+        #expect(manifest.tools.count == 4)
+
+        let toolNames = Set(manifest.tools.map(\.name))
+        #expect(toolNames == ["monarch.accounts", "monarch.transactions", "monarch.finances", "monarch.mutate"])
+
+        let accountsTool = manifest.tools.first { $0.name == "monarch.accounts" }
+        #expect(accountsTool?.permissionLevel == .readOnly)
+        #expect(accountsTool?.capabilities?.network == ["api.monarch.com"])
+        #expect(accountsTool?.capabilities?.env.contains("MONARCH_TOKEN") == true)
+
+        let mutateTool = manifest.tools.first { $0.name == "monarch.mutate" }
+        #expect(mutateTool?.permissionLevel == .requiresApproval)
+        #expect(mutateTool?.capabilities?.network == ["api.monarch.com"])
+    }
+
+    @Test
+    func `Marketplace index dictionary in Plugins directory is valid`() throws {
+        // Resolve fixtures relative to the test source so CWD never decides the result.
+        let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let indexURL = repoRoot
+            .appendingPathComponent("Plugins/index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else {
+            Issue.record("Plugins/index.json does not exist at \(indexURL.path)")
+            return
+        }
+        let data = try Data(contentsOf: indexURL)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(json?["version"] as? Int == 1)
+        let items = json?["items"] as? [[String: Any]]
+        #expect(items != nil)
+        let monarchItem = items?.first { ($0["id"] as? String) == "community.monarch-money" }
+        #expect(monarchItem != nil)
+        #expect(monarchItem?["runtime"] as? String == "python")
+        let declared = monarchItem?["declaredTools"] as? [String]
+        #expect(declared?.count == 4)
     }
 }

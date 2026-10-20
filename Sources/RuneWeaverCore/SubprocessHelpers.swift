@@ -43,7 +43,8 @@ extension SubprocessToolBridge {
         buffers: CappedPipeBuffers,
         didTimeOut: Bool,
         budgets: ProcessBudgets,
-        callID: String
+        callID: String,
+        resolvedSecrets: [String] = []
     ) -> ToolOutput {
         // Shared verdict preserves timeout-over-cap ordering; the bridge only
         // adapts budget failures into JSON-RPC failure wording with the call identity.
@@ -58,7 +59,8 @@ extension SubprocessToolBridge {
                 stderrData: snapshot.stderr,
                 terminationStatus: terminationStatus,
                 maxOutputBytes: budgets.maxOutputBytes,
-                callID: callID
+                callID: callID,
+                resolvedSecrets: resolvedSecrets
             )
         } catch let bridgeError as BoundedProcessError {
             switch bridgeError {
