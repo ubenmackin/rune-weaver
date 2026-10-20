@@ -102,9 +102,11 @@ export default function ConnectStep({
         </p>
       </div>
 
-      {loading ? <p className="onboarding-loading">Checking live status…</p> : null}
+      {(loading || (!effectiveStatus && !error)) ? (
+        <p className="onboarding-loading">Loading status…</p>
+      ) : null}
       {error ? (
-        <p className="notice-banner error" role="alert">
+        <p className="error-banner" role="alert">
           {error}
         </p>
       ) : null}
@@ -135,7 +137,7 @@ export default function ConnectStep({
 
           {showPermissionDetour ? (
             <div
-              className="calendar-permission-explainer"
+              className="calendar-permission-explainer notice-banner"
               data-testid="calendar-permission-explainer"
             >
               <p className="permission-explainer-text">
@@ -143,15 +145,15 @@ export default function ConnectStep({
                 schedule.
               </p>
               <a
-                className="btn-link permission-open-link"
+                className="ghost permission-open-link"
                 href="x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars"
               >
                 Open Permissions
               </a>
-              <div className="permission-explainer-actions">
+              <div className="permission-explainer-actions onboarding-actions">
                 <button
                   type="button"
-                  className="btn btn-secondary permission-check-btn"
+                  className="ghost permission-check-btn"
                   onClick={() => void handleRefresh()}
                   disabled={loading}
                 >
@@ -159,7 +161,7 @@ export default function ConnectStep({
                 </button>
                 <button
                   type="button"
-                  className="btn btn-secondary permission-skip-btn"
+                  className="primary permission-skip-btn"
                   onClick={() => void handleSkipCalendar()}
                   disabled={skipping}
                 >

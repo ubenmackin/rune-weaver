@@ -26,20 +26,20 @@ export default function ProtectStep({
         </p>
       </div>
 
-      <ul className="protect-bullets">
+      <ul className="protect-bullets muted text-sm">
         <li>Reads freely, writes ask first</li>
         <li>Allowlist-only network</li>
         <li>Secrets never in prompts</li>
       </ul>
 
-      <p className="protect-settings-line">
-        <a className="btn-link" href="#settings/access">
+      <p className="protect-settings-line onboarding-actions">
+        <a className="ghost" href="#settings/access">
           Settings Access
         </a>
       </p>
 
       {typeof onPolicyAckedChange === "function" ? (
-        <label className="protect-ack-row">
+        <label className="form-group protect-ack-row">
           <input
             type="checkbox"
             checked={policyAcked}
@@ -50,15 +50,15 @@ export default function ProtectStep({
           <span>I understand writes need approval</span>
         </label>
       ) : (
-        <p className="protect-ack-row" data-testid="protect-ack-status">
+        <p className="form-group protect-ack-row" data-testid="protect-ack-status">
           <span>{policyAcked ? "Policy verified" : "Policy review pending"}</span>
         </p>
       )}
 
-      <div className="protect-actions">
+      <div className="protect-actions onboarding-actions">
         <button
           type="button"
-          className="btn btn-primary protect-finish-btn"
+          className="primary protect-finish-btn"
           onClick={() => void onFinish()}
           disabled={finishing}
         >

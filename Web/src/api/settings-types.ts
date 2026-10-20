@@ -1,5 +1,22 @@
 // Rune Weaver Dashboard — Settings configuration data models.
 
+// Canonical provider-type values shared by the settings providers grid and
+// the onboarding brain form so both surfaces offer one set and preserve
+// hand-edited spellings through the unknown-type slot instead of drifting.
+export const KNOWN_PROVIDER_TYPES: readonly string[] = [
+  "",
+  "custom",
+  "openrouter",
+  "openai",
+  "anthropic",
+  "gemini",
+  "ollama",
+  "mlx",
+  "lmstudio",
+  "llamacpp",
+  "local",
+];
+
 export interface ProviderConfigData {
   enabled: boolean;
   model?: string;

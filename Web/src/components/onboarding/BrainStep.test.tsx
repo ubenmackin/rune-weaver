@@ -2,7 +2,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BrainStep } from "./BrainStep";
+import { BrainStep, validateBrainProviderForm } from "./BrainStep";
 import {
   PersonaStep,
   step3CardOrderForGoal,
@@ -17,55 +17,152 @@ describe("BrainStep", () => {
     clearAuthToken();
   });
 
-  it("defaults to Local MLX selection", () => {
+  it("renders five-field form with dropdown plus server URL and zero radios", () => {
     render(<BrainStep />);
-    const local = screen.getByRole("radio", { name: /local mlx gemma-4-9b/i });
-    const cloud = screen.getByRole("radio", { name: /cloud openrouter/i });
-    expect((local as HTMLInputElement).checked).toBe(true);
-    expect((cloud as HTMLInputElement).checked).toBe(false);
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(screen.getByTestId("brain-provider-name")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-provider-type")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-model")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-server-url")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-api-key-env")).toBeInTheDocument();
+    const options = screen.getAllByRole("option").map((o) => o.textContent ?? "");
+    for (const label of [
+      "Custom",
+      "OpenRouter",
+      "OpenAI",
+      "Anthropic",
+      "Gemini",
+      "Ollama",
+      "MLX",
+      "LM Studio",
+      "llama.cpp",
+      "Local",
+      "Auto",
+    ]) {
+      expect(options.join(" ")).toMatch(new RegExp(label.replace(".", "\\."), "i"));
+    }
+    expect(screen.getByText(/keychain/i).textContent).toMatch(/com\.runeweaver\.secrets/i);
   });
 
-  it("reveals the cloud key field behind the expander", async () => {
-    const user = userEvent.setup();
+  it("blank install shows empty fields with placeholders", () => {
     render(<BrainStep />);
-    expect(screen.queryByTestId("brain-api-key-env")).toBeNull();
-    await user.click(screen.getByTestId("cloud-expander"));
-    expect(screen.getByTestId("brain-api-key-env")).toBeDefined();
-    expect(screen.getByText(/keychain/i)).toBeDefined();
+    expect((screen.getByTestId("brain-provider-name") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("brain-model") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("brain-model") as HTMLInputElement).placeholder).toMatch(
+      /gemma-4-9b/i,
+    );
+    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).placeholder).toMatch(
+      /openrouter\.ai\/api\/v1/i,
+    );
+    expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).placeholder).toMatch(
+      /OPENROUTER_API_KEY/i,
+    );
   });
 
-  it("shows failed inline when the key is missing and never advances", async () => {
+  it("prefills all five fields from the existing default provider", () => {
+    render(
+      <BrainStep
+        initialProviders={{
+          mybrain: {
+            enabled: true,
+            model: "m1",
+            serverURL: "https://example.com/v1",
+            apiKeyEnv: "MY_KEY",
+            providerType: "openai",
+          },
+        }}
+        initialDefaultProvider="mybrain"
+      />,
+    );
+    expect((screen.getByTestId("brain-provider-name") as HTMLInputElement).value).toBe("mybrain");
+    expect((screen.getByTestId("brain-provider-type") as HTMLInputElement).value).toBe("openai");
+    expect((screen.getByTestId("brain-model") as HTMLInputElement).value).toBe("m1");
+    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).value).toBe(
+      "https://example.com/v1",
+    );
+    expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).value).toBe("MY_KEY");
+  });
+
+  it("validates fail-closed bounds without network writes", () => {
+    expect(
+      validateBrainProviderForm({
+        providerName: "  ",
+        providerType: "custom",
+        model: "m",
+        serverURL: "",
+        apiKeyEnv: "K",
+      }),
+    ).toMatch(/1 to 64/i);
+    expect(
+      validateBrainProviderForm({
+        providerName: "n",
+        providerType: "custom",
+        model: "  ",
+        serverURL: "",
+        apiKeyEnv: "K",
+      }),
+    ).toMatch(/1 to 128/i);
+    expect(
+      validateBrainProviderForm({
+        providerName: "n",
+        providerType: "custom",
+        model: "m",
+        serverURL: "not-a-url",
+        apiKeyEnv: "K",
+      }),
+    ).toMatch(/URL/i);
+    expect(
+      validateBrainProviderForm({
+        providerName: "n",
+        providerType: "custom",
+        model: "m",
+        serverURL: "",
+        apiKeyEnv: "bad-env!",
+      }),
+    ).toMatch(/env/i);
+  });
+
+  it("blocks Next on blank name without saving", async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      if (String(url) === "/settings/secrets/status") {
-        return jsonResponse({ status: { OPENROUTER_API_KEY: false } });
-      }
-      return jsonResponse({});
-    });
+    const fetchMock = vi.fn(async () => jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
     const onNext = vi.fn();
-    render(<BrainStep initialChoice="cloud" onNext={onNext} />);
-
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText(/failed/i)).toBeDefined();
-    expect(screen.getByTestId("brain-test-status").textContent).toMatch(/failed/i);
+    render(<BrainStep onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-error").textContent).toMatch(/1 to 64/i);
     expect(onNext).not.toHaveBeenCalled();
-    // Retry stays available instead of auto-advancing past the failure.
-    expect(screen.getByTestId("brain-test-connection")).toBeDefined();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("shows granted inline when the key is stored", async () => {
+  it("blocks Next on bad URL and bad env", async () => {
     const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ status: { OPENROUTER_API_KEY: true } })),
-    );
-    render(<BrainStep initialChoice="cloud" />);
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText("granted")).toBeDefined();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const onNext = vi.fn();
+    render(<BrainStep onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-server-url"), "not-a-url");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/Server URL/i);
+    expect(onNext).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByTestId("brain-server-url"));
+    await user.clear(screen.getByTestId("brain-api-key-env"));
+    await user.type(screen.getByTestId("brain-api-key-env"), "bad-env!");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-error")).toHaveTextContent(/API key env/i);
+    });
+    expect(onNext).not.toHaveBeenCalled();
   });
 
-  it("writes default plus fallback providers through the settings save path", async () => {
+  it("creates a single provider set as default with empty fallback", async () => {
     const user = userEvent.setup();
     const puts: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
@@ -78,15 +175,117 @@ describe("BrainStep", () => {
       }),
     );
     const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
+    render(<BrainStep initialProviders={{ other: { enabled: true } }} onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.selectOptions(screen.getByTestId("brain-provider-type"), "openai");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-server-url"), "https://example.com/v1");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
     await user.click(screen.getByTestId("brain-next"));
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1));
     expect(puts).toHaveLength(1);
-    expect(puts[0]).toMatchObject({ defaultProvider: "mlx", fallbackProvider: "openrouter" });
-    expect(onNext.mock.calls[0][0]).toMatchObject({
-      choice: "local",
-      defaultProvider: "mlx",
+    expect(puts[0]).toMatchObject({ defaultProvider: "mybrain", fallbackProvider: "" });
+    const providers = (puts[0] as { providers: Record<string, Record<string, unknown>> }).providers;
+    expect(providers["mybrain"]).toMatchObject({
+      enabled: true,
+      model: "m1",
+      serverURL: "https://example.com/v1",
+      apiKeyEnv: "MY_KEY",
+      providerType: "openai",
     });
+    expect(providers["other"]).toBeDefined();
+    expect(onNext.mock.calls[0][0]).toMatchObject({
+      providerName: "mybrain",
+      defaultProvider: "mybrain",
+      model: "m1",
+      serverURL: "https://example.com/v1",
+      apiKeyEnv: "MY_KEY",
+    });
+  });
+
+  it("reports missing key inline with Enter env var name first and never advances", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const onNext = vi.fn();
+    render(<BrainStep onNext={onNext} />);
+    await user.click(screen.getByTestId("brain-test-connection"));
+    expect(await screen.findByText(/Enter env var name first/i)).toBeInTheDocument();
+    expect(screen.getByTestId("brain-test-status").textContent).toMatch(/failed/i);
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("shows failed inline when the key is missing and never advances", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === "/settings/secrets/status") {
+        return jsonResponse({ status: { MY_KEY: false } });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onNext = vi.fn();
+    render(<BrainStep onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-test-connection"));
+    expect(await screen.findByText(/failed/i)).toBeInTheDocument();
+    expect(screen.getByTestId("brain-test-status").textContent).toMatch(/failed/i);
+    expect(onNext).not.toHaveBeenCalled();
+    expect(screen.getByTestId("brain-test-connection")).toBeInTheDocument();
+  });
+
+  it("shows granted inline when the key is stored", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ status: { MY_KEY: true } })),
+    );
+    const onNext = vi.fn();
+    render(<BrainStep onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-test-connection"));
+    expect(await screen.findByText("granted")).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("disables Test plus Next while testing", async () => {
+    let resolveFetch!: (value: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+    render(<BrainStep />);
+    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
+    fireEvent.click(screen.getByTestId("brain-test-connection"));
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-test-connection")).toBeDisabled();
+      expect(screen.getByTestId("brain-next")).toBeDisabled();
+    });
+    expect(screen.getByTestId("brain-test-connection").textContent).toMatch(/Testing/i);
+    resolveFetch(jsonResponse({ status: { MY_KEY: true } }));
+    expect(await screen.findByText("granted")).toBeInTheDocument();
+  });
+
+  it("surfaces unauthenticated save inline without advancing", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Unauthorized", { status: 401, statusText: "Unauthorized" })),
+    );
+    const onNext = vi.fn();
+    render(<BrainStep onNext={onNext} />);
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-error").textContent).toMatch(/401/i);
+    expect(onNext).not.toHaveBeenCalled();
   });
 });
 
