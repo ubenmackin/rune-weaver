@@ -54,13 +54,6 @@
   margin-top: 4px;
 }
 
-/* Wizard shell keeps one rhythm between header, progress, and body. */
-.wizard-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .wizard-footer {
   display: flex;
   align-items: center;
@@ -73,6 +66,42 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+
+/* Compact mirror stays one line; reserved height keeps the bar stable. */
+.wizard-footer-error {
+  color: #fca5a5;
+  font-size: 12px;
+  line-height: 16px;
+  max-width: 320px;
+  min-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Footer actions never shrink while the mirror takes the remaining space. */
+.wizard-footer-right button {
+  flex-shrink: 0;
+}
+
+/* Keychain row shares one layout between wizard and settings surfaces. */
+.keychain-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.keychain-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* Ghost links reuse the button ghost tokens on the dark theme. */

@@ -13,6 +13,7 @@ import BrainStep, { resolveBrainProviderSave, type BrainSelection } from "./Brai
 import PersonaStep, { type PersonaStepValue } from "./PersonaStep";
 import ConnectStep from "./ConnectStep";
 import ProtectStep from "./ProtectStep";
+import { WizardFooterError } from "./WizardFooterError";
 import {
   finishOnboardingWithVerifiedSeed,
   parseOnboardingStatus as parseSeedStatus,
@@ -27,6 +28,17 @@ export interface GettingStartedWizardProps {
   onOnboardingRefresh?: () => Promise<void>;
   onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
   onOnboardingSkip?: (step: WizardStepId) => Promise<void>;
+}
+
+// Footer mirror bound keeps the bar to one compact line, ellipsis inclusive.
+export const WIZARD_FOOTER_ERROR_MAX_LENGTH = 140;
+
+// Overlong messages cut within the bound with an ellipsis; empty stays empty
+// so the footer reserves space without rendering text.
+export function truncateWizardFooterError(value: string | null | undefined): string {
+  if (typeof value !== "string" || value.length === 0) return "";
+  if (value.length <= WIZARD_FOOTER_ERROR_MAX_LENGTH) return value;
+  return `${value.slice(0, WIZARD_FOOTER_ERROR_MAX_LENGTH - 1)}…`;
 }
 
 // Server snapshot is the single ack source; the checkbox never persists.
@@ -104,6 +116,7 @@ export default function GettingStartedWizard({
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stepError, setStepError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(() => {
     if (onboardingStatus !== undefined) return onboardingStatus !== null;
     return initialSkippedSteps !== undefined;
@@ -242,6 +255,11 @@ export default function GettingStartedWizard({
     const nextHistory = history.slice(0, -1);
     setHistory(nextHistory);
     setCurrent(nextHistory[nextHistory.length - 1]);
+    setStepError(null);
+  }
+
+  function handleBrainError(message: string | null) {
+    setStepError(message);
   }
 
   function advanceFrom(step: WizardStepId, skippedAfter: WizardStepId[]) {
@@ -250,12 +268,14 @@ export default function GettingStartedWizard({
       void handleFinish();
       return;
     }
+    setStepError(null);
     setHistory((prev) => [...prev, next]);
     setCurrent(next);
   }
 
   function handleBrainNext(selection: BrainSelection) {
     setError(null);
+    setStepError(null);
     setBrainSelection(selection);
     const resolved = resolveBrainProviderSave(selection, brainProviders);
     setBrainProviders(resolved.providers);
@@ -265,17 +285,20 @@ export default function GettingStartedWizard({
 
   function handlePersonaNext(value: PersonaStepValue) {
     setError(null);
+    setStepError(null);
     setPersonaValue(value);
     advanceFrom(current, skipped);
   }
 
   function handleNext() {
     setError(null);
+    setStepError(null);
     advanceFrom(current, skipped);
   }
 
   async function handleFinish() {
     setError(null);
+    setStepError(null);
     setBusy(true);
     try {
       // Single finish flow owns the verified seed plus demo and completion.
@@ -293,6 +316,7 @@ export default function GettingStartedWizard({
 
   async function handleSkip() {
     setError(null);
+    setStepError(null);
     setBusy(true);
     try {
       if (onOnboardingSkip) await onOnboardingSkip(current);
@@ -319,6 +343,7 @@ export default function GettingStartedWizard({
 
   async function handleSkipCalendarDetour() {
     setError(null);
+    setStepError(null);
     setBusy(true);
     try {
       // Calendar detour always records connect skip so reload resumes past it.
@@ -346,6 +371,10 @@ export default function GettingStartedWizard({
 
   // Every step skipped leaves no pending content: offer explicit completion
   // instead of unmounting while the row is still incomplete.
+  // Inline step errors stay source of truth; the footer only mirrors them.
+  // Brain test failures arrive via onError into stepError, so the mirror covers them.
+  const footerSource = error ?? stepError ?? brainProvidersError ?? effectiveSeedError ?? null;
+  const footerErrorText = truncateWizardFooterError(footerSource);
   if (allSkipped) {
     return (
       <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Getting started">
@@ -379,6 +408,7 @@ export default function GettingStartedWizard({
               )}
             </div>
             <div className="wizard-footer-right">
+              <WizardFooterError text={footerErrorText} />
               <button
                 type="button"
                 className="primary"
@@ -435,6 +465,7 @@ export default function GettingStartedWizard({
                 loadError={brainProvidersError}
                 onBack={history.length > 1 ? handleBack : undefined}
                 onNext={handleBrainNext}
+                onError={handleBrainError}
               />
             </>
           ) : null}
@@ -477,6 +508,7 @@ export default function GettingStartedWizard({
             )}
           </div>
           <div className="wizard-footer-right">
+            <WizardFooterError text={footerErrorText} />
             <button
               type="button"
               className="ghost"
