@@ -4,8 +4,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AccessFilesSection } from "./AccessFilesSection";
+import { useAccessFilesAdvanced } from "./useAccessAdvanced";
 import { clearAuthToken } from "../../api";
 import { jsonResponse } from "../../test-utils/http";
+
+// Single-path harness: the section renders only via simpleOnly plus the
+// pane-level Advanced hook, so one card holds Advanced above its footer.
+function FilesSectionHarness() {
+  const advanced = useAccessFilesAdvanced();
+  return <AccessFilesSection simpleOnly advanced={advanced} />;
+}
 
 // Seed snapshot mirroring the engine GET shape: the forced posture plus the
 // ordered rule list on the camelCase DTO keys. The deeper rule carries deny so
@@ -75,7 +83,7 @@ describe("AccessFilesSection", () => {
 
   it("loads the [files] write snapshot into both editors", async () => {
     stubSettings(storedWriteSettings);
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     expect(
@@ -87,7 +95,7 @@ describe("AccessFilesSection", () => {
     ).toBe("deny");
     expect(screen.getByLabelText(/Rule 2 path/i)).toBeDefined();
     // Bounds ride the form so the owner reads the engine limit before typing.
-    expect(screen.getByTestId("files-write-rules-bounds").textContent).toContain(
+    expect(screen.getByTestId("adv-files-write-rules-bounds").textContent).toContain(
       "Up to 50 rules, each path up to 1024 characters"
     );
     expect(screen.getByTestId("files-write-save-hint").textContent).toContain(
@@ -105,7 +113,7 @@ describe("AccessFilesSection", () => {
   it("saves the mode and the rule list in one payload", async () => {
     const { puts, getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     await user.click(screen.getByLabelText(/Always write live/i));
@@ -132,7 +140,7 @@ describe("AccessFilesSection", () => {
   it("saves an unedited form as an empty changed-only payload", async () => {
     const { puts, getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     await user.click(screen.getByTestId("files-write-save"));
@@ -148,7 +156,7 @@ describe("AccessFilesSection", () => {
   it("sends the trimmed rule path with the closed posture", async () => {
     const { puts, getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     // Surrounding whitespace never reaches the file, and the posture rides the
@@ -171,7 +179,7 @@ describe("AccessFilesSection", () => {
   it("adds and removes rows while keeping the declared order", async () => {
     const { puts, getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     await user.click(screen.getByRole("button", { name: /Add Rule/i }));
@@ -197,7 +205,7 @@ describe("AccessFilesSection", () => {
   it("locks a deny row against a softer posture", async () => {
     const { puts, getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     const denyPosture = screen.getByLabelText(
@@ -206,7 +214,7 @@ describe("AccessFilesSection", () => {
     // The select is inert, so the UI offers no click that softens the refusal.
     expect(denyPosture.disabled).toBe(true);
     expect(denyPosture.value).toBe("deny");
-    expect(screen.getByTestId("files-write-rule-1-lock").textContent).toContain(
+    expect(screen.getByTestId("adv-files-write-rule-1-lock").textContent).toContain(
       "Deny is locked"
     );
 
@@ -232,28 +240,28 @@ describe("AccessFilesSection", () => {
   it("renders the posture consequence per row and follows the select", async () => {
     stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     expect(
-      screen.getByTestId("files-write-rule-0-consequence").textContent
+      screen.getByTestId("adv-files-write-rule-0-consequence").textContent
     ).toBe("Writes wait in Staged Changes for your decision; nothing lands without review.");
     expect(
-      screen.getByTestId("files-write-rule-1-consequence").textContent
+      screen.getByTestId("adv-files-write-rule-1-consequence").textContent
     ).toContain(
       "Writes are refused outright, whatever the rest of the policy would allow."
     );
 
     await user.selectOptions(screen.getByLabelText(/Rule 1 posture/i), "ask");
     expect(
-      screen.getByTestId("files-write-rule-0-consequence").textContent
+      screen.getByTestId("adv-files-write-rule-0-consequence").textContent
     ).toBe("Writes park an approval request before anything is written to disk.");
   });
 
   it("locks Add Rule once the table sits at the engine bound", async () => {
     const files = { ...storedWriteSettings, filesWritePathRules: rulesAtBound(50) };
     stubSettings(files);
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitFor(() => {
       expect(screen.getByLabelText(/Rule 50 path/i)).toBeDefined();
@@ -275,7 +283,7 @@ describe("AccessFilesSection", () => {
     };
     const { getPutCount } = stubSettings(files);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitFor(() => {
       expect(screen.getByLabelText(/Rule 51 path/i)).toBeDefined();
@@ -292,7 +300,7 @@ describe("AccessFilesSection", () => {
 
   it("enforces the rule path length before any network write", async () => {
     const { getPutCount } = stubSettings(storedWriteSettings);
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     // Fire the change directly: typing a 1025-character path one keystroke at a
@@ -314,7 +322,7 @@ describe("AccessFilesSection", () => {
   it("rejects a blank or relative rule path in the form", async () => {
     const { getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     // A blank row is not a rule, so clearing a path fails closed rather than
@@ -345,7 +353,7 @@ describe("AccessFilesSection", () => {
   it("signals live apply with no restart after a save", async () => {
     const { getPutCount } = stubSettings(storedWriteSettings);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     await user.click(screen.getByLabelText(/Always write live/i));
@@ -377,7 +385,7 @@ describe("AccessFilesSection", () => {
       jsonResponse({ reason: serverReason }, 400)
     );
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitForSectionLoaded();
     await user.clear(screen.getByLabelText(/Rule 1 path/i));
@@ -391,7 +399,7 @@ describe("AccessFilesSection", () => {
     });
     expect(getPutCount()).toBe(1);
     expect(screen.queryByTestId("files-write-saved")).toBeNull();
-    expect(screen.getByTestId("files-write-pane")).toBeDefined();
+    expect(screen.getByTestId("files-access-pane")).toBeDefined();
     // The edited path survives the refused save.
     expect((screen.getByLabelText(/Rule 1 path/i) as HTMLInputElement).value).toBe(
       "~/Documents/Work"
@@ -400,7 +408,7 @@ describe("AccessFilesSection", () => {
 
   it("keeps the documented rule defaults when the engine omits the list", async () => {
     stubSettings({ filesWriteMode: "model" });
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitFor(() => {
       expect(screen.queryByTestId("files-write-loading")).toBeNull();
@@ -427,7 +435,7 @@ describe("AccessFilesSection", () => {
     };
     const { puts, getPutCount } = stubSettings(files);
     const user = userEvent.setup();
-    render(<AccessFilesSection />);
+    render(<FilesSectionHarness />);
 
     await waitFor(() => {
       expect((screen.getByLabelText(/Rule 1 path/i) as HTMLInputElement).value).toBe(

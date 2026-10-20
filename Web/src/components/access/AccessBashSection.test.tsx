@@ -301,7 +301,8 @@ describe("AccessBashSection", () => {
     expect(memoryInput.step).toBe("1");
     // One-line hints name the non-obvious bound semantics.
     expect(screen.getByText(/wall-clock may exceed CPU time for sleeping processes/i)).toBeDefined();
-    expect(screen.getByText(/best-effort ulimit bound/i)).toBeDefined();
+    // CPU and memory share the ulimit suffix, so match the pair together.
+    expect(screen.getAllByText(/best-effort ulimit bound/i)).toHaveLength(2);
   });
 
   it("saves edited bounds through one PATCH carrying only the bash delta", async () => {
@@ -440,19 +441,21 @@ describe("AccessBashSection", () => {
 
     await waitForSectionLoaded();
 
-    const advanced = screen.getByTestId("bash-advanced-details");
+    const advanced = screen.getByTestId("advanced-bash");
     expect(advanced).not.toBeNull();
     expect((advanced as HTMLDetailsElement).open).toBe(false);
-    expect(within(advanced as HTMLElement).getByText("Advanced")).toBeDefined();
+    expect(screen.getByTestId("advanced-bash-trigger").textContent).toContain(
+      "Advanced Bash settings"
+    );
     expect((advanced as HTMLElement).textContent).toContain("Advanced");
     const advancedScope = advanced as HTMLElement;
     expect(within(advancedScope).getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
     expect(within(advancedScope).getByLabelText(/CPU seconds/i)).toBeDefined();
     expect(within(advancedScope).getByLabelText(/Memory \(MB\)/i)).toBeDefined();
-    // The confinement editors stay outside the disclosure so the tier and
-    // allowlist read without opening Advanced.
-    expect(screen.getByLabelText(/Execution tier/i)).toBeDefined();
-    expect(screen.getByLabelText(/Host allow patterns/i)).toBeDefined();
+    // The confinement editors live inside Advanced too, so one disclosure owns
+    // every sandbox-widening knob; the visible summary names the selected tier.
+    expect(within(advancedScope).getByLabelText(/Execution tier/i)).toBeDefined();
+    expect(within(advancedScope).getByLabelText(/Host allow patterns/i)).toBeDefined();
     expect(screen.getByLabelText(/Allow network access/i)).toBeDefined();
     expect(screen.getByLabelText(/Default action/i)).toBeDefined();
     expect(screen.getByLabelText(/Rules, one per line/i)).toBeDefined();

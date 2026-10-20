@@ -1,9 +1,14 @@
 // Rune Weaver Dashboard — Settings tools tab: tool toggles, plugin management, and workspace storage controls.
 import { useState } from "react";
-import type { PluginSummary, ToolInfo } from "../../api";
+import { DEFAULT_WORKSPACE_CONFIG, type PluginSummary, type ToolInfo } from "../../api";
 import { AlertTriangleIcon, RefreshIcon, SearchIcon, SettingsIcon, WrenchIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
-import { countToolsAdvancedChanged } from "./settingsAdvancedCounts";
+import {
+  countToolsAdvancedChanged,
+  DEFAULT_TOOLS_AUTO_RESCAN,
+  DEFAULT_TOOLS_MARKETPLACE_INDEX_URL,
+  DEFAULT_TOOLS_PLUGINS_DIR,
+} from "./settingsAdvancedCounts";
 import PluginsListSection from "./PluginsListSection";
 import {
   getCategoryConfigKey,
@@ -11,6 +16,25 @@ import {
   TOOL_CATEGORIES,
 } from "./settingsHelpers";
 import WorkspaceStorageSection from "./WorkspaceStorageSection";
+
+// Advanced Tools validation messages the disclosure can focus; the shell reuses
+// it so one message never prints twice. Quota plus tmp route workspace validation;
+// machine usage plus status errors stay global.
+export const TOOLS_ADVANCED_ERROR_KEYWORDS = [
+  "plugins directory",
+  "marketplace",
+  "rescan",
+  "quota",
+  "tmp",
+] as const;
+
+export function isToolsAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return TOOLS_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
+}
 
 export interface ToolsTabProps {
   handleRescanPlugins: () => void;
@@ -109,16 +133,21 @@ export function ToolsTab({
   const advancedChangedCount = countToolsAdvancedChanged(
     pluginsDir,
     pluginsMarketplaceIndexURL,
-    pluginsAutoRescan
+    pluginsAutoRescan,
+    workspaceQuotaMB,
+    workspaceQuotaFiles,
+    workspaceTmpTTLDays
   );
 
-  // Reset restores stock plugin location, catalog URL, and scan behavior.
+  // Reset restores stock plugin location, catalog URL, scan behavior,
+  // plus workspace quotas and tmp retention.
   const resetToolsAdvanced = () => {
-    setPluginsDir("~/.runeweaver/plugins");
-    setPluginsMarketplaceIndexURL(
-      "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
-    );
-    setPluginsAutoRescan(true);
+    setPluginsDir(DEFAULT_TOOLS_PLUGINS_DIR);
+    setPluginsMarketplaceIndexURL(DEFAULT_TOOLS_MARKETPLACE_INDEX_URL);
+    setPluginsAutoRescan(DEFAULT_TOOLS_AUTO_RESCAN);
+    setWorkspaceQuotaMB(DEFAULT_WORKSPACE_CONFIG.quotaMB);
+    setWorkspaceQuotaFiles(DEFAULT_WORKSPACE_CONFIG.quotaFiles);
+    setWorkspaceTmpTTLDays(DEFAULT_WORKSPACE_CONFIG.tmpTTLDays);
   };
   const builtIns = safeTools.filter((t) => t.isBuiltIn);
   const q = toolSearchQuery.trim().toLowerCase();
@@ -138,7 +167,6 @@ export function ToolsTab({
   })).filter((cat) => cat.tools.length > 0);
 
   return (
-    <>
     <div className="settings-section card">
       <div className="settings-section-header">
         <div className="settings-section-title-group">
@@ -189,28 +217,6 @@ export function ToolsTab({
           </div>
         )}
       </div>
-
-      {/* Agent scratch workspace */}
-      <WorkspaceStorageSection
-        workspaceLoading={workspaceLoading}
-        pruningWorkspace={pruningWorkspace}
-        workspaceError={workspaceError}
-        workspaceUsage={workspaceUsage}
-        refreshWorkspaceUsage={refreshWorkspaceUsage}
-        setPendingPruneWorkspace={setPendingPruneWorkspace}
-        workspaceMachineLoading={workspaceMachineLoading}
-        workspaceMachine={workspaceMachine}
-        workspaceMachineError={workspaceMachineError}
-        workspaceMachineAction={workspaceMachineAction}
-        handleStopWorkspaceMachine={handleStopWorkspaceMachine}
-        handleRecycleWorkspaceMachine={handleRecycleWorkspaceMachine}
-        workspaceQuotaMB={workspaceQuotaMB}
-        setWorkspaceQuotaMB={setWorkspaceQuotaMB}
-        workspaceQuotaFiles={workspaceQuotaFiles}
-        setWorkspaceQuotaFiles={setWorkspaceQuotaFiles}
-        workspaceTmpTTLDays={workspaceTmpTTLDays}
-        setWorkspaceTmpTTLDays={setWorkspaceTmpTTLDays}
-      />
 
       {/* Warning banners */}
       {pendingCount > 0 && (
@@ -269,7 +275,6 @@ export function ToolsTab({
         setPendingUninstallPlugin={setPendingUninstallPlugin}
         handlePermissionChange={handlePermissionChange}
       />
-
 
       {/* Built-in Core Tools Section */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "28px 0 8px 0", flexWrap: "wrap", gap: "10px" }}>
@@ -461,23 +466,21 @@ export function ToolsTab({
         </div>
       )}
 
-    </div>
-    <AdvancedDisclosure
-      tabName="Tools"
-      changedCount={advancedChangedCount}
-      summary={
-        advancedChangedCount > 0
-          ? `${advancedChangedCount} advanced tools ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-          : undefined
-      }
-      open={advancedOpen}
-      onOpenChange={setAdvancedOpen}
-      testId="advanced-tools"
-      validationError={validationError}
-      errorKeywords={["plugins directory", "marketplace", "rescan"]}
-      onReset={resetToolsAdvanced}
-    >
-      <div className="settings-section card">
+      <AdvancedDisclosure
+        tabName="Tools"
+        changedCount={advancedChangedCount}
+        summary={
+          advancedChangedCount > 0
+            ? `${advancedChangedCount} advanced tools ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        testId="advanced-tools"
+        validationError={validationError}
+        errorKeywords={[...TOOLS_ADVANCED_ERROR_KEYWORDS]}
+        onReset={resetToolsAdvanced}
+      >
         <div className="settings-section-title-group">
           <h4 style={{ margin: "0 0 4px 0" }}>Plugin Configuration</h4>
           <p className="settings-section-hint">
@@ -527,9 +530,28 @@ export function ToolsTab({
             </label>
           </div>
         </div>
-      </div>
-    </AdvancedDisclosure>
-    </>
+        <WorkspaceStorageSection
+          workspaceLoading={workspaceLoading}
+          pruningWorkspace={pruningWorkspace}
+          workspaceError={workspaceError}
+          workspaceUsage={workspaceUsage}
+          refreshWorkspaceUsage={refreshWorkspaceUsage}
+          setPendingPruneWorkspace={setPendingPruneWorkspace}
+          workspaceMachineLoading={workspaceMachineLoading}
+          workspaceMachine={workspaceMachine}
+          workspaceMachineError={workspaceMachineError}
+          workspaceMachineAction={workspaceMachineAction}
+          handleStopWorkspaceMachine={handleStopWorkspaceMachine}
+          handleRecycleWorkspaceMachine={handleRecycleWorkspaceMachine}
+          workspaceQuotaMB={workspaceQuotaMB}
+          setWorkspaceQuotaMB={setWorkspaceQuotaMB}
+          workspaceQuotaFiles={workspaceQuotaFiles}
+          setWorkspaceQuotaFiles={setWorkspaceQuotaFiles}
+          workspaceTmpTTLDays={workspaceTmpTTLDays}
+          setWorkspaceTmpTTLDays={setWorkspaceTmpTTLDays}
+        />
+      </AdvancedDisclosure>
+    </div>
   );
 }
 

@@ -1,11 +1,14 @@
 // Rune Weaver Dashboard — Access settings pane shell.
-
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { AccessBashSection } from "./access/AccessBashSection";
 import { AccessFilesSection } from "./access/AccessFilesSection";
 import { AccessNetworkSection } from "./access/AccessNetworkSection";
 import { AccessRulesSection } from "./access/AccessRulesSection";
 import { readAccessDeepLink } from "./access/accessNav";
+import {
+  useAccessBashAdvanced,
+  useAccessFilesAdvanced,
+} from "./access/useAccessAdvanced";
 
 type AccessSectionKey = "rules" | "bash" | "network" | "credentials" | "files";
 
@@ -45,7 +48,13 @@ function isAccessSectionKey(value: unknown): value is AccessSectionKey {
   );
 }
 
+// Advanced drafts live at the pane so tab switches keep edits;
+// each slice still owns only its keys.
 export default function AccessPane({ initialSection = "rules" }: AccessPaneProps = {}) {
+  // Pane-owned Advanced drafts survive section swaps so edits never
+  // clear when the owner tabs away and back.
+  const bashAdvanced = useAccessBashAdvanced();
+  const filesAdvanced = useAccessFilesAdvanced();
   // One read of the deep link feeds both states below, so the highlight and
   // the landing section can never derive from two different reads of the URL.
   const [deepLinkRuleId] = useState<string | null>(readAccessDeepLink);
@@ -76,25 +85,24 @@ export default function AccessPane({ initialSection = "rules" }: AccessPaneProps
     };
   }, []);
 
-  // Lazily renders exactly the selected section. Rules receives the highlight; the policy surface
-  // below owns both network and credentials behind its own sub-tabs, so the Network and Credentials
-  // rail entries both mount it.
-  const renderSection = useCallback(() => {
+  // Lazily renders the selected section; Bash and Files embed Advanced slices
+  // inside their own cards above their footers, others stay Simple.
+  function renderSection() {
     switch (section) {
       case "rules":
         return <AccessRulesSection highlightRuleId={highlightRuleId} />;
       case "bash":
-        return <AccessBashSection />;
+        return <AccessBashSection simpleOnly advanced={bashAdvanced} />;
       case "network":
         return <AccessNetworkSection activeView="network" />;
       case "credentials":
         return <AccessNetworkSection activeView="credentials" />;
       case "files":
-        return <AccessFilesSection />;
+        return <AccessFilesSection simpleOnly advanced={filesAdvanced} />;
       default:
         return <AccessRulesSection highlightRuleId={highlightRuleId} />;
     }
-  }, [section, highlightRuleId]);
+  }
 
   return (
     <div className="access-pane" data-testid="access-pane">

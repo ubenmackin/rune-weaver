@@ -8,6 +8,11 @@ import { MenuIcon, RefreshIcon } from "./icons";
 import { SettingsModals } from "./settings/SettingsModals";
 import SettingsSidenav from "./settings/SettingsSidenav";
 import { SettingsFormPanels } from "./settings/SettingsFormPanels";
+import { isToolsAdvancedError } from "./settings/ToolsTab";
+import { isVoiceAdvancedError } from "./settings/VoiceTab";
+import { isGoalsAdvancedError } from "./settings/GoalsTab";
+import { isWebAdvancedError } from "./settings/WebSearchTab";
+import { isEngineAdvancedError } from "./settings/EngineTab";
 import {
   browserElapsedSeconds,
   BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT,
@@ -54,6 +59,18 @@ export {
   SECRET_STATUS_CHUNK_SIZE,
 };
 export type { SettingsManagerProps };
+
+// Single owner for the global-banner suppression check: an advanced error
+// prints once inside its disclosure, never twice behind the global banner.
+export function isSettingsAdvancedError(message: string | null | undefined): boolean {
+  return (
+    isToolsAdvancedError(message) ||
+    isVoiceAdvancedError(message) ||
+    isGoalsAdvancedError(message) ||
+    isWebAdvancedError(message) ||
+    isEngineAdvancedError(message)
+  );
+}
 
 export type SettingsManagerWithReopenProps = SettingsManagerProps & {
   onReopenOnboarding?: () => Promise<void> | void;
@@ -207,7 +224,16 @@ export default function SettingsManager({
         </div>
       )}
 
-      {save.error && <div className="error-banner">{save.error}</div>}
+      {save.error &&
+        !(
+          (activeTab === "tools" && isToolsAdvancedError(save.error)) ||
+          (activeTab === "voice" && isVoiceAdvancedError(save.error)) ||
+          (activeTab === "goals" && isGoalsAdvancedError(save.error)) ||
+          (activeTab === "search" && isWebAdvancedError(save.error)) ||
+          (activeTab === "engine" && isEngineAdvancedError(save.error))
+        ) && (
+          <div className="error-banner">{save.error}</div>
+        )}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       <div className="settings-layout">

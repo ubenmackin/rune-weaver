@@ -11,6 +11,10 @@ import {
   parseLinesToList,
 } from "../../api";
 
+// Engine clamp for the per-document vector chunk cap. The Advanced UI bound and
+// the save-time validation both read this constant so they cannot drift.
+export const INDEX_VECTOR_CAP_MAX = 4096;
+
 export const INDEX_EFFORT_OPTIONS: Array<{ id: string; label: string }> = [
   ...INDEX_EFFORT_PRESETS.map((id) => ({
     id,

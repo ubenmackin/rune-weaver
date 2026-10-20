@@ -69,6 +69,9 @@ import {
   DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
   DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER,
   DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT,
+  DEFAULT_TOOLS_AUTO_RESCAN,
+  DEFAULT_TOOLS_MARKETPLACE_INDEX_URL,
+  DEFAULT_TOOLS_PLUGINS_DIR,
 } from "./settingsAdvancedCounts";
 
 export function useSettingsFormState() {
@@ -120,11 +123,13 @@ export function useSettingsFormState() {
   >(DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS);
 
   // Plugins state
-  const [pluginsDir, setPluginsDir] = useState("~/.runeweaver/plugins");
+  const [pluginsDir, setPluginsDir] = useState(DEFAULT_TOOLS_PLUGINS_DIR);
   const [pluginsMarketplaceIndexURL, setPluginsMarketplaceIndexURL] = useState(
-    "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+    DEFAULT_TOOLS_MARKETPLACE_INDEX_URL
   );
-  const [pluginsAutoRescan, setPluginsAutoRescan] = useState(true);
+  const [pluginsAutoRescan, setPluginsAutoRescan] = useState(
+    DEFAULT_TOOLS_AUTO_RESCAN
+  );
 
   // Email accounts state
   const [emailAccountsList, setEmailAccountsList] = useState<EmailEntry[]>([]);
@@ -495,12 +500,11 @@ export function useSettingsFormState() {
       if (data.browserFetchTimeoutSeconds !== undefined) {
         setBrowserFetchTimeoutSeconds(data.browserFetchTimeoutSeconds);
       }
-      setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
+      setPluginsDir(data.pluginsDir ?? DEFAULT_TOOLS_PLUGINS_DIR);
       setPluginsMarketplaceIndexURL(
-        data.pluginsMarketplaceIndexURL ??
-          "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+        data.pluginsMarketplaceIndexURL ?? DEFAULT_TOOLS_MARKETPLACE_INDEX_URL
       );
-      setPluginsAutoRescan(data.pluginsAutoRescan ?? true);
+      setPluginsAutoRescan(data.pluginsAutoRescan ?? DEFAULT_TOOLS_AUTO_RESCAN);
 
       const eList: EmailEntry[] = (data.emailAccounts || []).map((acc, idx) => ({
         id: `email-${idx}-${acc.name}`,
