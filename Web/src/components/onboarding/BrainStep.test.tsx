@@ -383,6 +383,9 @@ describe("BrainStep", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("brain-loading")).toBeNull();
     });
+    // Prefilled default entry must be cleared before typing a new provider.
+    await user.clear(screen.getByTestId("brain-provider-name"));
+    await user.clear(screen.getByTestId("brain-model"));
     await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
     await user.type(screen.getByTestId("brain-model"), "m1");
     await user.click(screen.getByTestId("brain-next"));
@@ -450,6 +453,140 @@ describe("BrainStep", () => {
     const status = await screen.findByTestId("brain-test-status");
     expect(status).toHaveTextContent(/Failed to connect/i);
     expect(status).toHaveAttribute("role", "alert");
+  });
+});
+
+describe("Brain connection test fail-closed", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+  });
+
+  it("fails blank URL with Enter server URL first", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: {} });
+        }
+        return jsonResponse({ providers: {}, defaultProvider: "" });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Failed to connect/i);
+    expect(status).toHaveTextContent(/Enter server URL first/i);
+  });
+
+  it("fails invalid URL with shape error", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: {} });
+        }
+        return jsonResponse({ providers: {}, defaultProvider: "" });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    fireEvent.change(screen.getByTestId("brain-server-url"), { target: { value: "not-a-url" } });
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Failed to connect/i);
+    expect(status).toHaveTextContent(/absolute http\(s\) URL up to 253/i);
+  });
+
+  it("succeeds reachable plus stored with empty detail", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: { MY_KEY: true } });
+        }
+        if (String(url).startsWith("https://")) {
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ providers: {}, defaultProvider: "" });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    fireEvent.change(screen.getByTestId("brain-server-url"), {
+      target: { value: "https://brain.example.com" },
+    });
+    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Succeeded/i);
+    expect(status.textContent).not.toMatch(/—/);
+    expect(status.textContent).not.toMatch(/No server URL/i);
+  });
+
+  it("fails unreachable server", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: {} });
+        }
+        if (String(url).startsWith("https://")) {
+          throw new Error("unreachable");
+        }
+        return jsonResponse({ providers: {}, defaultProvider: "" });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    fireEvent.change(screen.getByTestId("brain-server-url"), {
+      target: { value: "https://brain.example.com" },
+    });
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Failed to connect/i);
+    expect(status).toHaveTextContent(/Server unreachable/i);
+  });
+
+  it("fails missing stored key", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: { MY_KEY: false } });
+        }
+        if (String(url).startsWith("https://")) {
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ providers: {}, defaultProvider: "" });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    fireEvent.change(screen.getByTestId("brain-server-url"), {
+      target: { value: "https://brain.example.com" },
+    });
+    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Failed to connect/i);
+    expect(status).toHaveTextContent(/Key not stored/i);
   });
 });
 
