@@ -1,16 +1,26 @@
 // Rune Weaver Core — Plugin discovery, registration, and lifecycle orchestration.
 
 import Foundation
+import os
 
 /// Service discovering and managing plugins on disk and in the live engine.
 public final class PluginDiscoveryService: Sendable {
     public let pluginsDirectory: URL
     public let store: ToolRegistryStore
+    public let secrets: SecretsManager?
+    private let egressBox: OSAllocatedUnfairLock<any EgressPolicyEvaluator?>
 
     /// Creates a plugin discovery service.
-    public init(pluginsDirectory: URL, store: ToolRegistryStore) {
+    public init(pluginsDirectory: URL, store: ToolRegistryStore, secrets: SecretsManager? = nil, egressEvaluator: any EgressPolicyEvaluator? = nil) {
         self.pluginsDirectory = pluginsDirectory
         self.store = store
+        self.secrets = secrets
+        self.egressBox = OSAllocatedUnfairLock(initialState: egressEvaluator)
+    }
+
+    /// Updates the evaluator screening network-capable tools after boot wires supervision.
+    public func updateEgressEvaluator(_ evaluator: any EgressPolicyEvaluator?) {
+        egressBox.withLock { $0 = evaluator }
     }
 
     /// Default directory URL for plugins (`~/.runeweaver/plugins`).
@@ -107,6 +117,10 @@ public final class PluginDiscoveryService: Sendable {
     public func enablePlugin(id: String, toolBus: ToolBus) async throws -> PluginRecord {
         guard let manifestInfo = findManifest(for: id) else {
             throw PluginDiscoveryError.pluginNotFound(id)
+        }
+
+        if manifestInfo.manifest.runtime == .python {
+            try await provisionVenvIfNeeded(at: manifestInfo.dir)
         }
 
         guard let hash = PluginSecurity.calculateDirectoryHash(at: manifestInfo.dir) else {
@@ -255,13 +269,17 @@ public final class PluginDiscoveryService: Sendable {
             }
 
             do {
+                let evaluator = egressBox.withLock { $0 }
                 let bridge = try SubprocessToolBridge(
                     pluginID: manifest.id,
                     declaration: toolDecl,
                     pluginDirectory: pluginDir,
                     entrypoint: manifest.entrypoint,
                     runtime: manifest.runtime,
-                    permissionOverride: overrideLevel
+                    permissionOverride: overrideLevel,
+                    capabilities: toolDecl.capabilities,
+                    secrets: secrets,
+                    egressEvaluator: evaluator
                 )
                 await toolBus.register(tool: bridge, isEnabled: isEnabled)
             } catch {
@@ -273,11 +291,178 @@ public final class PluginDiscoveryService: Sendable {
     }
 }
 
+/// Venv provisioning lives here so the main service body stays within budget.
+/// Enable-time provisioning runs ahead of hashing; behavior is unchanged.
+extension PluginDiscoveryService {
+    private func provisionVenvIfNeeded(at directory: URL) async throws {
+        guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
+            return
+        }
+        let fileManager = FileManager.default
+        let reqURL = directory.appendingPathComponent("requirements.txt")
+        let venvDir = directory.appendingPathComponent(".venv")
+        let venvPython = venvDir.appendingPathComponent("bin/python3")
+
+        guard fileManager.fileExists(atPath: reqURL.path),
+              !fileManager.fileExists(atPath: venvPython.path)
+        else {
+            return
+        }
+
+        // Pinned hashes plus rejected pip options keep enable on the default PyPI index.
+        // Enable is an explicit operator action with bounded timeouts, the documented egress exception.
+        try validatePinnedRequirements(at: reqURL)
+
+        RuneWeaverLog.tools.info("PluginDiscoveryService: provisioning .venv for \(directory.lastPathComponent)...")
+        let python = resolveProvisioningInterpreter()
+        do {
+            let venvResult = try await BoundedProcessRunner.runAsync(
+                executableURL: python,
+                arguments: ["-m", "venv", venvDir.path],
+                timeoutSeconds: 120,
+                maxOutputBytes: 64 * 1024,
+                maxErrorBytes: 64 * 1024
+            )
+            guard venvResult.exitCode == 0 else {
+                throw PluginDiscoveryError.provisioningFailed(
+                    "Failed to create Python virtual environment at \(directory.path) (code \(venvResult.exitCode)): \(venvResult.stderrString)"
+                )
+            }
+        } catch let error as PluginDiscoveryError {
+            throw error
+        } catch {
+            throw PluginDiscoveryError.provisioningFailed("Failed to create Python virtual environment at \(directory.path): \(error.localizedDescription)")
+        }
+
+        do {
+            let pipResult = try await BoundedProcessRunner.runAsync(
+                executableURL: venvPython,
+                arguments: ["-m", "pip", "install", "--require-hashes", "--no-input", "--index-url", "https://pypi.org/simple", "-r", reqURL.path],
+                timeoutSeconds: 180,
+                maxOutputBytes: 64 * 1024,
+                maxErrorBytes: 64 * 1024
+            )
+            guard pipResult.exitCode == 0 else {
+                throw PluginDiscoveryError.provisioningFailed(
+                    "Failed to install requirements.txt for \(directory.lastPathComponent) (code \(pipResult.exitCode)): \(pipResult.stderrString)"
+                )
+            }
+        } catch let error as PluginDiscoveryError {
+            throw error
+        } catch {
+            throw PluginDiscoveryError.provisioningFailed(
+                "Failed to install requirements.txt for \(directory.lastPathComponent): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func resolveProvisioningInterpreter() -> URL {
+        // Env override first so operators pin the interpreter without editing code.
+        if let override = ProcessInfo.processInfo.environment["RUNEWEAVER_PYTHON_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        }
+        for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] where FileManager.default.fileExists(atPath: candidate) {
+            return URL(fileURLWithPath: candidate)
+        }
+        return URL(fileURLWithPath: "/usr/bin/python3")
+    }
+
+    private func validatePinnedRequirements(at reqURL: URL) throws {
+        // Unpinned ranges plus missing hashes would let enable fetch arbitrary code.
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: reqURL.path),
+              let size = attrs[.size] as? NSNumber, size.int64Value <= 64 * 1024,
+              let content = try? String(contentsOf: reqURL, encoding: .utf8)
+        else {
+            throw PluginDiscoveryError.provisioningFailed("Could not read requirements.txt for hash verification.")
+        }
+        var stanzaHashes: [Int] = []
+        var sawRequirement = false
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if line.hasPrefix("--hash=") {
+                guard sawRequirement else {
+                    throw PluginDiscoveryError.provisioningFailed("requirements.txt has stray --hash without a requirement.")
+                }
+                try validateRequirementHashToken(line)
+                stanzaHashes[stanzaHashes.count - 1] += 1
+                continue
+            }
+            if line.hasPrefix("-") {
+                throw PluginDiscoveryError.provisioningFailed("requirements.txt must not contain pip options.")
+            }
+            // Inline flags would bypass the pin check and reach pip on the default index.
+            let inlineTokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            for token in inlineTokens {
+                var core = token
+                if core.hasSuffix("\\") {
+                    core = String(core.dropLast())
+                }
+                if core == "\\" || core.hasPrefix("--hash=") {
+                    continue
+                }
+                if core.hasPrefix("-") {
+                    throw PluginDiscoveryError.provisioningFailed("requirements.txt must not contain pip options.")
+                }
+            }
+            let loweredLine = line.lowercased()
+            let pipOptionMarkers = ["extra-index-url", "index-url", "trusted-host", "find-links", "no-index"]
+            if pipOptionMarkers.contains(where: { loweredLine.contains($0) }) {
+                throw PluginDiscoveryError.provisioningFailed("requirements.txt must not contain pip options.")
+            }
+            sawRequirement = true
+            var requirementPart = line
+            var inlineCount = 0
+            if line.contains("--hash=") {
+                let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init).filter { $0.hasPrefix("--hash=") }
+                for token in tokens {
+                    try validateRequirementHashToken(token)
+                }
+                inlineCount = tokens.count
+                if let hashStart = line.range(of: "--hash=") {
+                    requirementPart = String(line[..<hashStart.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            let pinCandidate = requirementPart.hasSuffix("\\")
+                ? String(requirementPart.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+                : requirementPart
+            guard pinCandidate.contains("=="), [">=", "<=", "~=", "!="].allSatisfy({ !pinCandidate.contains($0) }) else {
+                throw PluginDiscoveryError.provisioningFailed("requirements.txt must pin exact versions with '=='.")
+            }
+            stanzaHashes.append(inlineCount)
+        }
+        guard sawRequirement, !stanzaHashes.isEmpty, stanzaHashes.allSatisfy({ $0 >= 1 }) else {
+            throw PluginDiscoveryError.provisioningFailed("requirements.txt must pin versions and include --hash entries.")
+        }
+    }
+
+    private func validateRequirementHashToken(_ token: String) throws {
+        // Malformed hashes fail closed so pip never resolves an unverifiable stanza.
+        var cleaned = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasSuffix("\\") {
+            cleaned = String(cleaned.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard cleaned.hasPrefix("--hash=") else {
+            throw PluginDiscoveryError.provisioningFailed("requirements.txt contains a malformed --hash entry.")
+        }
+        let value = String(cleaned.dropFirst("--hash=".count))
+        let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, ["sha256", "sha384", "sha512"].contains(parts[0].lowercased()) else {
+            throw PluginDiscoveryError.provisioningFailed("requirements.txt --hash must use sha256, sha384, or sha512.")
+        }
+        let expectedLength = parts[0].lowercased() == "sha256" ? 64 : parts[0].lowercased() == "sha384" ? 96 : 128
+        guard parts[1].count == expectedLength, parts[1].allSatisfy(\.isHexDigit) else {
+            throw PluginDiscoveryError.provisioningFailed("requirements.txt --hash value is malformed.")
+        }
+    }
+}
+
 /// Errors raised by the plugin discovery service.
 public enum PluginDiscoveryError: Error, Sendable, Equatable, LocalizedError {
     case pluginNotFound(String)
     case unreadablePluginDirectory(String)
     case escapesPluginsDirectory(String)
+    case provisioningFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -287,6 +472,8 @@ public enum PluginDiscoveryError: Error, Sendable, Equatable, LocalizedError {
             "Could not read plugin directory at '\(path)'."
         case let .escapesPluginsDirectory(path):
             "Refusing to remove plugin directory outside the plugins pen at '\(path)'."
+        case let .provisioningFailed(reason):
+            "Plugin provisioning failed: \(reason)"
         }
     }
 }

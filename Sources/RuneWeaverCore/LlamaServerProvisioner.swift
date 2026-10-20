@@ -34,9 +34,12 @@ public struct LlamaServerProvisioner: Sendable {
     ]
 
     /// Pinned fallback release archive URL for macOS ARM64 Metal from ggml-org/llama.cpp.
-    public static let defaultArchiveURL = URL(
-        string: "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-macos-arm64.tar.gz"
-    )!
+    public static let defaultArchiveURL: URL = {
+        guard let url = URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-macos-arm64.tar.gz") else {
+            preconditionFailure("Invalid hardcoded llama-server URL")
+        }
+        return url
+    }()
 
     /// Directory where the provisioned binary lives.
     public let binDirectoryPath: String

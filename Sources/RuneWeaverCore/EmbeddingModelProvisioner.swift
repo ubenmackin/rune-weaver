@@ -20,14 +20,23 @@ public struct EmbeddingModelProvisioner: Sendable {
     public static let defaultMMProjFileName = "mmproj-embeddinggemma-2-Q8_0.gguf"
     /// Default local model directory under user home.
     public static let defaultModelDirectoryPath = "~/.runeweaver/models"
-    /// Default Unsloth Hugging Face repository download URL for the EmbeddingGemma 2 Q8_0 GGUF.
-    public static let defaultDownloadURL = URL(
-        string: "https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf"
-    )!
+    /// Default Hugging Face repository download URL for the EmbeddingGemma 2 Q8_0 GGUF.
+    public static let defaultDownloadURL: URL = {
+        guard let url = URL(string: "https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf") else {
+            preconditionFailure("Invalid hardcoded embedding model URL")
+        }
+        return url
+    }()
+
     /// Default Hugging Face repository download URL for the multimodal projector.
-    public static let defaultMMProjDownloadURL = URL(
-        string: "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8/mmproj-embeddinggemma-2-Q8_0.gguf"
-    )!
+    public static let defaultMMProjDownloadURL: URL = {
+        guard let url = URL(
+            string: "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/bfcd298762cc34d0357ece5ebdd31791a3a374d8/mmproj-embeddinggemma-2-Q8_0.gguf"
+        ) else {
+            preconditionFailure("Invalid hardcoded embedding projector URL")
+        }
+        return url
+    }()
 
     /// Default minimum file size in bytes for the text model (300 MB).
     public static let defaultMinModelSize: Int64 = 300_000_000

@@ -126,6 +126,13 @@ public final class ServerContext: Sendable {
         set { containersBox.withLock { $0 = newValue } }
     }
 
+    /// Plugin configuration carrying marketplace URL and plugins directory.
+    private let pluginConfigBox: OSAllocatedUnfairLock<PluginConfig>
+    public var pluginConfig: PluginConfig {
+        get { pluginConfigBox.withLock { $0 } }
+        set { pluginConfigBox.withLock { $0 = newValue } }
+    }
+
     /// Atomic bash plus files policy pair refreshed by settings saves.
     private let bashFilesBox: OSAllocatedUnfairLock<BashFilesPair>
     /// Live `[files]` access policy bounding read/write operations.
@@ -274,6 +281,7 @@ public final class ServerContext: Sendable {
         schedulerWorker: ServerSchedulerWorker? = nil,
         pluginStore: ToolRegistryStore? = nil,
         pluginDiscovery: PluginDiscoveryService? = nil,
+        pluginConfig: PluginConfig = PluginConfig(),
         toolStates: ToolStateStore? = nil,
         containersConfig: ContainersConfig = ContainersConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
@@ -397,6 +405,7 @@ public final class ServerContext: Sendable {
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.stagedFiles = stagedFiles ?? StagedFilesStore(dbPath: defaultDBPath)
         self.containersBox = OSAllocatedUnfairLock(initialState: containersConfig)
+        self.pluginConfigBox = OSAllocatedUnfairLock(initialState: pluginConfig)
         self.bashFilesBox = OSAllocatedUnfairLock(initialState: BashFilesPair(bash: bashConfig, files: filesConfig))
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig

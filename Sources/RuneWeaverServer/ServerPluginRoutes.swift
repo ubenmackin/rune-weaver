@@ -2,6 +2,7 @@
 
 import Foundation
 import RuneWeaverCore
+import RuneWeaverTools
 import Vapor
 
 /// Registers plugin and marketplace routes.
@@ -77,7 +78,7 @@ private func registerMarketplaceRoutes(_ app: Application) {
         let context = req.application.runeWeaver
         let installedRecords = await context.pluginStore.loadAll()
         let installedIDs = Set(installedRecords.map(\.id))
-        var items = getCuratedMarketplaceItems(installedIDs: installedIDs)
+        var items = await fetchMarketplaceCatalog(context: context, installedIDs: installedIDs)
         items.sort { $0.name < $1.name }
         return MarketplaceResponse(items: items)
     }
@@ -100,9 +101,9 @@ private func registerMarketplaceRoutes(_ app: Application) {
         else {
             throw Abort(.badRequest, reason: "Invalid plugin ID. Only alphanumeric, '.', '-', and '_' are allowed.")
         }
-        // The marketplace URL rides along as display provenance only. The loopback service never
-        // fetches remote URLs server-side, so a crafted install cannot turn this endpoint into a
-        // fetch oracle; only well-formed https URLs are accepted to keep stored provenance usable.
+        // Body downloadURL stays display provenance only and never triggers a fetch;
+        // catalog file fetches use https-only SSRF-guarded downloads with per-file
+        // size cap plus manifest-ID verification.
         if let rawDownloadURL = body.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            !rawDownloadURL.isEmpty
         {
@@ -126,38 +127,6 @@ private func registerMarketplaceRoutes(_ app: Application) {
             throw Abort(.badRequest, reason: "Plugin ID escapes the plugins directory.")
         }
 
-        // Scaffold from the advertised catalog when the ID is curated so the
-        // installed manifest declares the same tools, descriptions, and schemas
-        // the marketplace lists; ad-hoc IDs fall back to a single namespaced entrypoint tool.
-        let curated = getCuratedMarketplaceItems(installedIDs: []).first(where: { $0.id == pluginID })
-        let displayName = curated?.name ?? (pluginID.components(separatedBy: ".").last?.capitalized ?? pluginID)
-        let itemDescription = curated?.description ?? "Installed community rune package."
-        let itemVersion = curated?.version ?? "1.0.0"
-
-        let toolsMetadata: [[String: Any]] = getCuratedToolsMetadata(
-            for: pluginID,
-            fallbackTools: curated?.declaredTools ?? ["\(pluginID).run"]
-        )
-
-        // Scaffold the manifest through structured encoding so quotes or
-        // backslashes in the ID stay inside JSON string values and can never
-        // inject sibling manifest keys such as entrypoint or permission_level.
-        let manifestObject: [String: Any] = [
-            "id": pluginID,
-            "name": displayName,
-            "version": itemVersion,
-            "description": itemDescription,
-            "runtime": "python",
-            "entrypoint": "main.py",
-            "tools": toolsMetadata
-        ]
-        let manifestData = try JSONSerialization.data(
-            withJSONObject: manifestObject,
-            options: [.prettyPrinted, .sortedKeys]
-        )
-
-        let scriptContent = generateScaffoldScript(for: pluginID, tools: toolsMetadata)
-
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: targetDir.path) {
@@ -170,22 +139,17 @@ private func registerMarketplaceRoutes(_ app: Application) {
             throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already installed.")
         }
 
-        let manifestFile = targetDir.appendingPathComponent("rune.json")
-        let scriptFile = targetDir.appendingPathComponent("main.py")
-
-        // Both scaffold files inherit containment from the verified target directory since their
-        // leaf names are fixed server-side constants. A failed write removes the fresh pen so a
-        // half-installed directory never wedges later installs behind a persistent conflict.
         do {
-            try manifestData.write(to: manifestFile, options: .atomic)
-            try scriptContent.write(to: scriptFile, atomically: true, encoding: .utf8)
+            let doc = await loadMarketplaceIndex(context: context)
+            let entry = doc?.items.first(where: { $0.id == pluginID })
+            try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context)
         } catch {
             do {
                 try fileManager.removeItem(at: targetDir)
             } catch {
                 RuneWeaverLog.server.warning("Failed cleaning up aborted plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
             }
-            throw Abort(.internalServerError, reason: "Failed to scaffold plugin '\(pluginID)'.")
+            throw Abort(.internalServerError, reason: "Failed to install plugin '\(pluginID)': \(error.localizedDescription)")
         }
 
         // Trigger discovery sync: records plugin as 'discovered' (disabled by default!)
@@ -193,6 +157,12 @@ private func registerMarketplaceRoutes(_ app: Application) {
         await context.pluginDiscovery.discoverAndSync(toolBus: context.toolBus, defaultSource: "marketplace")
 
         guard let summary = await fetchPluginSummary(id: pluginID, context: context) else {
+            // Undiscoverable scaffold must not wedge retry behind a persistent 409.
+            do {
+                try fileManager.removeItem(at: targetDir)
+            } catch {
+                RuneWeaverLog.server.warning("Failed cleaning up undiscoverable plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
+            }
             throw Abort(.internalServerError, reason: "Plugin installed but could not be discovered.")
         }
         return summary
@@ -201,58 +171,8 @@ private func registerMarketplaceRoutes(_ app: Application) {
 
 // MARK: - Helper Functions
 
-private func fetchPluginsResponse(context: ServerContext) async -> PluginsResponse {
-    let records = await context.pluginStore.loadAll()
-    var summaries: [PluginSummary] = []
-
-    for record in records {
-        if let manifestInfo = context.pluginDiscovery.findManifest(for: record.id) {
-            let manifest = manifestInfo.manifest
-            let tools = manifest.tools.map { decl -> ToolInfo in
-                let effectiveLevel = record.permissionOverrides[decl.name] ?? decl.permissionLevel.rawValue
-                return ToolInfo(
-                    name: decl.name,
-                    description: decl.description,
-                    permissionLevel: effectiveLevel,
-                    inputSchema: decl.inputSchema,
-                    isEnabled: record.isEnabled,
-                    isBuiltIn: false,
-                    pluginID: record.id,
-                    source: record.source,
-                    integrityStatus: record.status == .tampered ? "tampered" : "valid"
-                )
-            }
-
-            summaries.append(PluginSummary(
-                id: record.id,
-                name: record.name,
-                version: record.version,
-                author: manifest.author,
-                description: manifest.description,
-                runtime: manifest.runtime.rawValue,
-                source: record.source,
-                status: record.status.rawValue,
-                isEnabled: record.isEnabled,
-                integrityHash: record.integrityHash,
-                tools: tools,
-                permissionOverrides: record.permissionOverrides,
-                discoveredAt: record.discoveredAt,
-                updatedAt: record.updatedAt
-            ))
-        }
-    }
-
-    return PluginsResponse(plugins: summaries)
-}
-
-private func fetchPluginSummary(id: String, context: ServerContext) async -> PluginSummary? {
-    guard let record = await context.pluginStore.get(id: id),
-          let manifestInfo = context.pluginDiscovery.findManifest(for: id)
-    else {
-        return nil
-    }
-
-    let manifest = manifestInfo.manifest
+private func makePluginSummary(record: PluginRecord, manifest: PluginManifest) -> PluginSummary {
+    // Single mapping keeps list and detail rows identical by construction.
     let tools = manifest.tools.map { decl -> ToolInfo in
         let effectiveLevel = record.permissionOverrides[decl.name] ?? decl.permissionLevel.rawValue
         return ToolInfo(
@@ -267,7 +187,6 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
             integrityStatus: record.status == .tampered ? "tampered" : "valid"
         )
     }
-
     return PluginSummary(
         id: record.id,
         name: record.name,
@@ -284,6 +203,29 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
         discoveredAt: record.discoveredAt,
         updatedAt: record.updatedAt
     )
+}
+
+private func fetchPluginsResponse(context: ServerContext) async -> PluginsResponse {
+    let records = await context.pluginStore.loadAll()
+    var summaries: [PluginSummary] = []
+
+    for record in records {
+        if let manifestInfo = context.pluginDiscovery.findManifest(for: record.id) {
+            summaries.append(makePluginSummary(record: record, manifest: manifestInfo.manifest))
+        }
+    }
+
+    return PluginsResponse(plugins: summaries)
+}
+
+private func fetchPluginSummary(id: String, context: ServerContext) async -> PluginSummary? {
+    guard let record = await context.pluginStore.get(id: id),
+          let manifestInfo = context.pluginDiscovery.findManifest(for: id)
+    else {
+        return nil
+    }
+
+    return makePluginSummary(record: record, manifest: manifestInfo.manifest)
 }
 
 private func getCuratedMarketplaceItems(installedIDs: Set<String>) -> [MarketplacePluginItem] {
@@ -557,4 +499,421 @@ private func generateScaffoldScript(for _: String, tools _: [[String: Any]]) -> 
     if __name__ == "__main__":
         main()
     """
+}
+
+struct MarketplaceIndexDocument: Codable, Sendable {
+    let version: Int?
+    let items: [MarketplaceIndexEntry]
+}
+
+struct MarketplaceIndexEntry: Codable, Sendable {
+    let id: String
+    let name: String
+    let version: String
+    let author: String?
+    let description: String
+    let downloadURL: String?
+    let tags: [String]
+    let runtime: String
+    let declaredTools: [String]
+    let path: String?
+    let files: [String]?
+}
+
+private let marketplaceIndexMaxBytes = 1_048_576
+
+private func isValidMarketplaceIndex(_ doc: MarketplaceIndexDocument) -> Bool {
+    // Version plus per-entry identity keep malformed catalogs from entering the merge.
+    guard let version = doc.version, version >= 1 else { return false }
+    for entry in doc.items {
+        guard !entry.id.isEmpty, !entry.name.isEmpty, !entry.version.isEmpty,
+              entry.runtime == "python" || entry.runtime == "executable",
+              !entry.declaredTools.isEmpty,
+              isValidMarketplaceCatalogID(entry.id) else { return false }
+        if let files = entry.files {
+            guard !files.isEmpty, files.allSatisfy(isSafeMarketplaceFileName) else { return false }
+        }
+        if let rawPath = entry.path, !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           validatedMarketplaceSourceDir(rawPath) == nil
+        {
+            return false
+        }
+        if let rawURL = entry.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawURL.isEmpty
+        {
+            guard let url = URL(string: rawURL), url.scheme?.lowercased() == "https", url.host?.isEmpty == false else { return false }
+        }
+    }
+    return true
+}
+
+private func isValidMarketplaceCatalogID(_ id: String) -> Bool {
+    // Catalog IDs become directory names, so enforce the install allowlist early.
+    guard !id.isEmpty, id != ".", id != "..",
+          id.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
+          !id.contains("/"), !id.contains("\\"), !id.contains("..") else { return false }
+    return true
+}
+
+private func loadValidatedMarketplaceIndexFile(at url: URL) -> MarketplaceIndexDocument? {
+    // Size cap plus validation keep oversized or malformed catalogs out.
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+          let size = attrs[.size] as? NSNumber, size.int64Value <= marketplaceIndexMaxBytes,
+          let data = try? Data(contentsOf: url), data.count <= marketplaceIndexMaxBytes,
+          let doc = try? JSONDecoder().decode(MarketplaceIndexDocument.self, from: data),
+          isValidMarketplaceIndex(doc)
+    else {
+        return nil
+    }
+    return doc
+}
+
+private func loadValidatedMarketplaceIndexFile(atExpandedPath rawPath: String) -> MarketplaceIndexDocument? {
+    // Expand tilde plus reject traversal so configured paths cannot escape via "..".
+    let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    for scalar in trimmed.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
+        return nil
+    }
+    let expanded = (trimmed as NSString).expandingTildeInPath
+    let parts = expanded.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard !parts.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+    let fileURL: URL
+    if expanded.hasPrefix("/") {
+        // Absolute catalog paths stay inside the workspace or the owner data dir.
+        let candidate = URL(fileURLWithPath: expanded).standardizedFileURL
+        let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
+        let ownerDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".runeweaver").standardizedFileURL
+        let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedWorkspace = workspaceRoot.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedOwner = ownerDir.resolvingSymlinksInPath().standardizedFileURL
+        let workspacePrefix = resolvedWorkspace.path.hasSuffix("/") ? resolvedWorkspace.path : resolvedWorkspace.path + "/"
+        let ownerPrefix = resolvedOwner.path.hasSuffix("/") ? resolvedOwner.path : resolvedOwner.path + "/"
+        guard resolvedCandidate.path.hasPrefix(workspacePrefix) || resolvedCandidate.path.hasPrefix(ownerPrefix) else { return nil }
+        fileURL = candidate
+    } else {
+        let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
+        fileURL = workspaceRoot.appendingPathComponent(expanded).standardizedFileURL
+    }
+    return loadValidatedMarketplaceIndexFile(at: fileURL)
+}
+
+private func fetchValidatedMarketplaceBytes(from initialURL: URL, maxBytes: Int, timeout: TimeInterval) async -> Data? {
+    // Manual redirect chain re-validates https plus SSRF plus size cap per hop.
+    var current = initialURL
+    for _ in 0 ..< HTTPRedirectFollower.maxRedirects {
+        guard current.scheme?.lowercased() == "https", current.host?.isEmpty == false,
+              await ApiSSRFGuard.denyReasonAsync(for: current.absoluteString, allowlistedOrigins: []) == nil
+        else { return nil }
+        var request = URLRequest(url: current)
+        request.timeoutInterval = timeout
+        // Streaming cap enforces per-byte during download so oversized bodies never buffer.
+        guard let (data, response) = try? await CappedNoRedirectDelegate.downloadCapped(
+            request: request,
+            maxBytes: maxBytes,
+            timeoutSeconds: timeout
+        ), let http = response as? HTTPURLResponse else { return nil }
+        if http.statusCode == 200 {
+            guard data.count <= maxBytes else { return nil }
+            return data
+        }
+        guard (300 ..< 400).contains(http.statusCode),
+              let next = HTTPRedirectFollower.redirectTarget(http: http, currentURL: current),
+              next.scheme?.lowercased() == "https", next.host?.isEmpty == false
+        else { return nil }
+        current = next
+    }
+    return nil
+}
+
+private func loadMarketplaceIndex(context: ServerContext) async -> MarketplaceIndexDocument? {
+    let urlString = context.pluginConfig.marketplaceIndexURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lower = urlString.lowercased()
+
+    // Remote catalog requires https only so plain http cannot tamper the merge.
+    if lower.hasPrefix("https://") {
+        if let url = URL(string: urlString),
+           url.scheme?.lowercased() == "https",
+           url.host?.isEmpty == false,
+           let data = await fetchValidatedMarketplaceBytes(from: url, maxBytes: marketplaceIndexMaxBytes, timeout: 5.0),
+           let doc = try? JSONDecoder().decode(MarketplaceIndexDocument.self, from: data),
+           isValidMarketplaceIndex(doc)
+        {
+            return doc
+        }
+    } else if !lower.hasPrefix("http://"), !urlString.isEmpty, let doc = loadValidatedMarketplaceIndexFile(atExpandedPath: urlString) {
+        // Configured file path honors tilde, containment, size cap, plus validation.
+        return doc
+    }
+
+    // File path from environment with the same size and validation bounds.
+    if let envPath = ProcessInfo.processInfo.environment["RUNEWEAVER_MARKETPLACE_INDEX_PATH"],
+       !envPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let doc = loadValidatedMarketplaceIndexFile(atExpandedPath: envPath)
+    {
+        return doc
+    }
+
+    // Fallback to local Plugins/index.json relative to current directory, plugins pen, or home.
+    let candidates = [
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Plugins/index.json"),
+        context.pluginDiscovery.pluginsDirectory.deletingLastPathComponent().appendingPathComponent("Plugins/index.json"),
+        URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path).appendingPathComponent(".runeweaver/Plugins/index.json")
+    ]
+    for candidate in candidates {
+        if let doc = loadValidatedMarketplaceIndexFile(at: candidate) {
+            return doc
+        }
+    }
+
+    return nil
+}
+
+private func fetchMarketplaceCatalog(context: ServerContext, installedIDs: Set<String>) async -> [MarketplacePluginItem] {
+    var itemsByID: [String: MarketplacePluginItem] = [:]
+
+    for item in getCuratedMarketplaceItems(installedIDs: installedIDs) {
+        itemsByID[item.id] = item
+    }
+
+    if let doc = await loadMarketplaceIndex(context: context) {
+        for entry in doc.items {
+            let item = MarketplacePluginItem(
+                id: entry.id,
+                name: entry.name,
+                version: entry.version,
+                author: entry.author ?? "Community",
+                description: entry.description,
+                downloadURL: entry.downloadURL ?? "",
+                tags: entry.tags,
+                runtime: entry.runtime,
+                declaredTools: entry.declaredTools,
+                isInstalled: installedIDs.contains(entry.id)
+            )
+            itemsByID[entry.id] = item
+        }
+    }
+
+    return Array(itemsByID.values)
+}
+
+private func isSafeMarketplaceFileName(_ fileName: String) -> Bool {
+    // Single-component allowlist so catalog entries cannot escape the pen.
+    guard !fileName.isEmpty, fileName != ".", fileName != "..",
+          !fileName.contains("/"), !fileName.contains("\\"), !fileName.contains(".."),
+          !fileName.hasPrefix("/"), !fileName.hasPrefix("\\") else { return false }
+    for scalar in fileName.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
+        return false
+    }
+    return true
+}
+
+private func containedMarketplaceDestination(for fileName: String, in targetDir: URL) -> URL? {
+    // Fail closed on traversal payloads, then re-resolve symlinks for pen containment.
+    guard isSafeMarketplaceFileName(fileName) else { return nil }
+    let dst = targetDir.appendingPathComponent(fileName).standardizedFileURL
+    let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
+    let resolvedDst = dst.resolvingSymlinksInPath().standardizedFileURL
+    let prefix = resolvedTarget.path.hasSuffix("/") ? resolvedTarget.path : resolvedTarget.path + "/"
+    guard resolvedDst.path.hasPrefix(prefix) else { return nil }
+    return dst
+}
+
+private func validatedMarketplaceSourceDir(_ rawPath: String) -> URL? {
+    // Catalog sources stay under Plugins/ so workspace files never enter the pen.
+    let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.hasPrefix("\\"), !trimmed.hasPrefix("~"),
+          !trimmed.contains("\\"), !trimmed.contains(".."),
+          trimmed == "Plugins" || trimmed.hasPrefix("Plugins/") else { return nil }
+    for scalar in trimmed.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
+        return nil
+    }
+    let parts = trimmed.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard !parts.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+    let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
+    let candidate = workspaceRoot.appendingPathComponent(trimmed).standardizedFileURL
+    let resolvedRoot = workspaceRoot.resolvingSymlinksInPath().standardizedFileURL
+    let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
+    let prefix = resolvedRoot.path.hasSuffix("/") ? resolvedRoot.path : resolvedRoot.path + "/"
+    guard resolvedCandidate.path.hasPrefix(prefix) else { return nil }
+    return candidate
+}
+
+private let marketplacePluginFileMaxBytes = 5_242_880
+
+private func isSafeLocalSourceFile(at src: URL, within localDir: URL) -> Bool {
+    // lstat-style check rejects symlinks plus directories before any copy.
+    guard let values = try? src.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey]),
+          values.isSymbolicLink != true,
+          values.isRegularFile == true,
+          values.isDirectory != true
+    else {
+        return false
+    }
+    let resolvedDir = localDir.resolvingSymlinksInPath().standardizedFileURL
+    let resolvedSrc = src.resolvingSymlinksInPath().standardizedFileURL
+    let prefix = resolvedDir.path.hasSuffix("/") ? resolvedDir.path : resolvedDir.path + "/"
+    return resolvedSrc.path.hasPrefix(prefix)
+}
+
+private func verifyInstalledManifestID(pluginID: String, in targetDir: URL) throws {
+    // Copied catalog bytes must describe the requested ID, not a swapped manifest.
+    let runeURL = targetDir.appendingPathComponent("rune.json")
+    guard let data = try? Data(contentsOf: runeURL),
+          let manifest = try? PluginManifest.from(jsonData: data),
+          manifest.id == pluginID
+    else {
+        throw PluginDiscoveryError.provisioningFailed("Installed manifest ID mismatch for '\(pluginID)'.")
+    }
+}
+
+private func copyMarketplaceFilesFromLocal(
+    pluginID: String,
+    targetDir: URL,
+    entry: MarketplaceIndexEntry?
+) throws -> Bool {
+    // Prefer workspace copies so reviewed local bytes win before any network fetch.
+    let fileManager = FileManager.default
+    var candidates = [
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Plugins/\(pluginID)")
+    ]
+    if let rawPath = entry?.path, let validated = validatedMarketplaceSourceDir(rawPath) {
+        candidates.append(validated)
+    }
+
+    for localDir in candidates where fileManager.fileExists(atPath: localDir.path) {
+        let filesToCopy = entry?.files ?? ["rune.json", "main.py", "requirements.txt", "README.md"]
+        // Fail closed: any unsafe name aborts the install, never silently skipped.
+        for fileName in filesToCopy {
+            guard containedMarketplaceDestination(for: fileName, in: targetDir) != nil else {
+                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
+            }
+        }
+        var hasMissing = false
+        for fileName in filesToCopy {
+            let src = localDir.appendingPathComponent(fileName)
+            if !fileManager.fileExists(atPath: src.path) {
+                hasMissing = true
+                break
+            }
+            guard isSafeLocalSourceFile(at: src, within: localDir) else {
+                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe local source '\(fileName)' for plugin '\(pluginID)'.")
+            }
+            // Cap local bytes like remote fetch so hashing never reads oversized files.
+            guard let attrs = try? fileManager.attributesOfItem(atPath: src.path),
+                  let size = attrs[.size] as? NSNumber,
+                  size.int64Value <= marketplacePluginFileMaxBytes
+            else {
+                throw PluginDiscoveryError.provisioningFailed("Local file '\(fileName)' exceeds size limit for plugin '\(pluginID)'.")
+            }
+        }
+        if hasMissing {
+            continue
+        }
+        for fileName in filesToCopy {
+            guard let dst = containedMarketplaceDestination(for: fileName, in: targetDir) else {
+                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
+            }
+            let src = localDir.appendingPathComponent(fileName)
+            try fileManager.copyItem(at: src, to: dst)
+        }
+        try verifyInstalledManifestID(pluginID: pluginID, in: targetDir)
+        return true
+    }
+    return false
+}
+
+private func fetchMarketplaceFilesFromRemote(
+    pluginID: String,
+    targetDir: URL,
+    entry: MarketplaceIndexEntry?
+) async throws -> Bool {
+    // Fetch catalog bytes over https with SSRF guard when local copies are absent.
+    guard let entry, let rawURL = entry.downloadURL, let baseDownloadURL = URL(string: rawURL),
+          baseDownloadURL.scheme?.lowercased() == "https",
+          let files = entry.files, !files.isEmpty
+    else {
+        return false
+    }
+    for fileName in files {
+        guard containedMarketplaceDestination(for: fileName, in: targetDir) != nil else {
+            throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
+        }
+    }
+    let baseURL = baseDownloadURL.deletingLastPathComponent()
+    var remoteComplete = true
+    var writtenFiles: [URL] = []
+    for fileName in files {
+        guard let dst = containedMarketplaceDestination(for: fileName, in: targetDir) else {
+            throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
+        }
+        let fileURL = baseURL.appendingPathComponent(fileName)
+        // Manual redirect chain re-validates each hop before accepting 200 bytes.
+        if let data = await fetchValidatedMarketplaceBytes(from: fileURL, maxBytes: marketplacePluginFileMaxBytes, timeout: 10.0) {
+            guard data.count <= marketplacePluginFileMaxBytes else {
+                throw PluginDiscoveryError.provisioningFailed("Remote file '\(fileName)' exceeds size limit for plugin '\(pluginID)'.")
+            }
+            try data.write(to: dst, options: .atomic)
+            writtenFiles.append(dst)
+        } else {
+            remoteComplete = false
+            break
+        }
+    }
+    if remoteComplete {
+        try verifyInstalledManifestID(pluginID: pluginID, in: targetDir)
+        return true
+    }
+    // Partial fetch must not leave fetched bytes beside a scaffolded fallback.
+    for written in writtenFiles {
+        try? FileManager.default.removeItem(at: written)
+    }
+    return false
+}
+
+private func installPluginFiles(
+    pluginID: String,
+    targetDir: URL,
+    entry: MarketplaceIndexEntry?,
+    context _: ServerContext
+) async throws {
+    if try copyMarketplaceFilesFromLocal(pluginID: pluginID, targetDir: targetDir, entry: entry) {
+        return
+    }
+    if try await fetchMarketplaceFilesFromRemote(pluginID: pluginID, targetDir: targetDir, entry: entry) {
+        return
+    }
+
+    // Fallback: scaffold manifest and stub script
+    let curated = getCuratedMarketplaceItems(installedIDs: []).first(where: { $0.id == pluginID })
+    let displayName = entry?.name ?? curated?.name ?? (pluginID.components(separatedBy: ".").last?.capitalized ?? pluginID)
+    let itemDescription = entry?.description ?? curated?.description ?? "Installed community rune package."
+    let itemVersion = entry?.version ?? curated?.version ?? "1.0.0"
+
+    let toolsMetadata: [[String: Any]] = getCuratedToolsMetadata(
+        for: pluginID,
+        fallbackTools: entry?.declaredTools ?? curated?.declaredTools ?? ["\(pluginID).run"]
+    )
+
+    let manifestObject: [String: Any] = [
+        "id": pluginID,
+        "name": displayName,
+        "version": itemVersion,
+        "description": itemDescription,
+        // Scaffold emits a Python stub, so the manifest stays python-only.
+        "runtime": "python",
+        "entrypoint": "main.py",
+        "tools": toolsMetadata
+    ]
+    let manifestData = try JSONSerialization.data(
+        withJSONObject: manifestObject,
+        options: [.prettyPrinted, .sortedKeys]
+    )
+    let scriptContent = generateScaffoldScript(for: pluginID, tools: toolsMetadata)
+
+    let manifestFile = targetDir.appendingPathComponent("rune.json")
+    let scriptFile = targetDir.appendingPathComponent("main.py")
+
+    try manifestData.write(to: manifestFile, options: .atomic)
+    try scriptContent.write(to: scriptFile, atomically: true, encoding: .utf8)
 }

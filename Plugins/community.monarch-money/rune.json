@@ -1,0 +1,180 @@
+{
+  "id": "community.monarch-money",
+  "name": "Monarch Money",
+  "version": "1.0.0",
+  "author": "Rune Weaver Community",
+  "description": "Query accounts, balances, transactions, budgets, cashflow, and holdings, or update transactions and budgets via Monarch Money.",
+  "runtime": "python",
+  "entrypoint": "main.py",
+  "tools": [
+    {
+      "name": "monarch.accounts",
+      "description": "Fetch Monarch Money accounts, total balances, institution statuses, and optionally investment holdings.",
+      "permission_level": "readOnly",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "description": "Optional specific account ID to fetch holdings for."
+          },
+          "include_holdings": {
+            "type": "boolean",
+            "description": "Whether to fetch detailed investment security holdings. Default is false."
+          }
+        },
+        "additionalProperties": false
+      },
+      "capabilities": {
+        "network": ["api.monarch.com"],
+        "filesystem": [],
+        "env": ["MONARCH_TOKEN", "MONARCH_COOKIE", "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_MFA_SECRET"]
+      }
+    },
+    {
+      "name": "monarch.transactions",
+      "description": "Query Monarch Money transactions with filtering, or retrieve details/splits for a specific transaction, or list all transaction categories and tags.",
+      "permission_level": "readOnly",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "string",
+            "description": "Text search query for merchant name or notes."
+          },
+          "start_date": {
+            "type": "string",
+            "description": "Start date filter in YYYY-MM-DD format."
+          },
+          "end_date": {
+            "type": "string",
+            "description": "End date filter in YYYY-MM-DD format."
+          },
+          "category_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of category IDs to filter by."
+          },
+          "account_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of account IDs to filter by."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max number of transactions to return (default: 50, max: 200)."
+          },
+          "transaction_id": {
+            "type": "string",
+            "description": "If provided, fetches details and splits for this specific transaction."
+          },
+          "list_categories": {
+            "type": "boolean",
+            "description": "If true, lists all available transaction categories and tags instead of transactions."
+          }
+        },
+        "additionalProperties": false
+      },
+      "capabilities": {
+        "network": ["api.monarch.com"],
+        "filesystem": [],
+        "env": ["MONARCH_TOKEN", "MONARCH_COOKIE", "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_MFA_SECRET"]
+      }
+    },
+    {
+      "name": "monarch.finances",
+      "description": "Retrieve financial reports from Monarch Money: budgets, cashflow summaries, recurring transactions, or savings goals.",
+      "permission_level": "readOnly",
+      "input_schema": {
+        "type": "object",
+        "required": ["report"],
+        "properties": {
+          "report": {
+            "type": "string",
+            "enum": ["budgets", "cashflow", "recurring", "goals"],
+            "description": "The report type to generate."
+          },
+          "start_date": {
+            "type": "string",
+            "description": "Start date for budgets/cashflow in YYYY-MM-DD format."
+          },
+          "end_date": {
+            "type": "string",
+            "description": "End date for budgets/cashflow in YYYY-MM-DD format."
+          }
+        },
+        "additionalProperties": false
+      },
+      "capabilities": {
+        "network": ["api.monarch.com"],
+        "filesystem": [],
+        "env": ["MONARCH_TOKEN", "MONARCH_COOKIE", "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_MFA_SECRET"]
+      }
+    },
+    {
+      "name": "monarch.mutate",
+      "description": "Perform write operations in Monarch Money (update or create transactions, update tags, adjust budget amounts, or trigger account refreshes). Always approval-gated.",
+      "permission_level": "requiresApproval",
+      "input_schema": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "update_transaction",
+              "create_transaction",
+              "set_transaction_tags",
+              "set_budget_amount",
+              "refresh_accounts"
+            ],
+            "description": "Mutation action to perform."
+          },
+          "transaction_id": {
+            "type": "string",
+            "description": "Target transaction ID for update_transaction or set_transaction_tags."
+          },
+          "account_id": {
+            "type": "string",
+            "description": "Target account ID for create_transaction or refresh_accounts."
+          },
+          "category_id": {
+            "type": "string",
+            "description": "Category ID for update_transaction, create_transaction, or set_budget_amount."
+          },
+          "merchant_name": {
+            "type": "string",
+            "description": "Merchant name for update_transaction or create_transaction."
+          },
+          "amount": {
+            "type": "number",
+            "description": "Amount for transaction creation/update (negative for expense, positive for income) or budget amount."
+          },
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format for create_transaction, update_transaction, or set_budget_amount."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Notes for the transaction."
+          },
+          "tag_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of tag IDs to assign for set_transaction_tags."
+          },
+          "apply_to_future": {
+            "type": "boolean",
+            "description": "When setting budget amount, apply to future months (default: false)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "capabilities": {
+        "network": ["api.monarch.com"],
+        "filesystem": [],
+        "env": ["MONARCH_TOKEN", "MONARCH_COOKIE", "MONARCH_EMAIL", "MONARCH_PASSWORD", "MONARCH_MFA_SECRET"]
+      }
+    }
+  ]
+}

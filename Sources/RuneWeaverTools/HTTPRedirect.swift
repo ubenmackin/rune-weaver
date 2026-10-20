@@ -59,9 +59,9 @@ final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
 
 /// Helper that surfaces redirects without following them and caps downloaded bytes,
 /// terminating the async streaming sequence once maxBytes is reached to prevent unbounded memory exhaustion.
-enum CappedNoRedirectDelegate: Sendable {
+public enum CappedNoRedirectDelegate: Sendable {
     /// Performs one capped HTTP download without following redirects.
-    static func downloadCapped(
+    public static func downloadCapped(
         request: URLRequest,
         maxBytes: Int,
         timeoutSeconds: Double

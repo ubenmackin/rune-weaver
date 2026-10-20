@@ -11,11 +11,21 @@ public enum PluginSecurity {
         "__pycache__",
         ".git",
         ".gitignore",
-        ".pytest_cache"
+        ".pytest_cache",
+        ".mm"
     ]
 
     /// Directory names marking a provisioned Python virtual environment.
     private static let venvDirectoryNames: Set<String> = ["venv", ".venv"]
+
+    /// Reports whether a plugin-relative entrypoint sits beneath an ignored name.
+    public static func isEntrypointUnderIgnoredPath(_ entrypoint: String) -> Bool {
+        // Ignored names stay unhashed, so executing beneath them would run untracked bytes.
+        // Lowercased comparison holds on case-insensitive filesystems where `.MM` resolves to `.mm`.
+        let loweredIgnored = Set(ignoredFileNames.map { $0.lowercased() })
+        let segments = entrypoint.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+        return segments.contains(where: { loweredIgnored.contains(String($0).lowercased()) })
+    }
 
     /// Calculates a deterministic SHA-256 tree hash of all files in a plugin directory.
     public static func calculateDirectoryHash(at directoryURL: URL) -> String? {
@@ -289,10 +299,22 @@ public enum PluginSecurity {
         // more replace them than the engine config beside them.
         let defaultPolicy = (homeDir as NSString).appendingPathComponent(".runeweaver/policy.toml")
         let defaultTokenFile = (homeDir as NSString).appendingPathComponent(".runeweaver/auth_token")
+        // Session digests, index, models, logs, run sockets, plus the checkpoint sidecar
+        // corroborate auth and history, so tools refuse them like the other control files.
+        let defaultSessions = (homeDir as NSString).appendingPathComponent(".runeweaver/auth-sessions.json")
+        let defaultIndexDB = (homeDir as NSString).appendingPathComponent(".runeweaver/index.db")
+        let defaultCheckpoint = (homeDir as NSString).appendingPathComponent(".runeweaver/sovereign-checkpoint.json")
+        let defaultModels = (homeDir as NSString).appendingPathComponent(".runeweaver/models")
+        let defaultLogs = (homeDir as NSString).appendingPathComponent(".runeweaver/logs")
+        let defaultRun = (homeDir as NSString).appendingPathComponent(".runeweaver/run")
 
         if isInside(standardTarget, defaultPlugins) || isInside(standardTarget, defaultMemory)
+            || isInside(standardTarget, defaultModels) || isInside(standardTarget, defaultLogs)
+            || isInside(standardTarget, defaultRun)
             || standardTarget == defaultConfig
             || standardTarget == defaultPolicy || standardTarget == defaultTokenFile
+            || standardTarget == defaultSessions || standardTarget == defaultIndexDB
+            || standardTarget == defaultCheckpoint
         {
             return true
         }

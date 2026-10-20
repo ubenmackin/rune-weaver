@@ -96,7 +96,8 @@ extension ServerContext {
         llm: any LLMProvider,
         memoryEngine: MemoryEngine,
         runs: RunLogStore? = nil,
-        hub: WSHub? = nil
+        hub: WSHub? = nil,
+        secrets: SecretsManager? = nil
     ) async -> ServerBootstrapServices {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         let durable = await loadDurableServerStores(
@@ -130,7 +131,12 @@ extension ServerContext {
             ideasEngine: ideasEngine,
             reporter: planReporter
         )
-        let pluginStack = await resolvePluginStack(episodesDBPath: config.episodesDBPath, pluginConfig: config.plugins, bus: bus)
+        let pluginStack = await resolvePluginStack(
+            episodesDBPath: config.episodesDBPath,
+            pluginConfig: config.plugins,
+            bus: bus,
+            secrets: secrets
+        )
         return ServerBootstrapServices(
             approvals: approvals,
             durable: durable,
@@ -428,7 +434,8 @@ extension ServerContext {
             llm: llm,
             memoryEngine: memoryEngine,
             runs: runs,
-            hub: hub
+            hub: hub,
+            secrets: secrets
         )
         let toolConfigs = ToolConfigs(
             email: emailConfig, files: filesConfig, bash: bashConfig, containers: containersConfig,
@@ -468,6 +475,10 @@ extension ServerContext {
             policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
             secrets: secrets, permissionGate: permissionGate
         )
+        // Early rescan registered bridges without supervision, so refresh the
+        // evaluator and re-register before serving network-capable tools.
+        services.pluginStack.discovery.updateEgressEvaluator(egressSupervisor)
+        _ = await services.pluginStack.discovery.discoverAndSync(toolBus: services.bus)
         try await registerBuiltinTools(BuiltinToolArgs(
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
@@ -487,7 +498,8 @@ extension ServerContext {
             memoryEngine: memoryEngine, embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
             scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub, runLock: services.durable.runLock,
             activeTurns: activeTurns, steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
-            pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery, toolStates: services.pluginStack.states,
+            pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery,
+            pluginConfig: pluginConfig, toolStates: services.pluginStack.states,
             containersConfig: containersConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
             indexCoordinator: indexCoordinator, indexStore: indexStore, servingLLM: llm, auth: auth, browserGateway: browserGateway,
             searchTransport: searchTransport, fetchTransport: fetchTransport, apiTransport: apiTransport, mediaTransport: mediaTransport,
@@ -645,13 +657,15 @@ private func loadDurableServerStores(
 private func resolvePluginStack(
     episodesDBPath: String?,
     pluginConfig: PluginConfig,
-    bus: ToolBus
+    bus: ToolBus,
+    secrets: SecretsManager? = nil,
+    egressEvaluator: any EgressPolicyEvaluator? = nil
 ) async -> ResolvedPluginStack {
     let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
     let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
     let tStates = ToolStateStore(dbPath: resolvedDBPath)
     let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
-    let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
+    let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore, secrets: secrets, egressEvaluator: egressEvaluator)
     if pluginConfig.autoRescan {
         _ = await pDiscovery.discoverAndSync(toolBus: bus)
     }
