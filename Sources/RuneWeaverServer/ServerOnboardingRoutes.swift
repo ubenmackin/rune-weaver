@@ -3,6 +3,7 @@
 import Foundation
 import RuneWeaverCore
 import RuneWeaverLLM
+import RuneWeaverTools
 import Vapor
 #if canImport(EventKit)
     import EventKit
@@ -16,6 +17,7 @@ public func registerOnboardingRoutes(_ app: Application) {
     onboarding.post(PathComponent.constant(ServerPaths.onboardingSkip), use: onboardingSkipHandler)
     onboarding.post(PathComponent.constant(ServerPaths.onboardingDismiss), use: onboardingDismissHandler)
     onboarding.post(PathComponent.constant(ServerPaths.onboardingReopen), use: onboardingReopenHandler)
+    onboarding.post(PathComponent.constant(ServerPaths.onboardingProbe), use: onboardingProbeHandler)
 }
 
 /// Rejects unauthenticated callers when an owner verifier is installed.
@@ -256,5 +258,112 @@ private func mapOnboardingStoreError(_ error: OnboardingStoreError) -> Abort {
         Abort(.internalServerError, reason: detail)
     case let .persistenceFailed(detail):
         Abort(.internalServerError, reason: detail)
+    }
+}
+
+/// Probes one brain server URL, reporting reachability only.
+private func onboardingProbeHandler(_ req: Request) async throws -> OnboardingProbeResponse {
+    try requireOnboardingAuth(req)
+    let body: OnboardingProbeRequest
+    do {
+        body = try req.content.decode(OnboardingProbeRequest.self)
+    } catch {
+        throw Abort(.badRequest, reason: "malformed onboarding probe body")
+    }
+    let trimmed = (body.serverURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, trimmed.count <= 253,
+          WebURLSafety.isSafeUrl(trimmed),
+          let parsed = URL(string: trimmed),
+          let scheme = parsed.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          !(parsed.host?.isEmpty ?? true)
+    else {
+        throw Abort(.badRequest, reason: "serverURL must be an absolute http(s) URL up to 253 characters")
+    }
+    guard let policy = try? await req.application.runeWeaver.policyStore.snapshot() else {
+        throw Abort(.internalServerError, reason: "security policy unavailable")
+    }
+    for candidate in onboardingProbeCandidates(for: trimmed) {
+        try Task.checkCancellation()
+        guard let url = URL(string: candidate),
+              WebURLSafety.isSafeUrl(candidate),
+              let pin = try await onboardingProbeVetted(candidate, url: url, policy: policy)
+        else { continue }
+        if try await onboardingProbeURL(url, pin: pin) {
+            return OnboardingProbeResponse(reachable: true)
+        }
+    }
+    return OnboardingProbeResponse(reachable: false)
+}
+
+/// Mirrors the dashboard probe order: base first, then its `/v1/models` root.
+private func onboardingProbeCandidates(for base: String) -> [String] {
+    guard var components = URLComponents(string: base) else { return [base] }
+    components.user = nil
+    components.password = nil
+    components.query = nil
+    components.fragment = nil
+    var path = components.path
+    while path.hasSuffix("/"), path.count > 1 {
+        path.removeLast()
+    }
+    components.path = path == "/" ? "" : path
+    guard let normalized = components.string else { return [base] }
+    var trimmed = normalized
+    while trimmed.hasSuffix("/") {
+        trimmed = String(trimmed.dropLast())
+    }
+    let lowered = trimmed.lowercased()
+    var baseRoot = trimmed
+    if lowered.hasSuffix("/v1/models") {
+        baseRoot = String(trimmed.dropLast("/v1/models".count))
+    } else if lowered.hasSuffix("/v1") {
+        baseRoot = String(trimmed.dropLast("/v1".count))
+    }
+    let modelsURL = baseRoot + "/v1/models"
+    if modelsURL.lowercased() == lowered {
+        return [trimmed]
+    }
+    return [trimmed, modelsURL]
+}
+
+/// Owner-typed hosts may be loopback or private; metadata and link-local never dial.
+private func onboardingProbeVetted(_ candidate: String, url: URL, policy: SecurityPolicy) async throws -> SSRFDialPin? {
+    try Task.checkCancellation()
+    guard let host = url.host, !host.isEmpty else { return nil }
+    if case .explicitlyBlocked = policy.network.hostStatus(for: host) {
+        return nil
+    }
+    var exemptions = Set<String>()
+    exemptions.insert(host.lowercased())
+    exemptions.insert(ApiSSRFGuard.normalizedHost(host).lowercased())
+    if let key = ApiSSRFGuard.originKey(for: url) {
+        exemptions.insert(key.lowercased())
+    }
+    exemptions.formUnion(policy.network.localExemptions)
+    try Task.checkCancellation()
+    let vetting = await ApiSSRFGuard.vetAsync(for: candidate, allowlistedOrigins: exemptions)
+    try Task.checkCancellation()
+    if case let .dialable(pin) = vetting {
+        return pin
+    }
+    return nil
+}
+
+/// Pinned dial only; the transport caps the body and surfaces 3xx without following.
+private func onboardingProbeURL(_ url: URL, pin: SSRFDialPin) async throws -> Bool {
+    try Task.checkCancellation()
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 5)
+    request.httpMethod = "GET"
+    request.httpShouldHandleCookies = false
+    do {
+        let transport = PinnedApiRequestTransport(timeoutSeconds: 5)
+        let (_, response) = try await transport.data(for: request, pin: pin)
+        try Task.checkCancellation()
+        return response is HTTPURLResponse
+    } catch is CancellationError {
+        throw CancellationError()
+    } catch {
+        return false
     }
 }

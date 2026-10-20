@@ -513,8 +513,8 @@ describe("Brain connection test fail-closed", () => {
         if (String(url).includes("/settings/secrets/status")) {
           return jsonResponse({ status: { MY_KEY: true } });
         }
-        if (String(url).startsWith("https://")) {
-          return jsonResponse({ ok: true });
+        if (String(url) === "/onboarding/probe") {
+          return jsonResponse({ reachable: true });
         }
         return jsonResponse({ providers: {}, defaultProvider: "" });
       }),
@@ -542,7 +542,7 @@ describe("Brain connection test fail-closed", () => {
         if (String(url).includes("/settings/secrets/status")) {
           return jsonResponse({ status: {} });
         }
-        if (String(url).startsWith("https://")) {
+        if (String(url) === "/onboarding/probe") {
           throw new Error("unreachable");
         }
         return jsonResponse({ providers: {}, defaultProvider: "" });
@@ -569,8 +569,8 @@ describe("Brain connection test fail-closed", () => {
         if (String(url).includes("/settings/secrets/status")) {
           return jsonResponse({ status: { MY_KEY: false } });
         }
-        if (String(url).startsWith("https://")) {
-          return jsonResponse({ ok: true });
+        if (String(url) === "/onboarding/probe") {
+          return jsonResponse({ reachable: true });
         }
         return jsonResponse({ providers: {}, defaultProvider: "" });
       }),

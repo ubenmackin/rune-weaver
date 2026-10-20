@@ -188,6 +188,28 @@ public struct OnboardingErrorResponse: Content, Equatable {
     }
 }
 
+/// Probe request carrying the candidate brain server URL.
+public struct OnboardingProbeRequest: Content, Sendable, Equatable {
+    /// Candidate server URL to probe.
+    public var serverURL: String?
+
+    /// Creates a probe request.
+    public init(serverURL: String? = nil) {
+        self.serverURL = serverURL
+    }
+}
+
+/// Probe result carrying reachability only, never upstream content.
+public struct OnboardingProbeResponse: Content, Sendable, Equatable {
+    /// Whether any upstream HTTP response arrived.
+    public var reachable: Bool
+
+    /// Creates a probe result.
+    public init(reachable: Bool) {
+        self.reachable = reachable
+    }
+}
+
 extension ServerPaths {
     /// Onboarding group backing the setup wizard.
     public static let onboarding = "onboarding"
@@ -201,4 +223,6 @@ extension ServerPaths {
     public static let onboardingDismiss = "dismiss"
     /// Reopen subpath under `/onboarding`.
     public static let onboardingReopen = "reopen"
+    /// Probe subpath under `/onboarding`.
+    public static let onboardingProbe = "probe"
 }
