@@ -113,7 +113,11 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
   useEffect(() => {
     if (brainDirtyRef.current) return;
     if (brainProviders === undefined) return;
-    const next = resolveBrainInitialForm(brainSelection?.apiKeyEnv);
+    const next = resolveBrainInitialForm(
+      brainProviders,
+      brainDefaultProvider,
+      brainSelection?.apiKeyEnv,
+    );
     setBrainDraft(next);
   }, [brainProviders, brainDefaultProvider, brainSelection]);
 
@@ -168,10 +172,17 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
     setStepError(null);
   }
 
-  // Reachability plus Keychain presence decide the outcome; any HTTP reply counts.
+  // Blank plus malformed URLs fail without probing; success needs reachability plus stored key.
   async function handleBrainTest() {
     const trimmedKey = normalizeSecretKey(brainDraft.apiKeyEnv);
     const trimmedURL = (brainDraft.serverURL ?? "").trim();
+    if (!trimmedURL) {
+      const detail = "Enter server URL first";
+      setBrainTestStatus("failed");
+      setBrainTestDetail(detail);
+      setStepError(detail);
+      return;
+    }
     if (!isValidBrainServerURL(trimmedURL)) {
       const detail = "Server URL must be an absolute http(s) URL up to 253 characters.";
       setBrainTestStatus("failed");
@@ -195,16 +206,11 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
       }
     }
     if (!brainMountedRef.current || controller.signal.aborted) return;
-    let reachable = true;
-    if (trimmedURL) {
-      reachable = await probeBrainServer(trimmedURL, { signal: controller.signal });
-    }
+    const reachable = await probeBrainServer(trimmedURL, { signal: controller.signal });
     if (!brainMountedRef.current || controller.signal.aborted) return;
     if (reachable && keyStored) {
-      // Empty config probes nothing, so name the outcome instead of silent success.
-      const detail = !trimmedKey && !trimmedURL ? "No server URL or key configured" : null;
       setBrainTestStatus("succeeded");
-      setBrainTestDetail(detail);
+      setBrainTestDetail(null);
       setStepError(null);
       return;
     }

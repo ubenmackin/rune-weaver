@@ -206,6 +206,8 @@ describe("GettingStartedWizard footer error mirror", () => {
     });
     try {
       render(<GettingStartedWizard initialSkippedSteps={[]} />);
+      // Missing-key path needs a valid URL so the blank-URL guard does not win.
+      await user.type(screen.getByTestId("brain-server-url"), "https://brain.example.com");
       await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
       await user.click(screen.getByTestId("brain-test-connection"));
       const inline = await screen.findByTestId("brain-test-status");

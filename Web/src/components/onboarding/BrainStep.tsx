@@ -140,17 +140,41 @@ export function resolveBrainProviderSave(
   };
 }
 
-// Wizard starts blank for a new entry by product choice; saves spread
-// existing providers so configured installs keep working and edits
-// migrate through the Settings providers surface.
-export function resolveBrainInitialForm(legacyApiKeyEnv?: string): BrainProviderForm {
+// Server-owned prefill: default entry wins, single-entry installs fall
+// back to that lone provider, otherwise start blank for a new entry.
+// Unknown defaults fall through to the single-entry then blank rules.
+export function resolveBrainInitialForm(
+  providers?: Record<string, ProviderConfigData>,
+  defaultProvider?: string,
+  legacyApiKeyEnv?: string,
+): BrainProviderForm {
   const legacyEnv = (legacyApiKeyEnv ?? "").trim();
+  const entries = Object.entries(providers ?? {});
+  const trimmedDefault = (defaultProvider ?? "").trim();
+  const defaultEntry =
+    trimmedDefault.length > 0 ? (providers ?? {})[trimmedDefault] : undefined;
+  const singleEntry = entries.length === 1 ? entries[0] : undefined;
+  const chosen = defaultEntry
+    ? ([trimmedDefault, defaultEntry] as const)
+    : singleEntry;
+  if (!chosen) {
+    return {
+      providerName: "",
+      providerType: "",
+      model: "",
+      serverURL: "",
+      apiKeyEnv: legacyEnv,
+    };
+  }
+  const [providerName, config] = chosen;
+  // Empty selects Auto, so a stored auto sentinel collapses to empty.
+  const rawType = (config.providerType ?? "").trim();
   return {
-    providerName: "",
-    providerType: "",
-    model: "",
-    serverURL: "",
-    apiKeyEnv: legacyEnv,
+    providerName,
+    providerType: rawType.toLowerCase() === "auto" ? "" : rawType,
+    model: config.model ?? "",
+    serverURL: config.serverURL ?? "",
+    apiKeyEnv: config.apiKeyEnv ?? "",
   };
 }
 
