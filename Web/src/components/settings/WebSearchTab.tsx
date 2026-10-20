@@ -16,6 +16,27 @@ import {
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import { countWebAdvancedChanged } from "./settingsAdvancedCounts";
 
+// Advanced Web validation messages the disclosure can focus. Shared by the
+// panel prop and the shell error router so one message never prints twice.
+export const WEB_ADVANCED_ERROR_KEYWORDS = [
+  "searxng",
+  "search timeout",
+  "searxng url",
+  "browser",
+  "playwright",
+  "python",
+  "venv",
+  "chromium",
+] as const;
+
+export function isWebAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return WEB_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
+}
+
 export interface WebSearchTabProps {
   searchActionBusy: boolean;
   searchRunning: boolean;
@@ -341,24 +362,22 @@ export function WebSearchTab({
           </details>
         ) : null}
       </div>
-    </div>
-    <AdvancedDisclosure
-      tabName="Web"
-      changedCount={advancedChangedCount}
-      summary={
-        advancedChangedCount > 0
-          ? `${advancedChangedCount} advanced web ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-          : undefined
-      }
-      open={advancedOpen}
-      onOpenChange={setAdvancedOpen}
-      testId="advanced-web"
-      validationError={advancedError}
-      errorKeywords={["searxng", "search timeout", "searxng url", "browser", "playwright", "python", "venv", "chromium"]}
-      onReset={resetWebAdvanced}
-      detailsRef={browserAdvancedRef}
-    >
-      <div className="settings-section card">
+      <AdvancedDisclosure
+        tabName="Web"
+        changedCount={advancedChangedCount}
+        summary={
+          advancedChangedCount > 0
+            ? `${advancedChangedCount} advanced web ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        testId="advanced-web"
+        validationError={advancedError}
+        errorKeywords={[...WEB_ADVANCED_ERROR_KEYWORDS]}
+        onReset={resetWebAdvanced}
+        detailsRef={browserAdvancedRef}
+      >
         <div className="form-group">
           <label htmlFor="search-searxng-url">SearXNG URL (Endpoint Override)</label>
           <input
@@ -410,55 +429,55 @@ export function WebSearchTab({
             (on Linux also run {browserVenvPath}/bin/python -m playwright install-deps or install system browser dependencies manually). Offline installs fail closed without changing the existing venv.
           </p>
         </div>
-      </div>
-    </AdvancedDisclosure>
+      </AdvancedDisclosure>
+    </div>
 
-      {pendingRemoveSearch ? (
-        <Modal
-          label="Confirm remove search container"
-          onClose={() => {
-            if (searchAction !== null) return;
-            setPendingRemoveSearch(false);
-          }}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Remove search container?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => setPendingRemoveSearch(false)}
-              disabled={searchAction !== null}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              This will stop (if running) and delete the runeweaver-searxng container. The image cache stays and next Start recreates the container.
-            </p>
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setPendingRemoveSearch(false)}
-              disabled={searchAction !== null}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() => void handleConfirmRemoveSearch()}
-              disabled={searchAction !== null}
-            >
-              Remove container
-            </button>
-          </div>
-        </Modal>
-      ) : null}
+    {pendingRemoveSearch ? (
+      <Modal
+        label="Confirm remove search container"
+        onClose={() => {
+          if (searchAction !== null) return;
+          setPendingRemoveSearch(false);
+        }}
+        containerClassName="modal-container session-delete-modal"
+      >
+        <div className="modal-header">
+          <h3>Remove search container?</h3>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => setPendingRemoveSearch(false)}
+            disabled={searchAction !== null}
+            aria-label="Close"
+          >
+            <CloseIcon size={16} />
+          </button>
+        </div>
+        <div className="modal-body">
+          <p className="muted" style={{ margin: 0 }}>
+            This will stop (if running) and delete the runeweaver-searxng container. The image cache stays and next Start recreates the container.
+          </p>
+        </div>
+        <div className="modal-footer">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setPendingRemoveSearch(false)}
+            disabled={searchAction !== null}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void handleConfirmRemoveSearch()}
+            disabled={searchAction !== null}
+          >
+            Remove container
+          </button>
+        </div>
+      </Modal>
+    ) : null}
     </>
   );
 }

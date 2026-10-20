@@ -15,7 +15,26 @@ import {
   TOOL_ROUNDS_MIN,
 } from "../../api";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
-import { countEngineAdvancedChanged } from "./settingsAdvancedCounts";
+import {
+  countEngineAdvancedChanged,
+  DEFAULT_ENGINE_COMPACTION_THRESHOLD,
+} from "./settingsAdvancedCounts";
+
+// Advanced Engine validation messages the disclosure can focus. Shared by the
+// panel prop and the shell error router so one message never prints twice.
+export const ENGINE_ADVANCED_ERROR_KEYWORDS = [
+  "compaction",
+  "scheduler",
+  "goal runs",
+] as const;
+
+export function isEngineAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return ENGINE_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
+}
 
 export interface EngineTabProps {
   engineName: string;
@@ -59,68 +78,66 @@ export function EngineTab({
 
   // Reset restores the stock compaction threshold.
   const resetEngineAdvanced = () => {
-    setCompactionThresholdPercent(80);
+    setCompactionThresholdPercent(DEFAULT_ENGINE_COMPACTION_THRESHOLD);
   };
   return (
-    <>
-      <div className="settings-section card">
-        <div className="settings-section-title-group">
-          <h3>Engine & Logging</h3>
-          <p className="settings-section-hint">
-            Identity name and logging verbosity for the Rune Weaver daemon.
-          </p>
+    <div className="settings-section card">
+      <div className="settings-section-title-group">
+        <h3>Engine & Logging</h3>
+        <p className="settings-section-hint">
+          Identity name and logging verbosity for the Rune Weaver daemon.
+        </p>
+      </div>
+      <div className="form-row">
+        <div className="form-group flex-1">
+          <label htmlFor="engine-name">Engine Name</label>
+          <input
+            id="engine-name"
+            type="text"
+            className="input-field"
+            value={engineName}
+            onChange={(e) => setEngineName(e.target.value)}
+            required
+          />
         </div>
-        <div className="form-row">
-          <div className="form-group flex-1">
-            <label htmlFor="engine-name">Engine Name</label>
-            <input
-              id="engine-name"
-              type="text"
-              className="input-field"
-              value={engineName}
-              onChange={(e) => setEngineName(e.target.value)}
-              required
-            />
-          </div>
-          <div className="form-group flex-1">
-            <label htmlFor="log-level">Log Level</label>
-            <select
-              id="log-level"
-              className="input-field"
-              value={logLevel}
-              onChange={(e) => setLogLevel(e.target.value)}
-            >
-              <option value="trace">Trace (Verbose)</option>
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="notice">Notice</option>
-              <option value="warning">Warning</option>
-              <option value="error">Error</option>
-            </select>
-          </div>
-        </div>
-        <div className="form-row" style={{ marginTop: "1rem" }}>
-          <div className="form-group flex-1">
-            <label htmlFor="max-tool-iterations">
-              Max Tool Rounds per Turn (Chats)
-            </label>
-            <input
-              id="max-tool-iterations"
-              type="number"
-              className="input-field"
-              min={TOOL_ROUNDS_MIN}
-              max={TOOL_ROUNDS_MAX}
-              step={1}
-              value={maxToolIterations}
-              onChange={(e) => setMaxToolIterations(e.target.value)}
-            />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-              Applies to interactive chats only. When a chat reaches this many consecutive tool rounds it parks for your approval to continue. Range: {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}. Default is {DEFAULT_ENGINE_MAX_TOOL_ITERATIONS}.
-            </p>
-          </div>
+        <div className="form-group flex-1">
+          <label htmlFor="log-level">Log Level</label>
+          <select
+            id="log-level"
+            className="input-field"
+            value={logLevel}
+            onChange={(e) => setLogLevel(e.target.value)}
+          >
+            <option value="trace">Trace (Verbose)</option>
+            <option value="debug">Debug</option>
+            <option value="info">Info</option>
+            <option value="notice">Notice</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+          </select>
         </div>
       </div>
-      <div className="settings-section card" style={{ marginTop: "16px" }} data-testid="proactive-pane">
+      <div className="form-row" style={{ marginTop: "1rem" }}>
+        <div className="form-group flex-1">
+          <label htmlFor="max-tool-iterations">
+            Max Tool Rounds per Turn (Chats)
+          </label>
+          <input
+            id="max-tool-iterations"
+            type="number"
+            className="input-field"
+            min={TOOL_ROUNDS_MIN}
+            max={TOOL_ROUNDS_MAX}
+            step={1}
+            value={maxToolIterations}
+            onChange={(e) => setMaxToolIterations(e.target.value)}
+          />
+          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            Applies to interactive chats only. When a chat reaches this many consecutive tool rounds it parks for your approval to continue. Range: {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}. Default is {DEFAULT_ENGINE_MAX_TOOL_ITERATIONS}.
+          </p>
+        </div>
+      </div>
+      <div data-testid="proactive-pane" style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
         <div className="settings-section-title-group">
           <h3>Proactivity</h3>
         <p className="settings-section-hint">
@@ -175,45 +192,43 @@ export function EngineTab({
         onOpenChange={setAdvancedOpen}
         testId="advanced-engine"
         validationError={validationError}
-        errorKeywords={["compaction", "scheduler", "goal runs"]}
+        errorKeywords={[...ENGINE_ADVANCED_ERROR_KEYWORDS]}
         onReset={resetEngineAdvanced}
       >
-        <div className="settings-section card">
-          <div className="form-row">
-            <div className="form-group flex-1">
-              <label htmlFor="compaction-threshold">
-                Context Compaction Threshold: {compactionThresholdPercent}%
-              </label>
-              <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                <input
-                  id="compaction-threshold"
-                  type="range"
-                  min={10}
-                  max={100}
-                  step={5}
-                  value={compactionThresholdPercent}
-                  onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
-                  style={{ flex: 1 }}
-                />
-                <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
-                  {compactionThresholdPercent}%
-                </span>
-              </div>
-              <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is 80%.
-              </p>
+        <div className="form-row">
+          <div className="form-group flex-1">
+            <label htmlFor="compaction-threshold">
+              Context Compaction Threshold: {compactionThresholdPercent}%
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+              <input
+                id="compaction-threshold"
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={compactionThresholdPercent}
+                onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
+                {compactionThresholdPercent}%
+              </span>
             </div>
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is {DEFAULT_ENGINE_COMPACTION_THRESHOLD}%.
+            </p>
           </div>
-          <div className="form-row" style={{ marginTop: "1rem" }}>
-            <div className="form-group flex-1">
-              <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                Chats use {engineMaxToolIterations(settings)} rounds per turn (parks for approval). Scheduled runs use {schedulerRounds} rounds by default with per-job override (synthesizes plus budget_exceeded, or parks when the job sets on_tool_limit to park). Goal runs use {goalRounds} rounds (always synthesizes plus budget_exceeded).
-              </p>
-            </div>
+        </div>
+        <div className="form-row" style={{ marginTop: "1rem" }}>
+          <div className="form-group flex-1">
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Chats use {engineMaxToolIterations(settings)} rounds per turn (parks for approval). Scheduled runs use {schedulerRounds} rounds by default with per-job override (synthesizes plus budget_exceeded, or parks when the job sets on_tool_limit to park). Goal runs use {goalRounds} rounds (always synthesizes plus budget_exceeded).
+            </p>
           </div>
         </div>
       </AdvancedDisclosure>
-    </>
+    </div>
   );
 }
 

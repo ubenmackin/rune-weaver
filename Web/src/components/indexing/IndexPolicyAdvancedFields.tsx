@@ -85,7 +85,7 @@ export default function IndexPolicyAdvancedFields({
                   </button>
                 </div>
                 <p className="muted text-xs">
-                  Chunks beyond the cap stay keyword-only (1–4096).
+                  Chunks beyond the cap stay keyword-only (1–{vectorCapMax}).
                 </p>
               </div>
       

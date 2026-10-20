@@ -22,6 +22,27 @@ import {
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import { countGoalsAdvancedChanged } from "./settingsAdvancedCounts";
 
+// Advanced Goals validation messages the disclosure can focus. Shared by the
+// panel prop and the shell error router so one message never prints twice.
+export const GOALS_ADVANCED_ERROR_KEYWORDS = [
+  "goals cap",
+  "max active",
+  "plan length",
+  "max steps",
+  "planning timeout",
+  "plan timeout",
+  "triggers budget",
+  "max triggers",
+] as const;
+
+export function isGoalsAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return GOALS_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
+}
+
 export interface GoalsTabProps {
   goalsEnabled: boolean;
   setGoalsEnabled: (val: boolean) => void;
@@ -84,7 +105,6 @@ export function GoalsTab({
   };
 
   return (
-    <>
     <div className="settings-section card" data-testid="goals-pane">
       <div className="settings-section-title-group">
         <h3>Goals</h3>
@@ -192,23 +212,21 @@ export function GoalsTab({
           </p>
         </div>
       </div>
-    </div>
-    <AdvancedDisclosure
-      tabName="Goals"
-      changedCount={advancedChangedCount}
-      summary={
-        advancedChangedCount > 0
-          ? `${advancedChangedCount} advanced goals ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-          : undefined
-      }
-      open={advancedOpen}
-      onOpenChange={setAdvancedOpen}
-      testId="advanced-goals"
-      validationError={validationError}
-      errorKeywords={["goals cap", "max active", "plan length", "max steps", "planning timeout", "plan timeout", "triggers budget", "max triggers"]}
-      onReset={resetGoalsAdvanced}
-    >
-      <div className="settings-section card">
+      <AdvancedDisclosure
+        tabName="Goals"
+        changedCount={advancedChangedCount}
+        summary={
+          advancedChangedCount > 0
+            ? `${advancedChangedCount} advanced goals ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        testId="advanced-goals"
+        validationError={validationError}
+        errorKeywords={[...GOALS_ADVANCED_ERROR_KEYWORDS]}
+        onReset={resetGoalsAdvanced}
+      >
         <div className="form-row">
           <div className="form-group flex-1">
             <label htmlFor="goals-max-active">Max Active Goals</label>
@@ -277,9 +295,8 @@ export function GoalsTab({
             </p>
           </div>
         </div>
-      </div>
-    </AdvancedDisclosure>
-    </>
+      </AdvancedDisclosure>
+    </div>
   );
 }
 

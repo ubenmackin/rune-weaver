@@ -3,226 +3,79 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
-  BASH_CPU_MAX_SECONDS,
-  BASH_CPU_MIN_SECONDS,
-  BASH_HOST_ALLOW_PATTERNS_MAX,
-  BASH_MEMORY_MAX_MB,
-  BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
-  BASH_SANDBOX_MODES,
-  BASH_SANDBOX_TIERS,
-  BASH_TIMEOUT_MAX_SECONDS,
-  BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
   DEFAULT_BASH_CPU_SECONDS,
-  DEFAULT_BASH_HOST_ALLOW_PATTERNS,
   DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT,
   DEFAULT_BASH_MEMORY_MB,
   DEFAULT_BASH_RULES_TEXT,
   DEFAULT_BASH_SANDBOX_MODE,
+  BASH_SANDBOX_TIERS,
   bashSandboxSummary,
-  formatBashRulesText,
   formatHostAllowPatternsText,
-  getSettings,
   parseBashRulesText,
   parseHostAllowPatternsText,
   parseHostAllowPatternsUncapped,
   updateSettings,
-  validateBashSandboxMode,
-  validateHostAllowPatterns,
-  type BashConfigData,
   type BashRuleData,
   type BashSettingsUpdate,
+  type SettingsResponse,
+  type UpdateSettingsInput,
 } from "../../api";
 import { AlertTriangleIcon, PlusIcon } from "../icons";
+import { AdvancedDisclosure } from "../settings/AdvancedDisclosure";
+import { countBashAdvancedChanged } from "../settings/settingsAdvancedCounts";
+import {
+  BashConfinementFields,
+  BashTuningFields,
+} from "./AccessBashAdvancedFields";
+import {
+  bashDraftSignature,
+  countBashRules,
+  freshBashDraft,
+  freshBashLoaded,
+  validateBashBudgets,
+  validateBashConfinementFields,
+  type BashDraft,
+  type BashLoadedSnapshot,
+} from "./accessBashDraft";
+import {
+  fetchSharedAccessSettings,
+  resolveBashDraftAndLoaded,
+} from "./accessSettingsLoader";
+import type { UseBashAdvancedResult } from "./useAccessAdvanced";
 
-// Last-loaded [bash] snapshot driving the changed-only patch: a field the owner never touches stays
-// omitted so the stored value survives, while a cleared allowlist sends an explicit empty list.
-interface BashLoadedSnapshot {
-  defaultAction: string;
-  rulesText: string;
-  timeoutSeconds: number;
-  cpuSeconds: number;
-  memoryMb: number;
-  allowNetwork: boolean;
-  sandboxMode: string;
-  hostAllowPatterns: string[];
-}
+// Advanced Bash validation messages the disclosure can focus. Shared by the
+// panel prop and the server-error router so one message never prints twice.
+const BASH_ADVANCED_ERROR_KEYWORDS = [
+  "timeout",
+  "cpu",
+  "memory",
+  "sandbox",
+  "tier",
+  "host allow",
+] as const;
 
-// The editor draft as the knobs sit in the form.
-interface BashDraft {
-  defaultAction: string;
-  rulesText: string;
-  timeoutSeconds: number | string;
-  cpuSeconds: number | string;
-  memoryMB: number | string;
-  allowNetwork: boolean;
-  sandboxMode: string;
-  hostAllowPatternsText: string;
-}
-
-// Fresh-form draft, seeded from the combined bash defaults so the editor
-// matches the engine boundary before the first settings fetch.
-function freshBashDraft(): BashDraft {
-  return {
-    defaultAction: DEFAULT_BASH_CONFIG.defaultAction,
-    rulesText: DEFAULT_BASH_RULES_TEXT,
-    timeoutSeconds: DEFAULT_BASH_CONFIG.timeoutSeconds,
-    cpuSeconds: DEFAULT_BASH_CPU_SECONDS,
-    memoryMB: DEFAULT_BASH_MEMORY_MB,
-    allowNetwork: DEFAULT_BASH_CONFIG.allowNetwork,
-    sandboxMode: DEFAULT_BASH_SANDBOX_MODE,
-    hostAllowPatternsText: DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT,
-  };
-}
-
-function freshBashLoaded(): BashLoadedSnapshot {
-  return {
-    defaultAction: DEFAULT_BASH_CONFIG.defaultAction,
-    rulesText: DEFAULT_BASH_RULES_TEXT,
-    timeoutSeconds: DEFAULT_BASH_CONFIG.timeoutSeconds,
-    cpuSeconds: DEFAULT_BASH_CPU_SECONDS,
-    memoryMb: DEFAULT_BASH_MEMORY_MB,
-    allowNetwork: DEFAULT_BASH_CONFIG.allowNetwork,
-    sandboxMode: DEFAULT_BASH_SANDBOX_MODE,
-    hostAllowPatterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
-  };
-}
-
-// Canonicalizes a draft for dirty tracking.
-function bashDraftSignature(draft: BashDraft): string {
-  let rules: unknown;
-  try {
-    rules = parseBashRulesText(draft.rulesText);
-  } catch {
-    rules = draft.rulesText;
-  }
-  return JSON.stringify({
-    defaultAction: draft.defaultAction.trim().toLowerCase(),
-    rules,
-    timeoutSeconds: Number(draft.timeoutSeconds),
-    cpuSeconds: Number(draft.cpuSeconds),
-    memoryMb: Number(draft.memoryMB),
-    allowNetwork: draft.allowNetwork,
-    sandboxMode: draft.sandboxMode.trim(),
-    hostAllowPatterns: parseHostAllowPatternsUncapped(draft.hostAllowPatternsText),
-  });
-}
-
-// Live parsed rule count. A malformed line still counts as a non-blank row so
-// the badge stays honest until validation reports the line number.
-function countBashRules(text: string): number {
-  try {
-    return parseBashRulesText(text).length;
-  } catch {
-    return text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean).length;
-  }
-}
-
-// Copies one settings fetch into the bash fields, and tolerates an absent [bash] section from older
-// engines by keeping the form defaults.
-function applyBashConfigToDraft(draft: BashDraft, bash: BashConfigData): BashDraft {
-  const next: BashDraft = { ...draft };
-  const defaultAction =
-    typeof bash.defaultAction === "string" && bash.defaultAction.trim()
-      ? bash.defaultAction.trim().toLowerCase()
-      : "";
-  if (defaultAction) {
-    next.defaultAction = defaultAction;
-  }
-  if (Array.isArray(bash.rules)) {
-    const normalized: BashRuleData[] = bash.rules.map((rule) => ({
-      pattern: typeof rule.pattern === "string" ? rule.pattern : "",
-      action:
-        typeof rule.action === "string" && rule.action.trim()
-          ? rule.action.trim().toLowerCase()
-          : "ask",
-    }));
-    next.rulesText = formatBashRulesText(normalized);
-  }
-  const timeout =
-    typeof bash.timeoutSeconds === "number"
-      ? bash.timeoutSeconds
-      : null;
-  if (timeout !== null) {
-    next.timeoutSeconds = timeout;
-  }
-  const cpu =
-    typeof bash.cpuSeconds === "number"
-      ? bash.cpuSeconds
-      : null;
-  if (cpu !== null) {
-    next.cpuSeconds = cpu;
-  }
-  const memory =
-    typeof bash.memoryMb === "number"
-      ? bash.memoryMb
-      : null;
-  if (memory !== null) {
-    next.memoryMB = memory;
-  }
-  if (typeof bash.allowNetwork === "boolean") {
-    next.allowNetwork = bash.allowNetwork;
-  }
-  const rawMode =
-    typeof bash.sandboxMode === "string" && bash.sandboxMode.trim()
-      ? bash.sandboxMode.trim()
-      : "";
-  if (rawMode && (BASH_SANDBOX_MODES as readonly string[]).includes(rawMode)) {
-    next.sandboxMode = rawMode;
-  }
-  const rawPatterns = Array.isArray(bash.hostAllowPatterns)
-    ? bash.hostAllowPatterns
-    : null;
-  if (rawPatterns !== null) {
-    const filtered = rawPatterns.filter(
-      (entry): entry is string => typeof entry === "string",
-    );
-    next.hostAllowPatternsText = formatHostAllowPatternsText(
-      parseHostAllowPatternsText(formatHostAllowPatternsText(filtered)),
-    );
-  }
-  return next;
-}
-
-// Rebuilds the editor draft from the last-loaded snapshot, which is what the
-// populate path seeds from: a key the engine omits keeps the previously loaded
-// value instead of resetting to a fresh-form default.
-function bashDraftFromLoaded(loaded: BashLoadedSnapshot): BashDraft {
-  return {
-    defaultAction: loaded.defaultAction,
-    rulesText: loaded.rulesText,
-    timeoutSeconds: loaded.timeoutSeconds,
-    cpuSeconds: loaded.cpuSeconds,
-    memoryMB: loaded.memoryMb,
-    allowNetwork: loaded.allowNetwork,
-    sandboxMode: loaded.sandboxMode,
-    hostAllowPatternsText: formatHostAllowPatternsText(loaded.hostAllowPatterns),
-  };
-}
-
-// Mirrors the last-loaded snapshot the patch builder compares against, so a
-// save that echoes the loaded shape leaves the next patch empty.
-function bashLoadedFromDraft(draft: BashDraft): BashLoadedSnapshot {
-  return {
-    defaultAction: draft.defaultAction.trim().toLowerCase(),
-    rulesText: draft.rulesText,
-    timeoutSeconds: Number(draft.timeoutSeconds),
-    cpuSeconds: Number(draft.cpuSeconds),
-    memoryMb: Number(draft.memoryMB),
-    allowNetwork: draft.allowNetwork,
-    sandboxMode: draft.sandboxMode.trim(),
-    hostAllowPatterns: parseHostAllowPatternsText(draft.hostAllowPatternsText),
-  };
+function isBashAdvancedError(message: string): boolean {
+  const lowered = message.toLowerCase();
+  return BASH_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
 }
 
 // Bash & Shell configuration section for the settings Access surface. Keeps the
 // single draft, the changed-only save, and the live-apply banner; the rule
 // engine on the engine side stays the sole evaluator of what persists here.
-export function AccessBashSection() {
+export function AccessBashSection({
+  simpleOnly = false,
+  advanced,
+}: {
+  simpleOnly?: boolean;
+  advanced?: UseBashAdvancedResult | null;
+} = {}) {
+  // simpleOnly is retained for compatibility; Advanced ownership follows the
+  // hook presence so both entry points share one disclosure.
+  void simpleOnly;
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [defaultAction, setDefaultAction] = useState<string>(
@@ -252,10 +105,12 @@ export function AccessBashSection() {
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const bashLoadedRef = useRef<BashLoadedSnapshot>(freshBashLoaded());
-  // Last accepted signature for dirty tracking. Changed is a canonical compare
-  // of the live draft against this value, so an edit that returns to the loaded
-  // shape reads clean instead of staying dirty on formatting alone.
+  // Last accepted signature for dirty tracking. Changed compares the live draft
+  // against this value so a return to the loaded shape reads clean.
   const loadedSignatureRef = useRef<string>(bashDraftSignature(freshBashDraft()));
+  // Local Advanced open for the standalone path. The pane-level hook owns this
+  // when present, so this state only drives the disclosure without a hook.
+  const [localAdvancedOpen, setLocalAdvancedOpen] = useState(false);
   // Direct handle to the rules editor so Add Rule can return keyboard focus
   // without a document-wide lookup that breaks with multiple instances or
   // strict-mode remounts.
@@ -271,17 +126,31 @@ export function AccessBashSection() {
     sandboxMode,
     hostAllowPatternsText,
   };
-  const changed = bashDraftSignature(draft) !== loadedSignatureRef.current;
+  // When the pane-level Advanced hook is present it owns tuning plus
+  // confinement, so Simple dirty tracking mutes those fields to keep one
+  // owner for their keys.
+  const simpleSignatureDraft: BashDraft = advanced
+    ? {
+        ...draft,
+        timeoutSeconds: bashLoadedRef.current.timeoutSeconds,
+        cpuSeconds: bashLoadedRef.current.cpuSeconds,
+        memoryMB: bashLoadedRef.current.memoryMb,
+        sandboxMode: bashLoadedRef.current.sandboxMode,
+        hostAllowPatternsText: formatHostAllowPatternsText(
+          bashLoadedRef.current.hostAllowPatterns
+        ),
+      }
+    : draft;
+  const changed = bashDraftSignature(simpleSignatureDraft) !== loadedSignatureRef.current;
 
   // Copies one loaded snapshot into every field at once, then reseeds the loaded ref and the dirty
-  // signature from that same snapshot.
-  const applyLoadedConfig = useCallback((bash: BashConfigData | undefined | null) => {
-    if (!bash) return;
-    const next = applyBashConfigToDraft(
-      bashDraftFromLoaded(bashLoadedRef.current),
-      bash,
-    );
-    bashLoadedRef.current = bashLoadedFromDraft(next);
+  // signature from that same snapshot. The shared loader owns the mapping so
+  // the section plus the Advanced hook read identical drafts from one payload.
+  const applyLoadedConfig = useCallback((settings: SettingsResponse | null | undefined) => {
+    const resolved = resolveBashDraftAndLoaded(settings, bashLoadedRef.current);
+    if (!resolved) return;
+    const next = resolved.draft;
+    bashLoadedRef.current = resolved.loaded;
     loadedSignatureRef.current = bashDraftSignature(next);
     setDefaultAction(next.defaultAction);
     setRulesText(next.rulesText);
@@ -298,8 +167,8 @@ export function AccessBashSection() {
     setLoading(true);
     setLoadError(null);
     try {
-      const data = await getSettings();
-      applyLoadedConfig(data.bash);
+      const data = await fetchSharedAccessSettings();
+      applyLoadedConfig(data);
     } catch (err: unknown) {
       setLoadError(
         err instanceof ApiError ? err.message : "Failed to load bash settings.",
@@ -359,9 +228,9 @@ export function AccessBashSection() {
     markEdited();
   }
 
-  // Builds the changed-only [bash] patch: a field matching its last-loaded
-  // value stays omitted so the stored value survives, while an emptied
-  // allowlist sends an explicit empty list.
+  // Builds the changed-only [bash] patch, omitting stored values. When the
+  // Advanced hook is present tuning plus confinement stay out so Advanced
+  // remains their sole writer.
   function buildBashPatch(): BashSettingsUpdate {
     const patch: BashSettingsUpdate = {};
     const loaded = bashLoadedRef.current;
@@ -386,40 +255,43 @@ export function AccessBashSection() {
       // Malformed rules never reach the patch: validation reports the line
       // number before any network write.
     }
-    const timeoutNum = Number(draft.timeoutSeconds);
-    if (timeoutNum !== loaded.timeoutSeconds) {
-      patch.timeoutSeconds = timeoutNum;
-    }
-    const cpuNum = Number(draft.cpuSeconds);
-    if (cpuNum !== loaded.cpuSeconds) {
-      patch.cpuSeconds = cpuNum;
-    }
-    const memoryNum = Number(draft.memoryMB);
-    if (memoryNum !== loaded.memoryMb) {
-      patch.memoryMb = memoryNum;
-    }
     if (draft.allowNetwork !== loaded.allowNetwork) {
       patch.allowNetwork = draft.allowNetwork;
     }
-    const nextMode = draft.sandboxMode.trim();
-    if (nextMode !== loaded.sandboxMode) {
-      patch.sandboxMode = nextMode;
-    }
-    const currentPatterns = parseHostAllowPatternsText(draft.hostAllowPatternsText);
-    if (
-      currentPatterns.length !== loaded.hostAllowPatterns.length ||
-      currentPatterns.some(
-        (entry, index) => entry !== loaded.hostAllowPatterns[index],
-      )
-    ) {
-      patch.hostAllowPatterns = [...currentPatterns];
+    if (!advanced) {
+      const timeoutNum = Number(draft.timeoutSeconds);
+      if (timeoutNum !== loaded.timeoutSeconds) {
+        patch.timeoutSeconds = timeoutNum;
+      }
+      const cpuNum = Number(draft.cpuSeconds);
+      if (cpuNum !== loaded.cpuSeconds) {
+        patch.cpuSeconds = cpuNum;
+      }
+      const memoryNum = Number(draft.memoryMB);
+      if (memoryNum !== loaded.memoryMb) {
+        patch.memoryMb = memoryNum;
+      }
+      const nextMode = draft.sandboxMode.trim();
+      if (nextMode !== loaded.sandboxMode) {
+        patch.sandboxMode = nextMode;
+      }
+      const currentPatterns = parseHostAllowPatternsText(draft.hostAllowPatternsText);
+      if (
+        currentPatterns.length !== loaded.hostAllowPatterns.length ||
+        currentPatterns.some(
+          (entry, index) => entry !== loaded.hostAllowPatterns[index],
+        )
+      ) {
+        patch.hostAllowPatterns = [...currentPatterns];
+      }
     }
     return patch;
   }
 
   // Client-side validation mirrors engine clamps: malformed rules, empty lists, invalid budgets
   // or tiers, and invalid/TOML-breaking host patterns fail in the form with the same field the
-  // server 400 names.
+  // server 400 names. With the Advanced hook present budgets plus confinement
+  // skip so Advanced owns them.
   function validateBashFields(): string | null {
     const normalizedAction = draft.defaultAction.trim().toLowerCase();
     if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
@@ -434,36 +306,34 @@ export function AccessBashSection() {
     if (parsed.length === 0) {
       return "Invalid bash rules: at least one rule is required.";
     }
-    const timeoutNum = Number(draft.timeoutSeconds);
-    if (!Number.isInteger(timeoutNum) || timeoutNum < BASH_TIMEOUT_MIN_SECONDS || timeoutNum > BASH_TIMEOUT_MAX_SECONDS) {
-      return `Invalid bash timeout: timeout must be between ${BASH_TIMEOUT_MIN_SECONDS} and ${BASH_TIMEOUT_MAX_SECONDS} seconds.`;
-    }
-    const cpuNum = Number(draft.cpuSeconds);
-    if (!Number.isInteger(cpuNum) || cpuNum < BASH_CPU_MIN_SECONDS || cpuNum > BASH_CPU_MAX_SECONDS) {
-      return `Invalid bash CPU budget: CPU time must be between ${BASH_CPU_MIN_SECONDS} and ${BASH_CPU_MAX_SECONDS} seconds.`;
-    }
-    const memoryNum = Number(draft.memoryMB);
-    if (!Number.isInteger(memoryNum) || memoryNum < BASH_MEMORY_MIN_MB || memoryNum > BASH_MEMORY_MAX_MB) {
-      return `Invalid bash memory budget: memory must be between ${BASH_MEMORY_MIN_MB} and ${BASH_MEMORY_MAX_MB} MB.`;
-    }
-    const tierError = validateBashSandboxMode(draft.sandboxMode);
-    if (tierError) {
-      return tierError;
-    }
-    const uncapped = parseHostAllowPatternsUncapped(draft.hostAllowPatternsText);
-    if (uncapped.length > BASH_HOST_ALLOW_PATTERNS_MAX) {
-      return `Invalid bash host allow patterns: must contain at most ${BASH_HOST_ALLOW_PATTERNS_MAX} entries (got ${uncapped.length}).`;
-    }
-    const patternsError = validateHostAllowPatterns(uncapped);
-    if (patternsError) {
-      return patternsError;
+    if (!advanced) {
+      const tuningError = validateBashBudgets(
+        draft.timeoutSeconds,
+        draft.cpuSeconds,
+        draft.memoryMB
+      );
+      if (tuningError) return tuningError;
+      const confinementError = validateBashConfinementFields(
+        draft.sandboxMode,
+        draft.hostAllowPatternsText
+      );
+      if (confinementError) return confinementError;
     }
     return null;
   }
 
   // Saves the changed-only [bash] patch through PUT /settings. Only edited keys travel so stored
-  // values survive; an emptied allowlist sends an explicit empty list.
+  // values survive; an emptied allowlist sends an explicit empty list. With the
+  // Advanced hook present its patch rides the same payload so one save has one
+  // truth.
   const handleSave = async (): Promise<void> => {
+    if (advanced) {
+      const advError = advanced.validate();
+      if (advError) {
+        advanced.setSaveError(advError);
+        return;
+      }
+    }
     const validationError = validateBashFields();
     if (validationError) {
       setSaveError(validationError);
@@ -472,16 +342,28 @@ export function AccessBashSection() {
     setSaveLoading(true);
     setSaveError(null);
     try {
-      const updated = await updateSettings({ bash: buildBashPatch() });
+      const patch: UpdateSettingsInput = { bash: buildBashPatch() };
+      if (advanced) {
+        const advPatch = advanced.buildPatch();
+        if (advPatch.bash) {
+          patch.bash = { ...patch.bash, ...advPatch.bash };
+        }
+      }
+      const updated = await updateSettings(patch);
       // Repopulate first so the accepted snapshot re-seeds both the loaded ref
       // and the dirty comparison; the banner then flips on after it, because
       // the repopulate clears the flag for the plain load path.
-      applyLoadedConfig(updated.bash);
+      applyLoadedConfig(updated);
+      advanced?.applySaved(updated);
       setSaved(true);
     } catch (err: unknown) {
-      setSaveError(
-        err instanceof ApiError ? err.message : "Failed to save bash settings",
-      );
+      const message =
+        err instanceof ApiError ? err.message : "Failed to save bash settings";
+      if (advanced && isBashAdvancedError(message)) {
+        advanced.setSaveError(message);
+      } else {
+        setSaveError(message);
+      }
     } finally {
       setSaveLoading(false);
     }
@@ -502,7 +384,37 @@ export function AccessBashSection() {
     rulesTextareaRef.current?.focus();
   };
 
+  // Local Advanced reset for the standalone path. Restores tuning plus
+  // confinement to defaults so reset never touches Simple bindings.
+  function handleResetLocalAdvanced() {
+    const fresh = freshBashDraft();
+    setTimeoutSeconds(fresh.timeoutSeconds);
+    setCpuSeconds(fresh.cpuSeconds);
+    setMemoryMB(fresh.memoryMB);
+    setSandboxMode(fresh.sandboxMode);
+    setHostAllowPatternsText(fresh.hostAllowPatternsText);
+    setSaveError(null);
+  }
+
   const ruleCount = countBashRules(rulesText);
+  const effectiveSandboxMode = advanced ? advanced.sandboxMode : sandboxMode;
+  const effectiveHostAllowPatternsText = advanced ? advanced.hostAllowPatternsText : hostAllowPatternsText;
+  const effectiveHostPatternCount = parseHostAllowPatternsUncapped(effectiveHostAllowPatternsText).length;
+  const advancedChanged = advanced?.changed ?? false;
+  // Single disclosure source: hook owns count plus open plus reset when
+  // present, otherwise local tuning drives the same disclosure.
+  const localAdvancedChangedCount = countBashAdvancedChanged(timeoutSeconds, cpuSeconds, memoryMB, sandboxMode, hostAllowPatternsText);
+  const unifiedChangedCount = advanced ? advanced.changedCount : localAdvancedChangedCount;
+  const unifiedOpen = advanced ? advanced.open : localAdvancedOpen;
+  const unifiedSetOpen = advanced ? advanced.setOpen : setLocalAdvancedOpen;
+  const unifiedValidationError = advanced ? advanced.saveError : saveError;
+  const unifiedReset = advanced ? advanced.reset : handleResetLocalAdvanced;
+
+  // An Advanced edit clears the section's saved confirmation too, so a stale
+  // success never covers a draft the advanced hook now owns.
+  useEffect(() => {
+    if (advancedChanged) setSaved(false);
+  }, [advancedChanged]);
 
   return (
     <section className="settings-section card" aria-label="Bash & Shell" data-testid="bash-pane">
@@ -528,7 +440,8 @@ export function AccessBashSection() {
 
       {!loading && !loadError ? (
         <>
-          {saveError ? (
+          {/* Advanced errors print once inside the disclosure, never twice behind the top banner. */}
+          {saveError && !isBashAdvancedError(saveError) ? (
             <div className="error-banner" data-testid="bash-error" style={{ marginBottom: "12px" }}>
               <AlertTriangleIcon size={16} />
               <span>{saveError}</span>
@@ -553,11 +466,9 @@ export function AccessBashSection() {
 
           <p className="muted text-sm" style={{ marginBottom: "16px" }}>
             Rules evaluate top-to-bottom last-match-wins; the default action applies
-            when no rule matches.
-          </p>
-
-          <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-            Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the execution tier below.
+            when nothing matches. Default working directory is the engine home with an
+            optional per-call override inside allowed roots, confined by the execution
+            tier below.
           </p>
 
           <div className="form-group" style={{ marginBottom: "12px" }}>
@@ -579,44 +490,9 @@ export function AccessBashSection() {
             </span>
           </div>
 
-          <div className="form-group" style={{ marginBottom: "12px" }}>
-            <label htmlFor="bash-sandbox-mode" style={{ fontSize: "0.82rem" }}>Execution tier</label>
-            <select
-              id="bash-sandbox-mode"
-              className="input-field"
-              aria-label="Execution tier"
-              value={sandboxMode}
-              onChange={(e) => handleSandboxModeChange(e.target.value)}
-            >
-              {BASH_SANDBOX_TIERS.map((tier) => (
-                <option key={tier.value} value={tier.value}>
-                  {tier.label}
-                </option>
-              ))}
-            </select>
-            <span className="form-group-hint" data-testid="bash-sandbox-help">
-              {bashSandboxSummary(sandboxMode, allowNetwork)}
-            </span>
-            <span className="form-group-hint" data-testid="bash-sandbox-scope">
-              {BASH_SANDBOX_TIERS.find((tier) => tier.value === sandboxMode)?.scope ?? ""}
-            </span>
-          </div>
-
-          <div className="form-group" style={{ marginBottom: "12px" }}>
-            <label htmlFor="bash-host-allow-patterns" style={{ fontSize: "0.82rem" }}>Host allow patterns</label>
-            <textarea
-              id="bash-host-allow-patterns"
-              className="input-field"
-              aria-label="Host allow patterns"
-              value={hostAllowPatternsText}
-              onChange={(e) => handleHostAllowPatternsChange(e.target.value)}
-              placeholder={"xcodebuild*\ncodesign*"}
-              rows={4}
-            />
-            <span className="form-group-hint">
-              One pattern per line gating {BASH_SANDBOX_TIERS.find((tier) => tier.value === "hostSeatbelt")?.label ?? "On this Mac"} execution. Empty list blocks host execution entirely.
-            </span>
-          </div>
+          <p className="muted text-sm" data-testid="bash-confinement-summary" style={{ marginBottom: "12px" }}>
+            Execution tier: {BASH_SANDBOX_TIERS.find((tier) => tier.value === effectiveSandboxMode)?.label ?? effectiveSandboxMode}. {bashSandboxSummary(effectiveSandboxMode, allowNetwork)} Host allow patterns: {effectiveHostPatternCount} configured. Edit both in Advanced Bash settings below.
+          </p>
 
           <div className="settings-subsection-header" style={{ marginTop: "16px" }}>
             <div className="settings-section-title-group">
@@ -660,63 +536,6 @@ export function AccessBashSection() {
             </span>
           </div>
 
-          <details data-testid="bash-advanced-details" style={{ marginTop: "16px", marginBottom: "12px" }}>
-            <summary style={{ cursor: "pointer", fontSize: "0.82rem" }}>Advanced</summary>
-            <div className="form-group" style={{ marginTop: "12px", marginBottom: "12px" }}>
-              <label htmlFor="bash-timeout" style={{ fontSize: "0.82rem" }}>Timeout (seconds)</label>
-              <input
-                id="bash-timeout"
-                type="number"
-                min={BASH_TIMEOUT_MIN_SECONDS}
-                max={BASH_TIMEOUT_MAX_SECONDS}
-                step={1}
-                className="input-field"
-                value={timeoutSeconds}
-                onChange={(e) => handleTimeoutChange(e.target.value)}
-                placeholder="30"
-              />
-              <span className="form-group-hint">
-                Default execution timeout in seconds (1 to 3600).
-              </span>
-            </div>
-
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-cpu-seconds" style={{ fontSize: "0.82rem" }}>CPU seconds</label>
-              <input
-                id="bash-cpu-seconds"
-                type="number"
-                min={BASH_CPU_MIN_SECONDS}
-                max={BASH_CPU_MAX_SECONDS}
-                step={1}
-                className="input-field"
-                value={cpuSeconds}
-                onChange={(e) => handleCpuSecondsChange(e.target.value)}
-                placeholder="120"
-              />
-              <span className="form-group-hint">
-                CPU time budget in seconds; wall-clock may exceed CPU time for sleeping processes.
-              </span>
-            </div>
-
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-memory-mb" style={{ fontSize: "0.82rem" }}>Memory (MB)</label>
-              <input
-                id="bash-memory-mb"
-                type="number"
-                min={BASH_MEMORY_MIN_MB}
-                max={BASH_MEMORY_MAX_MB}
-                step={1}
-                className="input-field"
-                value={memoryMB}
-                onChange={(e) => handleMemoryMBChange(e.target.value)}
-                placeholder="1024"
-              />
-              <span className="form-group-hint">
-                Address-space budget in MB as a best-effort ulimit bound.
-              </span>
-            </div>
-          </details>
-
           <div className="form-group checkbox-group">
             <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
               <input
@@ -732,9 +551,56 @@ export function AccessBashSection() {
             </span>
           </div>
 
+          <AdvancedDisclosure
+            tabName="Bash"
+            changedCount={unifiedChangedCount}
+            summary={
+              unifiedChangedCount > 0
+                ? `${unifiedChangedCount} advanced bash ${unifiedChangedCount === 1 ? "setting" : "settings"} changed`
+                : undefined
+            }
+            open={unifiedOpen}
+            onOpenChange={unifiedSetOpen}
+            testId="advanced-bash"
+            validationError={unifiedValidationError}
+            errorKeywords={[...BASH_ADVANCED_ERROR_KEYWORDS]}
+            onReset={unifiedReset}
+          >
+            {advanced?.loading ? (
+              <p className="muted text-sm" data-testid="advanced-bash-loading">Loading advanced bash settings…</p>
+            ) : null}
+            {advanced?.loadError ? (
+              <div className="error-banner" data-testid="advanced-bash-load-error" style={{ marginBottom: "12px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{advanced.loadError}</span>
+              </div>
+            ) : null}
+            {!advanced || (!advanced.loading && !advanced.loadError) ? (
+              <>
+                <BashTuningFields
+                  timeoutSeconds={advanced ? advanced.timeoutSeconds : timeoutSeconds}
+                  cpuSeconds={advanced ? advanced.cpuSeconds : cpuSeconds}
+                  memoryMB={advanced ? advanced.memoryMB : memoryMB}
+                  onTimeoutChange={advanced ? advanced.handleTimeoutChange : handleTimeoutChange}
+                  onCpuChange={advanced ? advanced.handleCpuChange : handleCpuSecondsChange}
+                  onMemoryChange={advanced ? advanced.handleMemoryChange : handleMemoryMBChange}
+                  idPrefix={advanced ? "adv-bash" : "bash"}
+                />
+                <BashConfinementFields
+                  idPrefix={advanced ? "adv-bash" : "bash"}
+                  sandboxMode={advanced ? advanced.sandboxMode : sandboxMode}
+                  allowNetwork={allowNetwork}
+                  hostAllowPatternsText={advanced ? advanced.hostAllowPatternsText : hostAllowPatternsText}
+                  onSandboxModeChange={advanced ? advanced.handleSandboxModeChange : handleSandboxModeChange}
+                  onHostAllowPatternsChange={advanced ? advanced.handleHostAllowPatternsChange : handleHostAllowPatternsChange}
+                />
+              </>
+            ) : null}
+          </AdvancedDisclosure>
+
           <div className="settings-footer">
             <span className="muted text-sm" data-testid="bash-save-hint">
-              {changed
+              {changed || advancedChanged
                 ? "Unsaved changes — only the edited keys travel in the bash patch."
                 : "Only the edited keys travel; every untouched value survives."}
             </span>

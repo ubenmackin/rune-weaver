@@ -6,6 +6,18 @@ import {
   DEFAULT_VOICE_WHISPER_MODEL,
 } from "./settingsAdvancedCounts";
 
+// Advanced Voice validation messages the disclosure can focus. Shared by the
+// panel prop and the shell error router so one message never prints twice.
+export const VOICE_ADVANCED_ERROR_KEYWORDS = ["whisper"] as const;
+
+export function isVoiceAdvancedError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return VOICE_ADVANCED_ERROR_KEYWORDS.some((keyword) =>
+    lowered.includes(keyword)
+  );
+}
+
 export interface VoiceTabProps {
   voiceSTTProvider: string;
   setVoiceSTTProvider: (val: string) => void;
@@ -34,7 +46,6 @@ export function VoiceTab({
   };
 
   return (
-    <>
     <div className="settings-section card">
       <div className="settings-section-title-group">
         <h3>Voice Pipeline</h3>
@@ -70,23 +81,21 @@ export function VoiceTab({
           </span>
         </div>
       </div>
-    </div>
-    <AdvancedDisclosure
-      tabName="Voice"
-      changedCount={advancedChangedCount}
-      summary={
-        advancedChangedCount > 0
-          ? `${advancedChangedCount} advanced voice ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-          : undefined
-      }
-      open={advancedOpen}
-      onOpenChange={setAdvancedOpen}
-      testId="advanced-voice"
-      validationError={validationError}
-      errorKeywords={["whisper"]}
-      onReset={resetVoiceAdvanced}
-    >
-      <div className="settings-section card">
+      <AdvancedDisclosure
+        tabName="Voice"
+        changedCount={advancedChangedCount}
+        summary={
+          advancedChangedCount > 0
+            ? `${advancedChangedCount} advanced voice ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
+            : undefined
+        }
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        testId="advanced-voice"
+        validationError={validationError}
+        errorKeywords={[...VOICE_ADVANCED_ERROR_KEYWORDS]}
+        onReset={resetVoiceAdvanced}
+      >
         <div className="form-group flex-1">
           <label htmlFor="whisper-model">Whisper Model</label>
           <input
@@ -100,9 +109,8 @@ export function VoiceTab({
             Whisper model size (e.g. tiny, base, small). Default is base.
           </span>
         </div>
-      </div>
-    </AdvancedDisclosure>
-    </>
+      </AdvancedDisclosure>
+    </div>
   );
 }
 

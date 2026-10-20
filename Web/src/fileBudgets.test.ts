@@ -13,9 +13,9 @@ const COMPONENT_LINE_BUDGET = 600;
 const SOURCE_LINE_BUDGET = 1000;
 const TEST_LINE_BUDGET = 1000;
 
-// Maximum line counts permitted for legacy files that exceed standard budgets.
-// Adding new entries here is discouraged; when refactoring existing files down,
-// ratchet these numbers downward.
+// Ratchet caps for over-budget legacy files; prefer shrinking entries over
+// adding new ones. Bash, Files, and Index stay whole to keep each disclosure
+// inside its card directly above its footer with a single merged save.
 const LEGACY_LINE_RATCHET: Record<string, number> = {
   // Stylesheet
   "src/styles.css": 50,
@@ -26,14 +26,14 @@ const LEGACY_LINE_RATCHET: Record<string, number> = {
   // Components (target budget <= 600)
   "src/components/EventRuleBuilder.tsx": 660,
   "src/components/access/AccessCredentialsSection.tsx": 675,
-  "src/components/access/AccessBashSection.tsx": 765,
+  "src/components/access/AccessBashSection.tsx": 635,
   "src/components/dashboard/NeedsActionQueue.tsx": 765,
   "src/components/SchedulerManager.tsx": 805,
   "src/components/RunLogViewer.tsx": 865,
   "src/components/TopNav.tsx": 945,
   "src/components/icons.tsx": 950,
   "src/components/ScheduleWizardModal.tsx": 970,
-  "src/components/access/AccessFilesSection.tsx": 1005,
+  "src/components/access/AccessFilesSection.tsx": 684,
   "src/components/ToolActionRow.tsx": 1075,
   "src/components/SessionSidebar.tsx": 1075,
   "src/components/ApprovalsInbox.tsx": 1080,
