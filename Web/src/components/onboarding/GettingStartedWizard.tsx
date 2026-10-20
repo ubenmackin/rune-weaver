@@ -1,6 +1,7 @@
 // Rune Weaver Dashboard — Onboarding wizard shell with gating, skip persistence, and resume.
 import { useCallback, useEffect, useState } from "react";
 import { fetchJson } from "../../api/http";
+import type { ProviderConfigData } from "../../api";
 import {
   sanitizeSkippedSteps,
   skipOnboardingStep,
@@ -8,7 +9,7 @@ import {
 } from "../../api/onboarding";
 import { useOnboardingStatus as useSharedOnboardingStatus } from "../../hooks/useOnboardingStatus";
 import { WIZARD_STEPS, isSkipped, nextStep, type WizardStepId } from "./wizardState";
-import BrainStep, { type BrainSelection } from "./BrainStep";
+import BrainStep, { resolveBrainProviderSave, type BrainSelection } from "./BrainStep";
 import PersonaStep, { type PersonaStepValue } from "./PersonaStep";
 import ConnectStep from "./ConnectStep";
 import ProtectStep from "./ProtectStep";
@@ -108,6 +109,13 @@ export default function GettingStartedWizard({
     return initialSkippedSteps !== undefined;
   });
   const [brainSelection, setBrainSelection] = useState<BrainSelection | null>(null);
+  const [brainProviders, setBrainProviders] = useState<
+    Record<string, ProviderConfigData> | undefined
+  >(undefined);
+  const [brainDefaultProvider, setBrainDefaultProvider] = useState<string | undefined>(
+    undefined,
+  );
+  const [brainProvidersError, setBrainProvidersError] = useState<string | null>(null);
   const [personaValue, setPersonaValue] = useState<PersonaStepValue | null>(null);
   const [internalSeedStatus, setInternalSeedStatus] = useState<SeedStatus | null>(null);
   const [seedLoading, setSeedLoading] = useState(false);
@@ -180,6 +188,40 @@ export default function GettingStartedWizard({
     void reloadSeed();
   }, [standalone, hasExternal, initialSkippedSteps, hydrated, reloadSeed]);
 
+  // Provider list stays server-owned so a brain save spreads existing
+  // entries instead of clobbering them with a single-entry dict.
+  useEffect(() => {
+    if (standalone) return;
+    if (!hydrated) return;
+    if (brainProviders !== undefined) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const settings = await fetchJson<{
+          providers?: Record<string, ProviderConfigData>;
+          defaultProvider?: string;
+        }>("/settings");
+        if (cancelled) return;
+        setBrainProviders(settings?.providers ?? {});
+        setBrainDefaultProvider(
+          typeof settings?.defaultProvider === "string" ? settings.defaultProvider : "",
+        );
+        setBrainProvidersError(null);
+      } catch (err) {
+        // Fail closed: leave the base undefined so save stays disabled
+        // and surface the load failure instead of seeding an empty dict.
+        if (!cancelled) {
+          setBrainProvidersError(
+            err instanceof Error ? err.message : "Failed to load providers.",
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [standalone, hydrated, brainProviders]);
+
   // Server-derived ack; no local checkbox persists across the gate.
   const seedStatus: SeedStatus | null = hasExternal
     ? toSeedStatus(onboardingStatus ?? null)
@@ -215,6 +257,9 @@ export default function GettingStartedWizard({
   function handleBrainNext(selection: BrainSelection) {
     setError(null);
     setBrainSelection(selection);
+    const resolved = resolveBrainProviderSave(selection, brainProviders);
+    setBrainProviders(resolved.providers);
+    setBrainDefaultProvider(resolved.defaultProvider);
     advanceFrom(current, skipped);
   }
 
@@ -308,11 +353,13 @@ export default function GettingStartedWizard({
           <div className="modal-header">
             <div>
               <h3>Getting started</h3>
-              <span className="wizard-step-indicator">Ready to finish</span>
+              <span className="wizard-step-indicator" data-testid="wizard-progress">
+                Step {total} of {total}: ready
+              </span>
             </div>
           </div>
-          <div className="wizard-progress-label" data-testid="wizard-progress">
-            Step {total} of {total}
+          <div className="wizard-progress-track">
+            <div className="wizard-progress-bar" style={{ width: "100%" }} />
           </div>
           <div className="modal-body wizard-body">
             {error ? <div className="error-banner">{error}</div> : null}
@@ -356,7 +403,7 @@ export default function GettingStartedWizard({
         <div className="modal-header">
           <div>
             <h3>Getting started</h3>
-            <span className="wizard-step-indicator">
+            <span className="wizard-step-indicator" data-testid="wizard-progress">
               Step {index + 1} of {total}: {current}
             </span>
           </div>
@@ -368,19 +415,28 @@ export default function GettingStartedWizard({
             style={{ width: `${((index + 1) / total) * 100}%` }}
           />
         </div>
-        <div className="wizard-progress-label" data-testid="wizard-progress">
-          Step {index + 1} of {total}
-        </div>
 
         <div className="modal-body wizard-body">
           {error ? <div className="error-banner">{error}</div> : null}
           {current === "brain" ? (
-            <BrainStep
-              initialChoice={brainSelection?.choice ?? "local"}
-              initialApiKeyEnv={brainSelection?.apiKeyEnv}
-              onBack={history.length > 1 ? handleBack : undefined}
-              onNext={handleBrainNext}
-            />
+            <>
+              {brainProviders === undefined && !brainProvidersError ? (
+                <p className="muted" data-testid="brain-loading">
+                  Loading providers…
+                </p>
+              ) : null}
+              <BrainStep
+                initialProviders={brainProviders}
+                initialDefaultProvider={
+                  brainDefaultProvider ?? brainSelection?.defaultProvider ?? ""
+                }
+                initialApiKeyEnv={brainSelection?.apiKeyEnv}
+                isLoading={brainProviders === undefined && !brainProvidersError}
+                loadError={brainProvidersError}
+                onBack={history.length > 1 ? handleBack : undefined}
+                onNext={handleBrainNext}
+              />
+            </>
           ) : null}
           {current === "persona" ? (
             <PersonaStep

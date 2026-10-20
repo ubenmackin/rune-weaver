@@ -46,6 +46,9 @@ describe("GettingStartedWizard progress", () => {
     stubFetch(async () => jsonResponse({ ok: true }));
     render(<GettingStartedWizard initialSkippedSteps={[]} />);
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
     await user.click(screen.getByTestId("brain-next"));
     await waitFor(() => {
       expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
@@ -69,6 +72,9 @@ describe("GettingStartedWizard progress", () => {
     stubFetch(async () => jsonResponse({ ok: true }));
     render(<GettingStartedWizard initialSkippedSteps={[]} />);
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
     await user.click(screen.getByTestId("brain-next"));
     await waitFor(() => {
       expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");

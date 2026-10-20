@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { ProviderConfigData } from "../../api";
+import { KNOWN_PROVIDER_TYPES } from "../../api/settings-types";
 import { CheckIcon, KeyIcon, PlusIcon, TrashIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import type { ProviderEntry } from "./settingsTypes";
@@ -145,21 +146,7 @@ export function ProvidersTab({
           const entry = item.config;
           const rawProviderType =
             entry.providerType || "";
-          const knownProviderTypes = [
-            "",
-            "custom",
-            "openrouter",
-            "openai",
-            "anthropic",
-            "gemini",
-            "ollama",
-            "mlx",
-            "lmstudio",
-            "llamacpp",
-            "llama-cpp",
-            "llama_cpp",
-            "local",
-          ];
+          const knownProviderTypes = KNOWN_PROVIDER_TYPES;
           return (
             <div key={item.id} className="provider-card">
               <div className="provider-card-header">

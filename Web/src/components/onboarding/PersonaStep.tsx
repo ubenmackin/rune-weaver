@@ -102,11 +102,13 @@ export function PersonaStep({
   return (
     <section className="onboarding-step" data-testid="persona-step" aria-label="Meet your assistant">
       <h2>Meet your assistant</h2>
-      <div>
+      <p className="onboarding-step-subtitle">Choose names and a first goal to personalize Rune Weaver.</p>
+      <div className="form-group">
         <label htmlFor="persona-assistant-name">Assistant name</label>
         <input
           id="persona-assistant-name"
           data-testid="persona-assistant-name"
+          className="input-field"
           type="text"
           value={assistantName}
           maxLength={ONBOARDING_NAME_MAX_LENGTH}
@@ -114,11 +116,12 @@ export function PersonaStep({
           placeholder="Rune Weaver"
         />
       </div>
-      <div>
+      <div className="form-group">
         <label htmlFor="persona-user-name">Your name</label>
         <input
           id="persona-user-name"
           data-testid="persona-user-name"
+          className="input-field"
           type="text"
           value={userName}
           maxLength={ONBOARDING_NAME_MAX_LENGTH}
@@ -126,11 +129,11 @@ export function PersonaStep({
           placeholder="Ada"
         />
       </div>
-      <fieldset>
+      <fieldset className="form-group">
         <legend>What should we set up first?</legend>
         <div role="radiogroup" aria-label="Onboarding goal">
           {ONBOARDING_GOALS.map((option) => (
-            <label key={option.value}>
+            <label key={option.value} className="onboarding-radio-card">
               <input
                 type="radio"
                 name="onboarding-goal"
@@ -145,17 +148,17 @@ export function PersonaStep({
         </div>
       </fieldset>
       {error ? (
-        <p data-testid="persona-error" role="alert">
+        <p data-testid="persona-error" role="alert" className="error-banner">
           {error}
         </p>
       ) : null}
-      <div>
+      <div className="onboarding-actions">
         {onBack ? (
-          <button type="button" data-testid="persona-back" onClick={onBack}>
+          <button type="button" className="ghost" data-testid="persona-back" onClick={onBack}>
             Back
           </button>
         ) : null}
-        <button type="button" data-testid="persona-next" disabled={saving} onClick={() => void handleNext()}>
+        <button type="button" className="primary" data-testid="persona-next" disabled={saving} onClick={() => void handleNext()}>
           {saving ? "Saving…" : "Next"}
         </button>
       </div>
