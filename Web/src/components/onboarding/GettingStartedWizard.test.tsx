@@ -209,10 +209,11 @@ describe("GettingStartedWizard footer error mirror", () => {
       await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
       await user.click(screen.getByTestId("brain-test-connection"));
       const inline = await screen.findByTestId("brain-test-status");
-      expect(inline.textContent).toMatch(/Key not found in Keychain/i);
+      expect(inline.textContent).toMatch(/Failed to connect/i);
+      expect(inline.textContent).toMatch(/Key not stored/i);
       const footer = screen.getByTestId("wizard-footer-error");
       await waitFor(() => {
-        expect(footer.textContent).toMatch(/Key not found in Keychain/i);
+        expect(footer.textContent).toMatch(/Key not stored/i);
       });
       expect(footer).toHaveAttribute("role", "alert");
       expect(scrollSpy).toHaveBeenCalled();

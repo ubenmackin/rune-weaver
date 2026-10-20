@@ -126,7 +126,7 @@
   color: var(--text-muted);
 }
 
-.granted-pill {
+.succeeded-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 10px;

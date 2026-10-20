@@ -1,14 +1,9 @@
 // Rune Weaver Dashboard — Onboarding brain provider form.
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ApiError,
-  checkSecretStatus,
-  updateSettings,
-  type ProviderConfigData,
-} from "../../api";
-import { KNOWN_PROVIDER_TYPES } from "../../api/settings-types";
-import { StoreSecretModal, normalizeSecretKey } from "../StoreSecretModal";
+import { useCallback, useEffect, useRef } from "react";
+import type { ProviderConfigData } from "../../api";
+import { normalizeSecretKey } from "../StoreSecretModal";
 import { KeychainBadge } from "./KeychainBadge";
+import { BRAIN_SECRET_PROBE_PATTERN } from "./brainProbe";
 
 export interface BrainProviderForm {
   providerName: string;
@@ -29,22 +24,19 @@ export interface BrainSelection {
 }
 
 export interface BrainStepProps {
-  initialProviders?: Record<string, ProviderConfigData>;
-  initialDefaultProvider?: string;
-  initialApiKeyEnv?: string;
-  isLoading?: boolean;
-  loadError?: string | null;
-  onBack?: () => void;
-  onNext?: (selection: BrainSelection) => void;
-  onError?: (message: string | null) => void;
+  value?: BrainProviderForm;
+  onChange?: (patch: Partial<BrainProviderForm>) => void;
+  testStatus?: "idle" | "testing" | "succeeded" | "failed";
+  testDetail?: string | null;
+  secretStored?: boolean;
+  onStoreKey?: () => void;
+  fieldError?: string | null;
 }
 
 export const BRAIN_PROVIDER_NAME_MAX_LENGTH = 64;
 export const BRAIN_MODEL_MAX_LENGTH = 128;
 export const BRAIN_API_KEY_ENV_MAX_LENGTH = 128;
 export const BRAIN_SERVER_URL_MAX_LENGTH = 253;
-
-export const BRAIN_KNOWN_PROVIDER_TYPES: readonly string[] = KNOWN_PROVIDER_TYPES;
 
 export const BRAIN_PROVIDER_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "", label: "Auto" },
@@ -60,7 +52,19 @@ export const BRAIN_PROVIDER_TYPE_OPTIONS: Array<{ value: string; label: string }
   { value: "local", label: "Local" },
 ];
 
-const BRAIN_API_KEY_ENV_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+// Shared URL shape check keeps wizard test and save validation in sync.
+export function isValidBrainServerURL(rawURL: string): boolean {
+  const trimmed = (rawURL ?? "").trim();
+  if (trimmed.length === 0) return true;
+  if (trimmed.length > BRAIN_SERVER_URL_MAX_LENGTH) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:";
+}
 
 // Empty key means local no-auth provider, so only non-empty values need shape checks.
 export function validateBrainProviderForm(form: BrainProviderForm): string | null {
@@ -76,19 +80,8 @@ export function validateBrainProviderForm(form: BrainProviderForm): string | nul
     return "Model must be 1 to 128 characters.";
   }
   const rawURL = (form.serverURL ?? "").trim();
-  if (rawURL.length > 0) {
-    if (rawURL.length > BRAIN_SERVER_URL_MAX_LENGTH) {
-      return "Server URL must be an absolute http(s) URL up to 253 characters.";
-    }
-    let parsed: URL;
-    try {
-      parsed = new URL(rawURL);
-    } catch {
-      return "Server URL must be an absolute http(s) URL up to 253 characters.";
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return "Server URL must be an absolute http(s) URL up to 253 characters.";
-    }
+  if (!isValidBrainServerURL(rawURL)) {
+    return "Server URL must be an absolute http(s) URL up to 253 characters.";
   }
   const env = (form.apiKeyEnv ?? "").trim();
   if (env.length === 0) {
@@ -97,7 +90,7 @@ export function validateBrainProviderForm(form: BrainProviderForm): string | nul
   if (env.length > BRAIN_API_KEY_ENV_MAX_LENGTH) {
     return "API Key Name must be empty or up to 128 characters: A-Z, 0-9, underscore, starting with a letter.";
   }
-  if (!BRAIN_API_KEY_ENV_PATTERN.test(env)) {
+  if (!BRAIN_SECRET_PROBE_PATTERN.test(env)) {
     return "API Key Name must be empty or up to 128 characters: A-Z, 0-9, underscore, starting with a letter.";
   }
   return null;
@@ -147,26 +140,10 @@ export function resolveBrainProviderSave(
   };
 }
 
-function resolveBrainInitialForm(
-  initialProviders: Record<string, ProviderConfigData> | undefined,
-  initialDefaultProvider: string | undefined,
-  legacyApiKeyEnv: string | undefined,
-): BrainProviderForm {
-  const entries = initialProviders ?? {};
-  const key = (initialDefaultProvider ?? "").trim();
-  if (key && Object.prototype.hasOwnProperty.call(entries, key)) {
-    const entry = entries[key];
-    const rawType =
-      typeof entry.providerType === "string" ? entry.providerType.trim() : "";
-    const normalizedType = rawType === "auto" ? "" : rawType;
-    return {
-      providerName: key,
-      providerType: normalizedType,
-      model: typeof entry.model === "string" ? entry.model : "",
-      serverURL: typeof entry.serverURL === "string" ? entry.serverURL : "",
-      apiKeyEnv: typeof entry.apiKeyEnv === "string" ? entry.apiKeyEnv : "",
-    };
-  }
+// Wizard starts blank for a new entry by product choice; saves spread
+// existing providers so configured installs keep working and edits
+// migrate through the Settings providers surface.
+export function resolveBrainInitialForm(legacyApiKeyEnv?: string): BrainProviderForm {
   const legacyEnv = (legacyApiKeyEnv ?? "").trim();
   return {
     providerName: "",
@@ -178,39 +155,20 @@ function resolveBrainInitialForm(
 }
 
 export function BrainStep({
-  initialProviders,
-  initialDefaultProvider,
-  initialApiKeyEnv = "",
-  isLoading = false,
-  loadError = null,
-  onBack,
-  onNext,
-  onError,
+  value = { providerName: "", providerType: "", model: "", serverURL: "", apiKeyEnv: "" },
+  onChange = () => {},
+  testStatus = "idle",
+  testDetail = null,
+  secretStored = false,
+  onStoreKey = () => {},
+  fieldError = null,
 }: BrainStepProps) {
-  const effectiveProviders = initialProviders ?? {};
-  const effectiveDefault = initialDefaultProvider ?? "";
-  const [initialForm] = useState<BrainProviderForm>(() =>
-    resolveBrainInitialForm(effectiveProviders, effectiveDefault, initialApiKeyEnv),
-  );
-  const [providerName, setProviderName] = useState(initialForm.providerName);
-  const [providerType, setProviderType] = useState(initialForm.providerType);
-  const [model, setModel] = useState(initialForm.model);
-  const [serverURL, setServerURL] = useState(initialForm.serverURL);
-  const [apiKeyEnv, setApiKeyEnv] = useState(initialForm.apiKeyEnv);
-  const [testStatus, setTestStatus] = useState<"idle" | "testing" | "granted" | "failed">("idle");
-  const [testDetail, setTestDetail] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [secretStatus, setSecretStatus] = useState<Record<string, boolean>>({});
-  const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
-  const dirtyRef = useRef(false);
   const errorRef = useRef<HTMLParagraphElement>(null);
-  const loadErrorRef = useRef<HTMLParagraphElement>(null);
   const testStatusRef = useRef<HTMLParagraphElement>(null);
 
   // Failures scroll into view then focus after paint, unless the owner
   // already moved into a field to correct it — never yank focus mid-edit.
-  const focusAfterPaint = useCallback((ref: { current: HTMLParagraphElement | null }) => {
+  const focusNode = useCallback((ref: { current: HTMLParagraphElement | null }) => {
     const run = () => {
       const target = ref.current;
       if (!target) return;
@@ -237,220 +195,58 @@ export function BrainStep({
     }
   }, []);
 
-  const normalizedKeyEnv = normalizeSecretKey(apiKeyEnv);
-  const isValidKeyShape =
-    normalizedKeyEnv.length > 0 &&
-    normalizedKeyEnv.length <= BRAIN_API_KEY_ENV_MAX_LENGTH &&
-    BRAIN_API_KEY_ENV_PATTERN.test(normalizedKeyEnv);
-  const hasProbedKey =
-    isValidKeyShape &&
-    Object.prototype.hasOwnProperty.call(secretStatus, normalizedKeyEnv);
-  const isStored = hasProbedKey ? secretStatus[normalizedKeyEnv] === true : false;
-  const showKeychainBadge = hasProbedKey;
-  const modalProviderLabel = providerName.trim() || "Provider";
-  const keychainModalTitle = isStored
-    ? `Update API Key for ${modalProviderLabel} in Keychain`
-    : `Store API Key for ${modalProviderLabel} to Keychain`;
-
-  // Late fetch must not clobber typed input: resync only while pristine.
+  // Inline failure surfaces where the form lives.
   useEffect(() => {
-    if (dirtyRef.current) return;
-    const next = resolveBrainInitialForm(
-      initialProviders,
-      effectiveDefault,
-      initialApiKeyEnv,
-    );
-    setProviderName(next.providerName);
-    setProviderType(next.providerType);
-    setModel(next.model);
-    setServerURL(next.serverURL);
-    setApiKeyEnv(next.apiKeyEnv);
-  }, [initialProviders, effectiveDefault, initialApiKeyEnv]);
+    if (fieldError) focusNode(errorRef);
+  }, [fieldError, focusNode]);
 
-  // Badge probe waits for a settled valid name so typing never spams Keychain.
+  // Test failure shares the same focusing posture as validation failures.
   useEffect(() => {
-    const key = normalizeSecretKey(apiKeyEnv);
-    if (!key || key.length > BRAIN_API_KEY_ENV_MAX_LENGTH) return;
-    if (!BRAIN_API_KEY_ENV_PATTERN.test(key)) return;
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      void checkSecretStatus([key])
-        .then((status) => {
-          if (!cancelled && status) {
-            setSecretStatus((prev) => ({ ...prev, [key]: status[key] === true }));
-          }
-        })
-        .catch(() => {});
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [apiKeyEnv]);
+    if (testStatus === "failed") focusNode(testStatusRef);
+  }, [testStatus, testDetail, focusNode]);
 
-  // Initial provider load failure surfaces where the form lives.
-  useEffect(() => {
-    if (loadError && !error) {
-      focusAfterPaint(loadErrorRef);
-    }
-  }, [loadError, error, focusAfterPaint]);
-
-  function handleStoreSuccess(key: string) {
-    const normalized = normalizeSecretKey(key) || normalizedKeyEnv;
-    if (normalized) {
-      setSecretStatus((prev) => ({ ...prev, [normalized]: true }));
-    }
-    setTestStatus("idle");
-    setTestDetail(null);
-    onError?.(null);
-  }
-
-  // Empty key means local no-auth, so it reports granted without probing Keychain.
-  async function handleTestConnection() {
-    const trimmed = normalizeSecretKey(apiKeyEnv);
-    if (!trimmed) {
-      setTestStatus("granted");
-      setTestDetail("No API key required — local provider");
-      onError?.(null);
-      return;
-    }
-    setTestStatus("testing");
-    setTestDetail(null);
-    try {
-      const status = await checkSecretStatus([trimmed]);
-      if (status && status[trimmed] === true) {
-        setTestStatus("granted");
-        setTestDetail(null);
-        onError?.(null);
-      } else {
-        const detail = "Key not found in Keychain. Store it, then retry.";
-        setTestStatus("failed");
-        setTestDetail(detail);
-        onError?.(detail);
-        focusAfterPaint(testStatusRef);
-      }
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : "Connection test failed. Retry.";
-      setTestStatus("failed");
-      setTestDetail(detail);
-      onError?.(detail);
-      focusAfterPaint(testStatusRef);
-    }
-  }
-
-  async function handleNext() {
-    if (isLoading) {
-      const message = "Providers are still loading. Wait, then retry.";
-      setError(message);
-      onError?.(message);
-      focusAfterPaint(errorRef);
-      return;
-    }
-    if (loadError) {
-      setError(loadError);
-      onError?.(loadError);
-      focusAfterPaint(errorRef);
-      return;
-    }
-    const problem = validateBrainProviderForm({
-      providerName,
-      providerType,
-      model,
-      serverURL,
-      apiKeyEnv,
-    });
-    if (problem) {
-      setError(problem);
-      onError?.(problem);
-      focusAfterPaint(errorRef);
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    onError?.(null);
-    const payload = resolveBrainProviderSave(
-      { providerName, providerType, model, serverURL, apiKeyEnv },
-      effectiveProviders,
-    );
-    try {
-      await updateSettings({
-        defaultProvider: payload.defaultProvider,
-        fallbackProvider: payload.fallbackProvider,
-        providers: payload.providers,
-      });
-      onNext?.({
-        providerName: payload.providerName,
-        defaultProvider: payload.defaultProvider,
-        fallbackProvider: payload.fallbackProvider,
-        providerType: payload.providerType,
-        model: payload.model,
-        serverURL: payload.serverURL,
-        apiKeyEnv: payload.apiKeyEnv,
-      });
-    } catch (err) {
-      // Plain-text bodies drop the status from the message, so reattach
-      // the code for an honest unauthenticated notice.
-      let detail: string;
-      if (err instanceof ApiError && err.status) {
-        detail = err.message.includes(String(err.status))
-          ? err.message
-          : `${err.status} ${err.message}`;
-      } else {
-        detail = err instanceof Error ? err.message : "Failed to save provider.";
-      }
-      setError(detail);
-      onError?.(detail);
-      focusAfterPaint(errorRef);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const testing = testStatus === "testing";
-  const saveBlocked = saving || testing || isLoading || !!loadError;
+  const normalizedKey = normalizeSecretKey(value.apiKeyEnv);
+  const showKeychain = normalizedKey.length > 0;
+  const isStored = secretStored === true;
   const showUnknownType =
-    providerType !== "" &&
-    !BRAIN_PROVIDER_TYPE_OPTIONS.some((option) => option.value === providerType);
+    value.providerType !== "" &&
+    !BRAIN_PROVIDER_TYPE_OPTIONS.some((option) => option.value === value.providerType);
 
   return (
     <section className="onboarding-step" data-testid="brain-step" aria-label="Choose your brain">
       <h2>Choose your brain</h2>
       <p className="onboarding-step-subtitle">Local-first by default. Cloud is an opt-in fallback.</p>
-      <div className="form-group">
-        <label htmlFor="brain-provider-name">Provider name</label>
-        <input
-          id="brain-provider-name"
-          data-testid="brain-provider-name"
-          className="input-field"
-          type="text"
-          value={providerName}
-          maxLength={BRAIN_PROVIDER_NAME_MAX_LENGTH}
-          onChange={(e) => {
-            dirtyRef.current = true;
-            setProviderName(e.target.value);
-          }}
-          placeholder="e.g. my-provider"
-        />
-      </div>
-      <div className="form-group">
-        <label htmlFor="brain-provider-type">Provider Type</label>
-        <select
-          id="brain-provider-type"
-          data-testid="brain-provider-type"
-          className="input-field"
-          value={providerType}
-          onChange={(e) => {
-            dirtyRef.current = true;
-            setProviderType(e.target.value);
-          }}
-        >
-          {BRAIN_PROVIDER_TYPE_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-          {showUnknownType ? <option value={providerType}>{providerType}</option> : null}
-        </select>
+      <div className="form-row">
+        <div className="form-group flex-1">
+          <label htmlFor="brain-provider-name">Provider name</label>
+          <input
+            id="brain-provider-name"
+            data-testid="brain-provider-name"
+            className="input-field"
+            type="text"
+            value={value.providerName}
+            maxLength={BRAIN_PROVIDER_NAME_MAX_LENGTH}
+            onChange={(e) => onChange({ providerName: e.target.value })}
+            placeholder="e.g. my-provider"
+          />
+        </div>
+        <div className="form-group flex-1">
+          <label htmlFor="brain-provider-type">Provider Type</label>
+          <select
+            id="brain-provider-type"
+            data-testid="brain-provider-type"
+            className="input-field"
+            value={value.providerType}
+            onChange={(e) => onChange({ providerType: e.target.value })}
+          >
+            {BRAIN_PROVIDER_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+            {showUnknownType ? <option value={value.providerType}>{value.providerType}</option> : null}
+          </select>
+        </div>
       </div>
       <div className="form-group">
         <label htmlFor="brain-model">Model</label>
@@ -459,12 +255,9 @@ export function BrainStep({
           data-testid="brain-model"
           className="input-field"
           type="text"
-          value={model}
+          value={value.model}
           maxLength={BRAIN_MODEL_MAX_LENGTH}
-          onChange={(e) => {
-            dirtyRef.current = true;
-            setModel(e.target.value);
-          }}
+          onChange={(e) => onChange({ model: e.target.value })}
           placeholder="e.g. gemma-4-9b"
         />
       </div>
@@ -475,24 +268,17 @@ export function BrainStep({
           data-testid="brain-server-url"
           className="input-field"
           type="text"
-          value={serverURL}
+          value={value.serverURL}
           maxLength={BRAIN_SERVER_URL_MAX_LENGTH}
-          onChange={(e) => {
-            dirtyRef.current = true;
-            setServerURL(e.target.value);
-          }}
+          onChange={(e) => onChange({ serverURL: e.target.value })}
           placeholder="https://openrouter.ai/api/v1"
         />
       </div>
       <div className="form-group">
         <div className="keychain-row">
-          <label htmlFor="brain-api-key-env">API Key Name</label>
-          {showKeychainBadge ? (
-            <KeychainBadge
-              isStored={isStored}
-              keyEnv={normalizedKeyEnv}
-              onStore={() => setIsStoreModalOpen(true)}
-            />
+          <label htmlFor="brain-api-key-env">API Key Name - Optional</label>
+          {showKeychain ? (
+            <KeychainBadge isStored={isStored} keyEnv={normalizedKey} onStore={onStoreKey} />
           ) : null}
         </div>
         <input
@@ -500,32 +286,11 @@ export function BrainStep({
           data-testid="brain-api-key-env"
           className="input-field"
           type="text"
-          value={apiKeyEnv}
+          value={value.apiKeyEnv}
           maxLength={BRAIN_API_KEY_ENV_MAX_LENGTH}
-          onChange={(e) => {
-            dirtyRef.current = true;
-            setApiKeyEnv(e.target.value);
-            if (testStatus === "failed") {
-              onError?.(null);
-            }
-            setTestStatus("idle");
-            setTestDetail(null);
-          }}
+          onChange={(e) => onChange({ apiKeyEnv: e.target.value })}
           placeholder="e.g. OPENROUTER_API_KEY"
         />
-        <p className="muted text-sm">Local providers leave this blank — no key needed.</p>
-        <p className="muted text-sm">Stored in macOS Keychain under com.runeweaver.secrets, never in the config file.</p>
-      </div>
-      <div className="onboarding-actions">
-        <button
-          type="button"
-          className="ghost"
-          data-testid="brain-test-connection"
-          disabled={testing || saving}
-          onClick={() => void handleTestConnection()}
-        >
-          {testing ? "Testing…" : "Test connection"}
-        </button>
       </div>
       {testStatus !== "idle" ? (
         <p
@@ -533,55 +298,26 @@ export function BrainStep({
           tabIndex={-1}
           data-testid="brain-test-status"
           role={testStatus === "failed" ? "alert" : "status"}
-          className={testStatus === "failed" ? "error-banner" : testStatus === "granted" ? "granted-pill" : undefined}
+          className={
+            testStatus === "failed"
+              ? "error-banner"
+              : testStatus === "succeeded"
+                ? "succeeded-pill"
+                : undefined
+          }
         >
-          {testStatus === "granted"
-            ? `granted${testDetail ? ` — ${testDetail}` : ""}`
+          {testStatus === "succeeded"
+            ? `Succeeded${testDetail ? ` — ${testDetail}` : ""}`
             : testStatus === "failed"
-              ? `failed${testDetail ? ` — ${testDetail}` : ""}`
-              : "testing…"}
+              ? `Failed to connect${testDetail ? ` — ${testDetail}` : ""}`
+              : "Testing…"}
         </p>
       ) : null}
-      {loadError && !error ? (
-        <p
-          ref={loadErrorRef}
-          tabIndex={-1}
-          data-testid="brain-load-error"
-          role="alert"
-          className="error-banner"
-        >
-          {loadError}
-        </p>
-      ) : null}
-      {error ? (
+      {fieldError ? (
         <p ref={errorRef} tabIndex={-1} data-testid="brain-error" role="alert" className="error-banner">
-          {error}
+          {fieldError}
         </p>
       ) : null}
-      <div className="onboarding-actions">
-        {onBack ? (
-          <button type="button" className="ghost" data-testid="brain-back" onClick={onBack}>
-            Back
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="primary"
-          data-testid="brain-next"
-          disabled={saveBlocked}
-          onClick={() => void handleNext()}
-        >
-          {saving ? "Saving…" : testing ? "Testing…" : isLoading ? "Loading…" : "Next"}
-        </button>
-      </div>
-      <StoreSecretModal
-        isOpen={isStoreModalOpen}
-        secretKey={normalizedKeyEnv}
-        title={keychainModalTitle}
-        isUpdate={isStored}
-        onClose={() => setIsStoreModalOpen(false)}
-        onSuccess={handleStoreSuccess}
-      />
     </section>
   );
 }

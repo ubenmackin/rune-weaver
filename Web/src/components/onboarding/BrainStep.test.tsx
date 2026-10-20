@@ -1,8 +1,13 @@
 // Rune Weaver Dashboard — Component tests for onboarding brain plus persona steps.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BrainStep, validateBrainProviderForm } from "./BrainStep";
+import BrainStep, {
+  validateBrainProviderForm,
+  type BrainProviderForm,
+} from "./BrainStep";
+import GettingStartedWizard from "./GettingStartedWizard";
 import {
   PersonaStep,
   step3CardOrderForGoal,
@@ -11,83 +16,134 @@ import {
 import { clearAuthToken } from "../../api";
 import { jsonResponse } from "../../test-utils/http";
 
+function BrainHarness({
+  initial,
+  secretStored = false,
+  onStoreKey,
+  testStatus = "idle" as const,
+  testDetail = null,
+  fieldError = null,
+}: {
+  initial?: Partial<BrainProviderForm>;
+  secretStored?: boolean;
+  onStoreKey?: () => void;
+  testStatus?: "idle" | "testing" | "succeeded" | "failed";
+  testDetail?: string | null;
+  fieldError?: string | null;
+}) {
+  const [value, setValue] = useState<BrainProviderForm>({
+    providerName: "",
+    providerType: "",
+    model: "",
+    serverURL: "",
+    apiKeyEnv: "",
+    ...initial,
+  });
+  return (
+    <BrainStep
+      value={value}
+      onChange={(patch) => setValue((prev) => ({ ...prev, ...patch }))}
+      secretStored={secretStored}
+      onStoreKey={onStoreKey}
+      testStatus={testStatus}
+      testDetail={testDetail}
+      fieldError={fieldError}
+    />
+  );
+}
+
+function stubWizardFetch(handler?: (input: string, init?: RequestInit) => Promise<Response>): void {
+  if (handler) {
+    vi.stubGlobal("fetch", vi.fn(handler));
+    return;
+  }
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes("/settings/secrets/status")) {
+        return jsonResponse({ status: {} });
+      }
+      return jsonResponse({});
+    }),
+  );
+}
+
 describe("BrainStep", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
   });
 
-  it("renders five-field form with dropdown plus server URL and zero radios", () => {
-    render(<BrainStep />);
-    expect(screen.queryAllByRole("radio")).toHaveLength(0);
-    expect(screen.getByTestId("brain-provider-name")).toBeInTheDocument();
-    expect(screen.getByTestId("brain-provider-type")).toBeInTheDocument();
+  it("shares a single-row layout for Provider Name plus Provider Type", () => {
+    render(<BrainHarness />);
+    const name = screen.getByTestId("brain-provider-name");
+    const type = screen.getByTestId("brain-provider-type");
+    const nameRow = name.closest(".form-row");
+    const typeRow = type.closest(".form-row");
+    expect(nameRow).not.toBeNull();
+    expect(nameRow).toBe(typeRow);
+    expect(name.closest(".form-group")?.classList.contains("flex-1")).toBe(true);
+    expect(type.closest(".form-group")?.classList.contains("flex-1")).toBe(true);
     expect(screen.getByTestId("brain-model")).toBeInTheDocument();
     expect(screen.getByTestId("brain-server-url")).toBeInTheDocument();
     expect(screen.getByTestId("brain-api-key-env")).toBeInTheDocument();
-    expect(screen.getByText("API Key Name")).toBeInTheDocument();
-    expect(screen.getByText(/Local providers leave this blank/i)).toBeInTheDocument();
-    const options = screen.getAllByRole("option").map((o) => o.textContent ?? "");
-    for (const label of [
-      "Custom",
-      "OpenRouter",
-      "OpenAI",
-      "Anthropic",
-      "Gemini",
-      "Ollama",
-      "MLX",
-      "LM Studio",
-      "llama.cpp",
-      "Local",
-      "Auto",
-    ]) {
-      expect(options.join(" ")).toMatch(new RegExp(label.replace(".", "\\."), "i"));
-    }
-    expect(screen.getByText(/keychain/i).textContent).toMatch(/com\.runeweaver\.secrets/i);
   });
 
-  it("blank install shows empty fields with placeholders", () => {
-    render(<BrainStep />);
-    expect((screen.getByTestId("brain-provider-name") as HTMLInputElement).value).toBe("");
-    expect((screen.getByTestId("brain-model") as HTMLInputElement).value).toBe("");
-    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).value).toBe("");
-    expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).value).toBe("");
-    expect((screen.getByTestId("brain-model") as HTMLInputElement).placeholder).toMatch(
-      /gemma-4-9b/i,
-    );
-    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).placeholder).toMatch(
-      /openrouter\.ai\/api\/v1/i,
-    );
+  it("labels the key field API Key Name - Optional with zero helper prose", () => {
+    render(<BrainHarness />);
+    expect(screen.getByText("API Key Name - Optional")).toBeInTheDocument();
+    const label = screen.getByText("API Key Name - Optional");
+    expect(label.getAttribute("for")).toBe("brain-api-key-env");
     expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).placeholder).toMatch(
       /OPENROUTER_API_KEY/i,
     );
+    expect(screen.queryByText(/Local providers leave this blank/i)).toBeNull();
+    expect(screen.queryByText(/never in the config/i)).toBeNull();
+    expect(screen.queryByText(/com\.runeweaver\.secrets/i)).toBeNull();
   });
 
-  it("prefills all five fields from the existing default provider", () => {
-    render(
-      <BrainStep
-        initialProviders={{
-          mybrain: {
-            enabled: true,
-            model: "m1",
-            serverURL: "https://example.com/v1",
-            apiKeyEnv: "MY_KEY",
-            providerType: "openai",
-          },
-        }}
-        initialDefaultProvider="mybrain"
-      />,
-    );
-    expect((screen.getByTestId("brain-provider-name") as HTMLInputElement).value).toBe("mybrain");
-    expect((screen.getByTestId("brain-provider-type") as HTMLInputElement).value).toBe("openai");
-    expect((screen.getByTestId("brain-model") as HTMLInputElement).value).toBe("m1");
-    expect((screen.getByTestId("brain-server-url") as HTMLInputElement).value).toBe(
-      "https://example.com/v1",
-    );
-    expect((screen.getByTestId("brain-api-key-env") as HTMLInputElement).value).toBe("MY_KEY");
+  it("shows no pill when the key name is blank", () => {
+    render(<BrainHarness initial={{ apiKeyEnv: "" }} />);
+    expect(screen.queryByText(/Not Set in Keychain/i)).toBeNull();
+    expect(screen.queryByText(/Stored in Keychain/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Store Key/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Update Key/i })).toBeNull();
   });
 
-  it("validates fail-closed bounds without network writes", () => {
+  it("immediately shows Not Set pill plus Store Key on typing", async () => {
+    const user = userEvent.setup();
+    render(<BrainHarness />);
+    expect(screen.queryByText(/Not Set in Keychain/i)).toBeNull();
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    expect(await screen.findByText(/Not Set in Keychain/i)).toBeInTheDocument();
+    const storeButton = screen.getByRole("button", { name: /Store Key/i });
+    expect(storeButton).toBeInTheDocument();
+    expect(storeButton).toHaveClass("keychain-action-btn");
+    expect(storeButton.getAttribute("title")).toMatch(/Store secret for MY_KEY in Keychain/);
+    expect(screen.getByText(/Not Set in Keychain/i)).toHaveClass("keychain-status-badge", "missing");
+  });
+
+  it("shows Stored pill plus Update Key when secretStored is true", () => {
+    const onStoreKey = vi.fn();
+    render(<BrainHarness initial={{ apiKeyEnv: "MY_KEY" }} secretStored onStoreKey={onStoreKey} />);
+    expect(screen.getByText(/Stored in Keychain/i)).toBeInTheDocument();
+    expect(screen.getByText(/Stored in Keychain/i)).toHaveClass("keychain-status-badge", "stored");
+    const updateButton = screen.getByRole("button", { name: /Update Key/i });
+    expect(updateButton).toHaveClass("keychain-action-btn");
+    expect(updateButton.getAttribute("title")).toBe("Update secret for MY_KEY");
+    fireEvent.click(updateButton);
+    expect(onStoreKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders zero inline action buttons in the presentational step", () => {
+    render(<BrainHarness initial={{ apiKeyEnv: "MY_KEY" }} />);
+    expect(screen.queryByTestId("brain-next")).toBeNull();
+    expect(screen.queryByTestId("brain-test-connection")).toBeNull();
+    expect(screen.queryByTestId("brain-back")).toBeNull();
+    expect(document.querySelector(".onboarding-actions")).toBeNull();
+  });
+
+  it("validates fail-closed bounds with empty key valid", () => {
     expect(
       validateBrainProviderForm({
         providerName: "n",
@@ -144,201 +200,38 @@ describe("BrainStep", () => {
     ).toMatch(/API Key Name/i);
   });
 
-  it("blocks Next on blank name without saving", async () => {
-    const user = userEvent.setup();
-    const fetchMock = vi.fn(async () => jsonResponse({}));
-    vi.stubGlobal("fetch", fetchMock);
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
-    await user.type(screen.getByTestId("brain-model"), "m1");
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
-    await user.click(screen.getByTestId("brain-next"));
-    expect(await screen.findByTestId("brain-error")).toBeInTheDocument();
-    expect(screen.getByTestId("brain-error").textContent).toMatch(/1 to 64/i);
-    expect(onNext).not.toHaveBeenCalled();
-    expect(
-      fetchMock.mock.calls.filter((call) => {
-        const [url, init] = call as unknown as [string, RequestInit | undefined];
-        return String(url) === "/settings" && init?.method === "PUT";
-      }),
-    ).toHaveLength(0);
-  });
-
-  it("blocks Next on bad URL and bad env", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
-    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
-    await user.type(screen.getByTestId("brain-model"), "m1");
-    await user.type(screen.getByTestId("brain-server-url"), "not-a-url");
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
-    await user.click(screen.getByTestId("brain-next"));
-    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/Server URL/i);
-    expect(onNext).not.toHaveBeenCalled();
-
-    await user.clear(screen.getByTestId("brain-server-url"));
-    await user.clear(screen.getByTestId("brain-api-key-env"));
-    await user.type(screen.getByTestId("brain-api-key-env"), "bad-env!");
-    await user.click(screen.getByTestId("brain-next"));
-    await waitFor(() => {
-      expect(screen.getByTestId("brain-error")).toHaveTextContent(/API Key Name/i);
-    });
-    expect(onNext).not.toHaveBeenCalled();
-  });
-
-  it("creates a single provider set as default with empty fallback", async () => {
-    const user = userEvent.setup();
-    const puts: Array<Record<string, unknown>> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        if (String(url) === "/settings" && init?.method === "PUT") {
-          puts.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
-        }
-        return jsonResponse({});
-      }),
+  it("renders inline field plus test states without owning actions", () => {
+    const { rerender } = render(
+      <BrainStep
+        value={{ providerName: "", providerType: "", model: "", serverURL: "", apiKeyEnv: "" }}
+        onChange={() => {}}
+      />,
     );
-    const onNext = vi.fn();
-    render(<BrainStep initialProviders={{ other: { enabled: true } }} onNext={onNext} />);
-    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
-    await user.selectOptions(screen.getByTestId("brain-provider-type"), "openai");
-    await user.type(screen.getByTestId("brain-model"), "m1");
-    await user.type(screen.getByTestId("brain-server-url"), "https://example.com/v1");
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
-    await user.click(screen.getByTestId("brain-next"));
-    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1));
-    expect(puts).toHaveLength(1);
-    expect(puts[0]).toMatchObject({ defaultProvider: "mybrain", fallbackProvider: "" });
-    const providers = (puts[0] as { providers: Record<string, Record<string, unknown>> }).providers;
-    expect(providers["mybrain"]).toMatchObject({
-      enabled: true,
-      model: "m1",
-      serverURL: "https://example.com/v1",
-      apiKeyEnv: "MY_KEY",
-      providerType: "openai",
-    });
-    expect(providers["other"]).toBeDefined();
-    expect(onNext.mock.calls[0][0]).toMatchObject({
-      providerName: "mybrain",
-      defaultProvider: "mybrain",
-      model: "m1",
-      serverURL: "https://example.com/v1",
-      apiKeyEnv: "MY_KEY",
-    });
-  });
-
-  it("reports granted inline when no key is needed for local providers", async () => {
-    const user = userEvent.setup();
-    const fetchMock = vi.fn(async () => jsonResponse({}));
-    vi.stubGlobal("fetch", fetchMock);
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText(/No API key required/i)).toBeInTheDocument();
-    expect(screen.getByTestId("brain-test-status").textContent).toMatch(/granted/i);
-    expect(screen.getByTestId("brain-test-status")).toHaveClass("granted-pill");
-    expect(onNext).not.toHaveBeenCalled();
-    expect(
-      fetchMock.mock.calls.some((call) => {
-        const [url] = call as unknown as [string];
-        return String(url).includes("/settings/secrets/status");
-      }),
-    ).toBe(false);
-  });
-
-  it("shows failed inline when the key is missing and never advances", async () => {
-    const user = userEvent.setup();
-    const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      if (String(url) === "/settings/secrets/status") {
-        return jsonResponse({ status: { MY_KEY: false } });
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText(/failed/i)).toBeInTheDocument();
-    expect(screen.getByTestId("brain-test-status").textContent).toMatch(/failed/i);
-    expect(screen.getByTestId("brain-test-status").textContent).toMatch(
-      /Key not found in Keychain/i,
+    expect(screen.queryByTestId("brain-test-status")).toBeNull();
+    expect(screen.queryByTestId("brain-error")).toBeNull();
+    rerender(
+      <BrainStep
+        value={{ providerName: "", providerType: "", model: "", serverURL: "", apiKeyEnv: "MY_KEY" }}
+        onChange={() => {}}
+        testStatus="failed"
+        testDetail="Key not stored"
+        fieldError="Model must be 1 to 128 characters."
+      />,
     );
-    expect(screen.getByTestId("brain-test-status")).toHaveClass("error-banner");
-    expect(onNext).not.toHaveBeenCalled();
-    expect(screen.getByTestId("brain-test-connection")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-test-status")).toHaveTextContent(/Failed to connect/i);
+    expect(screen.getByTestId("brain-test-status")).toHaveAttribute("role", "alert");
+    expect(screen.getByTestId("brain-error")).toHaveTextContent(/1 to 128/i);
   });
 
-  it("shows granted inline when the key is stored", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ status: { MY_KEY: true } })),
-    );
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText("granted")).toBeInTheDocument();
-    expect(onNext).not.toHaveBeenCalled();
-  });
-
-  it("disables Test plus Next while testing", async () => {
-    let resolveFetch!: (value: Response) => void;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveFetch = resolve;
-          }),
-      ),
-    );
-    render(<BrainStep />);
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    fireEvent.click(screen.getByTestId("brain-test-connection"));
-    await waitFor(() => {
-      expect(screen.getByTestId("brain-test-connection")).toBeDisabled();
-      expect(screen.getByTestId("brain-next")).toBeDisabled();
-    });
-    expect(screen.getByTestId("brain-test-connection").textContent).toMatch(/Testing/i);
-    resolveFetch(jsonResponse({ status: { MY_KEY: true } }));
-    expect(await screen.findByText("granted")).toBeInTheDocument();
-  });
-
-  it("shows Keychain badge plus Store Key when a key name is entered", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string | URL | Request) => {
-        if (String(url) === "/settings/secrets/status") {
-          return jsonResponse({ status: { MY_KEY: false } });
-        }
-        return jsonResponse({});
-      }),
-    );
-    render(<BrainStep />);
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    expect(await screen.findByText(/Not Set in Keychain/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Store Key/i })).toBeInTheDocument();
-  });
-
-  it("shows Stored badge plus Update Key when the key is stored", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ status: { MY_KEY: true } })),
-    );
-    render(<BrainStep />);
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    expect(await screen.findByText(/Stored in Keychain/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Update Key/i })).toBeInTheDocument();
-  });
-
-  it("opens the store modal and marks stored plus clears Test on success", async () => {
+  it("opens the store modal from the wizard footer and marks stored on success", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url) === "/settings") {
+          if (init?.method === "PUT") return jsonResponse({});
+          return jsonResponse({ providers: {}, defaultProvider: "" });
+        }
         if (String(url) === "/settings/secrets/status") {
           return jsonResponse({ status: { MY_KEY: false } });
         }
@@ -348,11 +241,10 @@ describe("BrainStep", () => {
         return jsonResponse({});
       }),
     );
-    render(<BrainStep />);
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
     await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
     fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    await user.click(screen.getByTestId("brain-test-connection"));
-    expect(await screen.findByText(/Key not found in Keychain/i)).toBeInTheDocument();
     const storeButton = await screen.findByRole("button", { name: /Store Key/i });
     expect(storeButton).toHaveAttribute("title", expect.stringMatching(/Store secret for MY_KEY/));
     await user.click(storeButton);
@@ -369,129 +261,195 @@ describe("BrainStep", () => {
     expect(screen.queryByTestId("brain-test-status")).toBeNull();
   });
 
-  it("surfaces unauthenticated save inline without advancing", async () => {
+  it("owns Back plus Test plus Next in the wizard footer with zero step actions", async () => {
+    const user = userEvent.setup();
+    stubWizardFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({});
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-test-connection")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("brain-next")).toBeInTheDocument();
+    expect(screen.getByTestId("brain-next")).toHaveClass("primary");
+    expect(screen.getByTestId("brain-test-connection")).toHaveClass("ghost");
+    const step = screen.getByTestId("brain-step");
+    expect(step.querySelector(".onboarding-actions")).toBeNull();
+    expect(step.querySelector('[data-testid="brain-next"]')).toBeNull();
+    expect(step.querySelector('[data-testid="brain-test-connection"]')).toBeNull();
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+    });
+  });
+
+  it("disables footer Test plus Next while testing plus saving plus loading", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (url: string | URL | Request) =>
+          new Promise<Response>((resolve) => {
+            if (String(url) === "/settings/secrets/status") {
+              return;
+            }
+            resolve(jsonResponse({ providers: {}, defaultProvider: "" }));
+          }),
+      ),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
+    fireEvent.click(screen.getByTestId("brain-test-connection"));
+    await waitFor(() => {
+      expect(screen.getByTestId("brain-test-connection")).toBeDisabled();
+      expect(screen.getByTestId("brain-next")).toBeDisabled();
+    });
+  });
+
+  it("blocks Next on blank name plus blank model with inline plus footer errors", async () => {
+    const user = userEvent.setup();
+    stubWizardFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({});
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.click(screen.getByTestId("brain-next"));
+    const inline = await screen.findByTestId("brain-error");
+    expect(inline).toHaveTextContent(/1 to 64/i);
+    expect(inline).toHaveAttribute("role", "alert");
+    const footer = screen.getByTestId("wizard-footer-error");
+    expect(footer).toHaveAttribute("role", "alert");
+    expect(footer.textContent).not.toBe("");
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/1 to 128/i);
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+  });
+
+  it("blocks Next on bad URL plus bad key shape", async () => {
+    const user = userEvent.setup();
+    stubWizardFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({});
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    fireEvent.change(screen.getByTestId("brain-server-url"), { target: { value: "not-a-url" } });
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/URL/i);
+    expect(screen.getByTestId("wizard-footer-error").textContent).toMatch(/URL/i);
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+    fireEvent.change(screen.getByTestId("brain-server-url"), { target: { value: "" } });
+    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "bad-env!" } });
+    await user.click(screen.getByTestId("brain-next"));
+    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/API Key Name/i);
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+  });
+
+  it("saves a single provider payload preserving existing entries", async () => {
+    const user = userEvent.setup();
+    const puts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target === "/settings" && init?.method === "PUT") {
+          puts.push({ url: target, body: JSON.parse(String(init.body ?? "{}")) });
+          return jsonResponse({ ok: true });
+        }
+        if (target === "/settings") {
+          return jsonResponse({
+            providers: {
+              other: { model: "other-model", serverURL: "", apiKeyEnv: "", providerType: "" },
+            },
+            defaultProvider: "other",
+          });
+        }
+        if (target === "/settings/secrets/status") return jsonResponse({ status: {} });
+        return jsonResponse({});
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+    });
+    expect(puts).toHaveLength(1);
+    const payload = puts[0].body as {
+      defaultProvider: string;
+      fallbackProvider: string;
+      providers: Record<string, Record<string, unknown>>;
+    };
+    expect(payload.defaultProvider).toBe("mybrain");
+    expect(payload.fallbackProvider).toBe("");
+    expect(payload.providers["other"]).toBeDefined();
+    expect(payload.providers["mybrain"]).toMatchObject({ model: "m1" });
+  });
+
+  it("surfaces 401 unauthenticated save inline with status code", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("Unauthorized", { status: 401, statusText: "Unauthorized" })),
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target === "/settings" && init?.method === "PUT") {
+          return new Response("unauthenticated", { status: 401, statusText: "Unauthorized" });
+        }
+        if (target === "/settings") {
+          return jsonResponse({ providers: {}, defaultProvider: "" });
+        }
+        if (target === "/settings/secrets/status") return jsonResponse({ status: {} });
+        return jsonResponse({});
+      }),
     );
-    const onNext = vi.fn();
-    render(<BrainStep onNext={onNext} />);
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
     await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
     await user.type(screen.getByTestId("brain-model"), "m1");
-    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
     await user.click(screen.getByTestId("brain-next"));
-    expect(await screen.findByTestId("brain-error")).toBeInTheDocument();
-    expect(screen.getByTestId("brain-error").textContent).toMatch(/401/i);
-    expect(onNext).not.toHaveBeenCalled();
+    const inline = await screen.findByTestId("brain-error");
+    expect(inline).toHaveTextContent(/401/i);
+    expect(screen.getByTestId("wizard-footer-error").textContent).toMatch(/401/i);
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
   });
 
-  it("propagates validation plus save plus test failures via onError", async () => {
+  it("renders role alert on failed test status through the wizard footer", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string | URL | Request) => {
-        if (String(url) === "/settings/secrets/status") {
+        if (String(url).includes("/settings/secrets/status")) {
           return jsonResponse({ status: { MY_KEY: false } });
         }
-        return jsonResponse({});
+        return jsonResponse({ providers: {}, defaultProvider: "" });
       }),
     );
-    const onError = vi.fn();
-    render(<BrainStep onNext={vi.fn()} onError={onError} />);
-    await user.type(screen.getByTestId("brain-model"), "m1");
-    await user.click(screen.getByTestId("brain-next"));
-    await screen.findByTestId("brain-error");
-    expect(onError).toHaveBeenCalledWith(expect.stringMatching(/1 to 64/i));
-    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    await user.click(screen.getByTestId("brain-test-connection"));
-    await screen.findByText(/Key not found in Keychain/i);
-    expect(onError).toHaveBeenCalledWith(expect.stringMatching(/Key not found in Keychain/i));
-  });
-
-  it("renders no status when idle and alert when failed", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ status: { MY_KEY: false } })),
-    );
-    render(<BrainStep />);
-    expect(screen.queryByTestId("brain-test-status")).toBeNull();
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    await user.click(screen.getByTestId("brain-test-connection"));
-    const failed = await screen.findByTestId("brain-test-status");
-    expect(failed).toHaveAttribute("role", "alert");
-    expect(failed).toHaveClass("error-banner");
-  });
-
-  it("triggers scrollIntoView plus focus on validation failure", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    const focusSpy = vi.fn();
-    const originalScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
-    const originalFocus = window.HTMLElement.prototype.focus;
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).focus = focusSpy;
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      cb(0);
-      return 0;
-    });
-    try {
-      render(<BrainStep onNext={vi.fn()} />);
-      await user.type(screen.getByTestId("brain-model"), "m1");
-      await user.click(screen.getByTestId("brain-next"));
-      await screen.findByTestId("brain-error");
-      await waitFor(() => {
-        expect(scrollSpy).toHaveBeenCalledWith(expect.objectContaining({ block: "nearest" }));
-        expect(focusSpy).toHaveBeenCalled();
-      });
-    } finally {
-      window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
-      window.HTMLElement.prototype.focus = originalFocus;
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("hides badge until probe resolves and never for invalid shape", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ status: { MY_KEY: false } })),
-    );
-    render(<BrainStep />);
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY" } });
-    expect(screen.queryByText(/Not Set in Keychain/i)).toBeNull();
-    expect(await screen.findByText(/Not Set in Keychain/i)).toBeInTheDocument();
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "MY_KEY!" } });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
     await waitFor(() => {
-      expect(screen.queryByText(/Stored in Keychain/i)).toBeNull();
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
     });
-    expect(screen.queryByText(/Not Set in Keychain/i)).toBeNull();
-  });
-
-  it("normalizes a pasted rwsecret prefix for probe", async () => {
-    const fetchMock = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
-      if (String(url) === "/settings/secrets/status") {
-        return jsonResponse({ status: { MY_KEY: false } });
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    render(<BrainStep />);
-    fireEvent.change(screen.getByTestId("brain-api-key-env"), {
-      target: { value: "rwsecret:MY_KEY" },
-    });
-    expect(await screen.findByText(/Not Set in Keychain/i)).toBeInTheDocument();
-    await waitFor(() => {
-      const bodies = fetchMock.mock.calls
-        .filter(([url]) => String(url).includes("/settings/secrets/status"))
-        .map(([, init]) => String((init as RequestInit)?.body ?? ""));
-      expect(bodies.length).toBeGreaterThan(0);
-      expect(bodies.join(" ")).toContain("MY_KEY");
-      expect(bodies.join(" ")).not.toContain("rwsecret:MY_KEY");
-    });
+    await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+    await user.click(screen.getByTestId("brain-test-connection"));
+    const status = await screen.findByTestId("brain-test-status");
+    expect(status).toHaveTextContent(/Failed to connect/i);
+    expect(status).toHaveAttribute("role", "alert");
   });
 });
 
