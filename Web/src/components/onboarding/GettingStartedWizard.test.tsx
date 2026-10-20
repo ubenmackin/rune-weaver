@@ -3,7 +3,10 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import GettingStartedWizard from "./GettingStartedWizard";
+import GettingStartedWizard, {
+  WIZARD_FOOTER_ERROR_MAX_LENGTH,
+  truncateWizardFooterError,
+} from "./GettingStartedWizard";
 import { WIZARD_STEPS, isSkipped, nextStep } from "./wizardState";
 import { jsonResponse } from "../../test-utils/http";
 
@@ -144,6 +147,79 @@ describe("GettingStartedWizard skip and resume", () => {
       );
     });
     await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("GettingStartedWizard footer error mirror", () => {
+  it("truncates overlong errors to 140 chars with ellipsis", () => {
+    expect(WIZARD_FOOTER_ERROR_MAX_LENGTH).toBe(140);
+    expect(truncateWizardFooterError(null)).toBe("");
+    expect(truncateWizardFooterError(undefined)).toBe("");
+    expect(truncateWizardFooterError("")).toBe("");
+    expect(truncateWizardFooterError("short")).toBe("short");
+    const long = "x".repeat(200);
+    const truncated = truncateWizardFooterError(long);
+    expect(truncated.length).toBe(140);
+    expect(truncated.endsWith("…")).toBe(true);
+  });
+
+  it("renders zero footer text when no error", () => {
+    stubFetch(async () => jsonResponse({ ok: true }));
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    const footer = screen.getByTestId("wizard-footer-error");
+    expect(footer).toHaveTextContent("");
+    expect(footer.textContent).toBe("");
+    expect(footer).toHaveClass("wizard-footer-error");
+    expect(footer.getAttribute("role")).toBeNull();
+  });
+
+  it("mirrors validation errors in footer with role alert", async () => {
+    const user = userEvent.setup();
+    stubFetch(async () => jsonResponse({}));
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await user.click(screen.getByTestId("brain-next"));
+    const inline = await screen.findByTestId("brain-error");
+    expect(inline).toHaveAttribute("role", "alert");
+    const footer = screen.getByTestId("wizard-footer-error");
+    expect(footer).toHaveAttribute("role", "alert");
+    expect(footer.textContent).not.toBe("");
+    expect(footer.textContent).toContain(truncateWizardFooterError(inline.textContent ?? "").slice(0, 20));
+  });
+
+  it("mirrors test failures in footer while keeping inline error", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        if (String(url).includes("/settings/secrets/status")) {
+          return jsonResponse({ status: { MY_KEY: false } });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    try {
+      render(<GettingStartedWizard initialSkippedSteps={[]} />);
+      await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
+      await user.click(screen.getByTestId("brain-test-connection"));
+      const inline = await screen.findByTestId("brain-test-status");
+      expect(inline.textContent).toMatch(/Key not found in Keychain/i);
+      const footer = screen.getByTestId("wizard-footer-error");
+      await waitFor(() => {
+        expect(footer.textContent).toMatch(/Key not found in Keychain/i);
+      });
+      expect(footer).toHaveAttribute("role", "alert");
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.pushState({}, "", "/");
+    }
   });
 });
 

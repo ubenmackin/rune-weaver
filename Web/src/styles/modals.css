@@ -249,6 +249,28 @@
 
 .wizard-modal {
   max-width: 640px;
+  max-height: min(90vh, calc(100vh - 40px));
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollable body keeps long steps inside the viewport on short screens. */
+.wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  max-height: 55vh;
+  padding: 20px;
+}
+
+/* Footer stays pinned while the body scrolls; never overlays inputs. */
+.modal-footer.wizard-footer {
+  position: sticky;
+  bottom: 0;
+  background: #141419;
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .wizard-progress-track {
