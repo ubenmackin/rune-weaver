@@ -32,7 +32,7 @@ export const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }
   {
     kind: "messages",
     label: "Messages",
-    hint: "Requires Full Disk Access — RuneWeaver.app, or your terminal emulator when running rune-weaver serve — then press Run.",
+    hint: "Requires Full Disk Access (RuneWeaver.app, or your terminal emulator when running rune-weaver serve), then press Run.",
   },
   { kind: "calendars", label: "Calendars" },
   { kind: "reminders", label: "Reminders" },
@@ -73,18 +73,18 @@ export function indexSourcePillTitle(
   }
   if (kind === "messages") {
     if (access === "denied") {
-      return `${label} is on but the chat database cannot be read. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access, then press Run — the pill turns green on the next poll.`;
+      return `${label} is on but the chat database cannot be read. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access, then press Run. The pill turns green on the next poll.`;
     }
     return `${label} is on but Messages access has not been granted yet. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access.`;
   }
   if (kind === "calendars" || kind === "reminders") {
     const pane = kind === "calendars" ? "Calendars" : "Reminders";
     if (access === "denied") {
-      return `${label} is on but ${pane} access was denied. Grant access in System Settings > Privacy & Security > ${pane} — the pill turns green on the next poll, no save needed.`;
+      return `${label} is on but ${pane} access was denied. Grant access in System Settings > Privacy & Security > ${pane}. The pill turns green on the next poll, no save needed.`;
     }
     return `${label} is on but ${pane} access has not been granted yet. Allow access when prompted, or grant it in System Settings > Privacy & Security > ${pane}.`;
   }
-  return `${label} is on but access is ${access}. Grant access — the pill turns green on the next poll.`;
+  return `${label} is on but access is ${access}. Grant access. The pill turns green on the next poll.`;
 }
 
 // Whether one source kind supports the explicit access prompt.
@@ -118,7 +118,7 @@ export function shouldShowIndexAccessDeniedGuidance(
 // Settings copy shown in place of the Grant button after a denial.
 export function indexAccessDeniedGuidance(kind: string): string {
   const pane = kind === "reminders" ? "Reminders" : "Calendars";
-  return `Access denied — open System Settings > Privacy & Security > ${pane} to grant access.`;
+  return `Access denied. Open System Settings > Privacy & Security > ${pane} to grant access.`;
 }
 
 // Deep link into the Full Disk Access pane. There is no prompt API for this grant, so the dashboard
@@ -675,7 +675,7 @@ export function formatIndexLiveHeader(
   const skippedPart = skipped > 0 ? ` · ${formatIndexCount(skipped)} skipped` : "";
   const errorsPart = errors > 0 ? ` · ${formatIndexCount(errors)} errors` : "";
   const ratePart = rate ? ` · ${rate}` : "";
-  return `${label} — ${stageTitle} · ${formatIndexCount(scanned)} scanned · ${formatIndexCount(indexed)} indexed${skippedPart}${errorsPart}${ratePart} · ${elapsed}`;
+  return `${label}: ${stageTitle} · ${formatIndexCount(scanned)} scanned · ${formatIndexCount(indexed)} indexed${skippedPart}${errorsPart}${ratePart} · ${elapsed}`;
 }
 
 // Embedded callers (the Memory tab) render their own inner header above the
@@ -729,7 +729,7 @@ export function describeAutoStartNotice(
   const trigger = parseIndexRunTrigger({ message: message ?? "", response: response ?? null });
   const label = indexRunTriggerLabel(trigger);
   if (trigger === "catchUp") {
-    return `${label} started — catching up on missed nightly indexing.`;
+    return `${label} started: catching up on missed nightly indexing.`;
   }
   return `${label} started.`;
 }

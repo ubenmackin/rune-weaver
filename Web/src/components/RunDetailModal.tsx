@@ -193,11 +193,11 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
                 {isSkipped
                   ? "Execution was skipped (a run for this job was already active)."
                   : isAwaitingApproval
-                    ? "Awaiting approval — no output yet."
+                    ? "Awaiting approval: no output yet."
                     : isRunning
                       ? "In progress…"
                       : isCancelled
-                        ? "Cancelled before completion — no output was recorded."
+                        ? "Cancelled before completion: no output was recorded."
                         : !isOk
                           ? "Execution terminated with error before generating an assistant response."
                           : "No textual response generated."}

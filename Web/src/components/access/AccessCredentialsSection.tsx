@@ -450,7 +450,7 @@ export function AccessCredentialsSection({
             <h4>Target-bound credentials</h4>
             <p className="settings-section-hint">
               One binding pairs one key with hosts, methods, and path prefixes. The secret is
-              sent only when host, method, and effective path all match — prefixes apply to every
+              sent only when host, method, and effective path all match. Prefixes apply to every
               host in the same binding. Empty hosts means the credential can never be sent; empty
               methods or prefixes mean Any.
             </p>

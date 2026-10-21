@@ -726,7 +726,7 @@ extension BehaviorWatchdog {
     /// Card copy: title, rule, observed versus baseline, and the owner actions.
     fileprivate static func cardDescription(reason: BrakeReason, parkedSessions: Int) -> String {
         let subject = reason.toolName.map { "\($0) activity" } ?? "Trusted-tool activity"
-        return "Brake — \(reason.rule.rawValue): \(subject) reached \(reason.observed) in the last hour versus a baseline of \(reason.baseline). "
+        return "Brake: \(reason.rule.rawValue): \(subject) reached \(reason.observed) in the last hour versus a baseline of \(reason.baseline). "
             + "\(parkedSessions) running turn(s) parked and steering cleared. Resume to release them, or keep them paused."
     }
 

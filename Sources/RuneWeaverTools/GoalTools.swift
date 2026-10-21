@@ -668,7 +668,7 @@ public struct GoalStatusTool: Tool, Sendable {
     public let name = "goal.status"
     /// When the LLM should use this tool.
     public let description =
-        "Shows goal plans with step statuses, next due times, and recent events — the agent's cross-session memory of commitments. "
+        "Shows goal plans with step statuses, next due times, and recent events (the agent's cross-session memory of commitments). "
             + "Use to recall what was promised without re-reading history."
     /// Function-calling contract for one goal or the full list.
     public let inputSchema = JSONSchema(

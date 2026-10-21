@@ -489,7 +489,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
   const hostsError = useMemo(() => {
     if (hostsList.length === 0) {
-      return "Add at least one host — empty hosts means the credential can never be sent.";
+      return "Add at least one host. Empty hosts mean the credential can never be sent.";
     }
     if (hostLineErrors.length > 0) {
       return hostLineErrors
@@ -676,7 +676,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               {mode === "edit" ? "Update hosts, methods, and paths for this key." : "Pair one key with the hosts, methods, and paths it may reach."}
             </span>
             <div className="wizard-step-indicator" data-testid="wizard-step-indicator">
-              Step {step} of 4 — {step === 1 ? "Key" : step === 2 ? "Hosts" : step === 3 ? "Scope" : "Review"}
+              Step {step} of 4: {step === 1 ? "Key" : step === 2 ? "Hosts" : step === 3 ? "Scope" : "Review"}
             </div>
           </div>
           <button
@@ -830,7 +830,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             {step === 3 ? (
               <div className="wizard-step" data-testid="wizard-step-3">
                 <p data-testid="scope-intro" className="muted text-sm">
-                  Most bindings leave both on Any — the binding then covers every method plus path on its hosts.
+                  Most bindings leave both on Any: the binding then covers every method plus path on its hosts.
                 </p>
                 <p data-testid="scope-hosts-context" className="muted text-sm">
                   Scoping {hostsList.length} hosts: {hostsList.join(", ")}
@@ -930,8 +930,8 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   marginTop: "8px",
                 }}
               >
-                Prefixes apply to every host in this binding — with {hostsList.length} hosts
-                and {prefixesList.length} {prefixesList.length === 1 ? "prefix" : "prefixes"} this
+                Prefixes apply to every host in this binding (with {hostsList.length} hosts
+                and {prefixesList.length} {prefixesList.length === 1 ? "prefix" : "prefixes"}). This
                 creates a cross-product: each prefix is checked on every host.
               </div>
             ) : null}
@@ -942,7 +942,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               <div className="wizard-step" data-testid="wizard-step-4">
                 <p data-testid="binding-pairing-sentence" className="muted text-sm">
                   One binding pairs one key with hosts, methods, and path prefixes. The
-                  secret is sent only when host, method, and effective path all match —
+                  secret is sent only when host, method, and effective path all match:
                   prefixes apply to every host in this binding.
                 </p>
                 <h4>Review and Test</h4>
@@ -1053,9 +1053,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     </button>
                     <div data-testid="probe-result" aria-live="polite" className="muted text-sm">
                       {probeDecision === null ? (
-                        <span>Yes — the secret would be sent.</span>
+                        <span>Yes: the secret would be sent.</span>
                       ) : (
-                        <span>No — {probeDecision}</span>
+                        <span>No: {probeDecision}</span>
                       )}
                     </div>
                   </div>

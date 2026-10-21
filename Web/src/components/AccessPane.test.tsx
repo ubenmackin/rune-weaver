@@ -208,7 +208,7 @@ describe("AccessPane", () => {
       expect(screen.getByTestId("access-rules-header")).toBeInTheDocument();
     });
     expect(screen.getByTestId("access-rules-header").textContent).toContain(
-      "every call needs your approval",
+      "Every call needs your approval",
     );
   });
 

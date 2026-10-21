@@ -166,7 +166,7 @@ export function accessRulesHeaderSentence(
     return effect === "allow" && isRuleActive(rule, nowMs);
   });
   if (activeAllows.length === 0) {
-    return "Right now the agent can't act on its own — every call needs your approval.";
+    return "Right now the agent can't act on its own. Every call needs your approval.";
   }
   const scopesByTool = new Map<string, AccessScopeDTO[]>();
   for (const rule of activeAllows) {

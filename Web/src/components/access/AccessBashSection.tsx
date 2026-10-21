@@ -601,7 +601,7 @@ export function AccessBashSection({
           <div className="settings-footer">
             <span className="muted text-sm" data-testid="bash-save-hint">
               {changed || advancedChanged
-                ? "Unsaved changes — only the edited keys travel in the bash patch."
+                ? "Unsaved changes: only the edited keys travel in the bash patch."
                 : "Only the edited keys travel; every untouched value survives."}
             </span>
             <button

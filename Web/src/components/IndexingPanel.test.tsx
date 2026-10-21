@@ -713,7 +713,7 @@ describe("IndexingPanel", () => {
     ).toBe(true);
   });
 
-  it("exposes only the status surface — no policy fields or Save button", async () => {
+  it("exposes only the status surface: no policy fields or Save button", async () => {
     const { fetchMock } = stubFetch();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -917,10 +917,10 @@ describe("IndexingPanel", () => {
     // Headings name the scaling so each bar reads as its fraction of the
     // displayed total rather than of the largest bucket.
     expect(
-      screen.getByText("Documents by source — share of index"),
+      screen.getByText("Documents by source (share of index)"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Extraction outcomes — share of index"),
+      screen.getByText("Extraction outcomes (share of index)"),
     ).toBeInTheDocument();
   });
 
@@ -1423,7 +1423,7 @@ describe("IndexingPanel", () => {
     expect(screen.getByRole("button", { name: "Reset Index" })).toBeEnabled();
     expect(
       screen.getByText(
-        "Indexing is off — turn it on in Settings → Indexing to run a pass.",
+        "Indexing is off. Turn it on in Settings → Indexing to run a pass.",
       ),
     ).toBeInTheDocument();
   });
@@ -1442,7 +1442,7 @@ describe("IndexingPanel", () => {
     expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
     expect(
       screen.queryByText(
-        "Indexing is off — turn it on in Settings → Indexing to run a pass.",
+        "Indexing is off. Turn it on in Settings → Indexing to run a pass.",
       ),
     ).toBeNull();
   });
@@ -4785,7 +4785,7 @@ describe("IndexingPanel connection resilience", () => {
     const toast = screen.getByTestId("index-reconnecting");
     expect(toast).toHaveClass("connection-toast");
     expect(
-      within(toast).getByText(/Live updates paused — reconnecting to server… Indexing continues in the background./),
+      within(toast).getByText(/Live updates paused\. Reconnecting to server… Indexing continues in the background\./),
     ).toBeInTheDocument();
     expect(screen.getByTestId("index-reconnect-retry")).toBeInTheDocument();
     expect(screen.getByTestId("index-reconnect-dismiss")).toBeInTheDocument();

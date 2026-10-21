@@ -608,7 +608,7 @@ describe("ChatView", () => {
     // One compact line per live trust, named by lifetime only.
     expect(
       screen.getByTestId("ephemeral-trust-chip").textContent,
-    ).toContain("email.send to bob@x.com — rest of this session");
+    ).toContain("email.send to bob@x.com (rest of this session)");
     // The chip rides inside the footer below the input row, so it stays
     // attached to the composer it explains.
     const footer = document.querySelector<HTMLElement>(".chat-footer-box");
@@ -2936,7 +2936,7 @@ describe("Chat reconnecting banner", () => {
     expect(toast).toHaveAttribute("aria-live", "assertive");
     expect(
       within(toast).getByText(
-        "Live updates paused — reconnecting to server… Chat still sends; streaming will resume.",
+        "Live updates paused. Reconnecting to server… Chat still sends; streaming will resume.",
       ),
     ).toBeInTheDocument();
     expect(screen.getByTestId("chat-reconnect-retry")).toBeInTheDocument();
@@ -3051,7 +3051,7 @@ describe("Chat reconnecting banner", () => {
     expect(toast).toHaveClass("connection-toast");
     expect(
       within(toast).getByText(
-        "Live updates paused — reconnecting to server… Chat still sends; streaming will resume.",
+        "Live updates paused. Reconnecting to server… Chat still sends; streaming will resume.",
       ),
     ).toBeInTheDocument();
     expect(document.querySelector(".connection-status-pill")).toBeNull();

@@ -9,7 +9,7 @@ mkdir -p ~/.runeweaver
 cp Config/config.toml.example ~/.runeweaver/config.toml
 ```
 
-If the file is absent, the engine uses built-in defaults (`RuneWeaverConfig.default`). If it exists, it is parsed and validated on load — invalid files throw a descriptive `ConfigError` (file, line, or dotted field path) instead of silently falling back. The file is read once at engine startup by `CLIConfigLoader.loadConfig(path:)`; there is no file-watching hot reload, so hand edits take effect on the next engine start.
+If the file is absent, the engine uses built-in defaults (`RuneWeaverConfig.default`). If it exists, it is parsed and validated on load: invalid files throw a descriptive `ConfigError` (file, line, or dotted field path) instead of silently falling back. The file is read once at engine startup by `CLIConfigLoader.loadConfig(path:)`; there is no file-watching hot reload, so hand edits take effect on the next engine start.
 
 Secrets (API keys, passwords, tokens) are **never** stored in this file. See [Secrets Management](#secrets-management) below.
 
@@ -124,7 +124,7 @@ Episodic memory, semantic memory vectors, and recall fan-out budgets.
 | `recall_threshold` | double | `0.1` | Minimum calibrated score for an injected recall hit (`0.0`–`1.0`). |
 | `recall_max_chars` | integer | `8000` | Maximum total characters for the injected recall block, header included (`500`–`32000`). |
 | `recall_per_hit_chars` | integer | `2000` | Maximum characters kept per individual hit before boundary truncation (`100`–`8000`). |
-| `recall_doc_pool_multiplier` | integer | `4` | Widening factor for the document candidate pool: the pool widens to `page * multiplier`, the vector leg scans `min(max(pool * 10, 500), maxPerTierResults)` chunks from it, and the keyword leg reads at the same width. Inert at the default page size — it only moves the vector leg once `pool * 10` clears the 500-row floor (`1`–`8`). |
+| `recall_doc_pool_multiplier` | integer | `4` | Widening factor for the document candidate pool: the pool widens to `page * multiplier`, the vector leg scans `min(max(pool * 10, 500), maxPerTierResults)` chunks from it, and the keyword leg reads at the same width. Inert at the default page size; it only moves the vector leg once `pool * 10` clears the 500-row floor (`1`–`8`). |
 | `recall_episodic_weight` | double | `0.25` | Weight mapping episodic rank scores onto the shared recall scale (`0.0`–`1.0`). |
 
 ```toml
@@ -296,7 +296,7 @@ pattern = "git status"
 action = "allow"
 ```
 
-### `[email]` — `[[email.accounts]]`
+### `[email]` and `[[email.accounts]]`
 
 Repeat `[[email.accounts]]` per account. Passwords live in the Keychain (`EMAIL_<ACCOUNT>_PASSWORD`), never in TOML.
 
@@ -323,7 +323,7 @@ smtp_port = 587
 smtp_security = "auto"
 ```
 
-### `[home]` — `[[home.homekit]]` / `[[home.home_assistant]]`
+### `[home]` and `[[home.homekit]]` / `[[home.home_assistant]]`
 
 `[[home.homekit]]`:
 
@@ -339,7 +339,7 @@ smtp_security = "auto"
 | `url` | string \| unset | unset | Home Assistant base URL (e.g. `http://homeassistant.local:8123`). |
 | `token_env` | string \| unset | unset | Env var (and Keychain key) holding the access token. |
 
-### `[media]` — `[media.sonarr]` / `[media.radarr]`
+### `[media]` and `[media.sonarr]` / `[media.radarr]`
 
 Self-hosted media automation managers used by `media.arr` and `media.arr.read`. API keys resolve via `SecretsManager` (`SONARR_API_KEY`, `RADARR_API_KEY`).
 
@@ -372,7 +372,7 @@ url = "http://localhost:7878"
 api_key_env = "RADARR_API_KEY"
 ```
 
-### `[scheduler]` — `[[scheduler.jobs]]`
+### `[scheduler]` and `[[scheduler.jobs]]`
 
 Persistent cron and email-arrival scheduled jobs. Config `[[scheduler.jobs]]` entries act as bootstrap seeds on initial startup when zero jobs exist in SQLite.
 
@@ -389,7 +389,7 @@ Persistent cron and email-arrival scheduled jobs. Config `[[scheduler.jobs]]` en
 | `poll_limit` | integer \| unset | `10` | Maximum hits per poll (`1`–`50`). |
 | `max_tool_iterations` | integer | `25` | Default consecutive tool rounds per scheduled run before the limit policy triggers (1-100). Per-job `max_tool_iterations` overrides this default. Default policy synthesizes plus budget_exceeded; a job with `on_tool_limit = "park"` parks instead. |
 | `jobs.max_tool_iterations` | integer \| unset | unset (section default) | Per-job consecutive tool rounds override for this job (1-100). Omit to inherit `[scheduler] max_tool_iterations` (default 25). |
-| `jobs.on_tool_limit` | string \| unset | unset (inherit, synthesizes) | Per-job limit policy when the budget is reached: `"fail"` synthesizes plus `budget_exceeded`, `"park"` parks for approval instead. Omit (or `""`/nil) to inherit — unset behaves like `"fail"` (synthesize). |
+| `jobs.on_tool_limit` | string \| unset | unset (inherit, synthesizes) | Per-job limit policy when the budget is reached: `"fail"` synthesizes plus `budget_exceeded`, `"park"` parks for approval instead. Omit (or `""`/nil) to inherit: unset behaves like `"fail"` (synthesize). |
 
 ### `[plugins]`
 
@@ -508,12 +508,12 @@ Network egress permissions and SSRF defenses are governed by `~/.runeweaver/poli
 
 Lookup order in `SecretsManager.retrieve(key:)`:
 
-1. **Environment variable** `key` (Docker/vault injection) — takes precedence.
+1. **Environment variable** `key` (Docker/vault injection): takes precedence.
 2. **macOS Keychain** item `(service: com.runeweaver.secrets, account: key)`.
 
 Writes always go to the Keychain. Secrets are never logged, never embedded in errors, and never written to `config.toml`.
 
-Config keys that reference secrets (`api_key_env`, `token_env`, email passwords) only **name** the variable — `SecretsManager.resolve(_:)` fetches the value at execution time, so the LLM prompt never contains credentials.
+Config keys that reference secrets (`api_key_env`, `token_env`, email passwords) only **name** the variable: `SecretsManager.resolve(_:)` fetches the value at execution time, so the LLM prompt never contains credentials.
 
 ```bash
 # Environment (dev/Docker)

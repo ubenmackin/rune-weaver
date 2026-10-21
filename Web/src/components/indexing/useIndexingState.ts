@@ -542,7 +542,7 @@ export function useIndexingState() {
   
     const handleConfirmPrune = async () => {
       if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) {
-        setPruneError("An index run is in flight — wait for it to settle before pruning.");
+        setPruneError("An index run is in flight. Wait for it to settle before pruning.");
         return;
       }
       const trimmed = pruneBefore.trim();
@@ -600,7 +600,7 @@ export function useIndexingState() {
   
     const handleConfirmRebuild = async () => {
       if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) {
-        setResetError("An index run is in flight — wait for it to settle before resetting.");
+        setResetError("An index run is in flight. Wait for it to settle before resetting.");
         return;
       }
       setResetError(null);

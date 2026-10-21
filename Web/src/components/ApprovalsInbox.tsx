@@ -732,7 +732,7 @@ export default function ApprovalsInbox({
                   title={
                     scopeReady
                       ? undefined
-                      : "Pick a custom scope first — select the Custom scope radio to open the editor."
+                      : "Pick a custom scope first. Select the Custom scope radio to open the editor."
                   }
                   onClick={() => decideFromCard(request, true)}
                 >
@@ -745,7 +745,7 @@ export default function ApprovalsInbox({
                   title={
                     scopeReady
                       ? undefined
-                      : "Pick a custom scope first — select the Custom scope radio to open the editor."
+                      : "Pick a custom scope first. Select the Custom scope radio to open the editor."
                   }
                   onClick={() => decideFromCard(request, false)}
                 >

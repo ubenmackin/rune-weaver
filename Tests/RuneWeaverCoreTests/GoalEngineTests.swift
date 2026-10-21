@@ -303,7 +303,7 @@ struct GoalEngineTests {
         let prompt = engine.advancePrompt(goal: goal, steps: steps, events: events)
         #expect(prompt.contains("Run daily"))
         #expect(prompt.contains("Run every morning"))
-        #expect(prompt.contains("- Step 0 [done] Lace shoes — Double knotted"))
+        #expect(prompt.contains("- Step 0 [done] Lace shoes: Double knotted"))
         #expect(prompt.contains("Current task:"))
         #expect(prompt.contains("Step 1 (stepOrdinal: 1) [in_progress]: Out the door"))
         // Future pending steps are withheld so the model cannot one-shot the entire plan.

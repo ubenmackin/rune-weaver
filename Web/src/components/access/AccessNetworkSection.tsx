@@ -164,7 +164,7 @@ function validatePolicyDraft(draft: PolicyDraft | null): string[] {
       break;
     }
     if (!isValidDomainLine(entry)) {
-      problems.push("Allowed domain '" + entry + "' is invalid — use an exact host or a single leading '*.example.com' edge.");
+      problems.push("Allowed domain '" + entry + "' is invalid: use an exact host or a single leading '*.example.com' edge.");
       break;
     }
   }
@@ -178,7 +178,7 @@ function validatePolicyDraft(draft: PolicyDraft | null): string[] {
       break;
     }
     if (!isValidDomainLine(entry)) {
-      problems.push("Blocked domain '" + entry + "' is invalid — use an exact host or a single leading '*.example.com' edge.");
+      problems.push("Blocked domain '" + entry + "' is invalid: use an exact host or a single leading '*.example.com' edge.");
       break;
     }
   }
@@ -195,7 +195,7 @@ function validatePolicyDraft(draft: PolicyDraft | null): string[] {
     }
     const hosts = binding.allowed_hosts ?? [];
     if (hosts.length === 0) {
-      problems.push("Key '" + key + "' needs at least one host — empty hosts means the credential can never be sent.");
+      problems.push("Key '" + key + "' needs at least one host. Empty hosts mean the credential can never be sent.");
       continue;
     }
     for (const host of hosts) {
@@ -608,12 +608,12 @@ export function NetworkEgressEditors({
           rows={5}
         />
         <span className="form-group-hint" data-testid="allowed-domains-count">
-          {allowedList.length} {allowedList.length === 1 ? "host" : "hosts"} — one per line —
-          blank lines ignored
+          {allowedList.length} {allowedList.length === 1 ? "host" : "hosts"} (one per line,
+          blank lines ignored)
         </span>
         {invalidAllowed.length > 0 ? (
           <span className="danger text-sm" data-testid="allowed-domains-error">
-            Allowed domain &apos;{invalidAllowed[0]}&apos; is invalid — use an exact host or a
+            Allowed domain &apos;{invalidAllowed[0]}&apos; is invalid: use an exact host or a
             single leading &apos;*.example.com&apos; edge.
           </span>
         ) : null}
@@ -630,12 +630,12 @@ export function NetworkEgressEditors({
           rows={5}
         />
         <span className="form-group-hint" data-testid="blocked-domains-count">
-          {blockedList.length} {blockedList.length === 1 ? "host" : "hosts"} — one per line —
-          blank lines ignored
+          {blockedList.length} {blockedList.length === 1 ? "host" : "hosts"} (one per line,
+          blank lines ignored)
         </span>
         {invalidBlocked.length > 0 ? (
           <span className="danger text-sm" data-testid="blocked-domains-error">
-            Blocked domain &apos;{invalidBlocked[0]}&apos; is invalid — use an exact host or a
+            Blocked domain &apos;{invalidBlocked[0]}&apos; is invalid: use an exact host or a
             single leading &apos;*.example.com&apos; edge.
           </span>
         ) : null}
@@ -653,10 +653,10 @@ export function NetworkEgressEditors({
           rows={5}
         />
         <span className="form-group-hint" data-testid="local-exemptions-count">
-          {localList.length} {localList.length === 1 ? "host" : "hosts"} — read-only, one per line
+          {localList.length} {localList.length === 1 ? "host" : "hosts"} (read-only, one per line)
         </span>
         <span className="form-group-hint" data-testid="local-exemptions-hint">
-          Not editable here — the server derives these grants. Exact hosts in Allowed domains that resolve to private addresses are granted when added or via Re-check local access. Wildcards never auto-grant. Metadata and link-local hosts are never allowed.
+          Not editable here. The server derives these grants. Exact hosts in Allowed domains that resolve to private addresses are granted when added or via Re-check local access. Wildcards never auto-grant. Metadata and link-local hosts are never allowed.
         </span>
       </div>
       {shadowWarnings.length > 0 ? (
@@ -1514,7 +1514,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
           <div className="settings-footer">
             <span className="muted text-sm" data-testid="policy-save-hint">
               {changed
-                ? "Unsaved changes — bindings stage here until Save."
+                ? "Unsaved changes: bindings stage here until Save."
                 : "Bindings stage here until Save; Keychain secrets save immediately."}
             </span>
             <button

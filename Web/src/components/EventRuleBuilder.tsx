@@ -579,7 +579,7 @@ export default function EventRuleBuilder({
                                     key={current.toolName}
                                     value={current.toolName}
                                   >
-                                    {current.toolName} (not allowed — pick above)
+                                    {current.toolName} (not allowed: pick above)
                                   </option>
                                 ) : null;
                               })()}

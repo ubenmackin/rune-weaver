@@ -140,7 +140,7 @@ export default function ChatView(props: ChatViewProps) {
             aria-live="assertive"
           >
             <span className="connection-toast-message">
-              Live updates paused — reconnecting to server… Chat still sends; streaming will resume.
+              Live updates paused. Reconnecting to server… Chat still sends; streaming will resume.
             </span>
             <div className="connection-toast-actions">
               <button

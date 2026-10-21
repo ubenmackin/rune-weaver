@@ -30,7 +30,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           aria-live="assertive"
         >
           <span className="connection-toast-message">
-            Live updates paused — reconnecting to server… Indexing continues in the background.
+            Live updates paused. Reconnecting to server… Indexing continues in the background.
           </span>
           <div className="connection-toast-actions">
             <button

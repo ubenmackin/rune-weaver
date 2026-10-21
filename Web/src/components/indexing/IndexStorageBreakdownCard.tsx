@@ -120,7 +120,7 @@ export default function IndexStorageBreakdownCard({
                     }}
                   >
                     <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-                      Extraction outcomes — share of index
+                      Extraction outcomes (share of index)
                     </h4>
                     {extractRows.length > 0 ? (
                       extractRows.map((row) => {

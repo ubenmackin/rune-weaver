@@ -216,7 +216,7 @@ export function useChatController({
         turnTimeoutRef.current = null;
         const budgetMinutes = Math.max(1, Math.round(budgetMs / 60000));
         setError(
-          `Still working — no progress for ${budgetMinutes} minutes but the turn is still running. Cancel remains available if you want to stop it.`,
+          `Still working. No progress for ${budgetMinutes} minutes but the turn is still running. Cancel remains available if you want to stop it.`,
         );
         schedule();
       }, budgetMs);

@@ -331,9 +331,9 @@ export function BrainStep({
           }
         >
           {testStatus === "succeeded"
-            ? `Succeeded${testDetail ? ` — ${testDetail}` : ""}`
+            ? `Succeeded${testDetail ? `: ${testDetail}` : ""}`
             : testStatus === "failed"
-              ? `Failed to connect${testDetail ? ` — ${testDetail}` : ""}`
+              ? `Failed to connect${testDetail ? `: ${testDetail}` : ""}`
               : "Testing…"}
         </p>
       ) : null}

@@ -201,7 +201,7 @@ public final class AppModel {
         // directly still renders the classified address.
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = "Running on \(trimmedHost):\(port)"
-        let title = authConfigured ? base : base + " — local only"
+        let title = authConfigured ? base : base + " (local only)"
         serverStatus = Self.truncatedServerTitle(title)
         isServerFailed = false
         serverStatusDetail = nil
@@ -260,7 +260,7 @@ extension AppModel {
             case .nonLoopbackRefused:
                 // Fail-closed LAN bind without a token stays refused with an
                 // actionable hint instead of the full policy text.
-                setServerFailed(detail: "Bind \(trimmedHost) refused — no owner token")
+                setServerFailed(detail: "Bind \(trimmedHost) refused: no owner token")
             case .invalidPort:
                 // Port bounds stay enforced by the shared range; the truncated
                 // description carries the offending value without widening the menu.
@@ -426,7 +426,7 @@ extension AppModel {
                 // Refuse to boot from defaults when a stored file exists but fails validation, so
                 // corrupt settings are never mistaken for intentional defaults.
                 RuneWeaverLog.app.error("Invalid config: \(String(describing: error))")
-                setServerFailed(detail: "Invalid config — check ~/.runeweaver/config.toml")
+                setServerFailed(detail: "Invalid config: check ~/.runeweaver/config.toml")
                 self.hasStartedBoot = false
                 return
             }
@@ -451,7 +451,7 @@ extension AppModel {
                 // instead of surfacing at the request gate; the secret itself
                 // never reaches the log or the menu.
                 RuneWeaverLog.app.error("Owner auth resolve failed: \(error.localizedDescription)")
-                setServerFailed(detail: "Owner auth unreadable — check Keychain plus file permissions")
+                setServerFailed(detail: "Owner auth unreadable: check Keychain plus file permissions")
                 self.hasStartedBoot = false
                 return
             }

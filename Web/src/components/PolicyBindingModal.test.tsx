@@ -311,18 +311,18 @@ describe("PolicyBindingModal wizard", () => {
     const modal = await walkToReview(user, "PROBE_KEY", "api.example.com");
     expect(within(modal).getByTestId("probe-helper")).toBeDefined();
     expect(within(modal).getByTestId("probe-result").textContent).toContain(
-      "Yes — the secret would be sent.",
+      "Yes: the secret would be sent.",
     );
 
     const probeHost = within(modal).getByLabelText("Probe host") as HTMLInputElement;
     await user.type(probeHost, "evil-collector.io");
     expect(within(modal).getByTestId("probe-result").textContent).toContain(
-      "Yes — the secret would be sent.",
+      "Yes: the secret would be sent.",
     );
 
     await user.click(within(modal).getByTestId("probe-run"));
     await waitFor(() => {
-      expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
+      expect(within(modal).getByTestId("probe-result").textContent).toContain("No:");
     });
     expect(within(modal).getByTestId("probe-result").textContent).toContain(
       "evil-collector.io",

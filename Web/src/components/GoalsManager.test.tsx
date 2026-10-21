@@ -239,7 +239,7 @@ describe("GoalsManager", () => {
     await user.click(screen.getByRole("button", { name: "Work on it now" }));
     await waitFor(() => {
       expect(
-        screen.getByText(/is already running — wait for the current run/i),
+        screen.getByText(/is already running\. Wait for the current run/i),
       ).toBeInTheDocument();
     });
   });

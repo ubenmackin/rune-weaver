@@ -686,7 +686,7 @@ describe("RunLogViewer", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Cancelled before completion — no output was recorded.",
+          "Cancelled before completion: no output was recorded.",
         ),
       ).toBeInTheDocument();
     });

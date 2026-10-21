@@ -138,7 +138,7 @@ struct OwnerTokenSettingsSection: View {
                     .disabled(model.isRestarting)
                 }
             } else {
-                Text("Status: not configured — LAN binds are refused until a token exists.")
+                Text("Status: not configured. LAN binds are refused until a token exists.")
                     .font(.callout)
                 if model.isGeneratingOwnerToken {
                     ProgressView("Generating…")
@@ -219,7 +219,7 @@ private struct OwnerOnceTokenView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Shown once — copy it now:")
+            Text("Shown once: copy it now:")
                 .font(.callout)
                 .bold()
             Text(onceToken)
@@ -253,7 +253,7 @@ private struct OwnerOnceTokenView: View {
             if isRestarting {
                 ProgressView("Restarting…")
             } else {
-                Button("I Saved It — Restart Service to Adopt Token") {
+                Button("I Saved It: Restart Service to Adopt Token") {
                     onAcknowledge()
                 }
                 .disabled(!acknowledgedSaved || isRestarting)

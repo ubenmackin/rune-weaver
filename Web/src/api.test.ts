@@ -1299,7 +1299,7 @@ describe("dashboard api client", () => {
     // reads as one outcome.
     expect(MAX_CONCURRENT_CHAT_TURNS).toBe(3);
     expect(concurrentTurnsBusyMessage()).toBe(
-      "Already running 3 chat turns — wait for one to finish or cancel it, then retry.",
+      "Already running 3 chat turns. Wait for one to finish or cancel it, then retry.",
     );
     expect(concurrentTurnsBusyMessage(2)).toContain("Already running 2 chat turns");
   });
@@ -1977,10 +1977,10 @@ describe("goal client and helpers", () => {
 
   it("formats the next advance across statuses and due windows", () => {
     const now = Date.UTC(2024, 0, 1, 0, 0, 0);
-    expect(formatGoalNextAdvance("paused", now + 3_600_000, now)).toBe("—");
-    expect(formatGoalNextAdvance("needs_input", now + 3_600_000, now)).toBe("—");
-    expect(formatGoalNextAdvance("achieved", now + 3_600_000, now)).toBe("—");
-    expect(formatGoalNextAdvance("abandoned", now + 3_600_000, now)).toBe("—");
+    expect(formatGoalNextAdvance("paused", now + 3_600_000, now)).toBe("-");
+    expect(formatGoalNextAdvance("needs_input", now + 3_600_000, now)).toBe("-");
+    expect(formatGoalNextAdvance("achieved", now + 3_600_000, now)).toBe("-");
+    expect(formatGoalNextAdvance("abandoned", now + 3_600_000, now)).toBe("-");
     expect(formatGoalNextAdvance("active", null, now)).toBe("No schedule");
     expect(formatGoalNextAdvance("active", now - 1000, now)).toBe("due now");
     expect(formatGoalNextAdvance("active", now + 3 * 3_600_000, now)).toBe(

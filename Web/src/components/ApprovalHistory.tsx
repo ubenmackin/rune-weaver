@@ -45,15 +45,15 @@ function describeHistoryScope(
     }
     default:
       if (data) return scopeKind ? `${scopeKind}: ${data}` : data;
-      return scopeKind || "—";
+      return scopeKind || "-";
   }
 }
 
 // Relative decided label for one history row. An unreadable timestamp reads as
-// an em dash so a drifted row never renders a bogus countdown.
+// a hyphen so a drifted row never renders a bogus countdown.
 function decidedLabel(decidedAt: ApprovalHistoryEntry["decidedAt"]): string {
   const decidedMs = parseRunTimestamp(decidedAt).getTime();
-  if (!Number.isFinite(decidedMs) || decidedMs <= 0) return "—";
+  if (!Number.isFinite(decidedMs) || decidedMs <= 0) return "-";
   return formatRelativeAgo(Date.now() - decidedMs);
 }
 
@@ -289,7 +289,7 @@ export default function ApprovalHistory() {
                         {truncateTarget(target)}
                       </code>
                     ) : (
-                      "—"
+                      "-"
                     )}
                   </td>
                   <td>{describeHistoryScope(entry.scopeKind, entry.scopeData)}</td>
@@ -306,7 +306,7 @@ export default function ApprovalHistory() {
                     {sessionID ? (
                       <a href={`#chat/${sessionID}`}>Open session</a>
                     ) : (
-                      "—"
+                      "-"
                     )}
                   </td>
                 </tr>

@@ -964,7 +964,7 @@ extension FanOutEngine {
         var lines: [String] = []
         lines.append("You are the background reviewer for Rune Weaver's parallel worker fan-out.")
         lines.append("Merge the worker outputs below into one merged summary, and give each subtask a verdict.")
-        lines.append("Judge content quality only — never permissions, tool access, or policy.")
+        lines.append("Judge content quality only: never permissions, tool access, or policy.")
         lines.append("")
         lines.append("Worker outputs:")
         for subtask in subtasks {

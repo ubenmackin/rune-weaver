@@ -623,7 +623,7 @@ export function describeIndexRun(
     typeof skippedReason === "string" &&
     skippedReason.trim()
   ) {
-    text += ` — Index run skipped: ${skippedReason.trim()}`;
+    text += ` (Index run skipped: ${skippedReason.trim()})`;
   }
   return text;
 }

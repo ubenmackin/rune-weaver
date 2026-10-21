@@ -72,7 +72,7 @@ export function FilesSectionFooter({
     <div className="settings-footer">
       <span className="muted text-sm" data-testid="files-write-save-hint">
         {changed || advancedChanged
-          ? "Unsaved changes — only the edited keys travel in the files patch."
+          ? "Unsaved changes: only the edited keys travel in the files patch."
           : "Only the edited keys travel; every untouched value survives."}
       </span>
       <button
@@ -132,7 +132,7 @@ export function FilesResetModals({
               This will replace {denyPatternCount}{" "}
               {denyPatternCount === 1 ? "custom pattern" : "custom patterns"} with{" "}
               {DEFAULT_FILES_DENY_PATTERNS.length} defaults. This only updates the
-              form — nothing is saved until you choose Save.
+              form. Nothing is saved until you choose Save.
             </p>
           </div>
           <div className="modal-footer">
@@ -174,8 +174,8 @@ export function FilesResetModals({
               {allowRootsCount === 1 ? "custom root" : "custom roots"} with{" "}
               {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}
               {DEFAULT_FILES_ALLOW_ROOTS.length === 1 ? "default" : "defaults"} (
-              {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form —
-              nothing is saved until you choose Save.
+              {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form.
+              Nothing is saved until you choose Save.
             </p>
           </div>
           <div className="modal-footer">

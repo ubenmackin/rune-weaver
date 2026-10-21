@@ -632,7 +632,7 @@ describe("ApprovalsInbox", () => {
     // Custom is selected with nothing staged, so both decisions stay locked
     // and the tooltip points at the Custom scope radio, the sole entry point.
     const expected =
-      "Pick a custom scope first — select the Custom scope radio to open the editor.";
+      "Pick a custom scope first. Select the Custom scope radio to open the editor.";
     expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Allow" })).toHaveAttribute(
@@ -1433,7 +1433,7 @@ describe("ApprovalsInbox", () => {
     });
     const line = container.querySelector<HTMLElement>(".ephemeral-trust-line");
     expect(line?.textContent).toBe(
-      "email.send to bob@x.com — rest of this session",
+      "email.send to bob@x.com (rest of this session)",
     );
     // The chip sits above the pending groups, and its revoke is per line.
     const chip = screen.getByTestId("ephemeral-trust-chip");

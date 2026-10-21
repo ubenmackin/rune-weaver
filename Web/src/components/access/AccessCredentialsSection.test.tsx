@@ -203,7 +203,7 @@ describe("AccessCredentialsSection", () => {
     // Default probe routes outside the /repos prefix, so it refuses with the
     // path gate named.
     await waitFor(() => {
-      expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
+      expect(within(modal).getByTestId("probe-result").textContent).toContain("No:");
     });
     expect(within(modal).getByTestId("probe-result").textContent).toContain("/repos");
 
@@ -212,11 +212,11 @@ describe("AccessCredentialsSection", () => {
     const probePath = within(modal).getByLabelText("Probe path") as HTMLInputElement;
     await user.clear(probePath);
     await user.type(probePath, "/repos/owner/repo");
-    expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
+    expect(within(modal).getByTestId("probe-result").textContent).toContain("No:");
     await user.click(within(modal).getByTestId("probe-run"));
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain(
-        "Yes — the secret would be sent."
+        "Yes: the secret would be sent."
       );
     });
 
@@ -225,11 +225,11 @@ describe("AccessCredentialsSection", () => {
     await user.clear(probeHost);
     await user.type(probeHost, "evil-collector.io");
     expect(within(modal).getByTestId("probe-result").textContent).toContain(
-      "Yes — the secret would be sent."
+      "Yes: the secret would be sent."
     );
     await user.click(within(modal).getByTestId("probe-run"));
     await waitFor(() => {
-      expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
+      expect(within(modal).getByTestId("probe-result").textContent).toContain("No:");
     });
     expect(within(modal).getByTestId("probe-result").textContent).toContain(
       "evil-collector.io"
@@ -267,7 +267,7 @@ describe("AccessCredentialsSection", () => {
     );
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain(
-        "Yes — the secret would be sent."
+        "Yes: the secret would be sent."
       );
     });
 

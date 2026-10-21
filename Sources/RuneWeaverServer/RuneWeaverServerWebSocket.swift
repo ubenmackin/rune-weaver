@@ -472,7 +472,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     if message.steer == true {
         guard await context.activeTurns.isActive(sessionID: sessionID) else {
             await sendWSError(
-                "No active turn for this session — steering was not applied. Send as a new message.",
+                "No active turn for this session. Steering was not applied. Send as a new message.",
                 connectionID: connectionID,
                 context: context,
                 sessionID: sessionID
@@ -485,7 +485,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
             // Withdraw newest to match client pop; keeps error and queue in agreement.
             await context.steeringQueue.remove(text: trimmed, sessionID: sessionID)
             await sendWSError(
-                "Turn ended before steering arrived — it missed the in-flight turn. Send as a new message.",
+                "Turn ended before steering arrived. It missed the in-flight turn. Send as a new message.",
                 connectionID: connectionID,
                 context: context,
                 sessionID: sessionID
@@ -501,7 +501,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     let taskBox = TurnTaskBox()
     guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
         await sendWSError(
-            "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns — wait for one to finish or cancel it, then retry.",
+            "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns. Wait for one to finish or cancel it, then retry.",
             connectionID: connectionID,
             context: context,
             sessionID: sessionID

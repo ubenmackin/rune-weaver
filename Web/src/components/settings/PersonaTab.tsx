@@ -174,7 +174,7 @@ export function PersonaTab({
             className="settings-field-hint"
             style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)" }}
           >
-            Avatar accent — a client-side colorway for the assistant sprite. It never reaches the prompt.
+            Avatar accent: A client-side colorway for the assistant sprite. It never reaches the prompt.
           </p>
           <div
             className="persona-avatar-grid"

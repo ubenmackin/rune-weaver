@@ -645,7 +645,7 @@ extension SearXNGEnsurer {
     /// to retry because downloaded layers stay cached, so the next attempt resumes instead of
     /// restarting.
     public static func pullTimeoutBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
-        "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
+        "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry: downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
     }
 
     /// Trimmed banner for an image pull that failed without timing out. Points at Hub reachability

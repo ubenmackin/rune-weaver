@@ -6,12 +6,12 @@ Capabilities are plugins. Add new ones without touching the core.
 
 Conform to `RuneWeaverCore.Tool`:
 
-- `name` — stable identifier (e.g. `email.search`)
-- `description` — when the LLM should use it
-- `inputSchema` — JSON Schema for function calling
-- `permissionLevel` — `readOnly`, `requiresApproval`, or `trusted`
-- `contentTrustLevel` — `.trusted` (default) or `.untrustedExternal` (for network/external outputs)
-- `execute(input:context:)` — the handler
+- `name`: stable identifier (e.g. `email.search`)
+- `description`: when the LLM should use it
+- `inputSchema`: JSON Schema for function calling
+- `permissionLevel`: `readOnly`, `requiresApproval`, or `trusted`
+- `contentTrustLevel`: `.trusted` (default) or `.untrustedExternal` (for network/external outputs)
+- `execute(input:context:)`: the handler
 
 Register with `ToolBus.register(tool:isEnabled:)`. File writes integrate with the review loop: staged writes persist to `StagedFilesStore` for inline review, while live writes create `.rune_backup_` rollback snapshots.
 
@@ -21,9 +21,9 @@ Python tools (Playwright browser automation, email parsing helpers) run in a san
 
 ## Permission levels
 
-- `readOnly` — always allowed (search, read, inspect)
-- `requiresApproval` — approved per-invocation unless covered by a graduated-trust grant (5 min / 1 hour / 1 day / forever)
-- `trusted` — auto-approved per trust policy (e.g. single-owner memory store/recall)
+- `readOnly`: always allowed (search, read, inspect)
+- `requiresApproval`: approved per-invocation unless covered by a graduated-trust grant (5 min / 1 hour / 1 day / forever)
+- `trusted`: auto-approved per trust policy (e.g. single-owner memory store/recall)
 
 ## Layout
 

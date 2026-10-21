@@ -617,7 +617,7 @@ export default function GoalsManager({
             <p className="muted">
               A goal is something you want to get done that takes more than one
               sitting. Tell the agent what you&apos;re aiming for, and it will
-              make a plan and work on it a step at a time — checking in with
+              make a plan and work on it a step at a time, checking in with
               you along the way.
             </p>
             <div className="goal-explainer-steps">
@@ -1046,7 +1046,7 @@ export default function GoalsManager({
                   aria-required="true"
                 />
                 <span className="form-group-hint">
-                  Describe what will be true when this is finished — and why it
+                  Describe what will be true when this is finished, and why it
                   matters to you. Required.
                 </span>
               </div>

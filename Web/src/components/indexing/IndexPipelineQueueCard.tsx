@@ -97,7 +97,7 @@ export default function IndexPipelineQueueCard({
         }}
       >
         <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-          Documents by source — share of index
+          Documents by source (share of index)
         </h4>
         {sourceContent.map((source) => {
           const barWidth = indexSourceBarWidth(

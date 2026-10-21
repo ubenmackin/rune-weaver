@@ -97,7 +97,7 @@ export function bindingHostsSummary(
   const hosts = Array.isArray(hostsOrBinding) || hostsOrBinding instanceof Set
     ? toStringList(hostsOrBinding as ReadonlyArray<string> | ReadonlySet<string>)
     : bindingHosts(hostsOrBinding as CredentialBindingLike | null | undefined);
-  if (hosts.length === 0) return "No hosts — never sent";
+  if (hosts.length === 0) return "No hosts (never sent)";
   if (hosts.length === 1) return hosts[0];
   return `${hosts[0]} +${hosts.length - 1} more`;
 }

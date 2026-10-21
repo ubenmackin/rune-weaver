@@ -465,7 +465,7 @@ export default function ChatMessageList({
                 ? "Executing tools…"
                 : hasPartialText
                   ? "Thinking…"
-                  : "Still thinking — large prompts take a while…"}
+                  : "Still thinking (large prompts take a while)…"}
             </span>
           </div>
         ) : null}
