@@ -1,22 +1,19 @@
 // Rune Weaver Dashboard — Onboarding persona names plus goal step.
-import { useState } from "react";
-import { updateSettings } from "../../api";
+import { useEffect, useRef } from "react";
 
 export type OnboardingGoal = "inbox" | "day" | "remember";
 export type Step3CardId = "email" | "calendar" | "index";
 
-export interface PersonaStepValue {
+export interface PersonaDraftValue {
   assistantName: string;
   userName: string;
-  goal: OnboardingGoal;
+  goal: OnboardingGoal | "";
 }
 
 export interface PersonaStepProps {
-  initialAssistantName?: string;
-  initialUserName?: string;
-  initialGoal?: OnboardingGoal | "";
-  onBack?: () => void;
-  onNext?: (value: PersonaStepValue) => void;
+  value: PersonaDraftValue;
+  onChange: (patch: Partial<PersonaDraftValue>) => void;
+  error?: string | null;
 }
 
 export const ONBOARDING_GOALS: Array<{ value: OnboardingGoal; label: string }> = [
@@ -61,43 +58,16 @@ export function step3CardOrderForGoal(goal: OnboardingGoal): Step3CardId[] {
   return ["email", "calendar", "index"];
 }
 
-export function PersonaStep({
-  initialAssistantName = "",
-  initialUserName = "",
-  initialGoal = "",
-  onBack,
-  onNext,
-}: PersonaStepProps) {
-  const [assistantName, setAssistantName] = useState(initialAssistantName);
-  const [userName, setUserName] = useState(initialUserName);
-  const [goal, setGoal] = useState<OnboardingGoal | "">(initialGoal);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+export function PersonaStep({ value, onChange, error = null }: PersonaStepProps) {
+  const errorRef = useRef<HTMLParagraphElement>(null);
 
-  async function handleNext() {
-    const problem = validatePersonaStep({ assistantName, userName, goal });
-    if (problem) {
-      setError(problem);
-      return;
+  // Inline failure steals focus after paint so keyboard users land on the message.
+  useEffect(() => {
+    if (error) {
+      errorRef.current?.scrollIntoView({ block: "nearest" });
+      errorRef.current?.focus({ preventScroll: true });
     }
-    setSaving(true);
-    setError(null);
-    const trimmedAssistant = assistantName.trim();
-    const trimmedUser = userName.trim();
-    const nextGoal = goal as OnboardingGoal;
-    try {
-      // Names persist through the existing persona patch; the goal travels
-      // with wizard state to order Step 3 with no new server key.
-      await updateSettings({
-        persona: { assistantName: trimmedAssistant, userName: trimmedUser },
-      });
-      onNext?.({ assistantName: trimmedAssistant, userName: trimmedUser, goal: nextGoal });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save persona.");
-    } finally {
-      setSaving(false);
-    }
-  }
+  }, [error]);
 
   return (
     <section className="onboarding-step" data-testid="persona-step" aria-label="Meet your assistant">
@@ -110,9 +80,9 @@ export function PersonaStep({
           data-testid="persona-assistant-name"
           className="input-field"
           type="text"
-          value={assistantName}
+          value={value.assistantName}
           maxLength={ONBOARDING_NAME_MAX_LENGTH}
-          onChange={(e) => setAssistantName(e.target.value)}
+          onChange={(e) => onChange({ assistantName: e.target.value })}
           placeholder="Rune Weaver"
         />
       </div>
@@ -123,13 +93,13 @@ export function PersonaStep({
           data-testid="persona-user-name"
           className="input-field"
           type="text"
-          value={userName}
+          value={value.userName}
           maxLength={ONBOARDING_NAME_MAX_LENGTH}
-          onChange={(e) => setUserName(e.target.value)}
+          onChange={(e) => onChange({ userName: e.target.value })}
           placeholder="Ada"
         />
       </div>
-      <fieldset className="form-group">
+      <fieldset className="form-group persona-goal-group">
         <legend>What should we set up first?</legend>
         <div role="radiogroup" aria-label="Onboarding goal">
           {ONBOARDING_GOALS.map((option) => (
@@ -139,8 +109,8 @@ export function PersonaStep({
                 name="onboarding-goal"
                 value={option.value}
                 data-testid={`persona-goal-${option.value}`}
-                checked={goal === option.value}
-                onChange={() => setGoal(option.value)}
+                checked={value.goal === option.value}
+                onChange={() => onChange({ goal: option.value })}
               />
               {option.label}
             </label>
@@ -148,20 +118,16 @@ export function PersonaStep({
         </div>
       </fieldset>
       {error ? (
-        <p data-testid="persona-error" role="alert" className="error-banner">
+        <p
+          ref={errorRef}
+          tabIndex={-1}
+          data-testid="persona-error"
+          role="alert"
+          className="error-banner"
+        >
           {error}
         </p>
       ) : null}
-      <div className="onboarding-actions">
-        {onBack ? (
-          <button type="button" className="ghost" data-testid="persona-back" onClick={onBack}>
-            Back
-          </button>
-        ) : null}
-        <button type="button" className="primary" data-testid="persona-next" disabled={saving} onClick={() => void handleNext()}>
-          {saving ? "Saving…" : "Next"}
-        </button>
-      </div>
     </section>
   );
 }

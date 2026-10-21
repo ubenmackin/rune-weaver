@@ -292,3 +292,43 @@
 .connect-mini-wrap {
   min-width: 0;
 }
+
+/* Protect bullets keep a native marker tinted to the accent. */
+.protect-bullets {
+  list-style: disc;
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.protect-bullets li::marker {
+  color: var(--accent-purple);
+}
+
+.protect-ack-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.protect-settings-line {
+  justify-content: flex-start;
+}
+
+/* Goal group drops the native fieldset chrome to match form groups. */
+.onboarding-step fieldset.form-group,
+.persona-goal-group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.onboarding-step fieldset.form-group legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}

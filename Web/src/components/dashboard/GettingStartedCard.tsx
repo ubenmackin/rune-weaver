@@ -1,5 +1,5 @@
-// Rune Weaver Dashboard — Getting started checklist with dismiss.
-import { useState } from "react";
+// Rune Weaver Dashboard — Getting started checklist with dismiss and resume.
+import { useEffect, useState } from "react";
 import {
   dismissChecklist,
   neverStartedOnboardingStatus,
@@ -8,7 +8,27 @@ import {
   type OnboardingStatus,
 } from "../../api/onboarding";
 import { isCalendarGranted, isConnectReady, isEmailReady, isIndexReady } from "../onboarding/seedPrompt";
+import {
+  clearWizardSnooze,
+  isWizardSnoozed,
+  subscribeWizardSnooze,
+} from "../onboarding/wizardSnooze";
 import type { Tab } from "../TopNav";
+
+// Single resume control shared by the pill and card branches.
+function ResumeButton({ onResume }: { onResume: () => void }) {
+  return (
+    <button
+      type="button"
+      className="btn btn-primary"
+      data-testid="getting-started-resume"
+      onClick={onResume}
+      aria-label="Resume setup"
+    >
+      Resume setup
+    </button>
+  );
+}
 
 export type ChecklistItemId = "brain" | "persona" | "connect" | "policy" | "chat";
 
@@ -108,6 +128,20 @@ export default function GettingStartedCard({
   const [dismissBusy, setDismissBusy] = useState(false);
   const [expandBusy, setExpandBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [snoozed, setSnoozed] = useState(() => isWizardSnoozed());
+
+  useEffect(() => subscribeWizardSnooze(setSnoozed), []);
+
+  // Verified completion drops the flag so resume never lingers past the gate.
+  useEffect(() => {
+    if (status === null || status === undefined) return;
+    if (
+      countCompletedItems(deriveChecklistItems(status)) >= CHECKLIST_TOTAL &&
+      isWizardSnoozed()
+    ) {
+      clearWizardSnooze();
+    }
+  }, [status]);
 
   if (loading) return null;
   if (status === null || status === undefined) return null;
@@ -124,6 +158,7 @@ export default function GettingStartedCard({
     setError(null);
     try {
       await dismissChecklist();
+      clearWizardSnooze();
       onDismiss?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to dismiss checklist");
@@ -138,12 +173,24 @@ export default function GettingStartedCard({
     setError(null);
     try {
       await reopenOnboarding();
+      clearWizardSnooze();
       onExpand?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reopen checklist");
     } finally {
       setExpandBusy(false);
     }
+  }
+
+  // Resume reopens at the persisted step through the gate; refresh converges the card.
+  function handleResume(): void {
+    clearWizardSnooze();
+    onExpand?.();
+  }
+
+  function handleComplete(): void {
+    clearWizardSnooze();
+    onFinish?.();
   }
 
   function handleStart(itemId: ChecklistItemId): void {
@@ -173,6 +220,7 @@ export default function GettingStartedCard({
         <span data-testid="getting-started-pill-progress">
           Setup {done} of {CHECKLIST_TOTAL}
         </span>
+        {snoozed ? <ResumeButton onResume={handleResume} /> : null}
         <button
           type="button"
           className="btn-link"
@@ -236,6 +284,7 @@ export default function GettingStartedCard({
       </ul>
 
       <div className="getting-started-actions">
+        {snoozed ? <ResumeButton onResume={handleResume} /> : null}
         <button
           type="button"
           className="btn btn-secondary"
@@ -249,7 +298,7 @@ export default function GettingStartedCard({
           type="button"
           className="btn btn-primary"
           data-testid="getting-started-finish"
-          onClick={() => onFinish?.()}
+          onClick={() => handleComplete()}
           disabled={finishing}
         >
           {finishing ? "Finishing…" : "Finish"}

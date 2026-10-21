@@ -14,6 +14,8 @@ function stubFetch(handler: (input: string, init?: RequestInit) => Promise<Respo
 beforeEach(() => {
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
+  // Each mount restores the session step, so drop the previous case's row.
+  window.sessionStorage.clear();
 });
 
 describe("wizardState step order", () => {
@@ -305,6 +307,140 @@ describe("GettingStartedWizard inline single source", () => {
       vi.unstubAllGlobals();
       window.history.pushState({}, "", "/");
     }
+  });
+});
+
+describe("GettingStartedWizard unified footer", () => {
+  it("renders Back in footer on steps 2 plus 3 plus 4 with stable layout", async () => {
+    const user = userEvent.setup();
+    stubFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({ ok: true });
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    expect(screen.queryByTestId("wizard-back")).toBeNull();
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+    });
+    expect(screen.getByTestId("wizard-back")).toHaveTextContent("Back");
+    expect(screen.getByTestId("wizard-back").closest(".wizard-footer-left")).not.toBeNull();
+    await user.type(screen.getByTestId("persona-assistant-name"), "Rune Weaver");
+    await user.type(screen.getByTestId("persona-user-name"), "Ada");
+    await user.click(screen.getByTestId("persona-goal-inbox"));
+    await user.click(screen.getByTestId("persona-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
+    });
+    expect(screen.getByTestId("wizard-back")).toBeInTheDocument();
+    await user.click(screen.getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 4 of 4");
+    });
+    expect(screen.getByTestId("wizard-back")).toBeInTheDocument();
+  });
+
+  it("labels primaries Next plus Next plus Finish with zero in-body actions", async () => {
+    const user = userEvent.setup();
+    stubFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({ ok: true });
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("persona-step")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("persona-next")).toHaveTextContent("Next");
+    expect(screen.getByTestId("persona-step").querySelector(".onboarding-actions")).toBeNull();
+    expect(screen.getByTestId("persona-step").querySelector('[data-testid="persona-next"]')).toBeNull();
+    expect(screen.queryByTestId("persona-back")).toBeNull();
+    await user.type(screen.getByTestId("persona-assistant-name"), "Rune Weaver");
+    await user.type(screen.getByTestId("persona-user-name"), "Ada");
+    await user.click(screen.getByTestId("persona-goal-day"));
+    await user.click(screen.getByTestId("persona-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("connect-step")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("wizard-next")).toHaveTextContent("Next");
+    expect(screen.getByTestId("connect-step").querySelector('[data-testid="wizard-next"]')).toBeNull();
+    expect(screen.getByTestId("connect-step").querySelector('[data-testid="wizard-back"]')).toBeNull();
+    await user.click(screen.getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("protect-step")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("wizard-finish")).toHaveTextContent("Finish");
+    expect(document.querySelector(".protect-actions")).toBeNull();
+    expect(screen.getByTestId("protect-step").querySelector("button.primary")).toBeNull();
+  });
+
+  it("saves persona through the hook with a persona patch", async () => {
+    const user = userEvent.setup();
+    const puts: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target === "/settings" && init?.method === "PUT") {
+          puts.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
+          return jsonResponse({ ok: true });
+        }
+        if (target === "/settings") {
+          return jsonResponse({ providers: {}, defaultProvider: "" });
+        }
+        return jsonResponse({ ok: true });
+      }),
+    );
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+    });
+    await user.type(screen.getByTestId("persona-assistant-name"), "Rune Weaver");
+    await user.type(screen.getByTestId("persona-user-name"), "Ada");
+    await user.click(screen.getByTestId("persona-goal-remember"));
+    await user.click(screen.getByTestId("persona-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
+    });
+    const personaPuts = puts.filter((body) => "persona" in body);
+    expect(personaPuts).toHaveLength(1);
+    expect(personaPuts[0]).toMatchObject({
+      persona: { assistantName: "Rune Weaver", userName: "Ada" },
+    });
+  });
+
+  it("styles protect bullets plus ack row with zero body Finish", async () => {
+    stubFetch(async () => jsonResponse({ ok: true }));
+    await act(async () => {
+      render(<GettingStartedWizard initialSkippedSteps={["brain", "persona", "connect"]} />);
+    });
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 4 of 4");
+    const step = screen.getByTestId("protect-step");
+    expect(step.querySelector(".protect-bullets")).not.toBeNull();
+    expect(step.querySelectorAll(".protect-bullets li")).toHaveLength(3);
+    expect(step.querySelector(".protect-ack-row")).not.toBeNull();
+    expect(step.querySelector(".protect-actions")).toBeNull();
+    expect(screen.getByTestId("wizard-finish")).toHaveTextContent("Finish");
+    const accessLink = screen.getByRole("link", { name: /Settings Access/i });
+    expect(accessLink).toHaveAttribute("target", "_blank");
+    expect(accessLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(accessLink.getAttribute("href")).toContain("#settings/access");
   });
 });
 

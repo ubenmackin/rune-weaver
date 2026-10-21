@@ -20,6 +20,10 @@ import {
   type OnboardingStatus,
 } from "./seedPrompt";
 import { jsonResponse } from "../../test-utils/http";
+import {
+  clearWizardSnooze,
+  isWizardSnoozed,
+} from "./wizardSnooze";
 
 function makeStatus(overrides: Partial<OnboardingStatus> = {}): OnboardingStatus {
   return {
@@ -215,10 +219,12 @@ describe("status honesty badges", () => {
 describe("ConnectStep", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    clearWizardSnooze();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    clearWizardSnooze();
   });
 
   it("shows three cards in goal order with live badges", () => {
@@ -605,42 +611,65 @@ describe("ConnectStep", () => {
     expect(emailLink.getAttribute("href")).toContain("#settings/email");
     expect(indexLink.getAttribute("href")).toContain("#settings/indexing");
   });
+
+  it("snoozes the wizard before opening Email settings in a new tab", async () => {
+    const user = userEvent.setup();
+    render(
+      <ConnectStep status={makeStatus()} refresh={() => {}} onSkipCalendar={() => {}} />,
+    );
+    expect(isWizardSnoozed()).toBe(false);
+    await user.click(screen.getByTestId("connect-email-settings-link"));
+    expect(isWizardSnoozed()).toBe(true);
+  });
+
+  it("snoozes the wizard before opening Indexing settings in a new tab", async () => {
+    const user = userEvent.setup();
+    render(
+      <ConnectStep status={makeStatus()} refresh={() => {}} onSkipCalendar={() => {}} />,
+    );
+    expect(isWizardSnoozed()).toBe(false);
+    await user.click(screen.getByTestId("connect-index-settings-link"));
+    expect(isWizardSnoozed()).toBe(true);
+  });
 });
 
 describe("ProtectStep", () => {
   it("renders the three read-only bullets with a Settings Access link", () => {
-    render(
-      <ProtectStep policyAcked={false} onPolicyAckedChange={() => {}} onFinish={() => {}} />,
-    );
+    render(<ProtectStep policyAcked={false} onPolicyAckedChange={() => {}} />);
     expect(screen.getByText(/Reads freely, writes ask first/i)).toBeInTheDocument();
     expect(screen.getByText(/Allowlist-only network/i)).toBeInTheDocument();
     expect(screen.getByText(/Secrets never in prompts/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: /Settings Access/i }),
-    ).toHaveAttribute("href", "#settings/access");
+    const link = screen.getByRole("link", { name: /Settings Access/i });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link.getAttribute("href")).toContain(window.location.origin);
+    expect(link.getAttribute("href")).toContain("#settings/access");
+    expect(screen.getByTestId("protect-step").querySelector(".protect-bullets")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /^Finish$/ })).toBeNull();
+    expect(document.querySelector(".protect-actions")).toBeNull();
   });
 
   it("maps the checkbox to the policy acknowledgement without gating Finish", async () => {
     const user = userEvent.setup();
     const onPolicyAckedChange = vi.fn();
-    const onFinish = vi.fn();
-    render(
-      <ProtectStep
-        policyAcked={false}
-        onPolicyAckedChange={onPolicyAckedChange}
-        onFinish={onFinish}
-      />,
-    );
+    render(<ProtectStep policyAcked={false} onPolicyAckedChange={onPolicyAckedChange} />);
     const checkbox = screen.getByRole("checkbox", {
       name: /I understand writes need approval/i,
     });
     expect(checkbox).not.toBeChecked();
     await user.click(checkbox);
     expect(onPolicyAckedChange).toHaveBeenCalledWith(true);
+    expect(screen.getByTestId("protect-step").querySelector(".protect-ack-row")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /^Finish$/ })).toBeNull();
+  });
 
-    const finish = screen.getByRole("button", { name: /^Finish$/ });
-    expect(finish).toBeEnabled();
-    await user.click(finish);
-    expect(onFinish).toHaveBeenCalledTimes(1);
+  it("snoozes the wizard before following the Settings Access link", async () => {
+    const user = userEvent.setup();
+    clearWizardSnooze();
+    render(<ProtectStep policyAcked={false} onPolicyAckedChange={() => {}} />);
+    expect(isWizardSnoozed()).toBe(false);
+    await user.click(screen.getByRole("link", { name: /Settings Access/i }));
+    expect(isWizardSnoozed()).toBe(true);
+    clearWizardSnooze();
   });
 });

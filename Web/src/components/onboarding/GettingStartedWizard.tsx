@@ -9,7 +9,7 @@ import {
 import { useOnboardingStatus as useSharedOnboardingStatus } from "../../hooks/useOnboardingStatus";
 import { WIZARD_STEPS, nextStep, type WizardStepId } from "./wizardState";
 import BrainStep from "./BrainStep";
-import PersonaStep, { type PersonaStepValue } from "./PersonaStep";
+import PersonaStep, { isOnboardingGoal } from "./PersonaStep";
 import ConnectStep from "./ConnectStep";
 import ProtectStep from "./ProtectStep";
 import { StoreSecretModal } from "../StoreSecretModal";
@@ -23,7 +23,9 @@ import {
   readStandaloneMode,
   toSeedStatus,
 } from "./wizardHelpers";
+import { clearWizardState, persistWizardState, resolveInitialWizardState } from "./wizardStorage";
 import { useBrainWizard } from "./useBrainWizard";
+import { usePersonaWizard } from "./usePersonaWizard";
 import {
   AllSkippedFooter,
   BrainWizardFooter,
@@ -61,16 +63,17 @@ export default function GettingStartedWizard({
     if (initialSkippedSteps === undefined) return [];
     return sanitizeSkippedSteps(initialSkippedSteps);
   });
-  const [current, setCurrent] = useState<WizardStepId>(() => {
-    if (onboardingStatus) return firstPendingStep(sanitizeSkippedSteps(onboardingStatus.skippedSteps)) ?? WIZARD_STEPS[0];
-    if (initialSkippedSteps === undefined) return WIZARD_STEPS[0];
-    return firstPendingStep(sanitizeSkippedSteps(initialSkippedSteps)) ?? WIZARD_STEPS[0];
+  const [initialWizardState] = useState(() => {
+    if (onboardingStatus) {
+      return resolveInitialWizardState(sanitizeSkippedSteps(onboardingStatus.skippedSteps));
+    }
+    if (initialSkippedSteps === undefined) {
+      return { current: WIZARD_STEPS[0], history: [WIZARD_STEPS[0]] as WizardStepId[] };
+    }
+    return resolveInitialWizardState(sanitizeSkippedSteps(initialSkippedSteps));
   });
-  const [history, setHistory] = useState<WizardStepId[]>(() => {
-    if (onboardingStatus) return [firstPendingStep(sanitizeSkippedSteps(onboardingStatus.skippedSteps)) ?? WIZARD_STEPS[0]];
-    if (initialSkippedSteps === undefined) return [WIZARD_STEPS[0]];
-    return [firstPendingStep(sanitizeSkippedSteps(initialSkippedSteps)) ?? WIZARD_STEPS[0]];
-  });
+  const [current, setCurrent] = useState<WizardStepId>(() => initialWizardState.current);
+  const [history, setHistory] = useState<WizardStepId[]>(() => initialWizardState.history);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
@@ -78,13 +81,14 @@ export default function GettingStartedWizard({
     if (onboardingStatus !== undefined) return onboardingStatus !== null;
     return initialSkippedSteps !== undefined;
   });
-  const [personaValue, setPersonaValue] = useState<PersonaStepValue | null>(null);
   const [internalSeedStatus, setInternalSeedStatus] = useState<SeedStatus | null>(null);
   const [seedLoading, setSeedLoading] = useState(false);
   const [seedError, setSeedError] = useState<string | null>(null);
 
   // Wizard-owned brain draft plus connection, save, and Keychain state.
   const brain = useBrainWizard({ standalone, hydrated, setStepError, setError });
+  // Wizard-owned persona draft plus save; presentational step never saves alone.
+  const persona = usePersonaWizard({ standalone, hydrated, setStepError, setError });
 
   // Late server snapshot seeds the shell once so reload resumes at the first
   // incomplete step instead of restarting at the beginning.
@@ -99,8 +103,9 @@ export default function GettingStartedWizard({
         setHydrated(true);
         return;
       }
-      setCurrent(first);
-      setHistory([first]);
+      const resolved = resolveInitialWizardState(clean);
+      setCurrent(resolved.current);
+      setHistory(resolved.history);
       setHydrated(true);
       return;
     }
@@ -113,10 +118,18 @@ export default function GettingStartedWizard({
       setHydrated(true);
       return;
     }
-    setCurrent(first);
-    setHistory([first]);
+    const resolved = resolveInitialWizardState(clean);
+    setCurrent(resolved.current);
+    setHistory(resolved.history);
     setHydrated(true);
   }, [hydrated, hasExternal, onboardingStatus, initialSkippedSteps, shared.isLoading, shared.status]);
+
+  // Session-scoped step memory so remount keeps the current step while badges
+  // and drafts still re-read from the server on the fresh mount.
+  useEffect(() => {
+    if (standalone || !hydrated) return;
+    persistWizardState(current, history);
+  }, [standalone, hydrated, current, history]);
 
   const reloadInternalSeed = useCallback(async () => {
     if (standalone) return;
@@ -195,11 +208,14 @@ export default function GettingStartedWizard({
   const total = WIZARD_STEPS.length;
 
   function handleBack() {
+    // Drop stale hook errors before stepping back so forward never replays them.
+    persona.clearErrors();
+    brain.clearErrors();
+    setStepError(null);
     if (history.length <= 1) return;
     const nextHistory = history.slice(0, -1);
     setHistory(nextHistory);
     setCurrent(nextHistory[nextHistory.length - 1]);
-    setStepError(null);
   }
 
   function advanceFrom(step: WizardStepId, skippedAfter: WizardStepId[]) {
@@ -213,11 +229,19 @@ export default function GettingStartedWizard({
     setCurrent(next);
   }
 
-  function handlePersonaNext(value: PersonaStepValue) {
-    setError(null);
-    setStepError(null);
-    setPersonaValue(value);
-    advanceFrom(current, skipped);
+  // Goal travels with wizard state to order Step 3 with no new server key.
+  const personaGoal = isOnboardingGoal(persona.draft.goal) ? persona.draft.goal : null;
+
+  function handlePersonaNext() {
+    void persona.onNext({
+      current,
+      skipped,
+      onAdvanced: (next) => {
+        setHistory((prev) => [...prev, next]);
+        setCurrent(next);
+      },
+      onFinished: handleFinish,
+    });
   }
 
   function handleNext() {
@@ -234,9 +258,10 @@ export default function GettingStartedWizard({
       // Single finish flow owns the verified seed plus demo and completion.
       await finishOnboardingWithVerifiedSeed({
         status: seedStatus,
-        goal: personaValue?.goal ?? null,
+        goal: personaGoal,
         complete: onOnboardingComplete,
       });
+      clearWizardState();
       onFinished?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to finish onboarding");
@@ -245,25 +270,22 @@ export default function GettingStartedWizard({
     }
   }
 
-  async function handleSkip() {
+  async function runSkip(step: WizardStepId) {
     setError(null);
     setStepError(null);
     setBusy(true);
     try {
-      if (onOnboardingSkip) await onOnboardingSkip(current);
-      else await skipOnboardingStep(current);
-      const updated = skipped.includes(current) ? skipped : [...skipped, current];
+      if (onOnboardingSkip) await onOnboardingSkip(step);
+      else await skipOnboardingStep(step);
+      const updated = skipped.includes(step) ? skipped : [...skipped, step];
       setSkipped(updated);
-      const next = nextStep(current, updated);
+      const next = nextStep(step, updated);
       if (next) {
         setHistory((prev) => [...prev, next]);
         setCurrent(next);
       } else {
-        await finishOnboardingWithVerifiedSeed({
-          status: seedStatus,
-          goal: personaValue?.goal ?? null,
-          complete: onOnboardingComplete,
-        });
+        await finishOnboardingWithVerifiedSeed({ status: seedStatus, goal: personaGoal, complete: onOnboardingComplete });
+        clearWizardState();
         onFinished?.();
       }
     } catch (err) {
@@ -273,33 +295,13 @@ export default function GettingStartedWizard({
     }
   }
 
+  async function handleSkip() {
+    await runSkip(current);
+  }
+
+  // Detour always records connect skip so reload resumes past it.
   async function handleSkipCalendarDetour() {
-    setError(null);
-    setStepError(null);
-    setBusy(true);
-    try {
-      // Calendar detour always records connect skip so reload resumes past it.
-      if (onOnboardingSkip) await onOnboardingSkip("connect");
-      else await skipOnboardingStep("connect");
-      const updated = skipped.includes("connect") ? skipped : [...skipped, "connect" as WizardStepId];
-      setSkipped(updated);
-      const next = nextStep("connect", updated);
-      if (next) {
-        setHistory((prev) => [...prev, next]);
-        setCurrent(next);
-      } else {
-        await finishOnboardingWithVerifiedSeed({
-          status: seedStatus,
-          goal: personaValue?.goal ?? null,
-          complete: onOnboardingComplete,
-        });
-        onFinished?.();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to skip this step");
-    } finally {
-      setBusy(false);
-    }
+    await runSkip("connect");
   }
 
   function handleBrainNext() {
@@ -314,8 +316,9 @@ export default function GettingStartedWizard({
     });
   }
 
-  // Inline step errors are the single source of truth.
-  const inlineStepError = current !== "brain" ? stepError : null;
+  // Inline step errors are the single source of truth; brain plus persona
+  // own their inline messages so the shell never mirrors them.
+  const inlineStepError = current !== "brain" && current !== "persona" ? stepError : null;
   const inlineSeedError = current !== "connect" ? effectiveSeedError : null;
   if (allSkipped) {
     return (
@@ -382,8 +385,8 @@ export default function GettingStartedWizard({
     );
   }
 
-  const showWizardBack = (current === "connect" || current === "protect") && history.length > 1;
-  const showWizardNext = current === "connect";
+  // Footer owns Back on every post-brain step; placeholder keeps layout stable.
+  const showWizardBack = history.length > 1;
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Getting started">
@@ -470,16 +473,14 @@ export default function GettingStartedWizard({
           ) : null}
           {current === "persona" ? (
             <PersonaStep
-              initialAssistantName={personaValue?.assistantName ?? ""}
-              initialUserName={personaValue?.userName ?? ""}
-              initialGoal={personaValue?.goal ?? ""}
-              onBack={handleBack}
-              onNext={handlePersonaNext}
+              value={persona.draft}
+              onChange={persona.onPatch}
+              error={persona.fieldError}
             />
           ) : null}
           {current === "connect" ? (
             <ConnectStep
-              goal={personaValue?.goal ?? null}
+              goal={personaGoal}
               status={seedStatus}
               loading={effectiveSeedLoading}
               error={effectiveSeedError}
@@ -489,11 +490,7 @@ export default function GettingStartedWizard({
             />
           ) : null}
           {current === "protect" ? (
-            <ProtectStep
-              policyAcked={seedStatus?.policyAcked ?? false}
-              onFinish={() => void handleFinish()}
-              finishing={busy}
-            />
+            <ProtectStep policyAcked={seedStatus?.policyAcked ?? false} />
           ) : null}
         </div>
 
@@ -510,14 +507,44 @@ export default function GettingStartedWizard({
             onNext={handleBrainNext}
             onSkip={() => void handleSkip()}
           />
-        ) : (
+        ) : current === "persona" ? (
           <WizardStepFooter
             showBack={showWizardBack}
-            showNext={showWizardNext}
+            busy={busy || persona.saving}
+            onBack={handleBack}
+            onSkip={() => void handleSkip()}
+            primary={{
+              label: persona.saving ? "Saving…" : "Next",
+              onClick: handlePersonaNext,
+              testId: "persona-next",
+              disabled: persona.saving || busy,
+            }}
+          />
+        ) : current === "connect" ? (
+          <WizardStepFooter
+            showBack={showWizardBack}
             busy={busy}
             onBack={handleBack}
             onSkip={() => void handleSkip()}
-            onNext={handleNext}
+            primary={{
+              label: "Next",
+              onClick: handleNext,
+              testId: "wizard-next",
+              disabled: busy || effectiveSeedLoading,
+            }}
+          />
+        ) : (
+          <WizardStepFooter
+            showBack={showWizardBack}
+            busy={busy}
+            onBack={handleBack}
+            onSkip={() => void handleSkip()}
+            primary={{
+              label: busy ? "Finishing…" : "Finish",
+              onClick: () => void handleFinish(),
+              testId: "wizard-finish",
+              disabled: busy,
+            }}
           />
         )}
       </div>
