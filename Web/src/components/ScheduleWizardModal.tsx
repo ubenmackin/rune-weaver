@@ -426,7 +426,7 @@ export default function ScheduleWizardModal({
       ? `Uses schedule default (${budgetBlankEffective})`
       : budgetIsNonNumeric
       ? `Max tool rounds must be between ${TOOL_ROUNDS_MIN} and ${TOOL_ROUNDS_MAX}.`
-      : `${budgetEffective} rounds — ${onToolLimit === "park" ? "parks" : "synthesizes"}`;
+      : `${budgetEffective} rounds (${onToolLimit === "park" ? "parks" : "synthesizes"})`;
 
   return (
     <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
@@ -909,7 +909,7 @@ export default function ScheduleWizardModal({
                     {rules.length > 0 ? "Fallback Prompt:" : "Agent Prompt:"}
                   </span>
                   <div className="prompt-preview-box">
-                    {prompt || (rules.length > 0 ? "(None configured — unmatched events ignored)" : "(Empty)")}
+                    {prompt || (rules.length > 0 ? "(None configured: unmatched events ignored)" : "(Empty)")}
                   </div>
                 </div>
               </div>

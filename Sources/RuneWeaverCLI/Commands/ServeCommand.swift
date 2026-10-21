@@ -570,7 +570,7 @@ extension ServeCommand {
                 } else {
                     print(
                         TerminalStyle.success(
-                            "Serving engine API on \(serverConfig.hostname):\(serverConfig.port) with owner auth — "
+                            "Serving engine API on \(serverConfig.hostname):\(serverConfig.port) with owner auth: "
                                 + "reachable on your local network (\(selectedName)). Ctrl+C to stop."
                         )
                     )
@@ -584,7 +584,7 @@ extension ServeCommand {
                 )
                 print(
                     TerminalStyle.error(
-                        "WARNING: no owner token is configured — serving UNAUTHENTICATED on loopback only. "
+                        "WARNING: no owner token is configured. Serving UNAUTHENTICATED on loopback only. "
                             + "Run 'rune-weaver auth token generate' before binding to a LAN address."
                     )
                 )

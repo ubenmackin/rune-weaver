@@ -122,7 +122,7 @@ export default function IndexBentoHeader({
             independent of the enabled flag. */}
         {status?.enabled === false ? (
           <p className="muted text-sm">
-            Indexing is off — turn it on in Settings → Indexing to run a pass.
+            Indexing is off. Turn it on in Settings → Indexing to run a pass.
           </p>
         ) : null}
         {/* Reclaim outcome keeps both on-disk figures visible after the size

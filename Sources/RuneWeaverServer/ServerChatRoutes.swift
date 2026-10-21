@@ -21,7 +21,7 @@ func registerChatRoute(_ app: Application) {
         guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
             throw Abort(
                 .tooManyRequests,
-                reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns — wait for one to finish or cancel it, then retry."
+                reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns. Wait for one to finish or cancel it, then retry."
             )
         }
         // Publish the running row immediately so dashboards badge the session from the run log even

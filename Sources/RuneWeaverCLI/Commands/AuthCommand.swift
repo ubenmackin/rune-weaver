@@ -203,7 +203,7 @@ private func expandedPath(_ path: String) -> String {
 /// New token value.
 private func printMintedToken(_ token: String, action: String) {
     print("")
-    print(TerminalStyle.success("\(action) owner token (shown once — store it now):"))
+    print(TerminalStyle.success("\(action) owner token (shown once. Store it now):"))
     print("  \(token)")
     print("")
     print(TerminalStyle.dim("  fingerprint: \(ServerAuth.fingerprint(token)) (SHA-256 prefix, non-secret)"))

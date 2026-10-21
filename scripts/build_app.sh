@@ -215,7 +215,7 @@ SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:-}"
         echo "  List identities with: security find-identity -v -p codesigning" >&2
         echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
         echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
-        echo "  Ad-hoc is refused because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access — no downgrade attempted." >&2
+        echo "  Ad-hoc is refused because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access. No downgrade attempted." >&2
         if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
             echo "  The login keychain is locked over ssh, so codesign cannot use the key even when it works from local Terminal.app." >&2
             echo "  Run security unlock-keychain ~/Library/Keychains/login.keychain-db first, then retry." >&2

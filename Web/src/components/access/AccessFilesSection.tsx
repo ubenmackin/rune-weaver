@@ -353,7 +353,7 @@ export function AccessFilesSection({
                 ) : null}
                 <p className="muted text-sm" style={{ marginBottom: "16px" }} data-testid="files-write-precedence">
                   Deny patterns refuse first. The longest matching write-path rule
-                  below decides next — a rule covers its path and everything inside it,
+                  below decides next: a rule covers its path and everything inside it,
                   so a deeper rule outranks a broader one. Otherwise the write mode
                   above applies inside the allowed roots, and a path outside every
                   allowed root asks.

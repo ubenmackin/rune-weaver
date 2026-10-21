@@ -201,7 +201,7 @@ export function useChatActions({
           .then((response) => {
             if (!response.cancelled) {
               forgetToolCall(trimmedCallID);
-              setError("Tool cancel missed — the tool call already settled");
+              setError("Tool cancel missed: the tool call already settled");
             }
           })
           .catch((failure) => {
@@ -223,13 +223,13 @@ export function useChatActions({
     // A steer raced with cancel has no live turn; surface the miss instead
     // of sending into a settled turn.
     if (cancelledRef.current) {
-      setError("No active turn — steering was not applied because the turn was cancelled.");
+      setError("No active turn. Steering was not applied because the turn was cancelled.");
       return;
     }
     if (!pending) return;
     if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
       setError(
-        `Message too long — keep steering under ${MAX_CHAT_TEXT_LENGTH} characters.`,
+        `Message too long: keep steering under ${MAX_CHAT_TEXT_LENGTH} characters.`,
       );
       return;
     }
@@ -241,7 +241,7 @@ export function useChatActions({
     });
     if (!sent) {
       setError(
-        "Connection is closed — steering was not sent. Wait for reconnect, then try again.",
+        "Connection is closed. Steering was not sent. Wait for reconnect, then try again.",
       );
       return;
     }
@@ -319,7 +319,7 @@ export function useChatActions({
     if (!pending) return;
     if (Date.now() - lastSteerTimestampRef.current < STEER_CANCEL_DEBOUNCE_MS) {
       setError(
-        "Steering was just sent — Cancel is briefly paused so the steer isn't dropped; try again in a moment.",
+        "Steering was just sent. Cancel is briefly paused so the steer isn't dropped; try again in a moment.",
       );
       return;
     }
@@ -360,7 +360,7 @@ export function useChatActions({
       const targetSid = overrideSessionID ?? sessionID;
       if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
         setError(
-          `Message too long — keep messages under ${MAX_CHAT_TEXT_LENGTH} characters.`,
+          `Message too long: keep messages under ${MAX_CHAT_TEXT_LENGTH} characters.`,
         );
         return;
       }

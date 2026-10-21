@@ -1046,7 +1046,7 @@ export function AccessRulesSection({
                 Deny rules never expire and outrank every allow rule.
                 {durationValue === "forever"
                   ? ""
-                  : " A deny cannot carry a dated tier — switch back to Allow, choose Forever, then select Deny."}
+                  : " A deny cannot carry a dated tier. Switch back to Allow, choose Forever, then select Deny."}
               </p>
             )}
 
@@ -1063,7 +1063,7 @@ export function AccessRulesSection({
                 onChange={(e) => setRuleReason(e.target.value)}
                 placeholder={
                   ruleEffect === "deny"
-                    ? "e.g. Production database — changes must go through CI/CD"
+                    ? "e.g. Production database (changes must go through CI/CD)"
                     : "Why this rule is being created"
                 }
               />
@@ -1134,7 +1134,7 @@ export function AccessRulesSection({
               Revoke the {getRuleEffect(pendingRevoke) === "allow" ? "allow" : "deny"} rule
               for <code>{pendingRevoke.toolName}</code> (
               {describeAccessScope(pendingRevoke.scope)})? Revocation stops future
-              matches only — calls already allowed stay in history.
+              matches only. Calls already allowed stay in history.
             </p>
             {revokeError ? (
               <p className="error" role="alert" data-testid="access-revoke-error">

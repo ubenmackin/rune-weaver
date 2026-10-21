@@ -201,7 +201,7 @@ export default function DashboardGreetingIdentity({
           className="dashboard-greeting-caption-button"
           data-testid="dashboard-persona-caption"
           onClick={() => onSelectTab(destination)}
-          aria-label={`${label} — open ${destination}`}
+          aria-label={`${label} (open ${destination})`}
         >
           {label}
         </button>
@@ -228,7 +228,7 @@ export default function DashboardGreetingIdentity({
           className="dashboard-greeting-caption"
           data-testid="dashboard-persona-caption"
         >
-          Resting — back on next run
+          Resting (back on next run)
         </span>
       );
     } else if (

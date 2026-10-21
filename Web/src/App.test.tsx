@@ -258,7 +258,7 @@ describe("App mobile shell clearance", () => {
     });
     // The mobile bar owns the canonical order with Settings reserved for
     // profile; the distinct mobile landmark keeps it unique from desktop tabs.
-    const bar = screen.getByRole("navigation", { name: "Dashboard sections — mobile" });
+    const bar = screen.getByRole("navigation", { name: "Dashboard sections (mobile)" });
     const tabs = Array.from(bar.querySelectorAll("button")).map((tab) =>
       tab.getAttribute("aria-label"),
     );
@@ -280,7 +280,7 @@ describe("App mobile shell clearance", () => {
     // owns visibility (min-width hides the bar, max-width hides the top
     // links), so a fail-closed viewport probe never leaves zero tab surfaces.
     expect(
-      screen.queryByRole("navigation", { name: "Dashboard sections — mobile" }),
+      screen.queryByRole("navigation", { name: "Dashboard sections (mobile)" }),
     ).not.toBeNull();
     expect(document.querySelector(".mobile-bottom-nav")).not.toBeNull();
     expect(document.querySelector(".app-main-content")).not.toBeNull();

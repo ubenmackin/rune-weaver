@@ -364,7 +364,7 @@ describe("ToolActionRow live progress", () => {
       />,
     );
     const warning = screen.getByTestId("tool-progress-scope-warning");
-    expect(warning).toHaveTextContent("— entire home folder");
+    expect(warning).toHaveTextContent("(entire home folder)");
     // The scope description stays on the same line rather than a second banner.
     expect(screen.getByText("Find *.txt in ~")).toBeInTheDocument();
   });

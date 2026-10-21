@@ -57,7 +57,7 @@ export default function ChatStatusBar({
             <span className="status-bar-value">
               {safeTurnTokens != null
                 ? `${safeTurnTokens.toLocaleString()} tokens`
-                : "—"}
+                : "-"}
             </span>
           </div>
           <div className="status-bar-detail-row">
@@ -91,7 +91,7 @@ export default function ChatStatusBar({
           <span className="status-bar-value">
             {safeTurnTokens != null
               ? `${safeTurnTokens.toLocaleString()} tokens`
-              : "—"}
+              : "-"}
           </span>
         </div>
 

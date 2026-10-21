@@ -374,7 +374,7 @@ public actor GoalEngine {
             lines.append("Completed steps:")
             for step in priorSteps {
                 if let notes = step.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
-                    lines.append("- Step \(step.ordinal) [\(step.status.rawValue)] \(step.title) — \(notes)")
+                    lines.append("- Step \(step.ordinal) [\(step.status.rawValue)] \(step.title): \(notes)")
                 } else {
                     lines.append("- Step \(step.ordinal) [\(step.status.rawValue)] \(step.title)")
                 }

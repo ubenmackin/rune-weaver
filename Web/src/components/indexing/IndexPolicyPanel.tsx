@@ -369,7 +369,7 @@ export function IndexPolicyPanel() {
               data-testid="index-roots-outside-warning"
               style={{ marginTop: 4, marginBottom: 0 }}
             >
-              An index root sits outside your Files allow roots — recalled
+              An index root sits outside your Files allow roots: recalled
               content from there may not be readable by live file tools. Keep
               index roots inside Security Files and Access allow roots, or
               broaden those allow roots.

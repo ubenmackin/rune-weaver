@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Onboarding wizard step order, skip, and resume tests.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GettingStartedWizard, {
@@ -125,9 +125,11 @@ describe("GettingStartedWizard skip and resume", () => {
     });
   });
 
-  it("resumes at the first incomplete step from server skipped steps", () => {
+  it("resumes at the first incomplete step from server skipped steps", async () => {
     stubFetch(async () => jsonResponse({ ok: true }));
-    render(<GettingStartedWizard initialSkippedSteps={["brain", "persona"]} />);
+    await act(async () => {
+      render(<GettingStartedWizard initialSkippedSteps={["brain", "persona"]} />);
+    });
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
     expect(screen.getByText(/Link the sources/i)).toBeInTheDocument();
   });
@@ -163,9 +165,11 @@ describe("GettingStartedWizard footer error mirror", () => {
     expect(truncated.endsWith("…")).toBe(true);
   });
 
-  it("renders zero footer text when no error", () => {
+  it("renders zero footer text when no error", async () => {
     stubFetch(async () => jsonResponse({ ok: true }));
-    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await act(async () => {
+      render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    });
     const footer = screen.getByTestId("wizard-footer-error");
     expect(footer).toHaveTextContent("");
     expect(footer.textContent).toBe("");

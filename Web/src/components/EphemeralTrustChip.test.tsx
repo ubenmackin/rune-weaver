@@ -154,12 +154,12 @@ describe("EphemeralTrustChip", () => {
     // domain allowances read by lifetime alone: the chip never claims a
     // provenance the payload does not carry.
     expect(trustLines(container)).toEqual([
-      "email.send to bob@x.com — rest of this task",
-      "email.send to alice@x.com — rest of this session",
-      "messages.send to bob@x.com — rest of this session",
-      "messages.send to 3 recipients — rest of this session",
-      "api.request to api.example.com — rest of this session",
-      "files.write to all targets — rest of this session",
+      "email.send to bob@x.com (rest of this task)",
+      "email.send to alice@x.com (rest of this session)",
+      "messages.send to bob@x.com (rest of this session)",
+      "messages.send to 3 recipients (rest of this session)",
+      "api.request to api.example.com (rest of this session)",
+      "files.write to all targets (rest of this session)",
     ]);
     // Every line carries its own revoke; no chip-level or bulk control exists.
     expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(6);
@@ -234,7 +234,7 @@ describe("EphemeralTrustChip", () => {
       expect(screen.getAllByTestId("ephemeral-trust-row")).toHaveLength(1);
     });
     expect(trustLines(container)).toEqual([
-      "api.request to api.example.com — rest of this session",
+      "api.request to api.example.com (rest of this session)",
     ]);
     expect(stub.trustCalls().length).toBeGreaterThanOrEqual(2);
   });
@@ -265,7 +265,7 @@ describe("EphemeralTrustChip", () => {
     // A refused clear must not read as revoked trust: the line stays until a
     // probe proves otherwise, and the row unlocks for a retry.
     expect(trustLines(container)).toEqual([
-      "email.send to bob@x.com — rest of this session",
+      "email.send to bob@x.com (rest of this session)",
     ]);
     expect(screen.getByRole("button", { name: "Revoke" })).not.toBeDisabled();
   });

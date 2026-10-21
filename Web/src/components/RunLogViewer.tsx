@@ -343,8 +343,8 @@ export default function RunLogViewer() {
       await cancelRun(run.id);
       pushSuccessToast(
         scope === "run"
-          ? "Cancel requested for this fan-out run — the whole swarm is stopping; completed worker output is kept."
-          : "Cancel requested for this worker — the rest of the swarm keeps running.",
+          ? "Cancel requested for this fan-out run. The whole swarm is stopping; completed worker output is kept."
+          : "Cancel requested for this worker. The rest of the swarm keeps running.",
       );
       // While any row still reads running the poller keeps converging the
       // remaining workers, so one refetch here is enough to start the settle.
@@ -765,7 +765,7 @@ export default function RunLogViewer() {
           </div>
           <div className="modal-body">
             <p className="muted" style={{ margin: 0 }}>
-              This stops the whole swarm — every worker still in flight is
+              This stops the whole swarm. Every worker still in flight is
               asked to stop. Completed worker output is kept.
             </p>
           </div>

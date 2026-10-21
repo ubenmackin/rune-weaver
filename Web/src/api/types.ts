@@ -702,7 +702,7 @@ export function resolveMaxConcurrentChatTurns(
 // refusal wording so client-side, REST, and socket refusals read as one
 // outcome regardless of which layer enforced the cap.
 export function concurrentTurnsBusyMessage(limit: number = MAX_CONCURRENT_CHAT_TURNS): string {
-  return `Already running ${limit} chat turns — wait for one to finish or cancel it, then retry.`;
+  return `Already running ${limit} chat turns. Wait for one to finish or cancel it, then retry.`;
 }
 
 // Single web source for the chat text bound, pinned to the engine ChatRequest.maxTextLength (which

@@ -256,7 +256,7 @@ struct AppMenuView: View {
                 } else if model.needsOwnerToken {
                     // Healthy loopback boot without a token stays local-only; the
                     // bottom Owner Access entry remains the sole token action.
-                    Text("Local only — add a token in Owner Access to enable LAN binds.")
+                    Text("Local only. Add a token in Owner Access to enable LAN binds.")
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }

@@ -25,7 +25,7 @@ struct StatusCommand: AsyncParsableCommand {
         if loaded.isFallback {
             print(TerminalStyle.dim("No config found at \(loaded.url.path); showing built-in defaults."))
         }
-        print("\(TerminalStyle.success("●")) \(config.engine.name) — \(loaded.url.path)")
+        print("\(TerminalStyle.success("●")) \(config.engine.name): \(loaded.url.path)")
 
         print("")
         print("LLM providers (default: \(config.llm.defaultProvider)):")
@@ -40,7 +40,7 @@ struct StatusCommand: AsyncParsableCommand {
             let state = reachable ? "reachable" : "unreachable"
             let tools = info.supportsTools ? "tools" : "no-tools"
             let embeddings = info.supportsEmbeddings ? "embeddings" : "no-embeddings"
-            print("  \(dot) \(provider.name) — model \(info.name), context \(info.contextLength), \(tools), \(embeddings) (\(state))")
+            print("  \(dot) \(provider.name): model \(info.name), context \(info.contextLength), \(tools), \(embeddings) (\(state))")
         }
         let disabled = config.llm.providers.filter { !$0.value.enabled }.map(\.key).sorted()
         if !disabled.isEmpty {
@@ -93,7 +93,7 @@ struct StatusCommand: AsyncParsableCommand {
         let searchReachable = await SearXNGEnsurer.isReachable(baseURL: searchURL)
         let searchDot = searchReachable ? TerminalStyle.success("●") : TerminalStyle.error("○")
         let searchState = searchReachable ? "reachable" : "unreachable"
-        print("  \(searchDot) SearXNG — \(searchState) (\(searchURL))")
+        print("  \(searchDot) SearXNG: \(searchState) (\(searchURL))")
         if !searchReachable {
             print(
                 TerminalStyle.dim(

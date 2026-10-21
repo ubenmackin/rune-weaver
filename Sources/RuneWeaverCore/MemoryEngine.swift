@@ -803,7 +803,7 @@ extension MemoryEngine {
     /// Builds the acknowledgement text for an explicit remember request.
     public static func rememberAcknowledgementText(for fact: String, stored: Bool) -> String {
         guard isStorableFact(fact) else {
-            return "Usage: /remember <fact> — what should I remember?"
+            return "Usage: /remember <fact>. What should I remember?"
         }
         return stored ? "Remembered: \(fact)" : "Could not remember that."
     }

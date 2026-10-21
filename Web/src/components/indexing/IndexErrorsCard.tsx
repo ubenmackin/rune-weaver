@@ -124,9 +124,9 @@ export default function IndexErrorsCard({
         >
           <p className="muted text-sm" style={{ marginBottom: 8 }}>
             Messages indexing needs Full Disk Access. Grant it to
-            RuneWeaver.app — or to your terminal emulator (for example
-            Terminal.app or iTerm2) when you run rune-weaver serve —
-             then restart and press Run.
+            RuneWeaver.app (or to your terminal emulator, for example
+            Terminal.app or iTerm2, when you run rune-weaver serve),
+            then restart and press Run.
           </p>
           <button
             type="button"
@@ -139,7 +139,7 @@ export default function IndexErrorsCard({
           </button>
           <ol className="muted text-sm" style={{ marginTop: 8, paddingLeft: 20 }}>
             <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
-            <li>Click + and add RuneWeaver.app — or your terminal emulator (for example Terminal.app or iTerm2) when you run rune-weaver serve.</li>
+            <li>Click + and add RuneWeaver.app (or your terminal emulator, for example Terminal.app or iTerm2, when you run rune-weaver serve).</li>
             <li>Toggle the added entry ON and authenticate when prompted.</li>
             <li>Quit and restart the app or terminal, then press Run.</li>
           </ol>

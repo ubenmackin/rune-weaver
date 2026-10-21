@@ -170,7 +170,7 @@ public actor PlaywrightPythonEnsurer {
         return "\(cause)\(step). Managed browser Python: \(venvPath) (\(effective))."
             + " Manual fallback: \(manualFallbackHint(pythonPath: effective))."
             + " `pipx` and `brew install playwright-cli` do not provide `import playwright` for the server python."
-            + " Check network connectivity — offline installs fail closed without changing the existing venv."
+            + " Check network connectivity. Offline installs fail closed without changing the existing venv."
     }
 
     /// Whether the managed interpreter file exists (without probing import).

@@ -23,7 +23,7 @@ import {
 // fault, so it earns honest copy instead of the raw transport message. Kept
 // as one string builder so both goal surfaces phrase contention identically.
 function goalAdvanceConflictMessage(goalTitle: string): string {
-  return `"${goalTitle}" is already running — wait for the current run to finish.`;
+  return `"${goalTitle}" is already running. Wait for the current run to finish.`;
 }
 
 // Active goals pause; every resting state (paused, needs input) resumes. The

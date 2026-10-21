@@ -73,7 +73,7 @@ export default function ChatHeader({
             className={`goal-chip ${goalStatusTone(sessionGoal.status)}`}
             data-testid="session-goal-chip"
             onClick={onOpenGoalDrawer}
-            title={`${sessionGoal.title} — ${sessionGoal.progress.done}/${sessionGoal.progress.total} steps`}
+            title={`${sessionGoal.title} (${sessionGoal.progress.done}/${sessionGoal.progress.total} steps)`}
           >
             <TargetIcon size={13} />
             <span className="goal-chip-title">Goal Tracker</span>

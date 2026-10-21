@@ -1,11 +1,11 @@
 # Plugin Developer Guide ("Runes")
 
-Capabilities are plugins. A plugin ("rune") is a self-contained module that gives the agent hands in the world — search email, click a web page, toggle a light, or run code. Add new ones without touching the core.
+Capabilities are plugins. A plugin ("rune") is a self-contained module that gives the agent hands in the world: search email, click a web page, toggle a light, or run code. Add new ones without touching the core.
 
 There are two flavors:
 
-- **Swift plugins** — conform to `RuneWeaverCore.Tool`, register with `ToolBus`. Native speed, type safety, direct Apple framework access.
-- **Python plugins** — for Playwright, email parsing, and anything where the ML/integration ecosystem is Python-first (Whisper runs as a local CLI binary instead). They run in a sandboxed subprocess and talk JSON-RPC over stdin/stdout, so a bad Python plugin can't crash the Swift core.
+- **Swift plugins**: conform to `RuneWeaverCore.Tool`, register with `ToolBus`. Native speed, type safety, direct Apple framework access.
+- **Python plugins**: for Playwright, email parsing, and anything where the ML/integration ecosystem is Python-first (Whisper runs as a local CLI binary instead). They run in a sandboxed subprocess and talk JSON-RPC over stdin/stdout, so a bad Python plugin can't crash the Swift core.
 
 ## The `Tool` Protocol
 
@@ -26,20 +26,20 @@ The protocol extension provides a default `contentTrustLevel` of `.trusted`. Any
 
 Supporting types (`Sources/RuneWeaverCore/ToolContext.swift`, `ToolOutput.swift`, `Tool.swift`):
 
-- `JSONSchema` — wraps the raw JSON Schema document (`rawValue: String`) describing the input arguments. Use `.emptyObject` (`{"type":"object"}`) for argument-free tools.
-- `ToolInput` — `toolName`, `argumentsJSON` (raw JSON matching your schema), `callID` (correlation ID, defaults to a UUID).
-- `ToolContext` — execution context provided to the handler:
-  - `conversationID` / `sessionID` — UUID of the owning session.
-  - `dryRun: Bool` — when `true`, the tool must not mutate external state (return a preview of what *would* happen).
-  - `approved: Bool` — when `true`, an explicit approval decision from the permission gate authorizes the mutating branch to run.
-  - `progress: ToolProgressReporter` — an async callback `(ToolProgress) async -> Void` for reporting live progress.
-- `ToolOutput` — `content`, `isError`, `callID`, and optional `errorKind: ToolErrorKind?` (e.g. `.invalidSyntax`, `.executionError`). Use `.success(_:callID:)` / `.failure(_:callID:errorKind:)` conveniences. Always echo back `input.callID`.
+- `JSONSchema`: wraps the raw JSON Schema document (`rawValue: String`) describing the input arguments. Use `.emptyObject` (`{"type":"object"}`) for argument-free tools.
+- `ToolInput`: `toolName`, `argumentsJSON` (raw JSON matching your schema), `callID` (correlation ID, defaults to a UUID).
+- `ToolContext`: execution context provided to the handler:
+  - `conversationID` / `sessionID`: UUID of the owning session.
+  - `dryRun: Bool`: when `true`, the tool must not mutate external state (return a preview of what *would* happen).
+  - `approved: Bool`: when `true`, an explicit approval decision from the permission gate authorizes the mutating branch to run.
+  - `progress: ToolProgressReporter`: an async callback `(ToolProgress) async -> Void` for reporting live progress.
+- `ToolOutput`: `content`, `isError`, `callID`, and optional `errorKind: ToolErrorKind?` (e.g. `.invalidSyntax`, `.executionError`). Use `.success(_:callID:)` / `.failure(_:callID:errorKind:)` conveniences. Always echo back `input.callID`.
 
 Registration: create your tool and call `ToolBus.register(tool: Tool, isEnabled: Bool = true)`. Installed external plugin checkouts live under `~/.runeweaver/plugins/<name>/`.
 
 ## Minimal Example
 
-A read-only clock tool — small enough to copy-paste, complete enough to show every piece:
+A read-only clock tool: small enough to copy-paste, complete enough to show every piece:
 
 ```swift
 import Foundation
@@ -83,10 +83,10 @@ struct GreetTool: Tool {
 
 Guidelines:
 
-- `name` — stable, dotted, lowercase (`domain.verb`: `email.search`, `files.read`). Never rename once shipped; the LLM and memory reference it.
-- `description` — write for the LLM: say **when** to use the tool and what it returns, not how it works.
-- `inputSchema` — keep it tight. Every required field is a chance for the model to hallucinate; prefer few required fields with clear types.
-- `execute` — honor `context.dryRun` (return what you *would* do without doing it), echo `input.callID`, and return `.failure` with an appropriate `ToolErrorKind` instead of throwing where the agent can recover.
+- `name`: stable, dotted, lowercase (`domain.verb`: `email.search`, `files.read`). Never rename once shipped; the LLM and memory reference it.
+- `description`: write for the LLM: say **when** to use the tool and what it returns, not how it works.
+- `inputSchema`: keep it tight. Every required field is a chance for the model to hallucinate; prefer few required fields with clear types.
+- `execute`: honor `context.dryRun` (return what you *would* do without doing it), echo `input.callID`, and return `.failure` with an appropriate `ToolErrorKind` instead of throwing where the agent can recover.
 
 ## Progress Reporting
 
@@ -103,7 +103,7 @@ await context.progress(ToolProgress(
 ```
 
 - Progress is advisory and throttled: emitters keep a 500 ms time floor (`ToolProgress.minimumReportIntervalNanoseconds`) between updates.
-- `current` must always be a safe relative path — absolute roots or traversing (`..`) paths are automatically stripped.
+- `current` must always be a safe relative path: absolute roots or traversing (`..`) paths are automatically stripped.
 - The `callID` and `toolName` are stamped authoritatively by `ToolBus`.
 
 ## Permission Levels
@@ -124,7 +124,7 @@ Rules of thumb:
   - `staged` (default for file write tools): mutations persist to `StagedFilesStore` and render as inline DiffCards in the Staged Changes drawer for interactive review (`live-accept` / `live-decline`).
   - `live`: mutations write directly to disk with an automatic `.rune_backup_<UUID>` rollback snapshot.
 - Browser automation runs in an isolated Playwright context per task; submitting forms or clicking buttons requires approval.
-- Never put secrets in `description`, `inputSchema`, logs, or errors — inject them at execution time via `SecretsManager` / `ToolContext`.
+- Never put secrets in `description`, `inputSchema`, logs, or errors: inject them at execution time via `SecretsManager` / `ToolContext`.
 
 ## Disabled-by-Default Tools
 
@@ -136,11 +136,11 @@ Sensitive or resource-intensive capabilities (such as `desktop.screenshot`, `des
 
 Each target has a suite under `Tests/<Target>Tests/` (e.g. `Tests/RuneWeaverToolsTests/ToolBusTests.swift` for tool dispatch). Follow the same pattern for new tools:
 
-1. **Unit-test the handler** — construct a `ToolInput` with canned `argumentsJSON`, a `ToolContext(conversationID: UUID(), dryRun: true/false, approved: true/false)`, and assert on `ToolOutput.content` / `isError` / `callID` echo.
-2. **Test both dry-run and live paths** — `dryRun: true` must not mutate anything; assert no side effects. Test `approved: true` vs `approved: false`.
-3. **Test the schema contract** — feed malformed `argumentsJSON` and expect a clean `.failure(..., errorKind: .invalidSyntax)`, not a crash.
-4. **Test registration and dispatch** — register with a `ToolBus`, dispatch by `name`, and confirm routing plus permission-level metadata.
-5. **Sandbox Python tools** — run the subprocess bridge locally, kill it mid-call, and confirm the Swift core survives; fuzz stdin/stdout framing.
+1. **Unit-test the handler**: construct a `ToolInput` with canned `argumentsJSON`, a `ToolContext(conversationID: UUID(), dryRun: true/false, approved: true/false)`, and assert on `ToolOutput.content` / `isError` / `callID` echo.
+2. **Test both dry-run and live paths**: `dryRun: true` must not mutate anything; assert no side effects. Test `approved: true` vs `approved: false`.
+3. **Test the schema contract**: feed malformed `argumentsJSON` and expect a clean `.failure(..., errorKind: .invalidSyntax)`, not a crash.
+4. **Test registration and dispatch**: register with a `ToolBus`, dispatch by `name`, and confirm routing plus permission-level metadata.
+5. **Sandbox Python tools**: run the subprocess bridge locally, kill it mid-call, and confirm the Swift core survives; fuzz stdin/stdout framing.
 
 ```bash
 swift test --filter RuneWeaverToolsTests   # tool dispatch + your new tool tests

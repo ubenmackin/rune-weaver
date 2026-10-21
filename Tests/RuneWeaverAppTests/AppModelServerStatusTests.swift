@@ -12,7 +12,7 @@ struct AppModelServerStatusTests {
         let model = AppModel()
         // Short refusal hint fits the one-line budget, so the stored detail
         // must round-trip unchanged instead of gaining an ellipsis.
-        let detail = "Bind 127.0.0.1 refused — no owner token"
+        let detail = "Bind 127.0.0.1 refused: no owner token"
         model.setServerFailed(detail: detail)
 
         // The flag alone selects the Failed affordance; the title stays fixed
@@ -49,7 +49,7 @@ struct AppModelServerStatusTests {
         let model = AppModel()
         // Seed a stale refusal first so the test proves a retry never renders
         // the previous failure beside fresh progress.
-        model.setServerFailed(detail: "Bind 127.0.0.1 refused — no owner token")
+        model.setServerFailed(detail: "Bind 127.0.0.1 refused: no owner token")
         model.setServerStarting()
 
         // Healthy transitions always drop both the flag and the summary, so
@@ -86,7 +86,7 @@ struct AppModelServerStatusTests {
         // but must name the posture, so LAN refusal is never a surprise.
         #expect(model.isServerFailed == false)
         #expect(model.serverStatusDetail == nil)
-        #expect(model.serverStatus == "Running on 127.0.0.1:8080 — local only")
+        #expect(model.serverStatus == "Running on 127.0.0.1:8080 (local only)")
         #expect(model.serverStatus.contains("local only") == true)
         #expect(model.serverStatus.count <= 40)
         #expect((model.serverStatusDetail?.count ?? 0) <= 140)

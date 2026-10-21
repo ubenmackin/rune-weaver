@@ -406,7 +406,7 @@ if ! bounded_run "${INSPECT_TIMEOUT_SECS}" "${RUNTIME}" image inspect "${IMAGE}"
     # GNU timeout reports 124 on expiry; the portable fallback kills the pull
     # instead (143/137), which is still a timeout with cached layers.
     if [ "${PULL_CODE}" -eq 124 ] || [ "${PULL_CODE}" -eq 143 ] || [ "${PULL_CODE}" -eq 137 ]; then
-        echo "Error: image pull timed out after ${PULL_TIMEOUT_SECS}s. Retry — downloaded layers are cached." >&2
+        echo "Error: image pull timed out after ${PULL_TIMEOUT_SECS}s. Retry: downloaded layers are cached." >&2
         exit 1
     elif [ "${PULL_CODE}" -ne 0 ]; then
         echo "Error: image pull failed. Check Docker Hub reachability, then retry." >&2

@@ -545,7 +545,7 @@ export default function NeedsActionQueue({
                         "The behavior brake parked the running turns after an anomaly in trusted-tool outcomes."}
                     </p>
                     <p className="action-card-once-note">
-                      Releasing the parked turns is the whole decision — neither choice grants a permission.
+                      Releasing the parked turns is the whole decision. Neither choice grants a permission.
                     </p>
                   </div>
 

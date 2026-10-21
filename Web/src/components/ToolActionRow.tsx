@@ -717,7 +717,7 @@ function ToolProgressLine({ progress }: { progress: ToolProgress }) {
             data-testid="tool-progress-scope-warning"
             title="This search spans a broad scope"
           >
-            — {warning}
+            ({warning})
           </span>
         ) : null}
       </div>
@@ -953,7 +953,7 @@ export default function ToolActionRow({
             ) : pendingWithoutResult ? (
               <div className="tool-section">
                 <div className="tool-label">Result</div>
-                <pre className="code-block">Awaiting result — no output recorded yet.</pre>
+                <pre className="code-block">Awaiting result: no output recorded yet.</pre>
               </div>
             ) : null}
           </div>
@@ -1059,7 +1059,7 @@ export default function ToolActionRow({
           ) : pendingWithoutResult ? (
             <div className="chat-tool-detail-section">
               <span className="chat-tool-detail-label">Output:</span>
-              <pre className="chat-tool-code">Awaiting result — no output recorded yet.</pre>
+              <pre className="chat-tool-code">Awaiting result: no output recorded yet.</pre>
             </div>
           ) : null}
         </div>

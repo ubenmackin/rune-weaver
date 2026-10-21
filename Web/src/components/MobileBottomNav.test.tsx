@@ -74,7 +74,7 @@ describe("MobileBottomNav tab contract", () => {
   it("exposes the distinct mobile sections landmark for assistive tech", () => {
     render(<MobileBottomNav currentTab="chat" onSelectTab={() => {}} />);
     expect(
-      screen.getByRole("navigation", { name: "Dashboard sections — mobile" }),
+      screen.getByRole("navigation", { name: "Dashboard sections (mobile)" }),
     ).toBeInTheDocument();
   });
 });

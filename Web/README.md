@@ -16,7 +16,7 @@ Static web dashboard for the Rune Weaver engine:
 
 ## Build, test, and lint (Makefile, canonical)
 
-Use the `Makefile` at the repo root as the canonical way to build, test, and lint — for the dashboard and the Swift engine alike. Run these from the repo root instead of invoking `npm` / `swift` directly:
+Use the `Makefile` at the repo root as the canonical way to build, test, and lint, for the dashboard and the Swift engine alike. Run these from the repo root instead of invoking `npm` / `swift` directly:
 
 ```bash
 make build-web   # build the dashboard bundle (requires Node.js 20+)
@@ -38,7 +38,7 @@ Full target list (see root `Makefile`):
 | `make test-web` | Dashboard tests (`npm test` in `Web/`, vitest) |
 | `make test-swift` | `swift test` (full Swift suite) |
 | `make lint` | `lint-web` + `lint-swift` |
-| `make lint-web` | Dashboard typecheck + lint (`npm run typecheck` + `npm run lint` in `Web/`: eslint over `src` — TS/TSX + CSS via `@eslint/css` — plus the file-budget vitest suite) |
+| `make lint-web` | Dashboard typecheck + lint (`npm run typecheck` + `npm run lint` in `Web/`: eslint over `src` (TS/TSX + CSS via `@eslint/css`) plus the file-budget vitest suite) |
 | `make lint-swift` | `swiftformat --lint .` plus `swiftlint lint` |
 | `make audit` / `make audit-web` | Security vulnerability scan (`npm audit --audit-level=high` in `Web/`) |
 | `make run ARGS="<args>"` | Launch the engine (`swift run rune-weaver <args>`), e.g. `make run ARGS="chat"` |
@@ -89,7 +89,7 @@ Patched dependency floors (see `package.json`):
 Loopback-only hardening (defense in depth):
 
 - `vite.config.ts` pins `server.host` and `preview.host` to `127.0.0.1` and keeps `server.fs.deny` explicit (`[".env", ".env.*", "*.{crt,pem}"]`).
-- `npm run dev` / `npm run preview` pass `--host 127.0.0.1 --strictPort`. Never override with `--host 0.0.0.0` (or any non-loopback `server.host` / `preview.host`); the engine serves the production `Web/dist/` bundle on `127.0.0.1:8082` instead — there is no separate frontend host process to expose.
+- `npm run dev` / `npm run preview` pass `--host 127.0.0.1 --strictPort`. Never override with `--host 0.0.0.0` (or any non-loopback `server.host` / `preview.host`); the engine serves the production `Web/dist/` bundle on `127.0.0.1:8082` instead. There is no separate frontend host process to expose.
 - `npm test` (`vitest run`) and `npm run test:watch` (`vitest`) run headless with no `--ui` / `--api` flags, and `vite.config.ts` keeps `test.ui: false` plus `test.api: false` (Vitest middleware mode, no standalone listener). Do not run `vitest --ui` / `vitest --api` on untrusted networks.
 
 Lockfile and audit:

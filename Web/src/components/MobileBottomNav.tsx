@@ -126,7 +126,7 @@ export default function MobileBottomNav({
           aria-hidden="true"
         />
       )}
-      <nav className="mobile-bottom-nav" aria-label="Dashboard sections — mobile">
+      <nav className="mobile-bottom-nav" aria-label="Dashboard sections (mobile)">
         {NAV_GROUPS.map((entry) => {
           const Icon = entry.icon;
 

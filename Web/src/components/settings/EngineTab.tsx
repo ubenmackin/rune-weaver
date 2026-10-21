@@ -153,10 +153,10 @@ export function EngineTab({
               value={normalizeProactiveMode(proactiveMode) || proactiveMode}
               onChange={(e) => setProactiveMode(normalizeProactiveMode(e.target.value) || e.target.value)}
             >
-              <option value="all">All — surface every background outcome</option>
-              <option value="milestones">Milestones — milestones, errors, and parked turns only</option>
-              <option value="guarded">Guarded — milestones plus a judge call for routine successes</option>
-              <option value="off">Off — never interrupt</option>
+              <option value="all">All: Surface every background outcome</option>
+              <option value="milestones">Milestones: Milestones, errors, and parked turns only</option>
+              <option value="guarded">Guarded: Milestones plus a judge call for routine successes</option>
+              <option value="off">Off: Never interrupt</option>
             </select>
             <span className="form-group-hint">
               Off never interrupts; the approvals inbox keeps recording.

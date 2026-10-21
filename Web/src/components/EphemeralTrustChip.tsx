@@ -205,8 +205,7 @@ export default function EphemeralTrustChip({
               <span className="ephemeral-trust-line">
                 <code className="ephemeral-trust-tool">{grant.toolName}</code>
                 {" to "}
-                {describeGrantScope(grant.scope)} —{" "}
-                {lifetimeCopy(grant.duration)}
+                {describeGrantScope(grant.scope)} ({lifetimeCopy(grant.duration)})
               </span>
               <button
                 type="button"

@@ -129,7 +129,7 @@ export function FanoutConfigModal({
               placeholder="0 (unlimited)"
             />
             <span className="form-group-hint">
-              0 = no timeout — recommended for local models. Clearing the field saves 0 (unlimited).
+              0 = no timeout (recommended for local models). Clearing the field saves 0 (unlimited).
             </span>
           </div>
         </div>

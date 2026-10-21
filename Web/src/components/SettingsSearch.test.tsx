@@ -450,7 +450,7 @@ describe("SettingsManager search", () => {
     // Mirrors the engine pullTimeoutBanner: a timed-out pull resumes cached
     // layers, so the banner names the retry instead of a generic pull failure.
     const banner =
-      "SearXNG image pull timed out after 300s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry.";
+      "SearXNG image pull timed out after 300s. Retry: downloaded layers are cached. Run `scripts/searxng-up.sh` to retry.";
     const chained = "stage: pull, (timed out after 300s), detail: download stalled";
     vi.stubGlobal(
       "fetch",

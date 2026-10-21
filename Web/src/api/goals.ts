@@ -254,7 +254,7 @@ export function formatGoalNextAdvance(
     status === "achieved" ||
     status === "abandoned"
   ) {
-    return "—";
+    return "-";
   }
   if (nextDueAt == null) return "No schedule";
   const due = parseRunTimestamp(nextDueAt).getTime();
