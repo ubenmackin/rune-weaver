@@ -130,3 +130,165 @@
   outline: 2px solid var(--accent-purple);
   outline-offset: 2px;
 }
+
+/* Goal-focused connect cards stack primary above the disclosure. */
+.connect-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.connect-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.connect-card-primary {
+  border-color: var(--accent-purple);
+}
+
+.connect-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.connect-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.connect-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+}
+
+.connect-badge-ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.connect-badge-configured {
+  background: rgba(237, 137, 54, 0.15);
+  color: #f6ad55;
+  border-color: rgba(237, 137, 54, 0.3);
+}
+
+.connect-badge-needs-permission {
+  background: rgba(245, 101, 101, 0.12);
+  color: #fc8181;
+  border-color: rgba(245, 101, 101, 0.3);
+}
+
+.connect-badge-not-connected {
+  color: var(--text-muted);
+}
+
+.connect-card-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.connect-goal-echo {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connect-account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.connect-account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.connect-account-address {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-account-pill {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connect-card-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.calendar-permission-explainer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+}
+
+.permission-explainer-text {
+  margin: 0;
+  font-size: 13px;
+}
+
+.permission-explainer-actions {
+  justify-content: flex-start;
+}
+
+.connect-card-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.connect-disclosure {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.connect-disclosure summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.connect-cards-secondary {
+  margin-top: 8px;
+}
+
+.connect-mini-wrap {
+  min-width: 0;
+}
