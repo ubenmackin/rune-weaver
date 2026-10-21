@@ -45,7 +45,7 @@ export function clearWizardState(): void {
   }
 }
 
-// Stored step wins only while still pending; skipped history never restores.
+// Stored current wins only while still pending; history restores verbatim.
 export function resolveInitialWizardState(clean: WizardStepId[] | null): {
   current: WizardStepId;
   history: WizardStepId[];
@@ -54,8 +54,10 @@ export function resolveInitialWizardState(clean: WizardStepId[] | null): {
   if (!clean) return { current: first, history: [first] };
   const stored = readStoredWizardState();
   if (!stored || clean.includes(stored.current)) return { current: first, history: [first] };
-  const filtered = stored.history.filter((step) => !clean.includes(step));
-  if (filtered.length === 0) return { current: first, history: [first] };
-  if (filtered[filtered.length - 1] !== stored.current) filtered.push(stored.current);
-  return { current: stored.current, history: filtered };
+  const history = stored.history.filter((step): step is WizardStepId =>
+    (WIZARD_STEPS as readonly string[]).includes(step as string),
+  );
+  if (history.length === 0) return { current: first, history: [first] };
+  if (history[history.length - 1] !== stored.current) history.push(stored.current);
+  return { current: stored.current, history };
 }

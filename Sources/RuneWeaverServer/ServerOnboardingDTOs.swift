@@ -223,6 +223,8 @@ extension ServerPaths {
     public static let onboardingDismiss = "dismiss"
     /// Reopen subpath under `/onboarding`.
     public static let onboardingReopen = "reopen"
+    /// Reset subpath under `/onboarding`.
+    public static let onboardingReset = "reset"
     /// Probe subpath under `/onboarding`.
     public static let onboardingProbe = "probe"
 }

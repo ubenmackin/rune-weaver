@@ -11,6 +11,7 @@ import {
   ONBOARDING_STEP_IDS,
   parseOnboardingStatus,
   reopenOnboarding,
+  resetOnboarding,
   skipOnboardingStep,
   truncateSeedPromptUsed,
 } from "./onboarding";
@@ -217,6 +218,17 @@ describe("onboarding client", () => {
     expect(paths).toEqual(["/onboarding/dismiss", "/onboarding/reopen"]);
   });
 
+  it("resets through the single reset endpoint", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    await resetOnboarding();
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/onboarding/reset");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({});
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("surfaces 401 as an ApiError for the hook needs-auth state", async () => {
     vi.stubGlobal(
       "fetch",
@@ -324,12 +336,16 @@ describe("useOnboardingStatus", () => {
     await act(async () => {
       await result.current.reopen();
     });
+    await act(async () => {
+      await result.current.reset();
+    });
     const statusCallsAfter = seen.filter((path) => path === "/onboarding/status").length;
     expect(statusCallsAfter).toBeGreaterThan(statusCallsBefore);
     expect(seen).toContain("/onboarding/complete");
     expect(seen).toContain("/onboarding/skip");
     expect(seen).toContain("/onboarding/dismiss");
     expect(seen).toContain("/onboarding/reopen");
+    expect(seen).toContain("/onboarding/reset");
     unmount();
   });
 

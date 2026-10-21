@@ -430,7 +430,7 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
           ) : null}
           {tab === "settings" ? (
             <Suspense fallback={<SectionProgress />}>
-              <SettingsManager onSettingsSaved={onRefreshHealth} onReopenOnboarding={onboarding.reopen} />
+              <SettingsManager onSettingsSaved={onRefreshHealth} onOnboardingRefresh={onboarding.refresh} />
             </Suspense>
           ) : null}
         </div>

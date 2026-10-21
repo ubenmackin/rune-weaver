@@ -1,12 +1,13 @@
 // Rune Weaver Dashboard — Settings manager coordinator shell for config.toml configuration.
 import { useEffect, useState } from "react";
-import { reopenOnboarding } from "../api/onboarding";
+import { resetOnboarding } from "../api/onboarding";
 import {
   clearWizardSnooze,
   isWizardSnoozed,
   resumeWizard,
   subscribeWizardSnooze,
 } from "./onboarding/wizardSnooze";
+import { clearWizardState } from "./onboarding/wizardStorage";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
@@ -78,14 +79,15 @@ export function isSettingsAdvancedError(message: string | null | undefined): boo
   );
 }
 
-export type SettingsManagerWithReopenProps = SettingsManagerProps & {
-  onReopenOnboarding?: () => Promise<void> | void;
+// Replay owns the full reset; the App-row refresh remounts the wizard.
+export type SettingsManagerWithResetProps = SettingsManagerProps & {
+  onOnboardingRefresh?: () => Promise<void> | void;
 };
 
 export default function SettingsManager({
   onSettingsSaved,
-  onReopenOnboarding,
-}: SettingsManagerWithReopenProps = {}) {
+  onOnboardingRefresh,
+}: SettingsManagerWithResetProps = {}) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
     if (typeof window !== "undefined") {
       if (hasAccessSectionLink()) return "access";
@@ -215,21 +217,22 @@ export default function SettingsManager({
             onClick={() => {
               void (async () => {
                 try {
-                  // Unsnooze first so the gate can mount, then reopen at the persisted step.
+                  // Server reset first; local snooze plus stored step clear only after refreshes succeed.
+                  await resetOnboarding();
+                  // Onboarding refresh remounts the wizard; settings refresh alone cannot.
+                  await onOnboardingRefresh?.();
+                  await refresh();
                   clearWizardSnooze();
-                  // Single App-owned status stays live; direct reopen is fallback.
-                  if (onReopenOnboarding) await onReopenOnboarding();
-                  else await reopenOnboarding();
-                  resumeWizard();
+                  clearWizardState();
                   if (typeof window !== "undefined") {
                     window.location.hash = "dashboard";
                   }
                 } catch (err) {
-                  pushErrorToast(err instanceof Error ? err.message : "Failed to reopen setup");
+                  pushErrorToast(err instanceof Error ? err.message : "Failed to replay setup");
                 }
               })();
             }}
-            title="Reopen setup wizard"
+            title="Replay setup wizard"
             aria-label="Replay setup"
           >
             <span>Replay setup</span>

@@ -44,16 +44,3 @@ export function firstPendingStep(skipped: WizardStepId[]): WizardStepId | null {
   }
   return null;
 }
-
-// Absolute settings URL keeps wizard state untouched when opened in a new tab.
-export function wizardSettingsHref(suffix: string): string {
-  const hash = `#settings/${suffix.replace(/^\/+/, "")}`;
-  if (
-    typeof window !== "undefined" &&
-    window.location?.origin &&
-    window.location?.pathname
-  ) {
-    return `${window.location.origin}${window.location.pathname}${hash}`;
-  }
-  return hash;
-}

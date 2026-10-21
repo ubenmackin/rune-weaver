@@ -227,7 +227,7 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
   }
 
   async function handleBrainNext(nextOptions: WizardNextOptions) {
-    const { current, skipped, onAdvanced, onFinished } = nextOptions;
+    const { current, onAdvanced, onFinished } = nextOptions;
     const loading = brainProviders === undefined && !brainProvidersError;
     if (loading) {
       const message = "Providers are still loading. Wait, then retry.";
@@ -271,7 +271,7 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
       setBrainSelection(selection);
       setBrainProviders(payload.providers);
       setBrainDefaultProvider(payload.defaultProvider);
-      const next = nextStep(current, skipped);
+      const next = nextStep(current);
       if (!next) {
         await onFinished();
         return;

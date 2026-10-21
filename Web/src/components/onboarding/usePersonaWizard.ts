@@ -75,7 +75,7 @@ export function usePersonaWizard(options: UsePersonaWizardOptions) {
 
   // Persona failures stay local so the wizard banner never mirrors inline text.
   async function handleNext(nextOptions: WizardNextOptions) {
-    const { current, skipped, onAdvanced, onFinished } = nextOptions;
+    const { current, onAdvanced, onFinished } = nextOptions;
     const problem = validatePersonaStep({
       assistantName: draft.assistantName,
       userName: draft.userName,
@@ -99,7 +99,7 @@ export function usePersonaWizard(options: UsePersonaWizardOptions) {
       setError(null);
       setStepError(null);
       setFieldError(null);
-      const next = nextStep(current, skipped);
+      const next = nextStep(current);
       if (!next) {
         await onFinished();
         return;

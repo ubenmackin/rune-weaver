@@ -326,3 +326,11 @@ export function reopenOnboarding(): Promise<void> {
     body: JSON.stringify({}),
   });
 }
+
+// Full reset clears completion plus skips plus dismissal plus seed.
+export function resetOnboarding(): Promise<void> {
+  return fetchJson<void>("/onboarding/reset", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}

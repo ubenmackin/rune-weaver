@@ -38,6 +38,16 @@ export function snoozeWizard(): void {
   emitSnoozed(true);
 }
 
+// Single settings-nav owner: snooze first then navigate same-tab.
+export type WizardSettingsTab = "email" | "indexing" | "access";
+
+export function goToSettings(tab: WizardSettingsTab): void {
+  snoozeWizard();
+  if (typeof window !== "undefined") {
+    window.location.hash = `#settings/${tab}`;
+  }
+}
+
 export function clearWizardSnooze(): void {
   try {
     if (typeof window !== "undefined" && window.localStorage) {

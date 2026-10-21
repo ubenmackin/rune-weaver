@@ -17,6 +17,7 @@ public func registerOnboardingRoutes(_ app: Application) {
     onboarding.post(PathComponent.constant(ServerPaths.onboardingSkip), use: onboardingSkipHandler)
     onboarding.post(PathComponent.constant(ServerPaths.onboardingDismiss), use: onboardingDismissHandler)
     onboarding.post(PathComponent.constant(ServerPaths.onboardingReopen), use: onboardingReopenHandler)
+    onboarding.post(PathComponent.constant(ServerPaths.onboardingReset), use: onboardingResetHandler)
     onboarding.post(PathComponent.constant(ServerPaths.onboardingProbe), use: onboardingProbeHandler)
 }
 
@@ -232,6 +233,19 @@ private func onboardingReopenHandler(_ req: Request) async throws -> OnboardingS
     var state = try await readOnboardingState(context: context)
     state.completedAt = nil
     state.checklistDismissed = false
+    try await writeOnboardingState(state, context: context)
+    return try await liveOnboardingStatus(for: req)
+}
+
+/// Resets onboarding so Replay restarts from Step 1 with no skips.
+private func onboardingResetHandler(_ req: Request) async throws -> OnboardingStatusResponse {
+    try requireOnboardingAuth(req)
+    let context = req.application.runeWeaver
+    var state = try await readOnboardingState(context: context)
+    state.completedAt = nil
+    state.skippedSteps = []
+    state.checklistDismissed = false
+    state.seedPromptUsed = nil
     try await writeOnboardingState(state, context: context)
     return try await liveOnboardingStatus(for: req)
 }
