@@ -1,22 +1,18 @@
 // Rune Weaver Dashboard — Onboarding wizard footer shells.
 import type { ReactNode } from "react";
-import { WizardFooterError } from "./WizardFooterError";
 
-// Shared shell keeps the modal footer plus mirror layout in one place.
+// Shared shell keeps the modal footer layout in one place.
 export function WizardFooterShell({
   left,
-  footerErrorText,
   children,
 }: {
   left: ReactNode;
-  footerErrorText: string;
   children: ReactNode;
 }) {
   return (
     <div className="modal-footer wizard-footer">
       <div className="wizard-footer-left">{left ?? <span />}</div>
       <div className="wizard-footer-right">
-        <WizardFooterError text={footerErrorText} />
         {children}
       </div>
     </div>
@@ -30,7 +26,6 @@ export interface BrainWizardFooterProps {
   saving: boolean;
   loading: boolean;
   hasProvidersError: boolean;
-  footerErrorText: string;
   onBack: () => void;
   onTest: () => void;
   onNext: () => void;
@@ -46,7 +41,6 @@ export function BrainWizardFooter({
   saving,
   loading,
   hasProvidersError,
-  footerErrorText,
   onBack,
   onTest,
   onNext,
@@ -70,7 +64,6 @@ export function BrainWizardFooter({
           <span />
         )
       }
-      footerErrorText={footerErrorText}
     >
       <button
         type="button"
@@ -101,7 +94,6 @@ export interface WizardStepFooterProps {
   showBack: boolean;
   showNext: boolean;
   busy: boolean;
-  footerErrorText: string;
   onBack: () => void;
   onSkip: () => void;
   onNext: () => void;
@@ -112,7 +104,6 @@ export function WizardStepFooter({
   showBack,
   showNext,
   busy,
-  footerErrorText,
   onBack,
   onSkip,
   onNext,
@@ -128,7 +119,6 @@ export function WizardStepFooter({
           <span />
         )
       }
-      footerErrorText={footerErrorText}
     >
       <button type="button" className="ghost" onClick={onSkip} disabled={busy}>
         Skip for now
@@ -145,7 +135,6 @@ export function WizardStepFooter({
 export interface AllSkippedFooterProps {
   canBack: boolean;
   busy: boolean;
-  footerErrorText: string;
   onBack: () => void;
   onFinish: () => void;
 }
@@ -154,7 +143,6 @@ export interface AllSkippedFooterProps {
 export function AllSkippedFooter({
   canBack,
   busy,
-  footerErrorText,
   onBack,
   onFinish,
 }: AllSkippedFooterProps) {
@@ -169,7 +157,6 @@ export function AllSkippedFooter({
           <span />
         )
       }
-      footerErrorText={footerErrorText}
     >
       <button type="button" className="primary" onClick={onFinish} disabled={busy}>
         Finish

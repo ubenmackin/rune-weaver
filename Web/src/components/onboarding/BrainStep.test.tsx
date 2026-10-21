@@ -308,28 +308,44 @@ describe("BrainStep", () => {
     });
   });
 
-  it("blocks Next on blank name plus blank model with inline plus footer errors", async () => {
+  it("blocks Next on blank name plus blank model with inline only", async () => {
     const user = userEvent.setup();
     stubWizardFetch(async (url: string) => {
       if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
       return jsonResponse({});
     });
-    render(<GettingStartedWizard initialSkippedSteps={[]} />);
-    await waitFor(() => {
-      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
     });
-    await user.click(screen.getByTestId("brain-next"));
-    const inline = await screen.findByTestId("brain-error");
-    expect(inline).toHaveTextContent(/1 to 64/i);
-    expect(inline).toHaveAttribute("role", "alert");
-    const footer = screen.getByTestId("wizard-footer-error");
-    expect(footer).toHaveAttribute("role", "alert");
-    expect(footer.textContent).not.toBe("");
-    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
-    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
-    await user.click(screen.getByTestId("brain-next"));
-    expect(await screen.findByTestId("brain-error")).toHaveTextContent(/1 to 128/i);
-    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+    try {
+      render(<GettingStartedWizard initialSkippedSteps={[]} />);
+      await waitFor(() => {
+        expect(screen.queryByTestId("brain-loading")).toBeNull();
+      });
+      await user.click(screen.getByTestId("brain-next"));
+      const inline = await screen.findByTestId("brain-error");
+      expect(inline).toHaveTextContent(/1 to 64/i);
+      expect(inline).toHaveAttribute("role", "alert");
+      expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+      await waitFor(() => {
+        expect(scrollSpy).toHaveBeenCalled();
+      });
+      await waitFor(() => {
+        expect(document.activeElement).toBe(inline);
+      });
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+      await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+      await user.click(screen.getByTestId("brain-next"));
+      expect(await screen.findByTestId("brain-error")).toHaveTextContent(/1 to 128/i);
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.pushState({}, "", "/");
+    }
   });
 
   it("blocks Next on bad URL plus bad key shape", async () => {
@@ -347,12 +363,13 @@ describe("BrainStep", () => {
     fireEvent.change(screen.getByTestId("brain-server-url"), { target: { value: "not-a-url" } });
     await user.click(screen.getByTestId("brain-next"));
     expect(await screen.findByTestId("brain-error")).toHaveTextContent(/URL/i);
-    expect(screen.getByTestId("wizard-footer-error").textContent).toMatch(/URL/i);
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
     fireEvent.change(screen.getByTestId("brain-server-url"), { target: { value: "" } });
     fireEvent.change(screen.getByTestId("brain-api-key-env"), { target: { value: "bad-env!" } });
     await user.click(screen.getByTestId("brain-next"));
     expect(await screen.findByTestId("brain-error")).toHaveTextContent(/API Key Name/i);
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
   });
 
@@ -429,11 +446,12 @@ describe("BrainStep", () => {
     await user.click(screen.getByTestId("brain-next"));
     const inline = await screen.findByTestId("brain-error");
     expect(inline).toHaveTextContent(/401/i);
-    expect(screen.getByTestId("wizard-footer-error").textContent).toMatch(/401/i);
+    expect(inline).toHaveAttribute("role", "alert");
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 1 of 4");
   });
 
-  it("renders role alert on failed test status through the wizard footer", async () => {
+  it("renders role alert on failed test status inline", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -453,6 +471,7 @@ describe("BrainStep", () => {
     const status = await screen.findByTestId("brain-test-status");
     expect(status).toHaveTextContent(/Failed to connect/i);
     expect(status).toHaveAttribute("role", "alert");
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
   });
 });
 

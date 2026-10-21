@@ -98,6 +98,7 @@ export function validateBrainProviderForm(form: BrainProviderForm): string | nul
 
 // Builds the single-provider save payload: existing entries survive by
 // spread while the trimmed form owns the new default with an empty fallback.
+// Blank optionals stay undefined so JSON drops them and the engine decodes nil.
 export function resolveBrainProviderSave(
   form: BrainProviderForm,
   existing?: Record<string, ProviderConfigData>,
@@ -127,9 +128,9 @@ export function resolveBrainProviderSave(
         ...prev,
         enabled: true,
         model,
-        serverURL,
-        apiKeyEnv,
-        providerType,
+        serverURL: serverURL ? serverURL : undefined,
+        apiKeyEnv: apiKeyEnv ? apiKeyEnv : undefined,
+        providerType: providerType ? providerType : undefined,
       },
     },
     providerName,
@@ -138,6 +139,43 @@ export function resolveBrainProviderSave(
     serverURL,
     apiKeyEnv,
   };
+}
+
+// Friendly labels for dotted provider field paths surfaced by the engine.
+const BRAIN_SAVE_FIELD_LABELS: Record<string, string> = {
+  api_key_env: "API Key Name",
+  server_url: "Server URL",
+  model: "Model",
+  provider_type: "Provider Type",
+};
+
+// Maps engine ConfigError text to a friendly field message; unknown shapes
+// return the original message verbatim so non-config failures stay honest.
+export function formatBrainSaveError(error: unknown, providerDisplayName: string): string {
+  const raw =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const text = raw && raw.length > 0 ? raw : "Failed to save provider.";
+  const label = (providerDisplayName ?? "").trim() || "Provider";
+  const field = text.match(/field:\s*"([^"]+)"/)?.[1] ?? null;
+  const message = text.match(/message:\s*"([^"]+)"/)?.[1] ?? null;
+  const dotted = text.match(/llm\.providers\.([^\s"'.,]+)\.([A-Za-z0-9_]+)/) ?? null;
+  const leaf = field ? (field.split(".").pop() ?? "") : (dotted?.[2] ?? "");
+  const friendly = leaf ? (BRAIN_SAVE_FIELD_LABELS[leaf] ?? null) : null;
+  if (friendly && message) {
+    return `${friendly}: ${message}`;
+  }
+  if (friendly && dotted && !field) {
+    const tail = text.split(dotted[0]).pop()?.replace(/^[\s:"'-]+/, "").trim() ?? "";
+    if (tail && tail !== text) {
+      return `${friendly}: ${tail}`;
+    }
+    return text;
+  }
+  // Default-provider failures name the chosen entry, so label it directly.
+  if (message && (field === "llm.default_provider" || field === "llm.fallback_provider")) {
+    return `${label}: ${message}`;
+  }
+  return text;
 }
 
 // Server-owned prefill: default entry wins, single-entry installs fall

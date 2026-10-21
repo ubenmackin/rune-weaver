@@ -1,5 +1,5 @@
 // Rune Weaver Dashboard — Onboarding wizard shell with gating, skip persistence, and resume.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson } from "../../api/http";
 import {
   sanitizeSkippedSteps,
@@ -22,7 +22,6 @@ import {
   firstPendingStep,
   readStandaloneMode,
   toSeedStatus,
-  truncateWizardFooterError,
 } from "./wizardHelpers";
 import { useBrainWizard } from "./useBrainWizard";
 import {
@@ -40,11 +39,6 @@ export interface GettingStartedWizardProps {
   onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
   onOnboardingSkip?: (step: WizardStepId) => Promise<void>;
 }
-
-export {
-  WIZARD_FOOTER_ERROR_MAX_LENGTH,
-  truncateWizardFooterError,
-} from "./wizardHelpers";
 
 export default function GettingStartedWizard({
   initialSkippedSteps,
@@ -165,6 +159,32 @@ export default function GettingStartedWizard({
     : (internalSeedStatus ?? (shared.status ? toSeedStatus(shared.status) : null));
   const effectiveSeedLoading = hasExternal ? false : seedLoading;
   const effectiveSeedError = hasExternal ? null : seedError;
+
+  // Inline banners are the single error source; each focuses on appearance.
+  const wizardErrorRef = useRef<HTMLParagraphElement>(null);
+  const wizardStepErrorRef = useRef<HTMLParagraphElement>(null);
+  const wizardSeedErrorRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (error) {
+      wizardErrorRef.current?.scrollIntoView({ block: "nearest" });
+      wizardErrorRef.current?.focus({ preventScroll: true });
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (stepError) {
+      wizardStepErrorRef.current?.scrollIntoView({ block: "nearest" });
+      wizardStepErrorRef.current?.focus({ preventScroll: true });
+    }
+  }, [stepError, current]);
+
+  useEffect(() => {
+    if (effectiveSeedError) {
+      wizardSeedErrorRef.current?.scrollIntoView({ block: "nearest" });
+      wizardSeedErrorRef.current?.focus({ preventScroll: true });
+    }
+  }, [effectiveSeedError, current]);
 
   if (standalone) return null;
   if (!hydrated) return null;
@@ -291,12 +311,9 @@ export default function GettingStartedWizard({
     });
   }
 
-  // Every step skipped offers explicit completion instead of unmounting.
-  // Inline step errors stay source of truth; the footer only mirrors them.
-  // Brain test failures arrive via step state, so the mirror covers them.
-  const footerSource =
-    error ?? stepError ?? brain.error ?? brain.testFailure ?? brain.providersError ?? effectiveSeedError ?? null;
-  const footerErrorText = truncateWizardFooterError(footerSource);
+  // Inline step errors are the single source of truth.
+  const inlineStepError = current !== "brain" ? stepError : null;
+  const inlineSeedError = current !== "connect" ? effectiveSeedError : null;
   if (allSkipped) {
     return (
       <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Getting started">
@@ -313,7 +330,39 @@ export default function GettingStartedWizard({
             <div className="wizard-progress-bar" style={{ width: "100%" }} />
           </div>
           <div className="modal-body wizard-body">
-            {error ? <div className="error-banner">{error}</div> : null}
+            {error ? (
+              <p
+                ref={wizardErrorRef}
+                tabIndex={-1}
+                data-testid="wizard-error"
+                role="alert"
+                className="error-banner"
+              >
+                {error}
+              </p>
+            ) : null}
+            {stepError ? (
+              <p
+                ref={wizardStepErrorRef}
+                tabIndex={-1}
+                data-testid="wizard-step-error"
+                role="alert"
+                className="error-banner"
+              >
+                {stepError}
+              </p>
+            ) : null}
+            {effectiveSeedError ? (
+              <p
+                ref={wizardSeedErrorRef}
+                tabIndex={-1}
+                data-testid="wizard-seed-error"
+                role="alert"
+                className="error-banner"
+              >
+                {effectiveSeedError}
+              </p>
+            ) : null}
             <div className="wizard-step">
               <h4>Everything is deferred</h4>
               <p className="muted">Every step is skipped. Finish to close onboarding.</p>
@@ -322,7 +371,6 @@ export default function GettingStartedWizard({
           <AllSkippedFooter
             canBack={history.length > 1}
             busy={busy}
-            footerErrorText={footerErrorText}
             onBack={handleBack}
             onFinish={() => void handleFinish()}
           />
@@ -354,7 +402,39 @@ export default function GettingStartedWizard({
         </div>
 
         <div className="modal-body wizard-body">
-          {error ? <div className="error-banner">{error}</div> : null}
+          {error ? (
+            <p
+              ref={wizardErrorRef}
+              tabIndex={-1}
+              data-testid="wizard-error"
+              role="alert"
+              className="error-banner"
+            >
+              {error}
+            </p>
+          ) : null}
+          {inlineStepError ? (
+            <p
+              ref={wizardStepErrorRef}
+              tabIndex={-1}
+              data-testid="wizard-step-error"
+              role="alert"
+              className="error-banner"
+            >
+              {inlineStepError}
+            </p>
+          ) : null}
+          {inlineSeedError ? (
+            <p
+              ref={wizardSeedErrorRef}
+              tabIndex={-1}
+              data-testid="wizard-seed-error"
+              role="alert"
+              className="error-banner"
+            >
+              {inlineSeedError}
+            </p>
+          ) : null}
           {current === "brain" ? (
             <>
               {brain.loading ? (
@@ -421,7 +501,6 @@ export default function GettingStartedWizard({
             saving={brain.saving}
             loading={brain.loading}
             hasProvidersError={!!brain.providersError}
-            footerErrorText={footerErrorText}
             onBack={handleBack}
             onTest={() => void brain.onTest()}
             onNext={handleBrainNext}
@@ -432,7 +511,6 @@ export default function GettingStartedWizard({
             showBack={showWizardBack}
             showNext={showWizardNext}
             busy={busy}
-            footerErrorText={footerErrorText}
             onBack={handleBack}
             onSkip={() => void handleSkip()}
             onNext={handleNext}

@@ -10,6 +10,7 @@ import {
 import { normalizeSecretKey } from "../StoreSecretModal";
 import {
   BRAIN_API_KEY_ENV_MAX_LENGTH,
+  formatBrainSaveError,
   isValidBrainServerURL,
   resolveBrainInitialForm,
   resolveBrainProviderSave,
@@ -276,15 +277,22 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
       }
       onAdvanced(next);
     } catch (err) {
-      // Plain-text bodies drop the status from the message, so reattach
-      // the code for an honest unauthenticated notice.
-      let detail: string;
-      if (err instanceof ApiError && err.status) {
-        detail = err.message.includes(String(err.status))
+      // Friendly ConfigError text drops the status; plain 401 bodies reattach it.
+      const saveLabel = (brainDraft.providerName ?? "").trim() || "Provider";
+      const friendly = formatBrainSaveError(err, saveLabel);
+      const raw =
+        err instanceof Error
           ? err.message
-          : `${err.status} ${err.message}`;
+          : typeof err === "string" && err.length > 0
+            ? err
+            : "Failed to save provider.";
+      let detail: string;
+      if (friendly !== raw) {
+        detail = friendly;
+      } else if (err instanceof ApiError && err.status === 401) {
+        detail = raw.includes("401") ? raw : `401 ${raw}`;
       } else {
-        detail = err instanceof Error ? err.message : "Failed to save provider.";
+        detail = friendly;
       }
       setBrainError(detail);
       setStepError(detail);
