@@ -234,6 +234,7 @@ export default function GettingStartedWizard({
       // Single finish flow owns the verified seed plus demo and completion.
       await finishOnboardingWithVerifiedSeed({
         status: seedStatus,
+        goal: personaValue?.goal ?? null,
         complete: onOnboardingComplete,
       });
       onFinished?.();
@@ -260,6 +261,7 @@ export default function GettingStartedWizard({
       } else {
         await finishOnboardingWithVerifiedSeed({
           status: seedStatus,
+          goal: personaValue?.goal ?? null,
           complete: onOnboardingComplete,
         });
         onFinished?.();
@@ -288,6 +290,7 @@ export default function GettingStartedWizard({
       } else {
         await finishOnboardingWithVerifiedSeed({
           status: seedStatus,
+          goal: personaValue?.goal ?? null,
           complete: onOnboardingComplete,
         });
         onFinished?.();
@@ -476,6 +479,7 @@ export default function GettingStartedWizard({
           ) : null}
           {current === "connect" ? (
             <ConnectStep
+              goal={personaValue?.goal ?? null}
               status={seedStatus}
               loading={effectiveSeedLoading}
               error={effectiveSeedError}

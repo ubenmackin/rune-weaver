@@ -10,6 +10,11 @@ import {
   EMAIL_SEED_PROMPT,
   GENERIC_SEED_PROMPT,
   INDEX_SEED_PROMPT,
+  emailBadge,
+  indexBadge,
+  isConnectReady,
+  isEmailReady,
+  isIndexReady,
   parseOnboardingStatus,
   selectSeedPrompt,
   type OnboardingStatus,
@@ -84,6 +89,126 @@ describe("selectSeedPrompt", () => {
     expect(selectSeedPrompt(null)).toBe(GENERIC_SEED_PROMPT);
     expect(selectSeedPrompt(undefined)).toBe(GENERIC_SEED_PROMPT);
     expect(parseOnboardingStatus(null).calendarStatus).toBeNull();
+  });
+
+  it("prefers the goal capability when ready", () => {
+    const status = makeStatus({
+      calendarStatus: "granted",
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
+    });
+    expect(selectSeedPrompt(status, "inbox")).toBe(EMAIL_SEED_PROMPT);
+    expect(selectSeedPrompt(status, "day")).toBe(CALENDAR_SEED_PROMPT);
+    expect(selectSeedPrompt(status, "remember")).toBe(INDEX_SEED_PROMPT);
+  });
+
+  it("falls back to fixed priority when the goal capability is not ready", () => {
+    const indexOnly = makeStatus({
+      calendarStatus: "denied",
+      emailAccounts: [],
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
+    });
+    expect(selectSeedPrompt(indexOnly, "inbox")).toBe(INDEX_SEED_PROMPT);
+    const calendarOnly = makeStatus({
+      calendarStatus: "granted",
+      emailAccounts: [],
+      indexEnabled: false,
+      indexWatermark: null,
+    });
+    expect(selectSeedPrompt(calendarOnly, "remember")).toBe(CALENDAR_SEED_PROMPT);
+    expect(selectSeedPrompt(calendarOnly, null)).toBe(CALENDAR_SEED_PROMPT);
+  });
+
+  it("keeps single-arg behavior unchanged for legacy callers", () => {
+    const status = makeStatus({
+      calendarStatus: "denied",
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
+    });
+    expect(selectSeedPrompt(status)).toBe(EMAIL_SEED_PROMPT);
+    expect(selectSeedPrompt(status, undefined)).toBe(EMAIL_SEED_PROMPT);
+  });
+});
+
+describe("status honesty badges", () => {
+  it("marks email Ready only when a fetch succeeded", () => {
+    expect(
+      emailBadge(
+        makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+        }),
+      ),
+    ).toBe("Ready");
+    expect(
+      emailBadge(
+        makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+          emailReady: true,
+        }),
+      ),
+    ).toBe("Ready");
+  });
+
+  it("marks email Configured when accounts exist without a fetch", () => {
+    expect(
+      emailBadge(
+        makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: false }],
+        }),
+      ),
+    ).toBe("Configured");
+  });
+
+  it("marks email Not connected when no accounts exist", () => {
+    expect(emailBadge(makeStatus({ emailAccounts: [] }))).toBe(
+      "Not connected",
+    );
+    expect(emailBadge(null)).toBe("Not connected");
+    expect(emailBadge(undefined)).toBe("Not connected");
+  });
+
+  it("marks index Configured when enabled without a watermark", () => {
+    expect(
+      indexBadge(
+        makeStatus({ indexEnabled: true, indexWatermark: null }),
+      ),
+    ).toBe("Configured");
+    expect(
+      indexBadge(
+        makeStatus({
+          indexEnabled: true,
+          indexWatermark: "2026-10-01T00:00:00Z",
+        }),
+      ),
+    ).toBe("Ready");
+    expect(indexBadge(makeStatus())).toBe("Not connected");
+    expect(indexBadge(null)).toBe("Not connected");
+  });
+
+  it("keeps readiness booleans unchanged by Configured states", () => {
+    expect(
+      isEmailReady(
+        makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: false }],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isIndexReady(makeStatus({ indexEnabled: true, indexWatermark: null })),
+    ).toBe(false);
+    expect(
+      isConnectReady(makeStatus({ emailAccounts: [], indexEnabled: false })),
+    ).toBe(false);
+    expect(
+      isConnectReady(
+        makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+        }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -167,8 +292,26 @@ describe("ConnectStep", () => {
     render(
       <ConnectStep status={makeStatus()} refresh={refresh} onSkipCalendar={() => {}} />,
     );
-    await user.click(screen.getByRole("button", { name: /Check Again/i }));
+    const checks = screen.getAllByRole("button", { name: /Check Again/i });
+    expect(checks.length).toBeGreaterThan(0);
+    await user.click(checks[0]);
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives every panel its own Check Again refresh", () => {
+    render(
+      <ConnectStep status={makeStatus()} refresh={() => {}} onSkipCalendar={() => {}} />,
+    );
+    for (const cardId of [
+      "connect-email-card",
+      "connect-calendar-card",
+      "connect-index-card",
+    ]) {
+      const card = screen.getByTestId(cardId);
+      expect(
+        within(card).getByRole("button", { name: /Check Again/i }),
+      ).toBeInTheDocument();
+    }
   });
 
   it("records a calendar skip through the skip action", async () => {
@@ -210,6 +353,257 @@ describe("ConnectStep", () => {
     await waitFor(() => expect(seen).toHaveLength(1));
     expect(seen[0].path).toBe("/onboarding/skip");
     expect(seen[0].body).toContain("connect");
+  });
+
+  it("shows Configured with an address row for an unfetched account", () => {
+    render(
+      <ConnectStep
+        status={makeStatus({
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: false }],
+        })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("connect-email-badge")).toHaveTextContent(
+      "Configured",
+    );
+    expect(screen.getByTestId("connect-email-accounts")).toBeInTheDocument();
+    expect(screen.getAllByTestId("connect-email-account")).toHaveLength(1);
+    expect(screen.getByTestId("connect-email-account")).toHaveTextContent(
+      "ops@example.com",
+    );
+    expect(screen.getByTestId("connect-email-account-pill")).toHaveTextContent(
+      "Configured",
+    );
+    expect(screen.queryByTestId("connect-email-empty")).toBeNull();
+  });
+
+  it("shows Ready with per-account pills when any fetch succeeded", () => {
+    render(
+      <ConnectStep
+        status={makeStatus({
+          emailAccounts: [
+            { address: "ops@example.com", fetchSucceeded: true },
+            { address: "other@example.com", fetchSucceeded: false },
+          ],
+        })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("connect-email-badge")).toHaveTextContent("Ready");
+    expect(screen.getAllByTestId("connect-email-account")).toHaveLength(2);
+    expect(screen.getAllByTestId("connect-email-account-pill").map((pill) => pill.textContent)).toEqual([
+      "Fetched",
+      "Configured",
+    ]);
+  });
+
+  it("shows Not connected with empty copy when no accounts exist", () => {
+    render(
+      <ConnectStep
+        status={makeStatus({ emailAccounts: [] })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("connect-email-badge")).toHaveTextContent(
+      "Not connected",
+    );
+    expect(screen.getByTestId("connect-email-empty")).toHaveTextContent(
+      "No account yet",
+    );
+    expect(screen.queryByTestId("connect-email-accounts")).toBeNull();
+  });
+
+  it("shows Configured for an enabled index without a watermark", () => {
+    render(
+      <ConnectStep
+        status={makeStatus({ indexEnabled: true, indexWatermark: null })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("connect-index-badge")).toHaveTextContent(
+      "Configured",
+    );
+  });
+
+  it("fails closed to Not connected with a detour for null status", () => {
+    render(
+      <ConnectStep status={null} loading={false} refresh={() => {}} onSkipCalendar={() => {}} />,
+    );
+    expect(screen.getByTestId("connect-email-badge")).toHaveTextContent(
+      "Not connected",
+    );
+    expect(screen.getByTestId("connect-index-badge")).toHaveTextContent(
+      "Not connected",
+    );
+    expect(screen.getByTestId("connect-email-empty")).toHaveTextContent(
+      "No account yet",
+    );
+    expect(screen.getByTestId("calendar-permission-explainer")).toBeInTheDocument();
+  });
+
+  it("renders a dash placeholder with ellipsis and tooltip for blank or long addresses", () => {
+    const longAddress = `${"a".repeat(120)}@example.com`;
+    render(
+      <ConnectStep
+        status={makeStatus({
+          emailAccounts: [
+            { address: "   ", fetchSucceeded: false },
+            { address: longAddress, fetchSucceeded: false },
+          ],
+        })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    const rows = screen.getAllByTestId("connect-email-account");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText("—")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("—")).toHaveAttribute("title", "—");
+    const longCell = within(rows[1]).getByText(longAddress);
+    expect(longCell).toHaveAttribute("title", longAddress);
+    // Ellipsis lives in CSS so assert the shared class plus tooltip.
+    expect(longCell).toHaveClass("connect-account-address");
+  });
+
+  it("shows Email primary with echo plus accounts plus new-tab link for inbox", () => {
+    const status = makeStatus({
+      calendarStatus: "denied",
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+      indexEnabled: false,
+      indexWatermark: null,
+    });
+    render(
+      <ConnectStep
+        goal="inbox"
+        status={status}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    const primary = screen.getByTestId("connect-email-card");
+    expect(within(primary).getByTestId("connect-goal-echo")).toHaveTextContent(
+      /You chose/i,
+    );
+    expect(within(primary).getByTestId("connect-goal-echo")).toHaveTextContent(
+      /Triage my inbox/i,
+    );
+    expect(within(primary).getByTestId("connect-email-accounts")).toBeInTheDocument();
+    const link = within(primary).getByRole("link", { name: /Open Email settings/i });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("href")).toContain("#settings/email");
+    const disclosure = screen.getByTestId("connect-other-options");
+    expect(within(disclosure).getByText(/Show other options/i)).toBeInTheDocument();
+    const disclosed = within(disclosure).getAllByTestId(/connect-.*-card/);
+    expect(disclosed.map((card) => card.getAttribute("data-testid"))).toEqual([
+      "connect-calendar-card",
+      "connect-index-card",
+    ]);
+  });
+
+  it("shows Calendar primary with explainer for day", () => {
+    render(
+      <ConnectStep
+        goal="day"
+        status={makeStatus({ calendarStatus: "denied" })}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    const primary = screen.getByTestId("connect-calendar-card");
+    expect(within(primary).getByTestId("connect-goal-echo")).toHaveTextContent(
+      /Stay ahead of my day/i,
+    );
+    expect(
+      within(primary).getByTestId("calendar-permission-explainer"),
+    ).toBeInTheDocument();
+    expect(
+      within(primary).getByRole("link", { name: /Open Permissions/i }),
+    ).not.toHaveAttribute("target", "_blank");
+    const disclosure = screen.getByTestId("connect-other-options");
+    const disclosed = within(disclosure).getAllByTestId(/connect-.*-card/);
+    expect(disclosed.map((card) => card.getAttribute("data-testid"))).toEqual([
+      "connect-email-card",
+      "connect-index-card",
+    ]);
+  });
+
+  it("shows Index primary with new-tab link for remember", () => {
+    const status = makeStatus({
+      calendarStatus: "denied",
+      emailAccounts: [],
+      indexEnabled: true,
+      indexWatermark: null,
+    });
+    render(
+      <ConnectStep
+        goal="remember"
+        status={status}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    const primary = screen.getByTestId("connect-index-card");
+    expect(within(primary).getByTestId("connect-goal-echo")).toHaveTextContent(
+      /Remember things for me/i,
+    );
+    const link = within(primary).getByRole("link", {
+      name: /Open Indexing settings/i,
+    });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("href")).toContain("#settings/indexing");
+    const disclosure = screen.getByTestId("connect-other-options");
+    const disclosed = within(disclosure).getAllByTestId(/connect-.*-card/);
+    expect(disclosed.map((card) => card.getAttribute("data-testid"))).toEqual([
+      "connect-email-card",
+      "connect-calendar-card",
+    ]);
+  });
+
+  it("renders all three in default order with no disclosure for null goal", () => {
+    const status = makeStatus({
+      calendarStatus: "granted",
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
+    });
+    const { container } = render(
+      <ConnectStep status={status} refresh={() => {}} onSkipCalendar={() => {}} />,
+    );
+    expect(screen.queryByTestId("connect-goal-echo")).toBeNull();
+    expect(screen.queryByTestId("connect-other-options")).toBeNull();
+    const cards = Array.from(
+      container.querySelectorAll('[data-testid^="connect-"][data-testid$="-card"]'),
+    );
+    expect(cards.map((card) => card.getAttribute("data-testid"))).toEqual([
+      "connect-email-card",
+      "connect-calendar-card",
+      "connect-index-card",
+    ]);
+  });
+
+  it("opens settings links in a new tab with absolute origin hrefs", () => {
+    render(
+      <ConnectStep
+        goal="remember"
+        status={makeStatus()}
+        refresh={() => {}}
+        onSkipCalendar={() => {}}
+      />,
+    );
+    const emailLink = screen.getByTestId("connect-email-settings-link");
+    const indexLink = screen.getByTestId("connect-index-settings-link");
+    for (const link of [emailLink, indexLink]) {
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link.getAttribute("href")).toContain(window.location.origin);
+      expect(link.getAttribute("href")).toContain(window.location.pathname);
+    }
+    expect(emailLink.getAttribute("href")).toContain("#settings/email");
+    expect(indexLink.getAttribute("href")).toContain("#settings/indexing");
   });
 });
 

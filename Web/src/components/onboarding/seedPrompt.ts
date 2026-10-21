@@ -13,11 +13,16 @@ import {
   DEMO_GOAL_STATEMENT,
   DEMO_GOAL_TITLE,
 } from "../dashboard/dashboardGreeting";
+import type { OnboardingGoal } from "./PersonaStep";
 
 export type { OnboardingEmailAccount, OnboardingStatus };
 export { neverStartedOnboardingStatus };
 
-export type OnboardingBadge = "Ready" | "Not connected" | "Needs permission";
+export type OnboardingBadge =
+  | "Ready"
+  | "Configured"
+  | "Not connected"
+  | "Needs permission";
 
 export const CALENDAR_SEED_PROMPT =
   "Show my schedule for today and flag any conflicts.";
@@ -81,7 +86,19 @@ export function calendarBadge(
 export function emailBadge(
   status: OnboardingStatus | null | undefined,
 ): OnboardingBadge {
-  if (isEmailReady(status) || status?.emailReady === true) return "Ready";
+  const accountCount = Array.isArray(status?.emailAccounts)
+    ? status.emailAccounts.length
+    : 0;
+  // Zero accounts never counts as Ready even when a legacy flag is set.
+  if (isEmailReady(status) || (status?.emailReady === true && accountCount > 0))
+    return "Ready";
+  // Present accounts without a fetch prove configuration, not liveness.
+  if (
+    status &&
+    Array.isArray(status.emailAccounts) &&
+    status.emailAccounts.length > 0
+  )
+    return "Configured";
   return "Not connected";
 }
 
@@ -89,13 +106,25 @@ export function indexBadge(
   status: OnboardingStatus | null | undefined,
 ): OnboardingBadge {
   if (isIndexReady(status)) return "Ready";
+  // Enabled without a watermark proves configuration, not readiness.
+  if (status?.indexEnabled === true) return "Configured";
   return "Not connected";
 }
 
 // Selects the single verified seed; unverified capabilities never seed a turn.
+// Optional goal prefers its capability when ready, else fixed priority.
 export function selectSeedPrompt(
   status: OnboardingStatus | null | undefined,
+  goal?: OnboardingGoal | null,
 ): string {
+  if (goal === "inbox" && (isEmailReady(status) || status?.emailReady === true))
+    return EMAIL_SEED_PROMPT;
+  if (
+    goal === "day" &&
+    (isCalendarGranted(status) || status?.calendarReady === true)
+  )
+    return CALENDAR_SEED_PROMPT;
+  if (goal === "remember" && isIndexReady(status)) return INDEX_SEED_PROMPT;
   if (isCalendarGranted(status) || status?.calendarReady === true)
     return CALENDAR_SEED_PROMPT;
   if (isEmailReady(status) || status?.emailReady === true)
@@ -106,6 +135,7 @@ export function selectSeedPrompt(
 
 export interface FinishOnboardingWithVerifiedSeedOptions {
   status: unknown;
+  goal?: OnboardingGoal | null;
   complete?: (prompt: string) => Promise<void>;
   swallowCompleteErrors?: boolean;
 }
@@ -116,7 +146,7 @@ export async function finishOnboardingWithVerifiedSeed(
   options: FinishOnboardingWithVerifiedSeedOptions,
 ): Promise<string> {
   const base = parseOnboardingStatus(options.status ?? null);
-  const prompt = selectSeedPrompt(base);
+  const prompt = selectSeedPrompt(base, options.goal ?? null);
   try {
     const res = await apiListGoals();
     const goals = Array.isArray((res as { goals?: unknown })?.goals)
