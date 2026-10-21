@@ -1,18 +1,7 @@
-// Rune Weaver Dashboard — Onboarding wizard navigation plus footer text helpers.
+// Rune Weaver Dashboard — Onboarding wizard navigation helpers.
 import type { OnboardingStatus as ApiOnboardingStatus } from "../../api/onboarding";
 import { WIZARD_STEPS, isSkipped, type WizardStepId } from "./wizardState";
 import type { OnboardingStatus as SeedStatus } from "./seedPrompt";
-
-// Footer mirror bound keeps the bar to one compact line, ellipsis inclusive.
-export const WIZARD_FOOTER_ERROR_MAX_LENGTH = 140;
-
-// Overlong messages cut within the bound with an ellipsis; empty stays empty
-// so the footer reserves space without rendering text.
-export function truncateWizardFooterError(value: string | null | undefined): string {
-  if (typeof value !== "string" || value.length === 0) return "";
-  if (value.length <= WIZARD_FOOTER_ERROR_MAX_LENGTH) return value;
-  return `${value.slice(0, WIZARD_FOOTER_ERROR_MAX_LENGTH - 1)}…`;
-}
 
 // Server snapshot is the single ack source; the checkbox never persists.
 export function toSeedStatus(value: ApiOnboardingStatus | null): SeedStatus | null {

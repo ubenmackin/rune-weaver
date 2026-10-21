@@ -69,21 +69,7 @@
   min-width: 0;
 }
 
-/* Compact mirror stays one line; reserved height keeps the bar stable. */
-.wizard-footer-error {
-  color: #fca5a5;
-  font-size: 12px;
-  line-height: 16px;
-  max-width: 320px;
-  min-height: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-/* Footer actions never shrink while the mirror takes the remaining space. */
+/* Footer actions never shrink in the sticky bar. */
 .wizard-footer-right button {
   flex-shrink: 0;
 }

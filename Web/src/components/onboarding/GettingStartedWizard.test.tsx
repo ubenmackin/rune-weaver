@@ -3,10 +3,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import GettingStartedWizard, {
-  WIZARD_FOOTER_ERROR_MAX_LENGTH,
-  truncateWizardFooterError,
-} from "./GettingStartedWizard";
+import GettingStartedWizard from "./GettingStartedWizard";
 import { WIZARD_STEPS, isSkipped, nextStep } from "./wizardState";
 import { jsonResponse } from "../../test-utils/http";
 
@@ -152,45 +149,50 @@ describe("GettingStartedWizard skip and resume", () => {
   });
 });
 
-describe("GettingStartedWizard footer error mirror", () => {
-  it("truncates overlong errors to 140 chars with ellipsis", () => {
-    expect(WIZARD_FOOTER_ERROR_MAX_LENGTH).toBe(140);
-    expect(truncateWizardFooterError(null)).toBe("");
-    expect(truncateWizardFooterError(undefined)).toBe("");
-    expect(truncateWizardFooterError("")).toBe("");
-    expect(truncateWizardFooterError("short")).toBe("short");
-    const long = "x".repeat(200);
-    const truncated = truncateWizardFooterError(long);
-    expect(truncated.length).toBe(140);
-    expect(truncated.endsWith("…")).toBe(true);
-  });
-
-  it("renders zero footer text when no error", async () => {
+describe("GettingStartedWizard inline single source", () => {
+  it("renders zero banners when no error", async () => {
     stubFetch(async () => jsonResponse({ ok: true }));
     await act(async () => {
       render(<GettingStartedWizard initialSkippedSteps={[]} />);
     });
-    const footer = screen.getByTestId("wizard-footer-error");
-    expect(footer).toHaveTextContent("");
-    expect(footer.textContent).toBe("");
-    expect(footer).toHaveClass("wizard-footer-error");
-    expect(footer.getAttribute("role")).toBeNull();
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+    expect(screen.queryByTestId("wizard-error")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-error")).toBeNull();
+    expect(screen.queryByTestId("wizard-seed-error")).toBeNull();
+    expect(screen.queryByTestId("brain-error")).toBeNull();
   });
 
-  it("mirrors validation errors in footer with role alert", async () => {
+  it("shows brain validation inline with role alert and focus and no footer", async () => {
     const user = userEvent.setup();
     stubFetch(async () => jsonResponse({}));
-    render(<GettingStartedWizard initialSkippedSteps={[]} />);
-    await user.click(screen.getByTestId("brain-next"));
-    const inline = await screen.findByTestId("brain-error");
-    expect(inline).toHaveAttribute("role", "alert");
-    const footer = screen.getByTestId("wizard-footer-error");
-    expect(footer).toHaveAttribute("role", "alert");
-    expect(footer.textContent).not.toBe("");
-    expect(footer.textContent).toContain(truncateWizardFooterError(inline.textContent ?? "").slice(0, 20));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    try {
+      render(<GettingStartedWizard initialSkippedSteps={[]} />);
+      await user.click(screen.getByTestId("brain-next"));
+      const inline = await screen.findByTestId("brain-error");
+      expect(inline).toHaveAttribute("role", "alert");
+      expect(inline.textContent).toMatch(/1 to 64/i);
+      expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+      expect(screen.queryByTestId("wizard-step-error")).toBeNull();
+      await waitFor(() => {
+        expect(scrollSpy).toHaveBeenCalled();
+      });
+      await waitFor(() => {
+        expect(document.activeElement).toBe(inline);
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.pushState({}, "", "/");
+    }
   });
 
-  it("mirrors test failures in footer while keeping inline error", async () => {
+  it("shows brain test failure inline with role alert and no footer", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -210,18 +212,94 @@ describe("GettingStartedWizard footer error mirror", () => {
     });
     try {
       render(<GettingStartedWizard initialSkippedSteps={[]} />);
-      // Missing-key path needs a valid URL so the blank-URL guard does not win.
       await user.type(screen.getByTestId("brain-server-url"), "https://brain.example.com");
       await user.type(screen.getByTestId("brain-api-key-env"), "MY_KEY");
       await user.click(screen.getByTestId("brain-test-connection"));
       const inline = await screen.findByTestId("brain-test-status");
       expect(inline.textContent).toMatch(/Failed to connect/i);
       expect(inline.textContent).toMatch(/Key not stored/i);
-      const footer = screen.getByTestId("wizard-footer-error");
-      await waitFor(() => {
-        expect(footer.textContent).toMatch(/Key not stored/i);
-      });
-      expect(footer).toHaveAttribute("role", "alert");
+      expect(inline).toHaveAttribute("role", "alert");
+      expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  it("shows persona failure inline with no footer mirror", async () => {
+    const user = userEvent.setup();
+    stubFetch(async (url: string) => {
+      if (url === "/settings") return jsonResponse({ providers: {}, defaultProvider: "" });
+      return jsonResponse({});
+    });
+    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("brain-loading")).toBeNull();
+    });
+    await user.type(screen.getByTestId("brain-provider-name"), "mybrain");
+    await user.type(screen.getByTestId("brain-model"), "m1");
+    await user.click(screen.getByTestId("brain-next"));
+    await waitFor(() => {
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+    });
+    await user.click(screen.getByTestId("persona-next"));
+    const inline = await screen.findByTestId("persona-error");
+    expect(inline).toHaveAttribute("role", "alert");
+    expect(inline.textContent).toMatch(/1 to 64|goal/i);
+    expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+    expect(screen.queryByTestId("wizard-error")).toBeNull();
+  });
+
+  it("shows connect skip failure inline with no footer mirror", async () => {
+    const user = userEvent.setup();
+    stubFetch(async () => jsonResponse({ ok: true }));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(
+        <GettingStartedWizard
+          initialSkippedSteps={["brain", "persona"]}
+          onOnboardingSkip={async () => {
+            throw new Error("skip boom");
+          }}
+        />,
+      );
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
+      await user.click(screen.getByRole("button", { name: "Skip for now" }));
+      const inline = await screen.findByTestId("wizard-error");
+      expect(inline).toHaveAttribute("role", "alert");
+      expect(inline.textContent).toMatch(/skip boom/i);
+      expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  it("shows protect finish failure inline with no footer mirror", async () => {
+    const user = userEvent.setup();
+    stubFetch(async () => jsonResponse({ ok: true }));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(
+        <GettingStartedWizard
+          initialSkippedSteps={["brain", "persona", "connect"]}
+          onOnboardingComplete={async () => {
+            throw new Error("finish boom");
+          }}
+        />,
+      );
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 4 of 4");
+      await user.click(screen.getByRole("button", { name: "Finish" }));
+      const inline = await screen.findByTestId("wizard-error");
+      expect(inline).toHaveAttribute("role", "alert");
+      expect(inline.textContent).toMatch(/finish boom/i);
+      expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
       expect(scrollSpy).toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
