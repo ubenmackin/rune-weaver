@@ -1,6 +1,5 @@
 // Rune Weaver Dashboard — Onboarding protect step with optional acknowledgement.
-import { wizardSettingsHref } from "./wizardHelpers";
-import { snoozeWizard } from "./wizardSnooze";
+import { goToSettings } from "./wizardSnooze";
 
 export interface ProtectStepProps {
   policyAcked: boolean;
@@ -31,12 +30,14 @@ export default function ProtectStep({
       </ul>
 
       <p className="protect-settings-line onboarding-actions">
+        {/* Snooze first so the gate never flashes the modal over Settings. */}
         <a
           className="ghost"
-          href={wizardSettingsHref("access")}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => snoozeWizard()}
+          href="#settings/access"
+          onClick={(event) => {
+            event.preventDefault();
+            goToSettings("access");
+          }}
         >
           Settings Access
         </a>

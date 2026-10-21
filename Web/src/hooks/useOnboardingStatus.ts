@@ -6,6 +6,7 @@ import {
   getOnboardingStatus,
   isOnboardingCompleted,
   reopenOnboarding as apiReopenOnboarding,
+  resetOnboarding as apiResetOnboarding,
   skipOnboardingStep as apiSkipOnboardingStep,
   type OnboardingStatus,
   type OnboardingStepId,
@@ -23,6 +24,7 @@ export interface UseOnboardingStatusResult {
   skip: (stepId: OnboardingStepId) => Promise<void>;
   dismiss: () => Promise<void>;
   reopen: () => Promise<void>;
+  reset: () => Promise<void>;
 }
 
 export function useOnboardingStatus(options?: { disabled?: boolean }): UseOnboardingStatusResult {
@@ -140,6 +142,13 @@ export function useOnboardingStatus(options?: { disabled?: boolean }): UseOnboar
     await refresh();
   }, [refresh]);
 
+  // Full reset clears completion plus skips plus dismissal plus seed,
+  // then re-reads so the wizard gate remounts from the cleared row.
+  const reset = useCallback(async (): Promise<void> => {
+    await apiResetOnboarding();
+    await refresh();
+  }, [refresh]);
+
   return {
     status,
     isLoading,
@@ -151,6 +160,7 @@ export function useOnboardingStatus(options?: { disabled?: boolean }): UseOnboar
     skip,
     dismiss,
     reopen,
+    reset,
   };
 }
 

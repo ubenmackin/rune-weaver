@@ -1,13 +1,12 @@
-// Rune Weaver Dashboard — Onboarding wizard shell with gating, skip persistence, and resume.
+// Rune Weaver Dashboard — Onboarding wizard shell with skip-to-dismiss, gating, and resume.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson } from "../../api/http";
 import {
   sanitizeSkippedSteps,
-  skipOnboardingStep,
   type OnboardingStatus as ApiOnboardingStatus,
 } from "../../api/onboarding";
 import { useOnboardingStatus as useSharedOnboardingStatus } from "../../hooks/useOnboardingStatus";
-import { WIZARD_STEPS, nextStep, type WizardStepId } from "./wizardState";
+import { WIZARD_STEPS, nextStep, prevStep, type WizardStepId } from "./wizardState";
 import BrainStep from "./BrainStep";
 import PersonaStep, { isOnboardingGoal } from "./PersonaStep";
 import ConnectStep from "./ConnectStep";
@@ -24,6 +23,7 @@ import {
   toSeedStatus,
 } from "./wizardHelpers";
 import { clearWizardState, persistWizardState, resolveInitialWizardState } from "./wizardStorage";
+import { recordSkipAndSnooze } from "./wizardSkip";
 import { useBrainWizard } from "./useBrainWizard";
 import { usePersonaWizard } from "./usePersonaWizard";
 import {
@@ -77,6 +77,7 @@ export default function GettingStartedWizard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState(false);
   const [hydrated, setHydrated] = useState(() => {
     if (onboardingStatus !== undefined) return onboardingStatus !== null;
     return initialSkippedSteps !== undefined;
@@ -199,6 +200,8 @@ export default function GettingStartedWizard({
     }
   }, [effectiveSeedError, current]);
 
+  // Dismissed skip hides locally while the snooze flag hides the App shell.
+  if (dismissed) return null;
   if (standalone) return null;
   if (!hydrated) return null;
   if (!WIZARD_STEPS.includes(current)) return null;
@@ -209,21 +212,24 @@ export default function GettingStartedWizard({
 
   function handleBack() {
     // Drop stale hook errors before stepping back so forward never replays them.
+    setError(null);
     persona.clearErrors();
     brain.clearErrors();
     setStepError(null);
-    if (history.length <= 1) return;
-    const nextHistory = history.slice(0, -1);
-    setHistory(nextHistory);
-    setCurrent(nextHistory[nextHistory.length - 1]);
+    if (index <= 0) return;
+    const prev = prevStep(current);
+    if (!prev) return;
+    setHistory((prevHistory) => [...prevHistory, prev]);
+    setCurrent(prev);
   }
 
-  function advanceFrom(step: WizardStepId, skippedAfter: WizardStepId[]) {
-    const next = nextStep(step, skippedAfter);
+  function advanceFrom(step: WizardStepId) {
+    const next = nextStep(step);
     if (!next) {
       void handleFinish();
       return;
     }
+    setError(null);
     setStepError(null);
     setHistory((prev) => [...prev, next]);
     setCurrent(next);
@@ -235,7 +241,6 @@ export default function GettingStartedWizard({
   function handlePersonaNext() {
     void persona.onNext({
       current,
-      skipped,
       onAdvanced: (next) => {
         setHistory((prev) => [...prev, next]);
         setCurrent(next);
@@ -247,7 +252,7 @@ export default function GettingStartedWizard({
   function handleNext() {
     setError(null);
     setStepError(null);
-    advanceFrom(current, skipped);
+    advanceFrom(current);
   }
 
   async function handleFinish() {
@@ -275,20 +280,13 @@ export default function GettingStartedWizard({
     setStepError(null);
     setBusy(true);
     try {
-      if (onOnboardingSkip) await onOnboardingSkip(step);
-      else await skipOnboardingStep(step);
+      await recordSkipAndSnooze(step, onOnboardingSkip);
       const updated = skipped.includes(step) ? skipped : [...skipped, step];
       setSkipped(updated);
-      const next = nextStep(step, updated);
-      if (next) {
-        setHistory((prev) => [...prev, next]);
-        setCurrent(next);
-      } else {
-        await finishOnboardingWithVerifiedSeed({ status: seedStatus, goal: personaGoal, complete: onOnboardingComplete });
-        clearWizardState();
-        onFinished?.();
-      }
+      // Snooze hides the App-mounted shell; local dismiss covers isolated mounts.
+      setDismissed(true);
     } catch (err) {
+      // Failed skip keeps the wizard open so the inline error stays actionable.
       setError(err instanceof Error ? err.message : "Failed to skip this step");
     } finally {
       setBusy(false);
@@ -299,7 +297,7 @@ export default function GettingStartedWizard({
     await runSkip(current);
   }
 
-  // Detour always records connect skip so reload resumes past it.
+  // Detour shares the dismiss path so resume lands past connect.
   async function handleSkipCalendarDetour() {
     await runSkip("connect");
   }
@@ -307,7 +305,6 @@ export default function GettingStartedWizard({
   function handleBrainNext() {
     void brain.onNext({
       current,
-      skipped,
       onAdvanced: (next) => {
         setHistory((prev) => [...prev, next]);
         setCurrent(next);
@@ -375,7 +372,7 @@ export default function GettingStartedWizard({
             </div>
           </div>
           <AllSkippedFooter
-            canBack={history.length > 1}
+            canBack={index > 0}
             busy={busy}
             onBack={handleBack}
             onFinish={() => void handleFinish()}
@@ -386,7 +383,7 @@ export default function GettingStartedWizard({
   }
 
   // Footer owns Back on every post-brain step; placeholder keeps layout stable.
-  const showWizardBack = history.length > 1;
+  const showWizardBack = index > 0;
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Getting started">
@@ -496,7 +493,7 @@ export default function GettingStartedWizard({
 
         {current === "brain" ? (
           <BrainWizardFooter
-            canBack={history.length > 1}
+            canBack={index > 0}
             busy={busy}
             testing={brain.testing}
             saving={brain.saving}

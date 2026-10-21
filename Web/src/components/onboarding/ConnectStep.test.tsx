@@ -220,11 +220,13 @@ describe("ConnectStep", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearWizardSnooze();
+    window.location.hash = "";
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     clearWizardSnooze();
+    window.location.hash = "";
   });
 
   it("shows three cards in goal order with live badges", () => {
@@ -476,7 +478,7 @@ describe("ConnectStep", () => {
     expect(longCell).toHaveClass("connect-account-address");
   });
 
-  it("shows Email primary with echo plus accounts plus new-tab link for inbox", () => {
+  it("shows Email primary with echo plus accounts plus same-tab button for inbox", () => {
     const status = makeStatus({
       calendarStatus: "denied",
       emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
@@ -499,9 +501,10 @@ describe("ConnectStep", () => {
       /Triage my inbox/i,
     );
     expect(within(primary).getByTestId("connect-email-accounts")).toBeInTheDocument();
-    const link = within(primary).getByRole("link", { name: /Open Email settings/i });
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link.getAttribute("href")).toContain("#settings/email");
+    const link = within(primary).getByRole("button", { name: /Open Email settings/i });
+    expect(link).toHaveAttribute("data-testid", "connect-email-settings-link");
+    expect(link).not.toHaveAttribute("target");
+    expect(link).not.toHaveAttribute("href");
     const disclosure = screen.getByTestId("connect-other-options");
     expect(within(disclosure).getByText(/Show other options/i)).toBeInTheDocument();
     const disclosed = within(disclosure).getAllByTestId(/connect-.*-card/);
@@ -538,7 +541,7 @@ describe("ConnectStep", () => {
     ]);
   });
 
-  it("shows Index primary with new-tab link for remember", () => {
+  it("shows Index primary with same-tab button for remember", () => {
     const status = makeStatus({
       calendarStatus: "denied",
       emailAccounts: [],
@@ -557,11 +560,12 @@ describe("ConnectStep", () => {
     expect(within(primary).getByTestId("connect-goal-echo")).toHaveTextContent(
       /Remember things for me/i,
     );
-    const link = within(primary).getByRole("link", {
+    const link = within(primary).getByRole("button", {
       name: /Open Indexing settings/i,
     });
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link.getAttribute("href")).toContain("#settings/indexing");
+    expect(link).toHaveAttribute("data-testid", "connect-index-settings-link");
+    expect(link).not.toHaveAttribute("target");
+    expect(link).not.toHaveAttribute("href");
     const disclosure = screen.getByTestId("connect-other-options");
     const disclosed = within(disclosure).getAllByTestId(/connect-.*-card/);
     expect(disclosed.map((card) => card.getAttribute("data-testid"))).toEqual([
@@ -592,7 +596,9 @@ describe("ConnectStep", () => {
     ]);
   });
 
-  it("opens settings links in a new tab with absolute origin hrefs", () => {
+  it("navigates settings links same-tab with hash targets and no popup", async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     render(
       <ConnectStep
         goal="remember"
@@ -604,45 +610,59 @@ describe("ConnectStep", () => {
     const emailLink = screen.getByTestId("connect-email-settings-link");
     const indexLink = screen.getByTestId("connect-index-settings-link");
     for (const link of [emailLink, indexLink]) {
-      expect(link).toHaveAttribute("target", "_blank");
-      expect(link.getAttribute("href")).toContain(window.location.origin);
-      expect(link.getAttribute("href")).toContain(window.location.pathname);
+      expect(link).not.toHaveAttribute("target");
+      expect(link).not.toHaveAttribute("href");
     }
-    expect(emailLink.getAttribute("href")).toContain("#settings/email");
-    expect(indexLink.getAttribute("href")).toContain("#settings/indexing");
+    await user.click(emailLink);
+    expect(isWizardSnoozed()).toBe(true);
+    expect(window.location.hash).toContain("#settings/email");
+    expect(openSpy).not.toHaveBeenCalled();
+    clearWizardSnooze();
+    window.location.hash = "";
+    await user.click(indexLink);
+    expect(isWizardSnoozed()).toBe(true);
+    expect(window.location.hash).toContain("#settings/indexing");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
   });
 
-  it("snoozes the wizard before opening Email settings in a new tab", async () => {
+  it("snoozes the wizard before navigating same-tab to Email settings", async () => {
     const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     render(
       <ConnectStep status={makeStatus()} refresh={() => {}} onSkipCalendar={() => {}} />,
     );
     expect(isWizardSnoozed()).toBe(false);
     await user.click(screen.getByTestId("connect-email-settings-link"));
     expect(isWizardSnoozed()).toBe(true);
+    expect(window.location.hash).toContain("#settings/email");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
   });
 
-  it("snoozes the wizard before opening Indexing settings in a new tab", async () => {
+  it("snoozes the wizard before navigating same-tab to Indexing settings", async () => {
     const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     render(
       <ConnectStep status={makeStatus()} refresh={() => {}} onSkipCalendar={() => {}} />,
     );
     expect(isWizardSnoozed()).toBe(false);
     await user.click(screen.getByTestId("connect-index-settings-link"));
     expect(isWizardSnoozed()).toBe(true);
+    expect(window.location.hash).toContain("#settings/indexing");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
   });
 });
 
 describe("ProtectStep", () => {
-  it("renders the three read-only bullets with a Settings Access link", () => {
+  it("renders the three read-only bullets with a same-tab Settings Access link", () => {
     render(<ProtectStep policyAcked={false} onPolicyAckedChange={() => {}} />);
     expect(screen.getByText(/Reads freely, writes ask first/i)).toBeInTheDocument();
     expect(screen.getByText(/Allowlist-only network/i)).toBeInTheDocument();
     expect(screen.getByText(/Secrets never in prompts/i)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Settings Access/i });
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    expect(link.getAttribute("href")).toContain(window.location.origin);
+    expect(link).not.toHaveAttribute("target");
     expect(link.getAttribute("href")).toContain("#settings/access");
     expect(screen.getByTestId("protect-step").querySelector(".protect-bullets")).not.toBeNull();
     expect(screen.queryByRole("button", { name: /^Finish$/ })).toBeNull();
@@ -663,13 +683,19 @@ describe("ProtectStep", () => {
     expect(screen.queryByRole("button", { name: /^Finish$/ })).toBeNull();
   });
 
-  it("snoozes the wizard before following the Settings Access link", async () => {
+  it("snoozes the wizard before same-tab navigation to Settings Access", async () => {
     const user = userEvent.setup();
     clearWizardSnooze();
+    window.location.hash = "";
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     render(<ProtectStep policyAcked={false} onPolicyAckedChange={() => {}} />);
     expect(isWizardSnoozed()).toBe(false);
     await user.click(screen.getByRole("link", { name: /Settings Access/i }));
     expect(isWizardSnoozed()).toBe(true);
+    expect(window.location.hash).toContain("#settings/access");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
     clearWizardSnooze();
+    window.location.hash = "";
   });
 });

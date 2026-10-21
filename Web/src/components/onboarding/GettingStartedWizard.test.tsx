@@ -2,10 +2,11 @@
 
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import GettingStartedWizard from "./GettingStartedWizard";
 import { WIZARD_STEPS, isSkipped, nextStep } from "./wizardState";
 import { jsonResponse } from "../../test-utils/http";
+import { clearWizardSnooze, isWizardSnoozed } from "./wizardSnooze";
 
 function stubFetch(handler: (input: string, init?: RequestInit) => Promise<Response>): void {
   vi.stubGlobal("fetch", vi.fn(handler));
@@ -16,6 +17,12 @@ beforeEach(() => {
   window.history.pushState({}, "", "/");
   // Each mount restores the session step, so drop the previous case's row.
   window.sessionStorage.clear();
+  clearWizardSnooze();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  clearWizardSnooze();
 });
 
 describe("wizardState step order", () => {
@@ -24,16 +31,16 @@ describe("wizardState step order", () => {
   });
 
   it("advances through unskipped steps and ends after protect", () => {
-    expect(nextStep("brain", [])).toBe("persona");
-    expect(nextStep("persona", [])).toBe("connect");
-    expect(nextStep("connect", [])).toBe("protect");
-    expect(nextStep("protect", [])).toBeNull();
+    expect(nextStep("brain")).toBe("persona");
+    expect(nextStep("persona")).toBe("connect");
+    expect(nextStep("connect")).toBe("protect");
+    expect(nextStep("protect")).toBeNull();
   });
 
-  it("jumps over skipped steps", () => {
-    expect(nextStep("brain", ["persona"])).toBe("connect");
-    expect(nextStep("brain", ["persona", "connect"])).toBe("protect");
-    expect(nextStep("connect", ["protect"])).toBeNull();
+  it("keeps fixed order without skipping over steps", () => {
+    expect(nextStep("brain")).toBe("persona");
+    expect(nextStep("persona")).toBe("connect");
+    expect(nextStep("connect")).toBe("protect");
   });
 
   it("reports skipped membership", () => {
@@ -98,7 +105,7 @@ describe("GettingStartedWizard progress", () => {
 });
 
 describe("GettingStartedWizard skip and resume", () => {
-  it("persists Skip for now and advances to the next step", async () => {
+  it("records footer Skip, snoozes, and hides without advancing or finishing", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn(async (input: string) => {
       if (typeof input === "string" && input.includes("/onboarding/skip")) {
@@ -107,7 +114,9 @@ describe("GettingStartedWizard skip and resume", () => {
       return jsonResponse({ ok: true });
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<GettingStartedWizard initialSkippedSteps={[]} />);
+    const onFinished = vi.fn();
+    expect(isWizardSnoozed()).toBe(false);
+    render(<GettingStartedWizard initialSkippedSteps={[]} onFinished={onFinished} />);
     await user.click(screen.getByRole("button", { name: "Skip for now" }));
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -120,7 +129,45 @@ describe("GettingStartedWizard skip and resume", () => {
     ) as unknown as [string, RequestInit];
     expect(String(init.body)).toContain("brain");
     await waitFor(() => {
-      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 2 of 4");
+      expect(isWizardSnoozed()).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("getting-started-wizard")).toBeNull();
+    });
+    const completedCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/onboarding/complete"),
+    );
+    expect(completedCalls).toHaveLength(0);
+    expect(onFinished).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the calendar detour without advancing", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (input: string) => {
+      if (typeof input === "string" && input.includes("/onboarding/skip")) {
+        return jsonResponse({ skipped_steps: ["brain", "persona", "connect"] });
+      }
+      return jsonResponse({ ok: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<GettingStartedWizard initialSkippedSteps={["brain", "persona"]} />);
+    expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
+    await user.click(screen.getByRole("button", { name: "Skip connect for now" }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/onboarding/skip"),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    const [, init] = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/onboarding/skip"),
+    ) as unknown as [string, RequestInit];
+    expect(String(init.body)).toContain("connect");
+    await waitFor(() => {
+      expect(isWizardSnoozed()).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("getting-started-wizard")).toBeNull();
     });
   });
 
@@ -131,6 +178,30 @@ describe("GettingStartedWizard skip and resume", () => {
     });
     expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
     expect(screen.getByText(/Link the sources/i)).toBeInTheDocument();
+  });
+
+  it("shows the deferred Finish view when every step is skipped", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async () => jsonResponse({ completed_at: "2026-10-19T00:00:00Z" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onFinished = vi.fn();
+    await act(async () => {
+      render(
+        <GettingStartedWizard
+          initialSkippedSteps={["brain", "persona", "connect", "protect"]}
+          onFinished={onFinished}
+        />,
+      );
+    });
+    expect(screen.getByText(/Everything is deferred/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/onboarding/complete"),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
   });
 
   it("finishes on the last step via completeOnboarding", async () => {
@@ -274,6 +345,9 @@ describe("GettingStartedWizard inline single source", () => {
       expect(inline).toHaveAttribute("role", "alert");
       expect(inline.textContent).toMatch(/skip boom/i);
       expect(screen.queryByTestId("wizard-footer-error")).toBeNull();
+      expect(isWizardSnoozed()).toBe(false);
+      expect(screen.getByTestId("getting-started-wizard")).toBeInTheDocument();
+      expect(screen.getByTestId("wizard-progress")).toHaveTextContent("Step 3 of 4");
       expect(scrollSpy).toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
@@ -438,8 +512,7 @@ describe("GettingStartedWizard unified footer", () => {
     expect(step.querySelector(".protect-actions")).toBeNull();
     expect(screen.getByTestId("wizard-finish")).toHaveTextContent("Finish");
     const accessLink = screen.getByRole("link", { name: /Settings Access/i });
-    expect(accessLink).toHaveAttribute("target", "_blank");
-    expect(accessLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(accessLink).not.toHaveAttribute("target");
     expect(accessLink.getAttribute("href")).toContain("#settings/access");
   });
 });

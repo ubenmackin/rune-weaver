@@ -1,7 +1,8 @@
 // Rune Weaver Dashboard — Onboarding connect step with live readiness.
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { fetchJson } from "../../api/http";
-import { skipOnboardingStep } from "../../api/onboarding";
+import { goToSettings } from "./wizardSnooze";
+import { recordSkipAndSnooze } from "./wizardSkip";
 import {
   calendarBadge,
   emailBadge,
@@ -18,8 +19,6 @@ import {
   type OnboardingGoal,
   type Step3CardId,
 } from "./PersonaStep";
-import { snoozeWizard } from "./wizardSnooze";
-import { wizardSettingsHref } from "./wizardHelpers";
 
 export interface ConnectStepProps {
   goal?: OnboardingGoal | null;
@@ -128,19 +127,19 @@ interface SettingsLinkProps {
   label: string;
 }
 
-// Snooze hides the wizard in the new tab so Settings edits without overlap.
+// Snooze first so the gate never flashes the modal over Settings.
 function SettingsLink({ tab, testId, label }: SettingsLinkProps) {
   return (
-    <a
+    <button
+      type="button"
       className="ghost connect-settings-link"
       data-testid={testId}
-      href={wizardSettingsHref(tab)}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={() => snoozeWizard()}
+      onClick={() => {
+        goToSettings(tab);
+      }}
     >
       {label}
-    </a>
+    </button>
   );
 }
 
@@ -193,17 +192,16 @@ export default function ConnectStep({
       await controlledSkip();
       return;
     }
-    // Detour always records connect skip so reload resumes past connect.
+    // Detour shares the dismiss path so resume lands past connect.
     setInternalSkipping(true);
     try {
-      await skipOnboardingStep("connect");
-      await reloadInternal();
+      await recordSkipAndSnooze("connect");
     } catch (err) {
       setInternalError(err instanceof Error ? err.message : "Failed to skip calendar");
     } finally {
       setInternalSkipping(false);
     }
-  }, [controlledSkip, reloadInternal]);
+  }, [controlledSkip]);
 
   const email = emailBadge(effectiveStatus);
   const calendar = calendarBadge(effectiveStatus);
