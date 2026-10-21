@@ -90,29 +90,40 @@ export function BrainWizardFooter({
   );
 }
 
+export interface WizardStepFooterPrimary {
+  label: string;
+  onClick: () => void;
+  testId: string;
+  disabled: boolean;
+}
+
 export interface WizardStepFooterProps {
   showBack: boolean;
-  showNext: boolean;
   busy: boolean;
   onBack: () => void;
   onSkip: () => void;
-  onNext: () => void;
+  primary: WizardStepFooterPrimary;
 }
 
-// Non-brain steps share one footer so Back plus Skip plus Next stay together.
+// Non-brain steps share one footer so Back plus Skip plus primary stay together.
 export function WizardStepFooter({
   showBack,
-  showNext,
   busy,
   onBack,
   onSkip,
-  onNext,
+  primary,
 }: WizardStepFooterProps) {
   return (
     <WizardFooterShell
       left={
         showBack ? (
-          <button type="button" className="ghost" onClick={onBack} disabled={busy}>
+          <button
+            type="button"
+            className="ghost"
+            data-testid="wizard-back"
+            onClick={onBack}
+            disabled={busy}
+          >
             Back
           </button>
         ) : (
@@ -123,11 +134,15 @@ export function WizardStepFooter({
       <button type="button" className="ghost" onClick={onSkip} disabled={busy}>
         Skip for now
       </button>
-      {showNext ? (
-        <button type="button" className="primary" onClick={onNext} disabled={busy}>
-          Next
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="primary"
+        data-testid={primary.testId}
+        onClick={primary.onClick}
+        disabled={primary.disabled}
+      >
+        {primary.label}
+      </button>
     </WizardFooterShell>
   );
 }

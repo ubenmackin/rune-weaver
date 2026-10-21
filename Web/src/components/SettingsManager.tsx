@@ -1,6 +1,12 @@
 // Rune Weaver Dashboard — Settings manager coordinator shell for config.toml configuration.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { reopenOnboarding } from "../api/onboarding";
+import {
+  clearWizardSnooze,
+  isWizardSnoozed,
+  resumeWizard,
+  subscribeWizardSnooze,
+} from "./onboarding/wizardSnooze";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
@@ -98,6 +104,9 @@ export default function SettingsManager({
   } = useToastStack();
   const { runs: sharedRuns } = useRunningRuns();
   const isMobile = useIsMobile();
+  const [wizardSnoozed, setWizardSnoozed] = useState(() => isWizardSnoozed());
+
+  useEffect(() => subscribeWizardSnooze(setWizardSnoozed), []);
 
   // Form state hook
   const form = useSettingsFormState();
@@ -182,6 +191,23 @@ export default function SettingsManager({
         </div>
 
         <div className="row">
+          {wizardSnoozed ? (
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              data-testid="resume-setup"
+              onClick={() => {
+                resumeWizard();
+                if (typeof window !== "undefined") {
+                  window.location.hash = "dashboard";
+                }
+              }}
+              title="Resume setup wizard"
+              aria-label="Resume setup"
+            >
+              <span>Resume setup</span>
+            </button>
+          ) : null}
           <button
             type="button"
             className="ghost icon-text-btn"
@@ -189,9 +215,12 @@ export default function SettingsManager({
             onClick={() => {
               void (async () => {
                 try {
+                  // Unsnooze first so the gate can mount, then reopen at the persisted step.
+                  clearWizardSnooze();
                   // Single App-owned status stays live; direct reopen is fallback.
                   if (onReopenOnboarding) await onReopenOnboarding();
                   else await reopenOnboarding();
+                  resumeWizard();
                   if (typeof window !== "undefined") {
                     window.location.hash = "dashboard";
                   }

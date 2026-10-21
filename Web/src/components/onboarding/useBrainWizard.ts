@@ -19,7 +19,7 @@ import {
   type BrainSelection,
 } from "./BrainStep";
 import { BRAIN_SECRET_PROBE_PATTERN, probeBrainServer } from "./brainProbe";
-import { nextStep, type WizardStepId } from "./wizardState";
+import { nextStep, type WizardNextOptions } from "./wizardState";
 
 export type BrainTestStatus = "idle" | "testing" | "succeeded" | "failed";
 
@@ -28,13 +28,6 @@ export interface UseBrainWizardOptions {
   hydrated: boolean;
   setStepError: (message: string | null) => void;
   setError: (message: string | null) => void;
-}
-
-export interface BrainNextOptions {
-  current: WizardStepId;
-  skipped: WizardStepId[];
-  onAdvanced: (next: WizardStepId) => void;
-  onFinished: () => Promise<void>;
 }
 
 // Single state owner stays the wizard shell; this hook only groups the
@@ -173,6 +166,14 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
     setStepError(null);
   }
 
+  // Back navigation drops stale inline plus probe state so forward never replays it.
+  function clearErrors() {
+    setBrainError(null);
+    setBrainTestStatus("idle");
+    setBrainTestDetail(null);
+    setStepError(null);
+  }
+
   // Blank plus malformed URLs fail without probing; success needs reachability plus stored key.
   async function handleBrainTest() {
     const trimmedKey = normalizeSecretKey(brainDraft.apiKeyEnv);
@@ -225,7 +226,7 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
     setStepError(detail);
   }
 
-  async function handleBrainNext(nextOptions: BrainNextOptions) {
+  async function handleBrainNext(nextOptions: WizardNextOptions) {
     const { current, skipped, onAdvanced, onFinished } = nextOptions;
     const loading = brainProviders === undefined && !brainProvidersError;
     if (loading) {
@@ -334,5 +335,6 @@ export function useBrainWizard(options: UseBrainWizardOptions) {
     onStoreSuccess: handleBrainStoreSuccess,
     onTest: handleBrainTest,
     onNext: handleBrainNext,
+    clearErrors,
   };
 }

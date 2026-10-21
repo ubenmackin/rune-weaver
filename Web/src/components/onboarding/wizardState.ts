@@ -5,6 +5,14 @@ export type WizardStepId = OnboardingStepId;
 
 export const WIZARD_STEPS: readonly WizardStepId[] = ONBOARDING_STEP_IDS;
 
+// Single wizard advance contract so persona plus brain Next stay in lockstep.
+export interface WizardNextOptions {
+  current: WizardStepId;
+  skipped: WizardStepId[];
+  onAdvanced: (next: WizardStepId) => void;
+  onFinished: () => Promise<void>;
+}
+
 export function isSkipped(step: WizardStepId, skipped: WizardStepId[]): boolean {
   if (!isOnboardingStepId(step)) return false;
   if (!Array.isArray(skipped)) return false;

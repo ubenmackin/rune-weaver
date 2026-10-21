@@ -12,6 +12,7 @@ import LoginView from "./components/LoginView";
 import MobileBottomNav from "./components/MobileBottomNav";
 import TopNav, { type Tab } from "./components/TopNav";
 import GettingStartedWizard from "./components/onboarding/GettingStartedWizard";
+import { isWizardSnoozed, subscribeWizardSnooze } from "./components/onboarding/wizardSnooze";
 import { useOnboardingStatus } from "./hooks/useOnboardingStatus";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
@@ -208,12 +209,19 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
 
   // Wizard gate stays behind authentication: this shell only mounts after the
   // owner gate reports authenticated, and standalone never fetches or shows.
-  // The wizard shows until completion alone; dismissal only hides the
-  // post-complete checklist and never strands pre-complete onboarding.
+  // Snoozed Settings trips hide the wizard until resume or completion.
   const onboarding = useOnboardingStatus({ disabled: isStandalone });
+  const [snoozed, setSnoozed] = useState(() => isWizardSnoozed());
+
+  useEffect(() => subscribeWizardSnooze(setSnoozed), []);
+
+  // A present status keeps the wizard mounted across refetch: focus and
+  // Check Again re-reads flip isLoading while the cached row stays, so the
+  // gate must not unmount on loading alone once a row exists.
   const showWizard =
     !isStandalone &&
-    !onboarding.isLoading &&
+    !snoozed &&
+    (!onboarding.isLoading || onboarding.status != null) &&
     onboarding.error == null &&
     onboarding.status != null &&
     !onboarding.isCompleted;

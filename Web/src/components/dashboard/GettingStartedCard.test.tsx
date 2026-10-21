@@ -1,4 +1,4 @@
-// Rune Weaver Dashboard — Getting started checklist progress, dismiss, and seed tests.
+// Rune Weaver Dashboard — Getting started checklist progress, dismiss, resume, and seed tests.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,11 @@ import {
 } from "../onboarding/seedPrompt";
 import { clearSharedRecentRunsForTesting } from "./sharedRuns";
 import { resetPersonaSignalsForTesting } from "../PersonaAvatar";
+import {
+  clearWizardSnooze,
+  isWizardSnoozed,
+  snoozeWizard,
+} from "../onboarding/wizardSnooze";
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof api>();
@@ -82,6 +87,7 @@ function stubOnboardingFetch(payload: unknown, seen: string[]) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  window.localStorage.clear();
   clearSharedRecentRunsForTesting();
   resetPersonaSignalsForTesting();
   vi.mocked(api.listApprovals).mockResolvedValue({ approvals: [], count: 0 });
@@ -277,6 +283,185 @@ describe("GettingStartedCard dismiss", () => {
       "Setup 2 of 5",
     );
     expect(screen.queryByTestId("getting-started-card")).toBeNull();
+  });
+});
+
+describe("GettingStartedCard resume", () => {
+  it("hides Resume setup when not snoozed", () => {
+    clearWizardSnooze();
+    render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("getting-started-resume")).toBeNull();
+  });
+
+  it("shows Resume setup only while snoozed and incomplete", () => {
+    snoozeWizard();
+    const { unmount } = render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+      />,
+    );
+    expect(screen.getByTestId("getting-started-resume")).toHaveTextContent("Resume setup");
+    unmount();
+    clearWizardSnooze();
+  });
+
+  it("shows Resume setup in the dismissed pill while snoozed", () => {
+    snoozeWizard();
+    render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+        dismissed
+      />,
+    );
+    expect(screen.getByTestId("getting-started-pill")).toBeInTheDocument();
+    expect(screen.getByTestId("getting-started-resume")).toHaveTextContent("Resume setup");
+    clearWizardSnooze();
+  });
+
+  it("clicking Resume clears snooze and refreshes", async () => {
+    const user = userEvent.setup();
+    snoozeWizard();
+    const onExpand = vi.fn();
+    render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+        onExpand={onExpand}
+      />,
+    );
+    await user.click(screen.getByTestId("getting-started-resume"));
+    expect(isWizardSnoozed()).toBe(false);
+    expect(onExpand).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("getting-started-resume")).toBeNull();
+  });
+
+  it("clears snooze on dismiss and expand", async () => {
+    const user = userEvent.setup();
+    const seenDismiss: string[] = [];
+    stubOnboardingFetch(emptyOnboarding(), seenDismiss);
+    snoozeWizard();
+    const onDismiss = vi.fn();
+    const { unmount } = render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+        onDismiss={onDismiss}
+      />,
+    );
+    await user.click(screen.getByTestId("getting-started-dismiss"));
+    await waitFor(() => expect(seenDismiss).toContain("/onboarding/dismiss"));
+    expect(isWizardSnoozed()).toBe(false);
+    unmount();
+    vi.unstubAllGlobals();
+
+    const seenExpand: string[] = [];
+    stubOnboardingFetch(emptyOnboarding(), seenExpand);
+    snoozeWizard();
+    const onExpand = vi.fn();
+    render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+        dismissed
+        onExpand={onExpand}
+      />,
+    );
+    await user.click(screen.getByTestId("getting-started-expand"));
+    await waitFor(() => expect(seenExpand).toContain("/onboarding/reopen"));
+    expect(isWizardSnoozed()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("clears snooze on Finish", async () => {
+    const user = userEvent.setup();
+    snoozeWizard();
+    const onFinish = vi.fn();
+    render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: false,
+          emailReady: false,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: false,
+          firstChatSent: false,
+        }}
+        onFinish={onFinish}
+      />,
+    );
+    await user.click(screen.getByTestId("getting-started-finish"));
+    expect(isWizardSnoozed()).toBe(false);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides Resume once verified complete", async () => {
+    snoozeWizard();
+    const { container } = render(
+      <GettingStartedCard
+        status={{
+          brainReady: true,
+          personaSet: true,
+          emailReady: true,
+          calendarReady: false,
+          indexReady: false,
+          policyAcked: true,
+          firstChatSent: true,
+        }}
+      />,
+    );
+    await waitFor(() => expect(isWizardSnoozed()).toBe(false));
+    expect(screen.queryByTestId("getting-started-resume")).toBeNull();
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

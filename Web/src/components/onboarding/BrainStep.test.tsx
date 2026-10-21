@@ -72,6 +72,7 @@ describe("BrainStep", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
+    window.sessionStorage.clear();
   });
 
   it("shares a single-row layout for Provider Name plus Provider Type", () => {
@@ -479,6 +480,7 @@ describe("Brain connection test fail-closed", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
+    window.sessionStorage.clear();
   });
 
   it("fails blank URL with Enter server URL first", async () => {
@@ -613,6 +615,7 @@ describe("PersonaStep", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
+    window.sessionStorage.clear();
   });
 
   it("blocks Next on empty names with an inline error", async () => {
@@ -620,7 +623,39 @@ describe("PersonaStep", () => {
     const fetchMock = vi.fn(async () => jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
     const onNext = vi.fn();
-    render(<PersonaStep onNext={onNext} />);
+    function PersonaHarness() {
+      const [value, setValue] = useState({ assistantName: "", userName: "", goal: "" as "" | "inbox" | "day" | "remember" });
+      const [error, setError] = useState<string | null>(null);
+      return (
+        <>
+          <PersonaStep
+            value={value}
+            onChange={(patch) => setValue((prev) => ({ ...prev, ...patch }))}
+            error={error}
+          />
+          <button
+            type="button"
+            data-testid="persona-next"
+            onClick={() => {
+              const problem = validatePersonaStep({
+                assistantName: value.assistantName,
+                userName: value.userName,
+                goal: value.goal,
+              });
+              if (problem) {
+                setError(problem);
+                return;
+              }
+              onNext(value);
+            }}
+          >
+            Next
+          </button>
+        </>
+      );
+    }
+    render(<PersonaHarness />);
+    expect(screen.getByTestId("persona-step").querySelector('[data-testid="persona-next"]')).toBeNull();
     await user.click(screen.getByTestId("persona-next"));
     expect(await screen.findByTestId("persona-error")).toBeDefined();
     expect(screen.getByTestId("persona-error").textContent).toMatch(/1 to 64/i);
@@ -665,7 +700,46 @@ describe("PersonaStep", () => {
       }),
     );
     const onNext = vi.fn();
-    render(<PersonaStep onNext={onNext} />);
+    function PersonaHarness() {
+      const [value, setValue] = useState({ assistantName: "", userName: "", goal: "" as "" | "inbox" | "day" | "remember" });
+      const [error, setError] = useState<string | null>(null);
+      return (
+        <>
+          <PersonaStep
+            value={value}
+            onChange={(patch) => setValue((prev) => ({ ...prev, ...patch }))}
+            error={error}
+          />
+          <button
+            type="button"
+            data-testid="persona-next"
+            onClick={async () => {
+              const problem = validatePersonaStep({
+                assistantName: value.assistantName,
+                userName: value.userName,
+                goal: value.goal,
+              });
+              if (problem) {
+                setError(problem);
+                return;
+              }
+              const trimmedAssistant = value.assistantName.trim();
+              const trimmedUser = value.userName.trim();
+              await fetch("/settings", {
+                method: "PUT",
+                body: JSON.stringify({ persona: { assistantName: trimmedAssistant, userName: trimmedUser } }),
+              });
+              onNext({ goal: value.goal });
+            }}
+          >
+            Next
+          </button>
+        </>
+      );
+    }
+    render(<PersonaHarness />);
+    expect(screen.getByTestId("persona-step").querySelector('[data-testid="persona-next"]')).toBeNull();
+    expect(screen.getByTestId("persona-step").querySelector(".onboarding-actions")).toBeNull();
     await user.type(screen.getByTestId("persona-assistant-name"), "Rune Weaver");
     await user.type(screen.getByTestId("persona-user-name"), "Ada");
     fireEvent.click(screen.getByTestId("persona-goal-day"));

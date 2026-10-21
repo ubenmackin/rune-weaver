@@ -1,17 +1,15 @@
 // Rune Weaver Dashboard — Onboarding protect step with optional acknowledgement.
+import { wizardSettingsHref } from "./wizardHelpers";
+import { snoozeWizard } from "./wizardSnooze";
 
 export interface ProtectStepProps {
   policyAcked: boolean;
   onPolicyAckedChange?: (acked: boolean) => void;
-  onFinish: () => void | Promise<void>;
-  finishing?: boolean;
 }
 
 export default function ProtectStep({
   policyAcked,
   onPolicyAckedChange,
-  onFinish,
-  finishing = false,
 }: ProtectStepProps) {
   return (
     <section
@@ -33,7 +31,13 @@ export default function ProtectStep({
       </ul>
 
       <p className="protect-settings-line onboarding-actions">
-        <a className="ghost" href="#settings/access">
+        <a
+          className="ghost"
+          href={wizardSettingsHref("access")}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={() => snoozeWizard()}
+        >
           Settings Access
         </a>
       </p>
@@ -45,26 +49,16 @@ export default function ProtectStep({
             checked={policyAcked}
             onChange={(event) => onPolicyAckedChange(event.target.checked)}
             aria-label="I understand writes need approval"
-            disabled={finishing}
           />
           <span>I understand writes need approval</span>
         </label>
       ) : (
         <p className="form-group protect-ack-row" data-testid="protect-ack-status">
-          <span>{policyAcked ? "Policy verified" : "Policy review pending"}</span>
+          <span className={policyAcked ? "succeeded-pill" : undefined}>
+            {policyAcked ? "Policy verified" : "Policy review pending"}
+          </span>
         </p>
       )}
-
-      <div className="protect-actions onboarding-actions">
-        <button
-          type="button"
-          className="primary protect-finish-btn"
-          onClick={() => void onFinish()}
-          disabled={finishing}
-        >
-          {finishing ? "Finishing…" : "Finish"}
-        </button>
-      </div>
     </section>
   );
 }

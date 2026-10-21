@@ -18,6 +18,8 @@ import {
   type OnboardingGoal,
   type Step3CardId,
 } from "./PersonaStep";
+import { snoozeWizard } from "./wizardSnooze";
+import { wizardSettingsHref } from "./wizardHelpers";
 
 export interface ConnectStepProps {
   goal?: OnboardingGoal | null;
@@ -36,18 +38,6 @@ const DEFAULT_STEP3_ORDER: Step3CardId[] = ["email", "calendar", "index"];
 async function loadOnboardingStatus(): Promise<OnboardingStatus> {
   const raw = await fetchJson<unknown>("/onboarding/status");
   return parseOnboardingStatus(raw);
-}
-
-// Absolute settings URL keeps the wizard state untouched in a new tab.
-function settingsHref(tab: "email" | "indexing"): string {
-  if (
-    typeof window !== "undefined" &&
-    window.location?.origin &&
-    window.location?.pathname
-  ) {
-    return `${window.location.origin}${window.location.pathname}#settings/${tab}`;
-  }
-  return `#settings/${tab}`;
 }
 
 function badgeClassName(badge: OnboardingBadge): string {
@@ -138,15 +128,16 @@ interface SettingsLinkProps {
   label: string;
 }
 
-// Settings open in a new tab so the wizard state never mutates.
+// Snooze hides the wizard in the new tab so Settings edits without overlap.
 function SettingsLink({ tab, testId, label }: SettingsLinkProps) {
   return (
     <a
       className="ghost connect-settings-link"
       data-testid={testId}
-      href={settingsHref(tab)}
+      href={wizardSettingsHref(tab)}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={() => snoozeWizard()}
     >
       {label}
     </a>
