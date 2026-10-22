@@ -466,54 +466,29 @@ describe("SettingsManager", () => {
     });
   });
 
-  it("hides marketplace entry points while keeping plugin rescan functional", async () => {
+  it("shows marketplace entry point alongside plugin rescan", async () => {
     const user = userEvent.setup();
     const discoveredRune = {
-      id: "community.weather",
-      name: "Weather Reporter",
-      version: "1.0.0",
-      description: "Fetches current weather.",
-      runtime: "python",
-      source: "local_disk",
-      status: "discovered",
-      isEnabled: false,
-      integrityHash: null,
-      tools: [
-        {
-          name: "weather.get",
-          description: "Get weather",
-          permissionLevel: "readOnly",
-          inputSchema: "{}",
-          isEnabled: false,
-          isBuiltIn: false,
-          pluginID: "community.weather",
-          source: "plugin",
-          integrityStatus: "valid",
-        },
-      ],
-      permissionOverrides: {},
-      discoveredAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      id: "community.weather", name: "Weather Reporter", version: "1.0.0",
+      description: "Fetches current weather.", runtime: "python", source: "local_disk",
+      status: "discovered", isEnabled: false, integrityHash: null,
+      tools: [{ name: "weather.get", description: "Get weather", permissionLevel: "readOnly", inputSchema: "{}", isEnabled: false, isBuiltIn: false, pluginID: "community.weather", source: "plugin", integrityStatus: "valid" }],
+      permissionOverrides: {}, discoveredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
-    const mockTools = [
-      {
-        name: "memories.store",
-        description: "Store persistent fact",
-        permissionLevel: "readOnly",
-        inputSchema: "{}",
-        isEnabled: true,
-        isBuiltIn: true,
-        pluginID: null,
-        source: "builtin",
-        integrityStatus: "valid",
-      },
+    const mockTools = [{ name: "memories.store", description: "Store persistent fact", permissionLevel: "readOnly", inputSchema: "{}", isEnabled: true, isBuiltIn: true, pluginID: null, source: "builtin", integrityStatus: "valid" }];
+    const marketplaceItems = [
+      { id: "community.market-weather", name: "Marketplace Weather", version: "1.0.0", author: "Community", description: "Fetches current weather from the catalog.", downloadURL: "https://example.com/weather.json", tags: ["weather"], runtime: "python", declaredTools: ["weather.get"], isInstalled: false },
+      { id: "community.clock", name: "World Clock", version: "1.0.0", author: "Community", description: "Shows time across zones.", downloadURL: "https://example.com/clock.json", tags: ["time"], runtime: "python", declaredTools: ["clock.current_time"], isInstalled: true },
     ];
 
-    // Empty initial registry proves the empty state; rescan returning a rune proves local discovery
-    // still works without any marketplace interaction. The second fetch parameter stays unused here
-    // because this path only serves GET fixtures and never inspects request bodies.
+    // Empty registry keeps the empty state; catalog stub lists two remote runes.
+    // The second fetch parameter stays unused here because this path only
+    // serves GET fixtures and never inspects request bodies.
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
+      if (urlStr.includes("/marketplace/plugins")) {
+        return jsonResponse({ items: marketplaceItems, count: 2 });
+      }
       if (urlStr.includes("/plugins/rescan")) {
         return jsonResponse({ plugins: [discoveredRune] });
       }
@@ -536,7 +511,7 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Empty state guides toward local discovery instead of a remote catalog.
+    // Empty state still guides toward local discovery.
     await waitFor(() => {
       expect(
         screen.getByText(/No external runes discovered in plugins directory/i)
@@ -544,15 +519,35 @@ describe("SettingsManager", () => {
     });
     expect(screen.getByText(/Rescan Plugins to discover them/i)).toBeDefined();
 
-    // Neither the header action nor the empty-state action exposes the catalog.
-    expect(
-      screen.queryByRole("button", { name: /Browse Marketplace/i })
-    ).toBeNull();
+    // Header exposes the single catalog entry point beside rescan.
+    const browseBtn = screen.getByRole("button", { name: /Browse Marketplace/i });
+    expect(browseBtn).toBeDefined();
 
     // Plugin Configuration stays editable so local paths keep working.
     expect(screen.getByLabelText(/^Plugins Directory$/i)).toBeDefined();
     expect(screen.getByLabelText(/Marketplace Index URL/i)).toBeDefined();
 
+    // Catalog opens on demand and lists remote runes with search and install states.
+    await user.click(browseBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Community Rune Marketplace")).toBeDefined();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Marketplace Weather")).toBeDefined();
+      expect(screen.getByText("World Clock")).toBeDefined();
+    });
+    expect(
+      screen.getByPlaceholderText(/Search runes by name/i)
+    ).toBeDefined();
+    expect(within(screen.getByRole("dialog", { name: /Rune Marketplace/i })).getByRole("button", { name: /^Refresh$/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /^Install$/i })).toBeDefined();
+    expect(screen.getByText(/^Installed$/i)).toBeDefined();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/marketplace/plugins"))).toBe(
+      true
+    );
+
+    // Closing returns to Tools; rescan still discovers local runes.
+    await user.click(screen.getByRole("button", { name: /Close marketplace/i }));
     const rescanBtn = screen.getByRole("button", { name: /Rescan Plugins/i });
     await user.click(rescanBtn);
 
@@ -561,8 +556,8 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Weather Reporter")).toBeDefined();
     });
     expect(
-      screen.queryByRole("button", { name: /Browse Marketplace/i })
-    ).toBeNull();
+      screen.getByRole("button", { name: /Browse Marketplace/i })
+    ).toBeDefined();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/plugins/rescan"))).toBe(
       true
     );

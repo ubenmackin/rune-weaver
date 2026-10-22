@@ -51,6 +51,10 @@ private func handlePutSettings(req: Request) async throws -> Response {
     let oldServerPort = config.server.port
     let oldServerAllowedHosts = config.server.allowedHosts
     let oldLLMConfig = config.llm
+    let oldGoals = config.goals
+    let oldProactive = config.proactive
+    let oldIdeas = config.ideas
+    let oldPersona = config.persona
     // Snapshot the stored bash policy before the single merge so the changed
     // flag reflects a real move, not merely a non-empty patch.
     let bashBefore = BashSettingsUpdate(bash: config.bash)
@@ -85,11 +89,13 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the same
         // partial-patch merge but take effect on restart: the pursuit engine, the scheduler worker,
         // the ideas engine, and the prompt composer's owner-authored identity hold their policy from.
-        let bootHeldSectionPatchPresent =
-            body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
+        let goalsChanged = config.goals != oldGoals
+        let proactiveChanged = config.proactive != oldProactive
+        let ideasChanged = config.ideas != oldIdeas
+        let personaChanged = config.persona != oldPersona
         // LLM providers, budgets, tools, bash, containers, and network apply live
         // through the shared context and never join the restart set.
-        let needsRestart = serverChanged || bootHeldSectionPatchPresent
+        let needsRestart = serverChanged || goalsChanged || proactiveChanged || ideasChanged || personaChanged
         let liveContext = req.application.runeWeaver
         // Fail-closed bind guard: a changed non-loopback hostname persists only when an owner token
         // resolves.
