@@ -4,11 +4,11 @@ import Foundation
 import RuneWeaverCore
 
 /// First program segment: imports, failure helper, metadata-host set, and the
-/// fail-closed SSRF gate. Concatenated before `BrowserPlaywrightScriptTail`.
+/// fail-closed SSRF gate. Concatenated before `BrowserPlaywrightScriptBody`.
 enum BrowserPlaywrightScriptHead: Sendable {
     /// Head source text, ending at the close of `_ssrf_deny_reason`.
     static let part = #"""
-    import sys, json, os, time
+    import sys, json, os, time, subprocess
 
     def fail(message):
         sys.stdout.write(json.dumps({"ok": False, "error": message}))
@@ -114,10 +114,10 @@ enum BrowserPlaywrightScriptHead: Sendable {
 }
 
 /// Second program segment: ref collection, text distillation, login-wall and
-/// redirect helpers, bounded screenshot capture, and the `main` dispatcher.
-/// Concatenated after `BrowserPlaywrightScriptHead`.
-enum BrowserPlaywrightScriptTail: Sendable {
-    /// Tail source text, from `collect_refs` through the `main()` call.
+/// challenge helpers, bounded screenshot capture, and timeout helpers.
+/// Concatenated between `BrowserPlaywrightScriptHead` and `BrowserPlaywrightScriptTail`.
+enum BrowserPlaywrightScriptBody: Sendable {
+    /// Body source text, from `collect_refs` through `_request_timeout_ms`.
     static let part = #"""
 
     def collect_refs(page, cap=200):
@@ -171,6 +171,43 @@ enum BrowserPlaywrightScriptTail: Sendable {
             return page.query_selector('input[type="password"]') is not None
         except Exception:
             return False
+
+    def is_challenge_or_auth(page, response=None):
+        if is_auth_wall(page):
+            return True
+        try:
+            url_lower = (page.url or "").lower()
+            auth_terms = ("login", "signin", "sign-in", "auth", "challenge", "captcha", "waf")
+            if any(k in url_lower for k in auth_terms):
+                return True
+        except Exception:
+            pass
+        try:
+            if response is not None:
+                status = getattr(response, "status", 0)
+                if status == 202 or status == 429:
+                    return True
+        except Exception:
+            pass
+        try:
+            has_waf = page.evaluate("""() => {
+                return Boolean(
+                    window.awsWafCookieDomainList ||
+                    window.gokuProps ||
+                    document.querySelector('script[src*="awswaf"]') ||
+                    document.querySelector('#challenge-stage') ||
+                    document.querySelector('.cf-turnstile') ||
+                    document.querySelector('#cf-wrapper') ||
+                    document.title.toLowerCase().includes('robot check') ||
+                    document.title.toLowerCase().includes('just a moment') ||
+                    document.title.toLowerCase().includes('captcha')
+                );
+            }""")
+            if has_waf:
+                return True
+        except Exception:
+            pass
+        return False
 
     def redirect_chain_for(response, initial_url, landed_url):
         # Walks `redirected_from` back to the initial request so the Swift
@@ -294,6 +331,14 @@ enum BrowserPlaywrightScriptTail: Sendable {
         except Exception:
             return default_ms
         return value if value > 0 else default_ms
+    """#
+}
+
+/// Third program segment: the `main` dispatcher and entry invocation.
+/// Concatenated after `BrowserPlaywrightScriptBody`.
+enum BrowserPlaywrightScriptTail: Sendable {
+    /// Tail source text, containing `main()` definition and invocation.
+    static let part = #"""
 
     def main():
         try:
@@ -347,13 +392,20 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     # enforces the 500KB bound before Swift's fail-closed check.
                     vw = \#(BrowserScreenshotPolicy.captureViewportWidth)
                     vh = \#(BrowserScreenshotPolicy.captureViewportHeight)
+                    launch_args = ["--disable-notifications"]
                     context = pw.chromium.launch_persistent_context(
                         user_data_dir=profile_dir,
                         headless=not is_headed,
                         accept_downloads=False,
+                        args=launch_args,
                         viewport={"width": vw, "height": vh} if want_screenshot else None,
                         device_scale_factor=1 if want_screenshot else None)
                     page = context.pages[0] if context.pages else context.new_page()
+                    if is_headed and sys.platform == "darwin":
+                        try:
+                            subprocess.run(["osascript", "-e", 'tell application "Chromium" to activate'], capture_output=True, timeout=2)
+                        except Exception:
+                            pass
                     goto_response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                     landed = page.url or url
                     landed_reason = _ssrf_deny_reason(landed)
@@ -362,27 +414,31 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         return
                     if op == "navigate" and is_headed:
                         # Wait loop for human login / 2FA / CAPTCHA resolution
-                        if is_auth_wall(page) or any(k in (page.url or "").lower() for k in ("login", "signin", "sign-in", "auth")):
-                            start_wait = time.time()
-                            # Stays below the subprocess kill budget so the timeout path still reaches `finally: context.close()`.
-                            max_wait = \#(SubprocessPlaywrightGateway.headedWaitSeconds)
-                            while time.time() - start_wait < max_wait:
-                                active = context.pages[-1] if context.pages else page
-                                if not context.pages or (active and active.is_closed()):
-                                    break
-                                cur_url = (active.url or "").lower()
-                                auth_terms = ("login", "signin", "sign-in", "auth")
-                                if not any(k in cur_url for k in auth_terms) and not is_auth_wall(active):
-                                    try:
-                                        active.wait_for_load_state("domcontentloaded", timeout=3000)
-                                    except Exception:
-                                        pass
-                                    page = active
-                                    break
+                        start_wait = time.time()
+                        # Stays below the subprocess kill budget so the timeout path still reaches `finally: context.close()`.
+                        max_wait = \#(SubprocessPlaywrightGateway.headedWaitSeconds)
+                        was_in_auth_or_challenge = is_challenge_or_auth(page, goto_response)
+                        while time.time() - start_wait < max_wait:
+                            active = context.pages[-1] if context.pages else page
+                            if not context.pages or (active and active.is_closed()):
+                                break
+                            current_in_auth = is_challenge_or_auth(active)
+                            if current_in_auth:
+                                was_in_auth_or_challenge = True
+                            elif was_in_auth_or_challenge and not current_in_auth:
                                 try:
-                                    page.wait_for_timeout(500)
+                                    active.wait_for_load_state("domcontentloaded", timeout=4000)
                                 except Exception:
-                                    break
+                                    pass
+                                page = active
+                                break
+                            elif not was_in_auth_or_challenge and (time.time() - start_wait > 15.0):
+                                page = active
+                                break
+                            try:
+                                page.wait_for_timeout(500)
+                            except Exception:
+                                break
                     if op == "navigate":
                         active_page = context.pages[-1] if context.pages and not context.pages[-1].is_closed() else (page if not page.is_closed() else None)
                         target_page = active_page or page
@@ -405,7 +461,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
                             "title": final_title,
                             "text": page_text(target_page) if not target_page.is_closed() else "",
                             "refs": refs,
-                            "authRequired": is_auth_wall(target_page) if not target_page.is_closed() else False,
+                            "authRequired": is_challenge_or_auth(target_page) if not target_page.is_closed() else False,
                             "downloads": [],
                             "redirectChain": chain,
                             "redirectCount": max(0, len(chain) - 1),
@@ -470,5 +526,8 @@ enum BrowserPlaywrightScriptTail: Sendable {
 /// Embedded Python Playwright helper source.
 public enum BrowserPlaywrightScript: Sendable {
     /// Python source executed via `python3 -c`.
-    public static let source = BrowserPlaywrightScriptHead.part + BrowserPlaywrightScriptTail.part
+    public static let source =
+        BrowserPlaywrightScriptHead.part
+            + BrowserPlaywrightScriptBody.part
+            + BrowserPlaywrightScriptTail.part
 }

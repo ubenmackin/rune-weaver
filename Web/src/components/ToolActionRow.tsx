@@ -642,6 +642,10 @@ function resolveResultStatus(
     return { kind: "ok", label: "Done" };
   }
   if (!result.isError) return { kind: "ok", label: "Done" };
+  const lc = typeof result.content === "string" ? result.content.toLowerCase() : "";
+  if (lc.includes("approval denied") || lc.includes("denied by operator") || lc.includes("stopped by operator") || lc.includes("stopped by user")) {
+    return { kind: "error", label: "Denied" };
+  }
   if (result.errorKind === "invalid_tool") {
     return { kind: "invalid-tool", label: "Unknown Tool" };
   }
