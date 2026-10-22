@@ -26,6 +26,8 @@ export type MemoryTab = MemoryInnerTab | "indexing";
 
 export interface MemoryBrowserProps {
   view?: MemoryTab;
+  highlightRun?: boolean;
+  onRunStarted?: () => void;
 }
 
 // Resolves the starting tab from the dashboard deep link. Menu-bar entries navigate with a memory
@@ -82,7 +84,7 @@ function baseResultKey(result: MemoryResult): string {
 const FACTS_PAGE_SIZE = 20;
 const EPISODES_PAGE_SIZE = 20;
 
-export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
+export default function MemoryBrowser({ view, highlightRun, onRunStarted }: MemoryBrowserProps = {}) {
   const [localTab, setLocalTab] = useState<MemoryTab>(() => {
     if (view !== undefined) {
       return view;
@@ -765,7 +767,7 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
 
         {renderTab === "indexing" ? (
           <div id="memory-panel-index" aria-label="Index Status">
-            <IndexingPanel hideHeader />
+            <IndexingPanel hideHeader highlightRun={highlightRun} onRunStarted={onRunStarted} />
           </div>
         ) : (
           <>

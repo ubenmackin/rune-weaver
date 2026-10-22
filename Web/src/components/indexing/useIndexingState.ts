@@ -443,9 +443,10 @@ export function useIndexingState() {
     }, [progressActive, cancelling, loadLiveOnly]);
   
     // Starts an on-demand run asynchronously. The start request returns immediately (~5ms) without
-    // holding an idle HTTP socket open over long-running passes.
-    const handleRun = async () => {
-      if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
+    // holding an idle HTTP socket open over long-running passes. Resolves true only on actual start;
+    // guards, skips, and failures resolve false so the nudge stays.
+    const handleRun = async (): Promise<boolean> => {
+      if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return false;
       runActiveRef.current = true;
       setRunActive(true);
       setAction("run");
@@ -457,14 +458,16 @@ export function useIndexingState() {
           setNotice(startResult.skippedReason || "Index run was skipped.");
           runActiveRef.current = false;
           setRunActive(false);
-        } else {
-          setNotice("Manual run started.");
-          if (cancellingRef.current) {
-            cancellingRef.current = false;
-            setCancelling(false);
-          }
+          await loadStatus();
+          return false;
+        }
+        setNotice("Manual run started.");
+        if (cancellingRef.current) {
+          cancellingRef.current = false;
+          setCancelling(false);
         }
         await loadStatus();
+        return true;
       } catch (failure) {
         // If a network blip occurred but the run is actually underway on the server,
         // probe status so we stay in the active tracking flow instead of displaying an error.
@@ -473,7 +476,9 @@ export function useIndexingState() {
           setError(failure instanceof ApiError ? failure.message : "Index run failed");
           runActiveRef.current = false;
           setRunActive(false);
+          return false;
         }
+        return true;
       } finally {
         setAction(null);
       }

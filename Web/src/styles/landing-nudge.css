@@ -1,0 +1,24 @@
+/* Rune Weaver Dashboard — shared landing nudge: finite pulse cue
+ * for Ask and Run controls after onboarding landing. */
+
+@keyframes landing-nudge-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.45);
+  }
+  50% {
+    transform: scale(1.04);
+    box-shadow: 0 0 0 6px rgba(139, 92, 246, 0);
+  }
+}
+
+.landing-nudge {
+  animation: landing-nudge-pulse 1.2s ease-in-out 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-nudge {
+    animation: none;
+  }
+}

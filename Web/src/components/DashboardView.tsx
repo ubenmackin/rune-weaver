@@ -2,8 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  deleteGoal,
-  listGoals,
   listSessions,
   personaUserName,
   type HealthResponse,
@@ -19,7 +17,11 @@ import GettingStartedCard, {
   CHECKLIST_TOTAL,
   type ChecklistItemId,
 } from "./dashboard/GettingStartedCard";
-import { finishOnboardingWithVerifiedSeed } from "./onboarding/seedPrompt";
+import {
+  parseOnboardingStatus as parseSeedStatus,
+  type OnboardingFinishDestination,
+} from "./onboarding/seedPrompt";
+import { finishOnboardingFlow } from "./onboarding/onboardingSchedule";
 import MorningRecommendations from "./dashboard/MorningRecommendations";
 import NeedsActionQueue from "./dashboard/NeedsActionQueue";
 import WorkingNowStream from "./dashboard/WorkingNowStream";
@@ -29,14 +31,7 @@ import RecentReports from "./dashboard/RecentReports";
 import SystemPulseCard from "./dashboard/SystemPulseCard";
 import RunDetailModal from "./RunDetailModal";
 import { usePersonaSignals } from "./PersonaAvatar";
-import {
-  DEMO_GOAL_STATEMENT,
-  DEMO_GOAL_TITLE,
-  getGreeting,
-  isDemoGoal,
-} from "./dashboard/dashboardGreeting";
-
-export { DEMO_GOAL_TITLE, DEMO_GOAL_STATEMENT, isDemoGoal };
+import { getGreeting } from "./dashboard/dashboardGreeting";
 import DashboardGreetingIdentity from "./dashboard/DashboardGreetingIdentity";
 import {
   useSharedWebSocket,
@@ -53,21 +48,25 @@ export interface DashboardViewProps {
   onboardingStatus?: ApiOnboardingStatus | null;
   onOnboardingRefresh?: () => Promise<void>;
   onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
+  onFinished?: (destination?: OnboardingFinishDestination) => void;
+  initialPrompt?: string | null;
+  onClearInitialPrompt?: () => void;
+  promptAttention?: boolean;
 }
 
-// Checklist above the queue; Finish owns the verified seed plus the demo goal.
+// Checklist above the queue; Finish lands via destination prefill without send.
 function DashboardGettingStarted({
   onSelectTab,
-  onOpenChatWithPrompt,
   onboardingStatus,
   onOnboardingRefresh,
   onOnboardingComplete,
+  onFinished,
 }: {
   onSelectTab: (tab: Tab) => void;
-  onOpenChatWithPrompt?: (prompt: string) => void;
   onboardingStatus?: ApiOnboardingStatus | null;
   onOnboardingRefresh?: () => Promise<void>;
   onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
+  onFinished?: (destination?: OnboardingFinishDestination) => void;
 }) {
   // App-owned status is the single live source when injected; local fetch stays
   // as the isolated fallback so the card still renders without the shell.
@@ -77,7 +76,6 @@ function DashboardGettingStarted({
   const [hasChat, setHasChat] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
-  const creatingDemoRef = useRef(false);
   const refreshInFlightRef = useRef(false);
   const refreshPendingRef = useRef(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -113,18 +111,6 @@ function DashboardGettingStarted({
         setHasChat(Array.isArray(sessions.sessions) && sessions.sessions.length > 0);
       } catch {
         setHasChat(false);
-      }
-      // Single-flight with Finish creation so a concurrent seed never gets purged.
-      if (creatingDemoRef.current) return;
-      try {
-        const res = await listGoals();
-        const goals = Array.isArray(res.goals) ? res.goals : [];
-        const demo = goals.find((goal) => isDemoGoal(goal));
-        if (demo && goals.some((goal) => !isDemoGoal(goal))) {
-          await deleteGoal(demo.id, true).catch(() => {});
-        }
-      } catch {
-        // Fail-closed: a missed purge retries on the next goal push.
       }
     } finally {
       refreshInFlightRef.current = false;
@@ -172,10 +158,9 @@ function DashboardGettingStarted({
   }
 
   async function handleFinish(): Promise<void> {
-    if (finishing || creatingDemoRef.current) return;
+    if (finishing) return;
     setFinishing(true);
     setFinishError(null);
-    creatingDemoRef.current = true;
     try {
       let seedRaw: Record<string, unknown> | null;
       if (hasExternal) {
@@ -191,20 +176,21 @@ function DashboardGettingStarted({
           // Stale snapshot still seeds fail-closed to the generic prompt.
         }
       }
-      // Fail-closed finish: a refused completion surfaces and blocks nav.
-      const prompt = await finishOnboardingWithVerifiedSeed({
-        status: seedRaw,
+      const parsed = parseSeedStatus(seedRaw);
+      const { destination } = await finishOnboardingFlow({
+        status: parsed,
+        goal: null,
         complete: onOnboardingComplete,
       });
       // Completion closes the App gate; refresh keeps live truth before nav.
       if (!onOnboardingComplete) await refreshAll().catch(() => {});
       if (hasExternal) await refreshAll();
-      if (onOpenChatWithPrompt) onOpenChatWithPrompt(prompt);
-      else onSelectTab("chat");
+      // Destination prefill never auto-sends; the owner taps Ask to send.
+      if (onFinished) onFinished(destination);
+      else onSelectTab("dashboard");
     } catch (err) {
       setFinishError(err instanceof Error ? err.message : "Failed to finish onboarding");
     } finally {
-      creatingDemoRef.current = false;
       setFinishing(false);
     }
   }
@@ -257,6 +243,10 @@ export default function DashboardView({
   onboardingStatus,
   onOnboardingRefresh,
   onOnboardingComplete,
+  onFinished,
+  initialPrompt,
+  onClearInitialPrompt,
+  promptAttention = false,
 }: DashboardViewProps) {
   const [inspectedRun, setInspectedRun] = useState<RunLogEntry | null>(null);
   const [goalsRefreshTrigger, setGoalsRefreshTrigger] = useState(0);
@@ -270,8 +260,11 @@ export default function DashboardView({
 
   function handlePromptSubmit(prompt: string) {
     if (onOpenChatWithPrompt) {
+      // Prefill clears on send so a second landing can prefill again.
+      onClearInitialPrompt?.();
       onOpenChatWithPrompt(prompt);
     } else {
+      // No chat handler keeps the text in the bar instead of discarding input.
       onSelectTab("chat");
     }
   }
@@ -299,7 +292,7 @@ export default function DashboardView({
           <DashboardGreetingIdentity onSelectTab={onSelectTab} />
         </div>
 
-        <DashboardPromptBar onSubmitPrompt={handlePromptSubmit} />
+        <DashboardPromptBar onSubmitPrompt={handlePromptSubmit} initialPrompt={initialPrompt} attention={promptAttention} />
       </header>
 
       {/* Proactive Radar (Morning Recommendations Banner) */}
@@ -314,10 +307,10 @@ export default function DashboardView({
         <div className="dashboard-stream-column">
           <DashboardGettingStarted
             onSelectTab={onSelectTab}
-            onOpenChatWithPrompt={onOpenChatWithPrompt}
             onboardingStatus={onboardingStatus}
             onOnboardingRefresh={onOnboardingRefresh}
             onOnboardingComplete={onOnboardingComplete}
+            onFinished={onFinished}
           />
           <NeedsActionQueue
             onOpenSession={handleOpenSession}

@@ -8,11 +8,6 @@ import {
   type OnboardingEmailAccount,
   type OnboardingStatus,
 } from "../../api/onboarding";
-import { createGoal as apiCreateGoal, listGoals as apiListGoals } from "../../api";
-import {
-  DEMO_GOAL_STATEMENT,
-  DEMO_GOAL_TITLE,
-} from "../dashboard/dashboardGreeting";
 import type { OnboardingGoal } from "./PersonaStep";
 
 export type { OnboardingEmailAccount, OnboardingStatus };
@@ -32,6 +27,34 @@ export const INDEX_SEED_PROMPT =
   "Search my indexed notes for the quarterly plan and summarize it.";
 export const GENERIC_SEED_PROMPT =
   "What can you help me with?\n\nTry: Give me a Morning briefing of my day.";
+
+// Single owner for digest text plus fixed name plus cron; schedule module imports.
+export const ONBOARDING_EMAIL_SCHEDULE_NAME = "Morning email briefing";
+export const ONBOARDING_EMAIL_SCHEDULE_CRON = "0 8 * * *";
+export const ONBOARDING_EMAIL_DIGEST_PROMPT =
+  "Summarize unread email from the last 24 hours and flag anything urgent. This is a read-only digest — do not send anything.";
+
+export type OnboardingFinishDestination =
+  | { kind: "schedules" }
+  | { kind: "dashboard"; prompt: string }
+  | { kind: "indexing"; highlightRun: boolean };
+
+// Verified goal routes to its surface; anything unverified falls back to generic dashboard.
+export function selectFinishDestination(
+  status: OnboardingStatus | null | undefined,
+  goal?: OnboardingGoal | null,
+): OnboardingFinishDestination {
+  if (goal === "inbox" && isGoalReady(status, goal)) {
+    return { kind: "schedules" };
+  }
+  if (goal === "day" && isGoalReady(status, goal)) {
+    return { kind: "dashboard", prompt: CALENDAR_SEED_PROMPT };
+  }
+  if (goal === "remember" && isGoalReady(status, goal)) {
+    return { kind: "indexing", highlightRun: true };
+  }
+  return { kind: "dashboard", prompt: GENERIC_SEED_PROMPT };
+}
 
 // Single-parser adapter failing closed to never-started for legacy callers.
 export function parseOnboardingStatus(value: unknown): OnboardingStatus {
@@ -55,43 +78,46 @@ export function isEmailReady(
 }
 
 // Enabled plus a post-epoch watermark proves the index path; epoch
-// or blank never counts while the server flag stays as legacy fallback.
+// or blank never counts.
 export function isIndexReady(
   status: OnboardingStatus | null | undefined,
 ): boolean {
   if (!status) return false;
-  if (status.indexReady === true) return true;
   if (status.indexEnabled !== true) return false;
   return isValidIndexWatermark(status.indexWatermark);
 }
 
-// Single connect check reusing flags plus evidence so card and seed agree.
+// Goal-scoped readiness gates verified routes so seed and destination agree.
+export function isGoalReady(
+  status: OnboardingStatus | null | undefined,
+  goal: OnboardingGoal | null | undefined,
+): boolean {
+  if (goal === "inbox") return isEmailReady(status);
+  if (goal === "day") return isCalendarGranted(status);
+  if (goal === "remember") return isIndexReady(status);
+  return false;
+}
+
+// Single connect check reusing evidence so card and seed agree.
 export function isConnectReady(
   status: OnboardingStatus | null | undefined,
 ): boolean {
   if (!status) return false;
-  if (status.calendarReady === true || status.emailReady === true)
-    return true;
   return isCalendarGranted(status) || isEmailReady(status) || isIndexReady(status);
 }
 
 export function calendarBadge(
   status: OnboardingStatus | null | undefined,
 ): OnboardingBadge {
-  if (isCalendarGranted(status) || status?.calendarReady === true)
-    return "Ready";
+  if (isCalendarGranted(status)) return "Ready";
   return "Needs permission";
 }
 
 export function emailBadge(
   status: OnboardingStatus | null | undefined,
 ): OnboardingBadge {
-  const accountCount = Array.isArray(status?.emailAccounts)
-    ? status.emailAccounts.length
-    : 0;
-  // Zero accounts never counts as Ready even when a legacy flag is set.
-  if (isEmailReady(status) || (status?.emailReady === true && accountCount > 0))
-    return "Ready";
+  // A successful fetch proves liveness; accounts alone stay Configured.
+  if (isEmailReady(status)) return "Ready";
   // Present accounts without a fetch prove configuration, not liveness.
   if (
     status &&
@@ -117,18 +143,11 @@ export function selectSeedPrompt(
   status: OnboardingStatus | null | undefined,
   goal?: OnboardingGoal | null,
 ): string {
-  if (goal === "inbox" && (isEmailReady(status) || status?.emailReady === true))
-    return EMAIL_SEED_PROMPT;
-  if (
-    goal === "day" &&
-    (isCalendarGranted(status) || status?.calendarReady === true)
-  )
-    return CALENDAR_SEED_PROMPT;
-  if (goal === "remember" && isIndexReady(status)) return INDEX_SEED_PROMPT;
-  if (isCalendarGranted(status) || status?.calendarReady === true)
-    return CALENDAR_SEED_PROMPT;
-  if (isEmailReady(status) || status?.emailReady === true)
-    return EMAIL_SEED_PROMPT;
+  if (goal === "inbox" && isGoalReady(status, goal)) return EMAIL_SEED_PROMPT;
+  if (goal === "day" && isGoalReady(status, goal)) return CALENDAR_SEED_PROMPT;
+  if (goal === "remember" && isGoalReady(status, goal)) return INDEX_SEED_PROMPT;
+  if (isCalendarGranted(status)) return CALENDAR_SEED_PROMPT;
+  if (isEmailReady(status)) return EMAIL_SEED_PROMPT;
   if (isIndexReady(status)) return INDEX_SEED_PROMPT;
   return GENERIC_SEED_PROMPT;
 }
@@ -140,24 +159,13 @@ export interface FinishOnboardingWithVerifiedSeedOptions {
   swallowCompleteErrors?: boolean;
 }
 
-// Single finish flow: verified seed plus demo goal plus completion.
-// Demo failures never block; completion throws unless swallowed for nav.
+// Single finish flow: verified seed plus completion.
+// Completion throws unless swallowed for nav.
 export async function finishOnboardingWithVerifiedSeed(
   options: FinishOnboardingWithVerifiedSeedOptions,
 ): Promise<string> {
   const base = parseOnboardingStatus(options.status ?? null);
   const prompt = selectSeedPrompt(base, options.goal ?? null);
-  try {
-    const res = await apiListGoals();
-    const goals = Array.isArray((res as { goals?: unknown })?.goals)
-      ? ((res as { goals: unknown[] }).goals ?? [])
-      : [];
-    if (goals.length === 0) {
-      await apiCreateGoal({ title: DEMO_GOAL_TITLE, statement: DEMO_GOAL_STATEMENT });
-    }
-  } catch {
-    // Demo creation never blocks landing in chat with the seed prompt.
-  }
   try {
     if (options.complete) await options.complete(prompt);
     else await apiCompleteOnboarding(prompt);

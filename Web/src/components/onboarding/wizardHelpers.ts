@@ -6,6 +6,7 @@ import type { OnboardingStatus as SeedStatus } from "./seedPrompt";
 // Server snapshot is the single ack source; the checkbox never persists.
 export function toSeedStatus(value: ApiOnboardingStatus | null): SeedStatus | null {
   if (!value) return null;
+  // Readiness derives from evidence alone; legacy flags stay unset so stale signals never pass.
   return {
     completedAt: value.completedAt,
     skippedSteps: [...value.skippedSteps],
@@ -21,9 +22,6 @@ export function toSeedStatus(value: ApiOnboardingStatus | null): SeedStatus | nu
     personaSet: value.personaSet,
     policyAcked: value.policyAcked,
     pendingPermission: false,
-    calendarReady: value.calendarReady,
-    emailReady: value.emailReady,
-    indexReady: value.indexReady,
   };
 }
 

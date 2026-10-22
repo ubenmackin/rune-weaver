@@ -27,11 +27,3 @@ export function truncateWorkingTitle(title: string): string {
   if (trimmed.length <= WORKING_TITLE_LIMIT) return trimmed;
   return `${trimmed.slice(0, WORKING_TITLE_LIMIT).trimEnd()}…`;
 }
-
-// Demo goal seeded on Finish when the owner has no goals yet.
-export const DEMO_GOAL_TITLE = "Morning briefing";
-export const DEMO_GOAL_STATEMENT = "Seeded demo goal from onboarding: review your morning briefing.";
-// Demo identity is the exact title so only that row ever purges.
-export function isDemoGoal(goal: { title?: string | null }): boolean {
-  return (goal.title ?? "").trim() === DEMO_GOAL_TITLE;
-}

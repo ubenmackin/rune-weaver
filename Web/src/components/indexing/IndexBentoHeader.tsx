@@ -27,6 +27,7 @@ interface IndexBentoHeaderProps {
   liveSources: IndexLiveSourceStatus[];
   reclaimSummary: string | null;
   status: IndexStatusResponse | null;
+  highlightRun?: boolean;
   onRun: () => void;
   onCancel: () => void;
   onOpenPrune: () => void;
@@ -49,6 +50,7 @@ export default function IndexBentoHeader({
   liveSources,
   reclaimSummary,
   status,
+  highlightRun = false,
   onRun,
   onCancel,
   onOpenPrune,
@@ -63,7 +65,9 @@ export default function IndexBentoHeader({
           <div className="row">
             <button
               type="button"
-              className="primary icon-text-btn"
+              className={`primary icon-text-btn${highlightRun ? " landing-nudge" : ""}`}
+              data-testid="index-run-button"
+              data-nudged={highlightRun ? "true" : undefined}
               onClick={onRun}
               disabled={actionBusy || cancelBusy || cancelling || !indexingEnabled || progressActive}
               title={
