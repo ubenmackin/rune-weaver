@@ -20,6 +20,12 @@ public actor FilesIndexer {
         "DerivedData",
         "__pycache__",
         ".venv",
+        "site-packages",
+        "dist",
+        "build",
+        ".build",
+        ".next",
+        ".turbo",
         ".fastlane"
     ]
 

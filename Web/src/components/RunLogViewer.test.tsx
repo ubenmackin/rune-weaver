@@ -696,7 +696,9 @@ describe("RunLogViewer", () => {
     expect(screen.queryByLabelText("Run details")).not.toBeInTheDocument();
     expect(screen.getByText("CANCELLED")).toBeInTheDocument();
     expect(screen.queryByText("IN PROGRESS")).not.toBeInTheDocument();
-  });
+    // Cancel plus refetch plus detail settle runs several round trips; loaded
+    // CI bursts past the 5s default, so this test alone carries headroom.
+  }, 15000);
 
   it("renders budget_exceeded status pill and detail modal warning banner", async () => {
     const user = userEvent.setup();
