@@ -8,13 +8,21 @@ public final class PluginDiscoveryService: Sendable {
     public let pluginsDirectory: URL
     public let store: ToolRegistryStore
     public let secrets: SecretsManager?
+    public let toolStates: ToolStateStore?
     private let egressBox: OSAllocatedUnfairLock<any EgressPolicyEvaluator?>
 
     /// Creates a plugin discovery service.
-    public init(pluginsDirectory: URL, store: ToolRegistryStore, secrets: SecretsManager? = nil, egressEvaluator: any EgressPolicyEvaluator? = nil) {
+    public init(
+        pluginsDirectory: URL,
+        store: ToolRegistryStore,
+        secrets: SecretsManager? = nil,
+        egressEvaluator: any EgressPolicyEvaluator? = nil,
+        toolStates: ToolStateStore? = nil
+    ) {
         self.pluginsDirectory = pluginsDirectory
         self.store = store
         self.secrets = secrets
+        self.toolStates = toolStates
         self.egressBox = OSAllocatedUnfairLock(initialState: egressEvaluator)
     }
 
@@ -48,6 +56,13 @@ public final class PluginDiscoveryService: Sendable {
         }
 
         var results: [(PluginManifest, PluginRecord)] = []
+
+        // Persisted per-tool toggles survive rescan so it never revives a mini-card disable.
+        let persistedStates: [String: Bool]? = if let toolStates {
+            await toolStates.loadAll()
+        } else {
+            nil
+        }
 
         for subdir in subdirs {
             guard (try? subdir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
@@ -98,17 +113,16 @@ public final class PluginDiscoveryService: Sendable {
 
             results.append((manifest, record))
 
-            // Register discovered plugin tools into the live ToolBus. Enabled tools
-            // are active for execution; disabled or tampered tools are registered as disabled
-            // so they appear in allTools() for GET /tools while availableTools() hides them.
-            await registerPluginTools(
-                manifest: manifest,
-                pluginDir: subdir,
-                record: record,
-                toolBus: toolBus,
-                isEnabled: record.status == .enabled
-            )
+            // Registered disabled for listing, then restore only was-enabled.
+            // Fail-closed start avoids exposing disabled tools to concurrent executes.
+            await registerFailClosed(manifest: manifest, dir: subdir, record: record, toolBus: toolBus) {
+                record.status == .enabled && persistedStates?[$0] != false
+            }
         }
+
+        // Execution refuses quarantined plugins even when a stale toggle says enabled.
+        let allRecords = await store.loadAll()
+        await toolBus.setQuarantinedPluginIDs(Set(allRecords.filter { $0.status == .tampered }.map(\.id)))
 
         return results
     }
@@ -131,20 +145,33 @@ public final class PluginDiscoveryService: Sendable {
             throw PluginDiscoveryError.pluginNotFound(id)
         }
 
-        await registerPluginTools(
+        // Preserve mini-card toggles across re-registration so enable never revives them.
+        let persisted: [String: Bool]? = if let toolStates {
+            await toolStates.loadAll()
+        } else {
+            nil
+        }
+        await registerFailClosed(
             manifest: manifestInfo.manifest,
-            pluginDir: manifestInfo.dir,
+            dir: manifestInfo.dir,
             record: updated,
-            toolBus: toolBus,
-            isEnabled: true
-        )
+            toolBus: toolBus
+        ) { persisted?[$0] != false }
+        // Re-verified hash clears quarantine; plugin enable is the only unquarantine path.
+        await toolBus.updateQuarantine(pluginID: id, quarantined: false)
 
         return updated
     }
 
     /// Disables a plugin, disabling its tools on the live bus.
     public func disablePlugin(id: String, toolBus: ToolBus) async throws -> PluginRecord {
-        guard let updated = await store.setStatus(id: id, status: .disabled) else {
+        guard let current = await store.get(id: id) else {
+            throw PluginDiscoveryError.pluginNotFound(id)
+        }
+        // Tampered stays tampered until enablePlugin re-verifies the tree hash;
+        // downgrading to disabled would clear quarantine on next restore.
+        let targetStatus: PluginStatus = current.status == .tampered ? .tampered : .disabled
+        guard let updated = await store.setStatus(id: id, status: targetStatus) else {
             throw PluginDiscoveryError.pluginNotFound(id)
         }
 
@@ -152,6 +179,9 @@ public final class PluginDiscoveryService: Sendable {
             for tool in manifestInfo.manifest.tools {
                 await toolBus.disableTool(named: tool.name)
             }
+        }
+        if targetStatus == .tampered {
+            await toolBus.updateQuarantine(pluginID: id, quarantined: true)
         }
 
         return updated
@@ -179,12 +209,17 @@ public final class PluginDiscoveryService: Sendable {
         }
 
         if updated.status == .enabled, let manifestInfo = findManifest(for: id) {
-            await registerPluginTools(
+            // Snapshot live per-tool states so re-registration never revives a disabled tool.
+            var previousStates: [String: Bool] = [:]
+            for toolDecl in manifestInfo.manifest.tools where await toolBus.tool(named: toolDecl.name) != nil {
+                previousStates[toolDecl.name] = await toolBus.isToolEnabled(named: toolDecl.name)
+            }
+            await registerFailClosed(
                 manifest: manifestInfo.manifest,
-                pluginDir: manifestInfo.dir,
+                dir: manifestInfo.dir,
                 record: updated,
                 toolBus: toolBus
-            )
+            ) { previousStates[$0] == true }
         }
 
         return updated
@@ -212,6 +247,7 @@ public final class PluginDiscoveryService: Sendable {
             await toolBus.unregister(toolNamed: toolName)
         }
         _ = await store.remove(id: id)
+        await toolBus.updateQuarantine(pluginID: id, quarantined: false)
     }
 
     /// Finds a plugin directory and parsed manifest matching the given ID.
@@ -241,6 +277,20 @@ public final class PluginDiscoveryService: Sendable {
             }
         }
         return nil
+    }
+
+    private func registerFailClosed(
+        manifest: PluginManifest,
+        dir: URL,
+        record: PluginRecord,
+        toolBus: ToolBus,
+        restore: (String) -> Bool
+    ) async {
+        // Fail-closed start avoids exposing disabled tools to concurrent executes.
+        await registerPluginTools(manifest: manifest, pluginDir: dir, record: record, toolBus: toolBus, isEnabled: false)
+        for toolDecl in manifest.tools where restore(toolDecl.name) {
+            await toolBus.enableTool(named: toolDecl.name)
+        }
     }
 
     private func registerPluginTools(

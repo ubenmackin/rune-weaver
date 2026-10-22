@@ -148,7 +148,9 @@ export function useSettingsServices({
     name: string;
   } | null>(null);
   const [togglingCategory, setTogglingCategory] = useState<string | null>(null);
-  const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
+  const [togglingToolNames, setTogglingToolNames] = useState<Set<string>>(
+    () => new Set<string>()
+  );
   const [toolSearchQuery, setToolSearchQuery] = useState("");
   const [selectedToolCategory, setSelectedToolCategory] = useState("all");
 
@@ -700,11 +702,17 @@ export function useSettingsServices({
 
   const handleToggleTool = async (tool: ToolInfo) => {
     const nextEnabled = !tool.isEnabled;
-    setTogglingToolName(tool.name);
+    setTogglingToolNames((prev) => new Set(prev).add(tool.name));
     try {
       await updateToolState(tool.name, nextEnabled);
       const toolsRes = await getTools();
       setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
+      // External cards read pluginsList while built-ins read safeTools;
+      // refetch plugins for plugin tools so externals update live.
+      if (tool.pluginID || !tool.isBuiltIn) {
+        const pluginsRes = await getPlugins();
+        setPluginsList(Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
+      }
       pushSuccessToast(
         nextEnabled
           ? `Enabled tool '${tool.name}'.`
@@ -717,7 +725,11 @@ export function useSettingsServices({
           : `Failed to update tool '${tool.name}'.`
       );
     } finally {
-      setTogglingToolName(null);
+      setTogglingToolNames((prev) => {
+        const next = new Set(prev);
+        next.delete(tool.name);
+        return next;
+      });
     }
   };
 
@@ -933,7 +945,7 @@ export function useSettingsServices({
     pendingUninstallPlugin,
     setPendingUninstallPlugin,
     togglingCategory,
-    togglingToolName,
+    togglingToolNames,
     loadPluginsData,
     handleRescanPlugins,
     handleToggleEnable,

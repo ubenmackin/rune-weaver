@@ -665,7 +665,13 @@ private func resolvePluginStack(
     let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
     let tStates = ToolStateStore(dbPath: resolvedDBPath)
     let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
-    let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore, secrets: secrets, egressEvaluator: egressEvaluator)
+    let pDiscovery = PluginDiscoveryService(
+        pluginsDirectory: pluginsURL,
+        store: pStore,
+        secrets: secrets,
+        egressEvaluator: egressEvaluator,
+        toolStates: tStates
+    )
     if pluginConfig.autoRescan {
         _ = await pDiscovery.discoverAndSync(toolBus: bus)
     }

@@ -228,6 +228,8 @@ public actor ToolBus {
     private let permissionGate: PermissionGate?
     /// Trusted-tool anomaly watchdog counting executions and denials.
     private var watchdog: BehaviorWatchdog?
+    /// Plugin IDs quarantined after integrity failure; execution refuses them fail-closed.
+    private var quarantinedPluginIDs: Set<String> = []
     /// In-flight tool call slots indexed by owning session and correlation identifier.
     private var activeCalls: [ToolCallKey: ToolCallCancellation] = [:]
 
@@ -257,6 +259,28 @@ public actor ToolBus {
     /// - Parameter watchdog: Watchdog receiving outcome counts, or nil to detach.
     public func setWatchdog(_ watchdog: BehaviorWatchdog?) {
         self.watchdog = watchdog
+    }
+
+    /// Replaces the quarantined plugin set used by execution-time refusal.
+    /// - Parameter ids: Plugin IDs currently quarantined as tampered.
+    public func setQuarantinedPluginIDs(_ ids: Set<String>) {
+        quarantinedPluginIDs = ids
+    }
+
+    /// Updates quarantine for one plugin without disturbing the rest.
+    /// - Parameters: pluginID, quarantined flag.
+    public func updateQuarantine(pluginID: String, quarantined: Bool) {
+        if quarantined {
+            quarantinedPluginIDs.insert(pluginID)
+        } else {
+            quarantinedPluginIDs.remove(pluginID)
+        }
+    }
+
+    /// Whether a plugin is currently quarantined.
+    /// - Parameter pluginID: Plugin identifier.
+    public func isQuarantined(pluginID: String) -> Bool {
+        quarantinedPluginIDs.contains(pluginID)
     }
 
     /// Records one trusted-tool observation as a count, never content.
@@ -360,6 +384,15 @@ public actor ToolBus {
             return .failure(
                 toolCallID: toolCall.callID,
                 content: "Error: Tool '\(toolCall.toolName)' is not recognized or not available. \(hint)",
+                errorKind: .invalidTool
+            )
+        }
+        // Quarantine outranks enablement so a per-tool toggle cannot revive tampered bytes.
+        if let bridge = tool as? SubprocessToolBridge, quarantinedPluginIDs.contains(bridge.pluginID) {
+            return .failure(
+                toolCallID: toolCall.callID,
+                content: "Error: Tool '\(toolCall.toolName)' is quarantined (owning plugin '\(bridge.pluginID)' failed integrity verification). "
+                    + "Re-enable the plugin to re-verify before use.",
                 errorKind: .invalidTool
             )
         }

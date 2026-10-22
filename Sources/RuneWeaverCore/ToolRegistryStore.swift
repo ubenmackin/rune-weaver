@@ -126,10 +126,9 @@ public actor ToolRegistryStore {
             existing.version = version
             existing.updatedAt = Date()
 
-            // A hash mismatch after approval quarantines the rune; the comparison itself lives in
-            // the security helper so store and verifier share one case-handling rule instead of
-            // drifting duplicates.
-            if existing.status == .enabled, let recordedHash = existing.integrityHash {
+            // A hash mismatch after approval quarantines the rune; disabled runes with a
+            // recorded hash check too so a modify-then-disable sequence cannot hide tampering.
+            if existing.status == .enabled || existing.status == .disabled, let recordedHash = existing.integrityHash {
                 if let currentHash {
                     if !PluginSecurity.hashesEqual(recordedHash, currentHash) {
                         existing.status = .tampered

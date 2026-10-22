@@ -231,7 +231,7 @@ async def get_monarch_client() -> Any:
     # 2. Cookie Header Auth
     if cookie and cookie.strip():
         mm = MonarchMoney(session_file=session_file)
-        await mm.login_with_cookies(cookie.strip(), save_session=True, verify=False)
+        await mm.login_with_cookies(cookie.strip(), save_session=True)
         _harden_saved_session(session_file)
         return mm
 

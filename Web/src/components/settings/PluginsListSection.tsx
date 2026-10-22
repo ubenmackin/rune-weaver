@@ -1,6 +1,5 @@
 // Rune Weaver Dashboard — Installed Runes and external plugins list section.
-
-import type { PluginSummary } from "../../api";
+import type { PluginSummary, ToolInfo } from "../../api";
 import { TrashIcon, WrenchIcon } from "../icons";
 
 export interface PluginsListSectionProps {
@@ -13,6 +12,8 @@ export interface PluginsListSectionProps {
     toolName: string,
     level: string
   ) => void;
+  handleToggleTool: (tool: ToolInfo) => Promise<void>;
+  togglingToolNames: Set<string>;
 }
 
 export function PluginsListSection({
@@ -21,6 +22,8 @@ export function PluginsListSection({
   handleToggleEnable,
   setPendingUninstallPlugin,
   handlePermissionChange,
+  handleToggleTool,
+  togglingToolNames,
 }: PluginsListSectionProps) {
   return (
     <>
@@ -48,141 +51,57 @@ export function PluginsListSection({
           </p>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+        <div className="tool-categories-container">
           {pluginsList.map((plugin) => {
             const isPending = plugin.status === "discovered";
             const isTampered = plugin.status === "tampered";
+            const enabledCount = plugin.tools.filter((t) => t.isEnabled).length;
+            const allEnabled =
+              plugin.tools.length > 0 &&
+              enabledCount === plugin.tools.length;
+            const anyEnabled = enabledCount > 0;
             return (
-              <div
-                key={plugin.id}
-                style={{
-                  padding: "16px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--bg-card, #1e2533)",
-                  border: isTampered
-                    ? "1px solid rgba(245, 101, 101, 0.5)"
-                    : isPending
-                      ? "1px solid rgba(237, 137, 54, 0.5)"
-                      : "1px solid var(--border-color, #2d3748)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    marginBottom: "8px",
-                    flexWrap: "wrap",
-                    gap: "8px",
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                        flexWrap: "wrap",
-                      }}
+              <section key={plugin.id} className="tool-category-section">
+                <div className="tool-category-header">
+                  <div className="tool-category-title-group">
+                    <WrenchIcon size={18} />
+                    <h4 className="tool-category-title">{plugin.name}</h4>
+                    <span className="tool-category-badge all-disabled">
+                      v{plugin.version}
+                    </span>
+                    <span className="tool-category-badge all-disabled">
+                      {plugin.runtime}
+                    </span>
+                    {plugin.isEnabled ? (
+                      <span className="tool-category-badge all-enabled">
+                        ENABLED
+                      </span>
+                    ) : isPending ? (
+                      <span className="tool-category-badge partial">
+                        PENDING REVIEW
+                      </span>
+                    ) : isTampered ? (
+                      <span className="tool-category-badge partial">
+                        TAMPERED
+                      </span>
+                    ) : (
+                      <span className="tool-category-badge all-disabled">
+                        DISABLED
+                      </span>
+                    )}
+                    <span
+                      className={`tool-category-badge ${
+                        allEnabled
+                          ? "all-enabled"
+                          : anyEnabled
+                            ? "partial"
+                            : "all-disabled"
+                      }`}
                     >
-                      <span style={{ fontWeight: 600, fontSize: "1.02rem" }}>
-                        {plugin.name}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          padding: "2px 6px",
-                          borderRadius: "4px",
-                          backgroundColor: "#2d3748",
-                          color: "#a0aec0",
-                        }}
-                      >
-                        v{plugin.version}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          padding: "2px 6px",
-                          borderRadius: "4px",
-                          backgroundColor: "#2c3e50",
-                          color: "#63b3ed",
-                        }}
-                      >
-                        {plugin.runtime}
-                      </span>
-
-                      {plugin.isEnabled ? (
-                        <span
-                          style={{
-                            fontSize: "0.75rem",
-                            padding: "2px 8px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(72, 187, 120, 0.2)",
-                            color: "#48bb78",
-                            fontWeight: 600,
-                          }}
-                        >
-                          ENABLED
-                        </span>
-                      ) : isPending ? (
-                        <span
-                          style={{
-                            fontSize: "0.75rem",
-                            padding: "2px 8px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(237, 137, 54, 0.2)",
-                            color: "#ed8936",
-                            fontWeight: 600,
-                          }}
-                        >
-                          PENDING REVIEW
-                        </span>
-                      ) : isTampered ? (
-                        <span
-                          style={{
-                            fontSize: "0.75rem",
-                            padding: "2px 8px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(245, 101, 101, 0.2)",
-                            color: "#f56565",
-                            fontWeight: 600,
-                          }}
-                        >
-                          TAMPERED
-                        </span>
-                      ) : (
-                        <span
-                          style={{
-                            fontSize: "0.75rem",
-                            padding: "2px 8px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(160, 174, 192, 0.2)",
-                            color: "#a0aec0",
-                          }}
-                        >
-                          DISABLED
-                        </span>
-                      )}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "0.8rem",
-                        color: "var(--text-secondary, #a0aec0)",
-                        marginTop: "3px",
-                      }}
-                    >
-                      <code>{plugin.id}</code>{" "}
-                      {plugin.author ? `• by ${plugin.author}` : ""}
-                    </div>
+                      {enabledCount} of {plugin.tools.length} enabled
+                    </span>
                   </div>
-
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                    }}
-                  >
+                  <div className="tool-category-actions">
                     <button
                       type="button"
                       className={
@@ -203,7 +122,6 @@ export function PluginsListSection({
                               ? "Re-verify & Enable"
                               : "Enable"}
                     </button>
-
                     <button
                       type="button"
                       className="icon-button danger"
@@ -222,152 +140,197 @@ export function PluginsListSection({
                   </div>
                 </div>
 
-                {plugin.description && (
-                  <p
-                    style={{
-                      margin: "4px 0 10px 0",
-                      fontSize: "0.88rem",
-                      color: "var(--text-secondary, #cbd5e0)",
-                    }}
-                  >
-                    {plugin.description}
-                  </p>
-                )}
-
-                {plugin.integrityHash && (
+                <div style={{ marginBottom: "12px" }}>
                   <div
                     style={{
-                      fontSize: "0.75rem",
+                      fontSize: "0.8rem",
                       color: "var(--text-secondary, #a0aec0)",
-                      marginBottom: "10px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
                     }}
                   >
-                    <span>SHA-256 Hash:</span>
-                    <code style={{ fontSize: "0.72rem" }}>
-                      {plugin.integrityHash.substring(0, 16)}...
-                    </code>
-                    {isTampered ? (
-                      <span style={{ color: "#f56565" }}>
-                        (MISMATCH DETECTED)
-                      </span>
-                    ) : (
-                      <span style={{ color: "#48bb78" }}>✓ Verified</span>
-                    )}
+                    <code>{plugin.id}</code>{" "}
+                    {plugin.author ? `• by ${plugin.author}` : ""}
                   </div>
-                )}
+                  {plugin.description && (
+                    <p
+                      style={{
+                        margin: "4px 0 8px 0",
+                        fontSize: "0.88rem",
+                        color: "var(--text-secondary, #cbd5e0)",
+                      }}
+                    >
+                      {plugin.description}
+                    </p>
+                  )}
+                  {isPending && (
+                    <div
+                      style={{
+                        fontSize: "0.8rem",
+                        color: "#ed8936",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Awaiting approval — disabled by default until approved.
+                    </div>
+                  )}
+                  {isTampered && (
+                    <div
+                      style={{
+                        fontSize: "0.8rem",
+                        color: "#f56565",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Changed on disk since approval — quarantined and
+                      disabled.
+                    </div>
+                  )}
+                  {plugin.integrityHash && (
+                    <div
+                      style={{
+                        fontSize: "0.75rem",
+                        color: "var(--text-secondary, #a0aec0)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <span>SHA-256 Hash:</span>
+                      <code style={{ fontSize: "0.72rem" }}>
+                        {plugin.integrityHash.substring(0, 16)}...
+                      </code>
+                      {isTampered ? (
+                        <span style={{ color: "#f56565" }}>
+                          (MISMATCH DETECTED)
+                        </span>
+                      ) : (
+                        <span style={{ color: "#48bb78" }}>✓ Verified</span>
+                      )}
+                    </div>
+                  )}
+                </div>
 
-                <div
-                  style={{
-                    borderTop: "1px solid var(--border-color, #2d3748)",
-                    paddingTop: "8px",
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      color: "var(--text-secondary, #a0aec0)",
-                      marginBottom: "6px",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Declared Tools ({plugin.tools.length})
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "6px",
-                    }}
-                  >
-                    {plugin.tools.map((tool) => {
-                      const override = plugin.permissionOverrides[tool.name];
-                      return (
+                <div className="builtin-tools-grid">
+                  {plugin.tools.map((tool) => {
+                    const override =
+                      plugin.permissionOverrides[tool.name];
+                    const effectiveLevel = override || tool.permissionLevel;
+                    const isToggling = togglingToolNames.has(tool.name);
+                    const pluginGated =
+                      !plugin.isEnabled || isTampered || isPending;
+                    return (
+                      <article
+                        key={tool.name}
+                        className="builtin-tool-card"
+                      >
+                        <div className="builtin-tool-card-header">
+                          <code
+                            className="builtin-tool-name"
+                            title={tool.name}
+                          >
+                            {tool.name}
+                          </code>
+                          <span className="builtin-tool-permission">
+                            {effectiveLevel}
+                          </span>
+                        </div>
+                        <p
+                          className="builtin-tool-desc"
+                          title={tool.description}
+                        >
+                          {tool.description}
+                        </p>
+                        {tool.description && (
+                          <details className="builtin-tool-details">
+                            <summary>Details</summary>
+                            <p className="builtin-tool-details-body">
+                              {tool.description}
+                            </p>
+                          </details>
+                        )}
                         <div
-                          key={tool.name}
                           style={{
                             display: "flex",
-                            justifyContent: "space-between",
                             alignItems: "center",
-                            padding: "6px 10px",
-                            borderRadius: "6px",
-                            backgroundColor: "var(--bg-secondary, #141822)",
-                            fontSize: "0.85rem",
-                            flexWrap: "wrap",
-                            gap: "8px",
+                            gap: "6px",
+                            marginTop: "8px",
                           }}
                         >
-                          <div>
-                            <code
-                              style={{ fontWeight: 600, color: "#63b3ed" }}
-                            >
-                              {tool.name}
-                            </code>
-                            {tool.description && (
-                              <span
-                                style={{
-                                  fontSize: "0.75rem",
-                                  color: "var(--text-secondary, #a0aec0)",
-                                  marginLeft: "6px",
-                                }}
-                              >
-                                ({tool.description})
-                              </span>
-                            )}
-                          </div>
-
-                          <div
+                          <span
+                            style={{
+                              fontSize: "0.75rem",
+                              color: "var(--text-secondary, #a0aec0)",
+                            }}
+                          >
+                            Permission:
+                          </span>
+                          <select
+                            value={override || "default"}
+                            onChange={(e) =>
+                              handlePermissionChange(
+                                plugin.id,
+                                tool.name,
+                                e.target.value
+                              )
+                            }
+                            disabled={updatingPluginId === plugin.id}
+                            className="input-field"
+                          >
+                            <option value="default">
+                              Default ({tool.permissionLevel})
+                            </option>
+                            <option value="readOnly">readOnly</option>
+                            <option value="requiresApproval">
+                              requiresApproval
+                            </option>
+                          </select>
+                        </div>
+                        <div className="builtin-tool-footer">
+                          <label
+                            className="toggle-label tool-switch"
                             style={{
                               display: "flex",
                               alignItems: "center",
-                              gap: "6px",
+                              gap: "8px",
+                              flexShrink: 0,
+                              cursor: isToggling ? "wait" : "pointer",
                             }}
                           >
-                            <span
-                              style={{
-                                fontSize: "0.75rem",
-                                color: "var(--text-secondary, #a0aec0)",
-                              }}
-                            >
-                              Permission:
-                            </span>
-                            <select
-                              value={override || "default"}
-                              onChange={(e) =>
-                                handlePermissionChange(
-                                  plugin.id,
-                                  tool.name,
-                                  e.target.value
-                                )
+                            <input
+                              type="checkbox"
+                              role="switch"
+                              className="tool-switch-input"
+                              aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
+                              aria-checked={tool.isEnabled}
+                              checked={tool.isEnabled}
+                              onChange={() => void handleToggleTool(tool)}
+                              disabled={isToggling || pluginGated}
+                              title={
+                                pluginGated
+                                  ? "Enable plugin first"
+                                  : undefined
                               }
-                              disabled={updatingPluginId === plugin.id}
-                              style={{
-                                fontSize: "0.78rem",
-                                padding: "2px 6px",
-                                borderRadius: "4px",
-                                backgroundColor: "var(--bg-card, #1e2533)",
-                                color: "inherit",
-                                border: "1px solid var(--border-color, #2d3748)",
-                              }}
+                            />
+                            <span
+                              className="tool-switch-track"
+                              data-on={tool.isEnabled ? "true" : "false"}
+                              aria-hidden="true"
                             >
-                              <option value="default">
-                                Default ({tool.permissionLevel})
-                              </option>
-                              <option value="readOnly">readOnly</option>
-                              <option value="requiresApproval">
-                                requiresApproval
-                              </option>
-                            </select>
-                          </div>
+                              <span className="tool-switch-thumb" />
+                            </span>
+                            <span className="tool-switch-state">
+                              {isToggling
+                                ? "Updating…"
+                                : tool.isEnabled
+                                  ? "Enabled"
+                                  : "Disabled"}
+                            </span>
+                          </label>
                         </div>
-                      );
-                    })}
-                  </div>
+                      </article>
+                    );
+                  })}
                 </div>
-              </div>
+              </section>
             );
           })}
         </div>
