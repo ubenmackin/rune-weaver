@@ -7,15 +7,10 @@ import GettingStartedCard, {
   countCompletedItems,
   deriveChecklistItems,
 } from "./GettingStartedCard";
-import DashboardView, { DEMO_GOAL_TITLE } from "../DashboardView";
+import DashboardView from "../DashboardView";
 import * as api from "../../api";
 import { jsonResponse } from "../../test-utils/http";
-import {
-  CALENDAR_SEED_PROMPT,
-  EMAIL_SEED_PROMPT,
-  GENERIC_SEED_PROMPT,
-  INDEX_SEED_PROMPT,
-} from "../onboarding/seedPrompt";
+import { GENERIC_SEED_PROMPT } from "../onboarding/seedPrompt";
 import { clearSharedRecentRunsForTesting } from "./sharedRuns";
 import { resetPersonaSignalsForTesting } from "../PersonaAvatar";
 import {
@@ -31,8 +26,6 @@ vi.mock("../../api", async (importOriginal) => {
     listApprovals: vi.fn(),
     decideApproval: vi.fn(),
     listGoals: vi.fn(),
-    createGoal: vi.fn(),
-    deleteGoal: vi.fn(),
     advanceGoal: vi.fn(),
     listRuns: vi.fn(),
     cancelRun: vi.fn(),
@@ -155,7 +148,8 @@ describe("GettingStartedCard progress", () => {
         status={{
           brainReady: true,
           personaSet: false,
-          calendarReady: true,
+          calendarReady: false,
+          calendarStatus: "granted",
           emailReady: false,
           indexReady: false,
           policyAcked: true,
@@ -223,7 +217,8 @@ describe("GettingStartedCard progress", () => {
         status={{
           brainReady: true,
           personaSet: true,
-          emailReady: true,
+          emailReady: false,
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
           calendarReady: false,
           indexReady: false,
           policyAcked: true,
@@ -451,7 +446,8 @@ describe("GettingStartedCard resume", () => {
         status={{
           brainReady: true,
           personaSet: true,
-          emailReady: true,
+          emailReady: false,
+          emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
           calendarReady: false,
           indexReady: false,
           policyAcked: true,
@@ -465,7 +461,7 @@ describe("GettingStartedCard resume", () => {
   });
 });
 
-describe("Dashboard seed landing and demo goal", () => {
+describe("Dashboard seed landing", () => {
   function mockDashboardBasics() {
     vi.mocked(api.listApprovals).mockResolvedValue({ approvals: [], count: 0 });
     vi.mocked(api.listRuns).mockResolvedValue({ runs: [], count: 0 });
@@ -474,219 +470,93 @@ describe("Dashboard seed landing and demo goal", () => {
     vi.mocked(api.listSessions).mockResolvedValue({ sessions: [], count: 0 });
   }
 
-  it("finishes with the calendar prompt when calendars are granted", async () => {
+  it("finishes to dashboard destination with prefill without auto-send when calendars are granted", async () => {
     const user = userEvent.setup();
     mockDashboardBasics();
     vi.mocked(api.listGoals).mockResolvedValue({ goals: [], count: 0 });
-    vi.mocked(api.createGoal).mockResolvedValue({
-      goal: {
-        id: "goal-demo-1",
-        title: DEMO_GOAL_TITLE,
-        statement: "demo",
-        status: "active",
-        progress: { done: 0, total: 0 },
-        stepIntervalMinutes: 1440,
-        nextDueAt: null,
-        originSessionId: null,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      },
-      steps: [],
-      events: [],
-    });
     const seen: string[] = [];
     stubOnboardingFetch(
       {
         ...emptyOnboarding(),
         brainReady: true,
         personaSet: true,
-        calendarReady: true,
-        emailReady: false,
-        indexReady: false,
+        calendarStatus: "granted",
+        emailAccounts: [],
+        indexEnabled: false,
+        indexWatermark: null,
         policyAcked: false,
       },
       seen,
     );
+    const onFinished = vi.fn();
     const onOpenChatWithPrompt = vi.fn();
     render(
       <DashboardView
         health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
         onSelectTab={vi.fn()}
         onOpenChatWithPrompt={onOpenChatWithPrompt}
+        onFinished={onFinished}
       />,
     );
     const finish = await screen.findByTestId("getting-started-finish");
     await user.click(finish);
-    await waitFor(() => expect(onOpenChatWithPrompt).toHaveBeenCalledTimes(1));
-    expect(onOpenChatWithPrompt).toHaveBeenCalledWith(CALENDAR_SEED_PROMPT);
-    await waitFor(() => expect(api.createGoal).toHaveBeenCalledTimes(1));
-    const input = vi.mocked(api.createGoal).mock.calls[0][0] as {
-      title: string;
-    };
-    expect(input.title).toBe("Morning briefing");
-    expect(input.title.length).toBeLessThanOrEqual(64);
+    await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    expect(onFinished).toHaveBeenCalledWith({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+    expect(onOpenChatWithPrompt).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
-  it("matches the seed prompt to the granted capability", async () => {
+  it("falls back to generic dashboard destination across capabilities without auto-send", async () => {
     const user = userEvent.setup();
     async function finishWithPayload(payload: unknown): Promise<string> {
       mockDashboardBasics();
       vi.mocked(api.listGoals).mockResolvedValue({ goals: [], count: 0 });
-      vi.mocked(api.createGoal).mockResolvedValue({
-        goal: {
-          id: "goal-demo-x",
-          title: DEMO_GOAL_TITLE,
-          statement: "demo",
-          status: "active",
-          progress: { done: 0, total: 0 },
-          stepIntervalMinutes: 1440,
-          nextDueAt: null,
-          originSessionId: null,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-        steps: [],
-        events: [],
-      });
       const seen: string[] = [];
       stubOnboardingFetch(payload, seen);
+      const onFinished = vi.fn();
       const onOpenChatWithPrompt = vi.fn();
       const { unmount } = render(
         <DashboardView
           health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
           onSelectTab={vi.fn()}
           onOpenChatWithPrompt={onOpenChatWithPrompt}
+          onFinished={onFinished}
         />,
       );
       const finish = await screen.findByTestId("getting-started-finish");
       await user.click(finish);
-      await waitFor(() => expect(onOpenChatWithPrompt).toHaveBeenCalledTimes(1));
-      const prompt = onOpenChatWithPrompt.mock.calls[0][0] as string;
+      await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+      const destination = onFinished.mock.calls[0][0] as { kind: string; prompt: string };
+      expect(destination.kind).toBe("dashboard");
+      expect(onOpenChatWithPrompt).not.toHaveBeenCalled();
+      const prompt = destination.prompt;
       unmount();
       vi.unstubAllGlobals();
       return prompt;
     }
 
-    const emailPrompt = await finishWithPayload({
+    const calendarPrompt = await finishWithPayload({
       ...emptyOnboarding(),
-      emailReady: true,
-      calendarReady: false,
-      indexReady: false,
+      emailAccounts: [],
+      calendarStatus: "granted",
+      indexEnabled: false,
+      indexWatermark: null,
     });
-    expect(emailPrompt).toBe(EMAIL_SEED_PROMPT);
+    expect(calendarPrompt).toBe(GENERIC_SEED_PROMPT);
 
     const indexPrompt = await finishWithPayload({
       ...emptyOnboarding(),
-      emailReady: false,
-      calendarReady: false,
-      indexReady: true,
+      emailAccounts: [],
+      calendarStatus: "denied",
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
     });
-    expect(indexPrompt).toBe(INDEX_SEED_PROMPT);
+    expect(indexPrompt).toBe(GENERIC_SEED_PROMPT);
 
     const genericPrompt = await finishWithPayload({ ...emptyOnboarding() });
     expect(genericPrompt).toBe(GENERIC_SEED_PROMPT);
-  });
-
-  it("creates the Morning briefing demo goal only when goals are empty", async () => {
-    const user = userEvent.setup();
-    mockDashboardBasics();
-    vi.mocked(api.listGoals).mockResolvedValue({ goals: [], count: 0 });
-    vi.mocked(api.createGoal).mockResolvedValue({
-      goal: {
-        id: "goal-demo-once",
-        title: DEMO_GOAL_TITLE,
-        statement: "demo",
-        status: "active",
-        progress: { done: 0, total: 0 },
-        stepIntervalMinutes: 1440,
-        nextDueAt: null,
-        originSessionId: null,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      },
-      steps: [],
-      events: [],
-    });
-    const seen: string[] = [];
-    stubOnboardingFetch(emptyOnboarding(), seen);
-    render(
-      <DashboardView
-        health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
-        onSelectTab={vi.fn()}
-        onOpenChatWithPrompt={vi.fn()}
-      />,
-    );
-    const finish = await screen.findByTestId("getting-started-finish");
-    await user.click(finish);
-    await waitFor(() => expect(api.createGoal).toHaveBeenCalledTimes(1));
-
-    vi.mocked(api.createGoal).mockClear();
-    vi.mocked(api.listGoals).mockResolvedValue({
-      goals: [
-        {
-          id: "goal-real-1",
-          title: "Ship the release",
-          statement: "done",
-          status: "active",
-          progress: { done: 0, total: 1 },
-          stepIntervalMinutes: 1440,
-          nextDueAt: null,
-          originSessionId: null,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      ],
-      count: 1,
-    });
-    await user.click(finish);
-    await waitFor(() =>
-      expect(screen.getByTestId("getting-started-finish")).toBeInTheDocument(),
-    );
-    expect(vi.mocked(api.createGoal)).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it("purges only the demo goal when the first real goal lands", async () => {
-    mockDashboardBasics();
-    const demo = {
-      id: "goal-demo-purge",
-      title: DEMO_GOAL_TITLE,
-      statement: "demo",
-      status: "active",
-      progress: { done: 0, total: 0 },
-      stepIntervalMinutes: 1440,
-      nextDueAt: null,
-      originSessionId: null,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    const real = {
-      id: "goal-real-purge",
-      title: "Ship the release",
-      statement: "done",
-      status: "active",
-      progress: { done: 0, total: 1 },
-      stepIntervalMinutes: 1440,
-      nextDueAt: null,
-      originSessionId: null,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    vi.mocked(api.listGoals).mockResolvedValue({ goals: [demo, real], count: 2 });
-    vi.mocked(api.deleteGoal).mockResolvedValue(undefined);
-    const seen: string[] = [];
-    stubOnboardingFetch(emptyOnboarding(), seen);
-    render(
-      <DashboardView
-        health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
-        onSelectTab={vi.fn()}
-      />,
-    );
-    await waitFor(() => expect(api.deleteGoal).toHaveBeenCalled());
-    expect(vi.mocked(api.deleteGoal)).toHaveBeenCalledWith("goal-demo-purge", true);
-    const calls = vi.mocked(api.deleteGoal).mock.calls;
-    expect(calls.every(([id]) => id === "goal-demo-purge")).toBe(true);
-    vi.unstubAllGlobals();
   });
 });

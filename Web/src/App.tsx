@@ -13,6 +13,7 @@ import MobileBottomNav from "./components/MobileBottomNav";
 import TopNav, { type Tab } from "./components/TopNav";
 import GettingStartedWizard from "./components/onboarding/GettingStartedWizard";
 import { isWizardSnoozed, subscribeWizardSnooze } from "./components/onboarding/wizardSnooze";
+import { GENERIC_SEED_PROMPT, type OnboardingFinishDestination } from "./components/onboarding/seedPrompt";
 import { useOnboardingStatus } from "./hooks/useOnboardingStatus";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
@@ -48,6 +49,28 @@ function getInitialTab(): Tab {
   const path = rawPath.split("/")[0] as Tab;
   if (VALID_TABS.includes(path)) return path;
   return "dashboard";
+}
+
+// Pure landing for a finish destination so routing stays testable: unverified
+// landings fall back to the dashboard with a generic prefill.
+export function resolveFinishLanding(destination?: OnboardingFinishDestination): {
+  tab: Tab;
+  prompt: string | null;
+  highlightRun: boolean;
+} {
+  if (!destination) return { tab: "dashboard", prompt: GENERIC_SEED_PROMPT, highlightRun: false };
+  switch (destination.kind) {
+    case "schedules":
+      return { tab: "schedules", prompt: null, highlightRun: false };
+    case "dashboard": {
+      const trimmed = destination.prompt.trim();
+      return { tab: "dashboard", prompt: trimmed || GENERIC_SEED_PROMPT, highlightRun: false };
+    }
+    case "indexing":
+      return { tab: "indexing", prompt: null, highlightRun: destination.highlightRun };
+    default:
+      return { tab: "dashboard", prompt: GENERIC_SEED_PROMPT, highlightRun: false };
+  }
 }
 
 // Gate state before the boot probe answers. "checking" renders a neutral loading
@@ -176,6 +199,9 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
   const [stagedFilesCount, setStagedFilesCount] = useState(0);
   const [pendingChatPrompt, setPendingChatPrompt] = useState<string | null>(null);
   const [targetChatSessionId, setTargetChatSessionId] = useState<string | null>(null);
+  const [dashboardPrefill, setDashboardPrefill] = useState<string | null>(null);
+  const [dashboardPrefillAttention, setDashboardPrefillAttention] = useState(false);
+  const [indexingHighlightRun, setIndexingHighlightRun] = useState(false);
 
   function handleOpenChatWithPrompt(prompt: string) {
     setPendingChatPrompt(prompt);
@@ -245,6 +271,14 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
   function handleSelectTab(selected: Tab) {
     if (isStandalone) return;
     setTab((previous) => (previous === selected ? previous : selected));
+    // Landing nudges clear once the owner leaves their surface.
+    if (selected !== "dashboard") {
+      setDashboardPrefill(null);
+      setDashboardPrefillAttention(false);
+    }
+    if (selected !== "indexing") {
+      setIndexingHighlightRun(false);
+    }
     // Writing the hash fires `hashchange`, which would set the same tab a
     // second time; guard the write so selecting the active tab (or an
     // already-synced hash) never triggers the redundant second update.
@@ -266,6 +300,19 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
       clearWarningsBadge();
       onRefreshHealth?.();
     }
+  }
+
+  // Goal-routed landing: verified surfaces win, otherwise generic dashboard prefill.
+  function handleWizardFinished(destination?: OnboardingFinishDestination) {
+    void onboarding.refresh().finally(() => {
+      const landing = resolveFinishLanding(destination);
+      if (landing.prompt) {
+        setDashboardPrefill(landing.prompt);
+        setDashboardPrefillAttention(true);
+      }
+      if (landing.highlightRun) setIndexingHighlightRun(true);
+      handleSelectTab(landing.tab);
+    });
   }
 
   // Bell wiring owns badge clearing plus the permission prompt, while the bell button itself owns
@@ -390,6 +437,13 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
                 onboardingStatus={onboarding.status}
                 onOnboardingRefresh={onboarding.refresh}
                 onOnboardingComplete={onboarding.complete}
+                onFinished={handleWizardFinished}
+                initialPrompt={dashboardPrefill}
+                onClearInitialPrompt={() => {
+                  setDashboardPrefill(null);
+                  setDashboardPrefillAttention(false);
+                }}
+                promptAttention={dashboardPrefillAttention}
               />
             </Suspense>
           ) : null}
@@ -415,7 +469,11 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
           ) : null}
           {tab === "indexing" ? (
             <Suspense fallback={<SectionProgress />}>
-              <MemoryBrowser view="indexing" />
+              <MemoryBrowser
+                view="indexing"
+                highlightRun={indexingHighlightRun}
+                onRunStarted={() => setIndexingHighlightRun(false)}
+              />
             </Suspense>
           ) : null}
           {tab === "runs" ? (
@@ -457,8 +515,8 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
           onOnboardingRefresh={onboarding.refresh}
           onOnboardingComplete={onboarding.complete}
           onOnboardingSkip={onboarding.skip}
-          onFinished={() => {
-            void onboarding.refresh().finally(() => handleSelectTab("chat"));
+          onFinished={(destination) => {
+            handleWizardFinished(destination);
           }}
         />
       ) : null}

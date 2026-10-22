@@ -683,6 +683,8 @@ export function formatIndexLiveHeader(
 // the same copy inline.
 export interface IndexingPanelProps {
   hideHeader?: boolean;
+  highlightRun?: boolean;
+  onRunStarted?: () => void;
 }
 
 // Status dashboard for the Memory → Index Status tab: run controls first, stat cards and per-source

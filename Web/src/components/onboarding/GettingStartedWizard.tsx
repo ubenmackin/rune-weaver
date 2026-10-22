@@ -13,16 +13,17 @@ import ConnectStep from "./ConnectStep";
 import ProtectStep from "./ProtectStep";
 import { StoreSecretModal } from "../StoreSecretModal";
 import {
-  finishOnboardingWithVerifiedSeed,
   parseOnboardingStatus as parseSeedStatus,
+  type OnboardingFinishDestination,
   type OnboardingStatus as SeedStatus,
 } from "./seedPrompt";
+import { finishOnboardingFlow } from "./onboardingSchedule";
 import {
   firstPendingStep,
   readStandaloneMode,
   toSeedStatus,
 } from "./wizardHelpers";
-import { clearWizardState, persistWizardState, resolveInitialWizardState } from "./wizardStorage";
+import { persistWizardState, resolveInitialWizardState } from "./wizardStorage";
 import { recordSkipAndSnooze } from "./wizardSkip";
 import { useBrainWizard } from "./useBrainWizard";
 import { usePersonaWizard } from "./usePersonaWizard";
@@ -35,7 +36,7 @@ import {
 export interface GettingStartedWizardProps {
   initialSkippedSteps?: WizardStepId[];
   isStandalone?: boolean;
-  onFinished?: () => void;
+  onFinished?: (destination?: OnboardingFinishDestination) => void;
   onboardingStatus?: ApiOnboardingStatus | null;
   onOnboardingRefresh?: () => Promise<void>;
   onOnboardingComplete?: (seedPromptUsed: string) => Promise<void>;
@@ -260,14 +261,12 @@ export default function GettingStartedWizard({
     setStepError(null);
     setBusy(true);
     try {
-      // Single finish flow owns the verified seed plus demo and completion.
-      await finishOnboardingWithVerifiedSeed({
+      const { destination } = await finishOnboardingFlow({
         status: seedStatus,
         goal: personaGoal,
         complete: onOnboardingComplete,
       });
-      clearWizardState();
-      onFinished?.();
+      onFinished?.(destination);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to finish onboarding");
     } finally {

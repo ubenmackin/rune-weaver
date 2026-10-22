@@ -14,8 +14,14 @@ export * from "./indexing/indexHelpers";
 export * from "./indexing/indexPolicyHelpers";
 export { IndexPolicyPanel } from "./indexing/IndexPolicyPanel";
 
-export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps) {
+export default function IndexingPanel({ hideHeader = false, highlightRun = false, onRunStarted }: IndexingPanelProps) {
   const state = useIndexingState();
+
+  // Nudge clears only after the run starts so a parked run keeps its highlight.
+  async function handleRunWithHighlight() {
+    const started = await state.handleRun();
+    if (started) onRunStarted?.();
+  }
 
   return (
     <section className="panel indexing-panel" aria-label="Index Status">
@@ -102,7 +108,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         liveSources={state.liveSources}
         reclaimSummary={state.reclaimSummary}
         status={state.status}
-        onRun={() => void state.handleRun()}
+        highlightRun={highlightRun}
+        onRun={() => void handleRunWithHighlight()}
         onCancel={() => void state.handleCancel()}
         onOpenPrune={() => {
           state.setPruneBefore("");

@@ -7,6 +7,13 @@ import GettingStartedWizard from "./GettingStartedWizard";
 import { WIZARD_STEPS, isSkipped, nextStep } from "./wizardState";
 import { jsonResponse } from "../../test-utils/http";
 import { clearWizardSnooze, isWizardSnoozed } from "./wizardSnooze";
+import {
+  CALENDAR_SEED_PROMPT,
+  GENERIC_SEED_PROMPT,
+  selectFinishDestination,
+  type OnboardingStatus,
+} from "./seedPrompt";
+import { resolveFinishLanding } from "../../App";
 
 function stubFetch(handler: (input: string, init?: RequestInit) => Promise<Response>): void {
   vi.stubGlobal("fetch", vi.fn(handler));
@@ -532,5 +539,173 @@ describe("GettingStartedWizard standalone suppression", () => {
     expect(screen.queryByTestId("getting-started-wizard")).toBeNull();
     expect(container).toBeEmptyDOMElement();
     window.history.pushState({}, "", "/");
+  });
+});
+
+describe("selectFinishDestination", () => {
+  function makeStatus(overrides: Partial<OnboardingStatus> = {}): OnboardingStatus {
+    return {
+      completedAt: null,
+      skippedSteps: [],
+      checklistDismissed: false,
+      seedPromptUsed: null,
+      calendarStatus: "denied",
+      emailAccounts: [],
+      indexEnabled: false,
+      indexWatermark: null,
+      personaSet: false,
+      policyAcked: false,
+      pendingPermission: false,
+      ...overrides,
+    };
+  }
+
+  it("routes inbox with verified email to schedules", () => {
+    const status = makeStatus({
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+    });
+    expect(selectFinishDestination(status, "inbox")).toEqual({ kind: "schedules" });
+  });
+
+  it("routes day with granted calendar to dashboard with calendar prompt", () => {
+    const status = makeStatus({ calendarStatus: "granted" });
+    expect(selectFinishDestination(status, "day")).toEqual({
+      kind: "dashboard",
+      prompt: CALENDAR_SEED_PROMPT,
+    });
+  });
+
+  it("routes remember with ready index to indexing with highlight", () => {
+    const status = makeStatus({ indexEnabled: true, indexWatermark: "2026-10-01T00:00:00Z" });
+    expect(selectFinishDestination(status, "remember")).toEqual({
+      kind: "indexing",
+      highlightRun: true,
+    });
+  });
+
+  it("falls back to generic dashboard for null goal", () => {
+    const status = makeStatus({
+      calendarStatus: "granted",
+      emailAccounts: [{ address: "ops@example.com", fetchSucceeded: true }],
+      indexEnabled: true,
+      indexWatermark: "2026-10-01T00:00:00Z",
+    });
+    expect(selectFinishDestination(status, null)).toEqual({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+  });
+
+  it("falls back to generic dashboard when inbox email is unverified", () => {
+    const status = makeStatus({ emailAccounts: [] });
+    expect(selectFinishDestination(status, "inbox")).toEqual({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+  });
+
+  it("falls back to generic dashboard when day calendar is unverified", () => {
+    const status = makeStatus({ calendarStatus: "denied" });
+    expect(selectFinishDestination(status, "day")).toEqual({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+  });
+
+  it("falls back to generic dashboard when remember index is not ready", () => {
+    const status = makeStatus({ indexEnabled: false, indexWatermark: null });
+    expect(selectFinishDestination(status, "remember")).toEqual({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+  });
+});
+
+describe("resolveFinishLanding", () => {
+  it("lands schedules on the schedules tab", () => {
+    expect(resolveFinishLanding({ kind: "schedules" })).toEqual({
+      tab: "schedules",
+      prompt: null,
+      highlightRun: false,
+    });
+  });
+
+  it("lands dashboard with prompt on the dashboard tab with prefill", () => {
+    expect(resolveFinishLanding({ kind: "dashboard", prompt: CALENDAR_SEED_PROMPT })).toEqual({
+      tab: "dashboard",
+      prompt: CALENDAR_SEED_PROMPT,
+      highlightRun: false,
+    });
+  });
+
+  it("falls back to generic dashboard prefill when the prompt is empty", () => {
+    expect(resolveFinishLanding({ kind: "dashboard", prompt: "   " })).toEqual({
+      tab: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+      highlightRun: false,
+    });
+  });
+
+  it("lands indexing with highlight on the indexing tab", () => {
+    expect(resolveFinishLanding({ kind: "indexing", highlightRun: true })).toEqual({
+      tab: "indexing",
+      prompt: null,
+      highlightRun: true,
+    });
+  });
+
+  it("lands void callers on dashboard with generic prefill", () => {
+    expect(resolveFinishLanding(undefined)).toEqual({
+      tab: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+      highlightRun: false,
+    });
+  });
+});
+
+describe("GettingStartedWizard finish destination", () => {
+  it("passes generic dashboard destination on deferred finish", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async () => jsonResponse({ completed_at: "2026-10-19T00:00:00Z" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onFinished = vi.fn();
+    await act(async () => {
+      render(
+        <GettingStartedWizard
+          initialSkippedSteps={["brain", "persona", "connect", "protect"]}
+          onFinished={onFinished}
+        />,
+      );
+    });
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1));
+    expect(onFinished).toHaveBeenCalledWith({
+      kind: "dashboard",
+      prompt: GENERIC_SEED_PROMPT,
+    });
+  });
+
+  it("still finishes for legacy void onFinished callers", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async () => jsonResponse({ completed_at: "2026-10-19T00:00:00Z" }));
+    vi.stubGlobal("fetch", fetchMock);
+    let finished = false;
+    const onFinished = () => {
+      finished = true;
+    };
+    await act(async () => {
+      render(
+        <GettingStartedWizard
+          initialSkippedSteps={["brain", "persona", "connect", "protect"]}
+          onFinished={onFinished}
+        />,
+      );
+    });
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    await waitFor(() => expect(finished).toBe(true));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/onboarding/complete"),
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });
