@@ -39,6 +39,7 @@ export function isToolsAdvancedError(message: string | null | undefined): boolea
 export interface ToolsTabProps {
   handleRescanPlugins: () => void;
   rescanLoading: boolean;
+  onBrowseMarketplace: () => void;
   safeTools: ToolInfo[];
   pluginsList: PluginSummary[];
   pendingCount: number;
@@ -86,6 +87,7 @@ export interface ToolsTabProps {
 export function ToolsTab({
   handleRescanPlugins,
   rescanLoading,
+  onBrowseMarketplace,
   safeTools,
   pluginsList,
   pendingCount,
@@ -184,6 +186,13 @@ export function ToolsTab({
           >
             <RefreshIcon size={14} className={rescanLoading ? "spin" : ""} />
             <span>{rescanLoading ? "Scanning..." : "Rescan Plugins"}</span>
+          </button>
+          <button
+            type="button"
+            className="ghost icon-text-btn"
+            onClick={onBrowseMarketplace}
+          >
+            <span>Browse Marketplace</span>
           </button>
         </div>
       </div>

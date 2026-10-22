@@ -132,6 +132,7 @@ export function SettingsFormPanels({
           pluginsList={services.pluginsList}
           rescanLoading={services.rescanLoading}
           handleRescanPlugins={() => void services.handleRescanPlugins()}
+          onBrowseMarketplace={() => services.setMarketplaceOpen(true)}
           handleToggleEnable={services.handleToggleEnable}
           setPendingUninstallPlugin={services.setPendingUninstallPlugin}
           handleToggleTool={services.handleToggleTool}
