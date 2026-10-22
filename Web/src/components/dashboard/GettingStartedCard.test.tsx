@@ -322,7 +322,7 @@ describe("GettingStartedCard resume", () => {
 
   it("shows Resume setup in the dismissed pill while snoozed", () => {
     snoozeWizard();
-    render(
+    const { unmount } = render(
       <GettingStartedCard
         status={{
           brainReady: true,
@@ -338,6 +338,7 @@ describe("GettingStartedCard resume", () => {
     );
     expect(screen.getByTestId("getting-started-pill")).toBeInTheDocument();
     expect(screen.getByTestId("getting-started-resume")).toHaveTextContent("Resume setup");
+    unmount();
     clearWizardSnooze();
   });
 

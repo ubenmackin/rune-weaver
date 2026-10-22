@@ -860,6 +860,26 @@ private func collectToolResults(from messages: [Message]) -> [String: ToolResult
             exitCode: message.exitCode
         )
     }
+    // Reconcile calls without a tool result when the session records a denial
+    for message in messages where message.role == .assistant {
+        for line in NormalizedText.splitLines(message.content) {
+            guard let parsed = ToolInput.parsePlaceholderLine(line),
+                  let callID = nonEmptyCallID(parsed.callID) else { continue }
+            if resultsByCallID[callID] == nil {
+                let hasDenial = messages.contains { sessionMessage in
+                    sessionMessage.role == .assistant && sessionMessage.content.contains("Approval denied for \(parsed.toolName)")
+                }
+                if hasDenial {
+                    resultsByCallID[callID] = ToolResult(
+                        toolCallID: callID,
+                        content: "Approval denied by operator.",
+                        isError: true,
+                        errorKind: .executionError
+                    )
+                }
+            }
+        }
+    }
     return resultsByCallID
 }
 

@@ -163,6 +163,25 @@ describe("ToolActionRow honest status", () => {
     expect(badge).toHaveClass("error");
   });
 
+  it("renders Denied badge when result content indicates approval denial (chat pill)", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Approval denied by operator.",
+            isError: true,
+            errorKind: "execution_error",
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Denied");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
   it("renders Done badge when result succeeded", () => {
     render(
       <ToolActionRow
@@ -242,6 +261,26 @@ describe("ToolActionRow card variant badges", () => {
       />,
     );
     const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-error");
+  });
+
+  it("renders Denied badge when result content indicates approval denial (card)", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Approval denied by operator.",
+            isError: true,
+            errorKind: "execution_error",
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Denied");
     expect(badge).toBeInTheDocument();
     expect(badge).toHaveClass("tool-badge-error");
   });

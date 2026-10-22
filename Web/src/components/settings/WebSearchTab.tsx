@@ -412,23 +412,25 @@ export function WebSearchTab({
             </span>
           </div>
         </div>
-        <div className="muted text-sm" style={{ marginTop: "12px" }}>
-          <p style={{ margin: "8px 0 0 0" }}>
-            Managed Python at {browserVenvPath}. Override with RUNEWEAVER_PYTHON_BIN, then managed venv, then PATH python3; pipx and brew playwright-cli do not provide import playwright.
-          </p>
-          {browserPythonPath ? (
-            <p style={{ margin: "8px 0 0 0" }}>
-              Python: <code>{browserPythonPath}</code>
+        <details className="muted text-sm" style={{ marginTop: "16px" }} data-testid="browser-troubleshooting-details">
+          <summary style={{ cursor: "pointer", userSelect: "none" }}>Manual environment setup &amp; troubleshooting</summary>
+          <div style={{ marginTop: "8px", paddingLeft: "4px" }}>
+            <p style={{ margin: "4px 0 0 0" }}>
+              Managed Python at <code>{browserVenvPath}</code>.
             </p>
-          ) : null}
-          <p style={{ margin: "8px 0 0 0" }}>
-            Manual fallback:{" "}
-            <code>
-              {browserVenvPath}/bin/python -m pip install {BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT} && {browserVenvPath}/bin/python -m playwright install chromium
-            </code>{" "}
-            (on Linux also run {browserVenvPath}/bin/python -m playwright install-deps or install system browser dependencies manually). Offline installs fail closed without changing the existing venv.
-          </p>
-        </div>
+            {browserPythonPath ? (
+              <p style={{ margin: "4px 0 0 0" }}>
+                Active interpreter: <code>{browserPythonPath}</code>
+              </p>
+            ) : null}
+            <p style={{ margin: "8px 0 0 0" }}>
+              Manual fallback:
+            </p>
+            <pre className="code-block" style={{ margin: "4px 0 0 0", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {browserVenvPath}/bin/python -m pip install {BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT} &amp;&amp; {browserVenvPath}/bin/python -m playwright install chromium
+            </pre>
+          </div>
+        </details>
       </AdvancedDisclosure>
     </div>
 

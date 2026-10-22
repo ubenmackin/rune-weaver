@@ -392,7 +392,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
     /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
         "Opens a URL in a persistent context (default headless); returns text plus refs (e.g. e12) for browser.act. "
-            + "Auth walls escalate to human login via headed=true; downloads are manifest-only. "
+            + "Auth walls escalate to human login via headed=true (interactively solves challenges in-call, saves session, closes). "
             + "Navigation is SSRF-guarded: approval-free browsing must not dial loopback, link-local, metadata, or private ranges."
     /// Function-calling contract for `url`, the screenshot opt-in, and headed mode.
     public let inputSchema =
@@ -412,7 +412,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
                 },
                 "headed": {
                   "type": "boolean",
-                  "description": "Launch a visible browser window for human login or CAPTCHA resolution (default false)",
+                  "description": "Launch a visible browser window for login or challenge resolution during this call; saves session (default false)",
                   "default": false
                 }
               },

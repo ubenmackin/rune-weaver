@@ -41,7 +41,12 @@ extension Orchestrator {
         _ parked: ParkedNarratedApproval,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
     ) async throws -> OrchestratorResponse {
-        let denialNote = await recordParkedDenial(parked.toolCall, sessionID: parked.sessionID, onEvent: onEvent)
+        let denialNote = await recordParkedDenial(
+            parked.toolCall,
+            sessionID: parked.sessionID,
+            roundIndex: parked.roundIndex,
+            onEvent: onEvent
+        )
         return try await finishParkedBatch(
             parked: parked,
             baseText: denialNote.content,
@@ -70,7 +75,12 @@ extension Orchestrator {
             return try await resumeAllowedQuestionAsk(parked, call: call, sessionID: sessionID, answer: answer, onEvent: onEvent)
         }
         guard let tool = await toolBus.tool(named: call.toolName) else {
-            let missingNote = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
+            let missingNote = await recordParkedMissingTool(
+                call,
+                sessionID: sessionID,
+                roundIndex: parked.roundIndex,
+                onEvent: onEvent
+            )
             return try await finishParkedBatch(
                 parked: parked,
                 baseText: missingNote.content,
@@ -535,12 +545,24 @@ extension Orchestrator {
     private func recordParkedDenial(
         _ call: ToolInput,
         sessionID: UUID,
+        roundIndex: Int? = nil,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     ) async -> Message {
         await conversations.removeWaitingMessages(from: sessionID)
         let denial = OrchestratorToolLoop.deniedApprovalMessage(for: call.toolName)
         let note = Message(role: .assistant, content: denial)
         let persisted = await conversations.append(note, to: sessionID)
+
+        let denialResult = ToolResult.failure(
+            toolCallID: call.callID,
+            content: "Approval denied by operator."
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: denialResult,
+            roundIndex: roundIndex
+        ))
         await onEvent?(.textDelta(denial))
         await flushEpisodic([(denial, .assistant)], sessionID: sessionID)
         return persisted
@@ -548,13 +570,25 @@ extension Orchestrator {
 
     /// Records a missing-tool notice for an allowed parked call.
     private func recordParkedMissingTool(
-        _ toolName: String,
+        _ call: ToolInput,
         sessionID: UUID,
+        roundIndex: Int? = nil,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     ) async -> Message {
-        let missing = "Approval allowed for \(toolName), but the tool is no longer available."
+        let missing = "Approval allowed for \(call.toolName), but the tool is no longer available."
         let note = Message(role: .assistant, content: missing)
         let persisted = await conversations.append(note, to: sessionID)
+
+        let missingResult = ToolResult.failure(
+            toolCallID: call.callID,
+            content: missing
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: missingResult,
+            roundIndex: roundIndex
+        ))
         await onEvent?(.textDelta(missing))
         await flushEpisodic([(missing, .assistant)], sessionID: sessionID)
         return persisted
