@@ -69,6 +69,43 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     guard let tool = await context.toolBus.tool(named: name) else {
         throw Abort(.notFound, reason: "Unknown tool '\(name)'")
     }
+    let records = await context.pluginStore.loadAll()
+    let recordByPluginID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    // Holding pen stays fail-closed: per-tool enable never arms a pending
+    // or disabled rune; plugin enable must hash and provision first.
+    if enabled, let bridge = tool as? SubprocessToolBridge,
+       let record = recordByPluginID[bridge.pluginID]
+    {
+        if record.status == .tampered {
+            throw Abort(
+                .conflict,
+                reason: "Tool '\(name)' is quarantined (owning plugin '\(bridge.pluginID)' failed integrity verification). "
+                    + "Re-enable the plugin to re-verify before enabling individual tools."
+            )
+        }
+        if record.status != .enabled || record.integrityHash == nil {
+            throw Abort(
+                .conflict,
+                reason: "Tool '\(name)' belongs to plugin '\(bridge.pluginID)' which is not enabled. "
+                    + "Enable the plugin via POST /plugins/\(bridge.pluginID)/state first."
+            )
+        }
+        if let expected = record.integrityHash {
+            var stale = true
+            if let manifestInfo = context.pluginDiscovery.findManifest(for: bridge.pluginID) {
+                if let current = PluginSecurity.calculateDirectoryHash(at: manifestInfo.dir) {
+                    stale = !PluginSecurity.hashesEqual(expected, current)
+                }
+            }
+            if stale {
+                throw Abort(
+                    .conflict,
+                    reason: "Tool '\(name)' is quarantined (owning plugin '\(bridge.pluginID)' failed integrity verification). "
+                        + "Re-enable the plugin to re-verify before enabling individual tools."
+                )
+            }
+        }
+    }
     // Single-gate contract: the persisted tool-state toggle is the sole authority for desktop
     // tools, so no config gate refines the enable here.
     await context.toolStates.setEnabled(toolName: name, enabled: enabled)
@@ -78,8 +115,6 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
         await context.toolBus.disableTool(named: name)
     }
     let isEnabled = await context.toolBus.isToolEnabled(named: name)
-    let records = await context.pluginStore.loadAll()
-    let recordByPluginID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     return buildToolInfo(for: tool, isEnabled: isEnabled, recordByPluginID: recordByPluginID)
 }
 
@@ -98,9 +133,8 @@ func cancelInFlightToolCall(callID: String, sessionID: UUID, reason: String?, co
 func registerToolRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.tools)) { req async throws -> ToolsResponse in
         let context = req.application.runeWeaver
-        // Late-registered builtin tools arrive after `make`, so reconcile
-        // stored toggles on read: the cached load makes this a memory-only
-        // pass after the first boot hydration.
+        // Reconcile before listing so a persisted toggle for a
+        // just-registered builtin never reads as enabled.
         await context.restoreToolStates()
         let tools = await context.toolBus.allTools()
         let records = await context.pluginStore.loadAll()

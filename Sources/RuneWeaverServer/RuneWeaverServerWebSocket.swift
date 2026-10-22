@@ -520,7 +520,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     )
     await context.hub.broadcastRun(initialEntry)
     // Detached ownership: the tracker slot plus this task own the turn, so no connection-table
-    // reserve/insert follows.
+    // reserve/insert follows. Detached so socket close never cancels the turn.
     let params = WebSocketTurnParameters(
         context: context,
         connectionID: connectionID,
@@ -530,7 +530,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         registration: registration,
         initialEntry: initialEntry
     )
-    let chatTask: Task<Void, Never> = Task {
+    let chatTask: Task<Void, Never> = Task.detached {
         await executeWebSocketTurn(params: params)
     }
     taskBox.set(chatTask)
@@ -645,11 +645,11 @@ private func finishWebSocketSuccessfulTurn(
         totalTokens: response.totalTokens,
         durationMs: durationMs
     ) ?? params.initialEntry
-    await context.hub.broadcastRun(entry)
+    await context.hub.broadcastTerminalRun(entry)
     var done = WSStreamDone(from: response)
     done.retainedSteerCount = await context.steeringQueue.pendingCount(for: params.sessionID)
     if let frame = encodeWSFrame(done) {
-        await context.hub.broadcast(text: frame)
+        await context.hub.broadcastTerminal(text: frame)
     }
 }
 
@@ -675,7 +675,7 @@ private func finishWebSocketFailedTurn(
         totalTokens: audit.totalTokens,
         durationMs: durationMs
     ) ?? params.initialEntry
-    await context.hub.broadcastRun(entry)
+    await context.hub.broadcastTerminalRun(entry)
     let errorReasoning: String? = audit.partialReasoning.isEmpty ? nil : audit.partialReasoning
     let errorMessage = Message(
         role: .assistant,
@@ -685,7 +685,7 @@ private func finishWebSocketFailedTurn(
     )
     await context.conversations.append(errorMessage, to: params.sessionID)
     if let frame = encodeWSFrame(WSErrorFrame(message: error.localizedDescription, sessionID: params.sessionID)) {
-        await context.hub.broadcast(text: frame)
+        await context.hub.broadcastTerminal(text: frame)
     }
 }
 

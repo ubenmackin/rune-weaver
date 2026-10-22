@@ -144,7 +144,7 @@ export function SettingsFormPanels({
           selectedToolCategory={services.selectedToolCategory}
           setSelectedToolCategory={services.setSelectedToolCategory}
           togglingCategory={services.togglingCategory}
-          togglingToolName={services.togglingToolName}
+          togglingToolNames={services.togglingToolNames}
           updatingPluginId={services.updatingPluginId}
           pluginsDir={form.pluginsDir}
           setPluginsDir={form.setPluginsDir}

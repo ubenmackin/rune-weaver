@@ -371,38 +371,27 @@ public final class ServerContext: Sendable {
         self.goalEngine = resolvedEngine
         self.ideas = resolvedIdeas
         self.ideasEngine = resolvedIdeasEngine
-        // Fan-out resolves over the shared orchestrator and run-log store so workers observe the
-        // same model posture as chat, with the serving provider as the background reviewer; a
-        // hand-built engine still wins untouched for tests that wire their own collaborators.
-        self.fanOut = fanOut ?? FanOutEngine(
-            orchestrator: orchestrator,
-            runLogs: FanOutRunLogAdapter(runs: runs, hub: hub),
-            config: fanOutConfig,
-            reviewer: servingLLM
-        )
-        // The interruption gate rides the stored `[proactive]` policy with the
-        // serving provider as its guarded judge; an explicit worker still wins
-        // untouched for tests that hand-build one without goals.
-        self.schedulerWorker = schedulerWorker ?? ServerSchedulerWorker(
-            scheduler: scheduler,
-            runs: runs,
-            hub: hub,
-            runLock: runLock,
-            orchestrator: orchestrator,
-            conversations: conversations,
-            toolBus: toolBus,
-            indexCoordinator: indexCoordinator,
-            goalStore: resolvedGoals,
-            goalEngine: resolvedEngine,
-            ideasEngine: resolvedIdeasEngine,
-            activeTurns: activeTurns,
-            proactiveConfig: proactiveConfig,
-            judgeLLM: servingLLM
+        // Fan-out shares the orchestrator and run log so workers match chat posture.
+        self.fanOut = Self.resolveFanOut(fanOut, orchestrator, runs, hub, fanOutConfig, servingLLM)
+        // The gate rides the stored policy with the serving provider as judge.
+        self.schedulerWorker = Self.resolveSchedulerWorker(
+            schedulerWorker,
+            SchedulerWorkerDeps(
+                scheduler: scheduler, runs: runs, hub: hub, runLock: runLock, orchestrator: orchestrator,
+                conversations: conversations, toolBus: toolBus, indexCoordinator: indexCoordinator,
+                goalStore: resolvedGoals, goalEngine: resolvedEngine, ideasEngine: resolvedIdeasEngine,
+                activeTurns: activeTurns, proactiveConfig: proactiveConfig, servingLLM: servingLLM
+            )
         )
         let pStore = pluginStore ?? ToolRegistryStore(dbPath: defaultDBPath)
         self.pluginStore = pStore
-        self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
-        self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
+        let resolvedToolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
+        self.toolStates = resolvedToolStates
+        self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(
+            pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(),
+            store: pStore,
+            toolStates: resolvedToolStates
+        )
         self.stagedFiles = stagedFiles ?? StagedFilesStore(dbPath: defaultDBPath)
         self.containersBox = OSAllocatedUnfairLock(initialState: containersConfig)
         self.pluginConfigBox = OSAllocatedUnfairLock(initialState: pluginConfig)
@@ -443,7 +432,10 @@ public final class ServerContext: Sendable {
         self.onboarding = onboarding ?? OnboardingStore(dbPath: defaultDBPath)
         wireVerifiedPulse(goalEngine: resolvedEngine)
     }
+}
 
+/// Live helpers ride an extension so the main body stays within budget.
+extension ServerContext {
     // MARK: - Verified-Pulse Construction Wiring
 
     /// Fails fast when the context would enqueue through a different queue than the turn loop
@@ -478,6 +470,64 @@ public final class ServerContext: Sendable {
         ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath), secrets: secrets ?? SecretsManager())
     }
 
+    /// Resolves the fan-out engine sharing the orchestrator and run log.
+    private static func resolveFanOut(
+        _ fanOut: FanOutEngine?,
+        _ orchestrator: Orchestrator,
+        _ runs: RunLogStore,
+        _ hub: WSHub,
+        _ config: FanOutConfig,
+        _ servingLLM: any LLMProvider?
+    ) -> FanOutEngine {
+        fanOut ?? FanOutEngine(
+            orchestrator: orchestrator,
+            runLogs: FanOutRunLogAdapter(runs: runs, hub: hub),
+            config: config,
+            reviewer: servingLLM
+        )
+    }
+
+    /// Scheduler worker collaborators bundled so the resolver stays within the parameter budget.
+    private struct SchedulerWorkerDeps: Sendable {
+        let scheduler: SchedulerStore
+        let runs: RunLogStore
+        let hub: WSHub
+        let runLock: SchedulerRunLock
+        let orchestrator: Orchestrator
+        let conversations: ConversationManager
+        let toolBus: ToolBus
+        let indexCoordinator: IndexCoordinator?
+        let goalStore: GoalStore
+        let goalEngine: GoalEngine
+        let ideasEngine: IdeasEngine?
+        let activeTurns: ActiveTurnTracker
+        let proactiveConfig: ProactiveConfig
+        let servingLLM: any LLMProvider?
+    }
+
+    /// Resolves the scheduler worker sharing the goal stack and turn tracker.
+    private static func resolveSchedulerWorker(
+        _ schedulerWorker: ServerSchedulerWorker?,
+        _ deps: SchedulerWorkerDeps
+    ) -> ServerSchedulerWorker {
+        schedulerWorker ?? ServerSchedulerWorker(
+            scheduler: deps.scheduler,
+            runs: deps.runs,
+            hub: deps.hub,
+            runLock: deps.runLock,
+            orchestrator: deps.orchestrator,
+            conversations: deps.conversations,
+            toolBus: deps.toolBus,
+            indexCoordinator: deps.indexCoordinator,
+            goalStore: deps.goalStore,
+            goalEngine: deps.goalEngine,
+            ideasEngine: deps.ideasEngine,
+            activeTurns: deps.activeTurns,
+            proactiveConfig: deps.proactiveConfig,
+            judgeLLM: deps.servingLLM
+        )
+    }
+
     /// Fans the shared semantic answer cache out to the goal engine, the policy store, and the tool
     /// bus, so goal changes, policy changes, and trusted-tool outcomes all land without a restart.
     private func wireVerifiedPulse(goalEngine: GoalEngine) {
@@ -499,8 +549,26 @@ public final class ServerContext: Sendable {
     /// tool-state toggle is the sole authority for desktop tools.
     public func restoreToolStates(forceReload: Bool = false) async {
         let stored = await toolStates.loadAll(forceReload: forceReload)
+        // Quarantine reflects boot and mutation refreshes; reads use the cached set.
+        let records = await pluginStore.loadAll()
+        let quarantinedIDs = Set(records.filter { $0.status == .tampered }.map(\.id))
+        await toolBus.setQuarantinedPluginIDs(quarantinedIDs)
+        let recordByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
         for (name, enabled) in stored {
             if enabled {
+                if let tool = await toolBus.tool(named: name),
+                   let bridge = tool as? SubprocessToolBridge
+                {
+                    guard let record = recordByID[bridge.pluginID],
+                          record.status == .enabled,
+                          record.integrityHash != nil,
+                          !quarantinedIDs.contains(bridge.pluginID),
+                          await !(toolBus.isQuarantined(pluginID: bridge.pluginID))
+                    else {
+                        await toolBus.disableTool(named: name)
+                        continue
+                    }
+                }
                 await toolBus.enableTool(named: name)
             } else {
                 await toolBus.disableTool(named: name)

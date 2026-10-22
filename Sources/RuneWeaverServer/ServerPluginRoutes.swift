@@ -171,20 +171,28 @@ private func registerMarketplaceRoutes(_ app: Application) {
 
 // MARK: - Helper Functions
 
-private func makePluginSummary(record: PluginRecord, manifest: PluginManifest) -> PluginSummary {
-    // Single mapping keeps list and detail rows identical by construction.
-    let tools = manifest.tools.map { decl -> ToolInfo in
+private func makePluginSummary(record: PluginRecord, manifest: PluginManifest, context: ServerContext) async -> PluginSummary {
+    // Per-tool truth lives on the live bus (same source as GET /tools);
+    // coarse plugin flag would flatten mixed per-tool states to all-or-nothing.
+    var tools: [ToolInfo] = []
+    for decl in manifest.tools {
         let effectiveLevel = record.permissionOverrides[decl.name] ?? decl.permissionLevel.rawValue
-        return ToolInfo(
-            name: decl.name,
-            description: decl.description,
-            permissionLevel: effectiveLevel,
-            inputSchema: decl.inputSchema,
-            isEnabled: record.isEnabled,
-            isBuiltIn: false,
-            pluginID: record.id,
-            source: record.source,
-            integrityStatus: record.status == .tampered ? "tampered" : "valid"
+        var liveEnabled = record.isEnabled
+        if await context.toolBus.tool(named: decl.name) != nil {
+            liveEnabled = await context.toolBus.isToolEnabled(named: decl.name)
+        }
+        tools.append(
+            ToolInfo(
+                name: decl.name,
+                description: decl.description,
+                permissionLevel: effectiveLevel,
+                inputSchema: decl.inputSchema,
+                isEnabled: liveEnabled,
+                isBuiltIn: false,
+                pluginID: record.id,
+                source: record.source,
+                integrityStatus: record.status == .tampered ? "tampered" : "valid"
+            )
         )
     }
     return PluginSummary(
@@ -206,12 +214,13 @@ private func makePluginSummary(record: PluginRecord, manifest: PluginManifest) -
 }
 
 private func fetchPluginsResponse(context: ServerContext) async -> PluginsResponse {
+    // Live bus is the truth on reads; quarantine refreshes at boot and mutations.
     let records = await context.pluginStore.loadAll()
     var summaries: [PluginSummary] = []
 
     for record in records {
         if let manifestInfo = context.pluginDiscovery.findManifest(for: record.id) {
-            summaries.append(makePluginSummary(record: record, manifest: manifestInfo.manifest))
+            await summaries.append(makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context))
         }
     }
 
@@ -225,7 +234,7 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
         return nil
     }
 
-    return makePluginSummary(record: record, manifest: manifestInfo.manifest)
+    return await makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context)
 }
 
 private func getCuratedMarketplaceItems(installedIDs _: Set<String>) -> [MarketplacePluginItem] {

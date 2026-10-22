@@ -196,39 +196,21 @@ public actor WSHub {
 
     /// Broadcasts a run log event (started or completed) to every connected socket.
     public func broadcastRun(_ run: RunLogEntry) async {
-        struct WSRunEvent: Codable {
-            let type: String
-            let run: RunLogEntry
-        }
-        // Only a live `running` turn keeps the session badge lit.
-        let eventType = run.status == "running" ? "run_started" : "run_completed"
-        let text: String
-        do {
-            let data = try JSONEncoder().encode(WSRunEvent(type: eventType, run: run))
-            guard let encodedText = String(data: data, encoding: .utf8) else { return }
-            text = encodedText
-        } catch {
-            RuneWeaverLog.server.error("WSHub: failed to encode run event: \(error.localizedDescription)")
-            return
-        }
+        guard let text = encodeRunEvent(run) else { return }
         await fanOut(text)
+    }
+
+    /// Broadcasts a terminal run event surviving late cancellation.
+    public func broadcastTerminalRun(_ run: RunLogEntry) async {
+        guard let text = encodeRunEvent(run) else { return }
+        await fanOut(text, ignoreCallerCancellation: true)
     }
 
     /// Broadcasts terminal turn settlement (run log entry plus optional cancelled frame)
     /// to all connected viewers even when called from inside a cancelled turn task.
     public func broadcastTerminalCancellation(run: RunLogEntry, frameText: String?) async {
-        struct WSRunEvent: Codable {
-            let type: String
-            let run: RunLogEntry
-        }
-        let eventType = run.status == "running" ? "run_started" : "run_completed"
-        do {
-            let data = try JSONEncoder().encode(WSRunEvent(type: eventType, run: run))
-            if let text = String(data: data, encoding: .utf8) {
-                await fanOut(text, ignoreCallerCancellation: true)
-            }
-        } catch {
-            RuneWeaverLog.server.warning("WSHub: failed to encode terminal cancellation event: \(error.localizedDescription)")
+        if let text = encodeRunEvent(run) {
+            await fanOut(text, ignoreCallerCancellation: true)
         }
         if let frameText {
             await fanOut(frameText, ignoreCallerCancellation: true)
@@ -302,11 +284,36 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts terminal turn frames surviving late cancellation.
+    public func broadcastTerminal(text: String) async {
+        await fanOut(text, ignoreCallerCancellation: true)
+    }
+
     /// Target for fan-out broadcast avoiding large tuples.
     private struct FanOutTarget: Sendable {
         let id: UUID
         let queue: WSSendQueue
         let box: any WSConnectionSocket
+    }
+
+    /// Single owner of run-event encoding so every run path fans out the same wire shape.
+    private struct WSRunEvent: Codable {
+        let type: String
+        let run: RunLogEntry
+    }
+
+    /// Encodes one run event, logging and dropping on failure.
+    private func encodeRunEvent(_ run: RunLogEntry) -> String? {
+        // Only a live `running` turn keeps the session badge lit.
+        let eventType = run.status == "running" ? "run_started" : "run_completed"
+        do {
+            let data = try JSONEncoder().encode(WSRunEvent(type: eventType, run: run))
+            guard let text = String(data: data, encoding: .utf8) else { return nil }
+            return text
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode run event: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Concurrent best-effort fan-out shared by every broadcast path.

@@ -72,7 +72,7 @@ export interface ToolsTabProps {
   setSelectedToolCategory: (val: string) => void;
   togglingCategory: string | null;
   handleToggleCategory: (catId: string, enable: boolean) => Promise<void>;
-  togglingToolName: string | null;
+  togglingToolNames: Set<string>;
   handleToggleTool: (tool: ToolInfo) => Promise<void>;
   onConfigureTool: (key: string) => void;
   pluginsDir: string;
@@ -120,7 +120,7 @@ export function ToolsTab({
   setSelectedToolCategory,
   togglingCategory,
   handleToggleCategory,
-  togglingToolName,
+  togglingToolNames,
   handleToggleTool,
   onConfigureTool,
   pluginsDir,
@@ -283,6 +283,8 @@ export function ToolsTab({
         handleToggleEnable={handleToggleEnable}
         setPendingUninstallPlugin={setPendingUninstallPlugin}
         handlePermissionChange={handlePermissionChange}
+        handleToggleTool={handleToggleTool}
+        togglingToolNames={togglingToolNames}
       />
 
       {/* Built-in Core Tools Section */}
@@ -420,7 +422,7 @@ export function ToolsTab({
 
                 <div className="builtin-tools-grid">
                   {cat.tools.map((tool) => {
-                    const isToggling = togglingToolName === tool.name;
+                    const isToggling = togglingToolNames.has(tool.name);
                     return (
                       <article key={tool.name} className="builtin-tool-card">
                         <div className="builtin-tool-card-header">
