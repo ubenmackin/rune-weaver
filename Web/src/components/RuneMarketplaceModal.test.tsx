@@ -153,6 +153,8 @@ describe("RuneMarketplaceModal", () => {
 
     const installButtons = screen.getAllByRole("button", { name: /Install/i });
     expect(installButtons.length).toBeGreaterThan(0);
+    expect(installButtons[0].className).toContain("primary");
+    expect(installButtons[0].className).not.toContain("btn-primary");
     await user.click(installButtons[0]);
 
     await waitFor(() => {
@@ -218,6 +220,8 @@ describe("RuneMarketplaceModal", () => {
     });
 
     const installButtons = screen.getAllByRole("button", { name: /Install/i });
+    expect(installButtons[0].className).toContain("primary");
+    expect(installButtons[0].className).not.toContain("btn-primary");
     await user.click(installButtons[0]);
 
     await waitFor(() => {

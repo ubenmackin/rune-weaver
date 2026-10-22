@@ -248,7 +248,7 @@ export default function RuneMarketplaceModal({
                   ) : (
                     <button
                       type="button"
-                      className="btn btn-primary"
+                      className="primary"
                       onClick={() => handleInstall(item)}
                       disabled={installingId === item.id}
                       style={{ padding: "6px 14px" }}
