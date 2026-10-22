@@ -116,11 +116,21 @@ public struct FilesVectorPolicy: Sendable, Equatable {
     /// indexed into FTS5 keyword search directly without spending `llama-server` vector passes.
     public static let keywordOnlyExtensions: Set<String> = [
         "json", "jsonl", "yaml", "yml", "toml", "xml", "plist",
-        "csv", "tsv", "lock", "ini", "cfg", "conf", "env", "log"
+        "csv", "tsv", "lock", "ini", "cfg", "conf", "env", "log",
+        "map", "wasm"
+    ]
+
+    /// Suffixes identifying minified or bundled web assets routed to keyword-only search.
+    private static let minifiedSuffixes = [
+        ".min.js", ".min.css", ".bundle.js", ".chunk.js"
     ]
 
     /// Reports whether a filename belongs to the structured keyword-only fast lane.
     public static func isKeywordOnlyFile(fileName: String) -> Bool {
+        let lower = fileName.lowercased()
+        if minifiedSuffixes.contains(where: { lower.hasSuffix($0) }) {
+            return true
+        }
         let ext = (fileName as NSString).pathExtension.lowercased()
         guard !ext.isEmpty else { return false }
         return keywordOnlyExtensions.contains(ext)

@@ -4,14 +4,21 @@ import Foundation
 
 extension FilesIndexer {
     /// Maximum number of extracted candidates accumulated before flushing a batch commit.
-    static let maxStagedCandidatesPerBatch = 32
+    static let maxStagedCandidatesPerBatch = 64
 
     /// Maximum number of text chunks sent in a single `/v1/embeddings` request.
     static let maxEmbeddingChunksPerRequest = 32
 
     /// Maximum UTF-8 bytes sent in a single `/v1/embeddings` request (~3,000–3,500 tokens),
-    /// keeping every request comfortably below `llama-server`'s 8,192-token context/ubatch window.
+    /// keeping every request comfortably below `llama-server`'s slot context window.
     static let maxEmbeddingSubBatchBytes = 12000
+
+    /// Maximum number of pending prompt chunks accumulated before triggering a parallel batch flush.
+    /// With 4 parallel slots and 32 chunks per sub-batch, 128 prompts saturates all 4 slots.
+    static let maxStagedPromptsPerBatch = 128
+
+    /// Maximum number of parallel embedding sub-batch requests dispatched concurrently.
+    static let maxConcurrentEmbeddingRequests = 4
 
     /// Maximum number of unchanged file paths accumulated before a `markSeenBatch` SQLite transaction.
     static let maxPendingSeenBatchSize = 256
@@ -386,8 +393,8 @@ extension FilesIndexer {
                 total + item.pendingPromptTexts.reduce(0) { $0 + $1.utf8.count }
             }
             if batchState.stagedBatch.count >= batchLimit
-                || pendingPrompts >= Self.maxEmbeddingChunksPerRequest
-                || pendingPromptBytes >= Self.maxEmbeddingSubBatchBytes
+                || pendingPrompts >= Self.maxStagedPromptsPerBatch
+                || pendingPromptBytes >= (Self.maxEmbeddingSubBatchBytes * Self.maxConcurrentEmbeddingRequests)
             {
                 await flushStagedBatch(
                     &batchState.stagedBatch,
@@ -779,8 +786,6 @@ extension FilesIndexer {
         }
         guard !flatTexts.isEmpty else { return [:] }
 
-        var allVectors: [[Float]] = []
-        allVectors.reserveCapacity(flatTexts.count)
         var expectedDim: Int?
         if let embeddingsPool {
             expectedDim = try? await embeddingsPool.withBackend { await $0.dimension }
@@ -788,34 +793,25 @@ extension FilesIndexer {
             expectedDim = await embedder.dimension
         }
 
+        var subBatchRanges: [Range<Int>] = []
         var offset = 0
         while offset < flatTexts.count {
-            if isCancelled || cancelBox.isSet || Task.isCancelled {
-                return [:]
-            }
             let end = Self.nextEmbeddingSubBatchEnd(in: flatTexts, from: offset)
-            let subBatch = Array(flatTexts[offset ..< end])
-            if let validated = await embedSingleSubBatch(subBatch, expectedDimension: expectedDim) {
-                allVectors.append(contentsOf: validated)
-            } else if isCancelled || cancelBox.isSet || Task.isCancelled {
-                return [:]
-            } else if subBatch.count > 1 {
-                for singleText in subBatch {
-                    if isCancelled || cancelBox.isSet || Task.isCancelled {
-                        return [:]
-                    }
-                    if let singleVec = await embedSingleSubBatch([singleText], expectedDimension: expectedDim),
-                       let first = singleVec.first
-                    {
-                        allVectors.append(first)
-                    } else {
-                        allVectors.append([])
-                    }
-                }
-            } else {
-                allVectors.append([])
-            }
+            subBatchRanges.append(offset ..< end)
             offset = end
+        }
+
+        let allVectors = await Self.embedSubBatchesConcurrently(
+            flatTexts: flatTexts,
+            subBatchRanges: subBatchRanges,
+            embeddingsPool: embeddingsPool,
+            embedder: embedder,
+            cancelBox: cancelBox,
+            expectedDimension: expectedDim
+        )
+
+        if isCancelled || cancelBox.isSet || Task.isCancelled {
+            return [:]
         }
 
         var result: [Int: [[Float]]] = [:]
@@ -827,8 +823,116 @@ extension FilesIndexer {
         return result
     }
 
+    /// Concurrently embeds partitioned sub-batches across available slots.
+    private static func embedSubBatchesConcurrently(
+        flatTexts: [String],
+        subBatchRanges: [Range<Int>],
+        embeddingsPool: EmbeddingsBackendPool?,
+        embedder: any EmbeddingsBackend?,
+        cancelBox: IndexCancellationFlag,
+        expectedDimension: Int?
+    ) async -> [[Float]] {
+        var allVectors: [[Float]] = Array(repeating: [], count: flatTexts.count)
+        let pool = embeddingsPool
+        let singleEmbedder = embedder
+        let flag = cancelBox
+        let dim = expectedDimension
+        let concurrencyLimit = Self.maxConcurrentEmbeddingRequests
+
+        await withTaskGroup(of: (Range<Int>, [[Float]]).self) { group in
+            var subBatchIndex = 0
+            var inFlight = 0
+            while subBatchIndex < subBatchRanges.count {
+                if flag.isSet || Task.isCancelled {
+                    break
+                }
+                if inFlight >= concurrencyLimit {
+                    if let (range, vectors) = await group.next() {
+                        inFlight -= 1
+                        for (idx, vec) in zip(range, vectors) {
+                            allVectors[idx] = vec
+                        }
+                    } else {
+                        break
+                    }
+                }
+                let range = subBatchRanges[subBatchIndex]
+                subBatchIndex += 1
+                let subBatch = Array(flatTexts[range])
+                inFlight += 1
+                group.addTask {
+                    let vectors = await Self.embedSubBatchWithFallback(
+                        subBatch,
+                        embeddingsPool: pool,
+                        embedder: singleEmbedder,
+                        cancelBox: flag,
+                        expectedDimension: dim
+                    )
+                    return (range, vectors)
+                }
+            }
+            while let (range, vectors) = await group.next() {
+                for (idx, vec) in zip(range, vectors) {
+                    allVectors[idx] = vec
+                }
+            }
+        }
+        return allVectors
+    }
+
+    /// Embeds a single sub-batch, falling back to per-chunk embedding if the multi-chunk request fails.
+    private static func embedSubBatchWithFallback(
+        _ subBatch: [String],
+        embeddingsPool: EmbeddingsBackendPool?,
+        embedder: any EmbeddingsBackend?,
+        cancelBox: IndexCancellationFlag,
+        expectedDimension: Int?
+    ) async -> [[Float]] {
+        if let validated = await embedSingleSubBatch(
+            subBatch,
+            embeddingsPool: embeddingsPool,
+            embedder: embedder,
+            cancelBox: cancelBox,
+            expectedDimension: expectedDimension
+        ) {
+            return validated
+        }
+        if cancelBox.isSet || Task.isCancelled {
+            return Array(repeating: [], count: subBatch.count)
+        }
+        if subBatch.count > 1 {
+            var singleVectors: [[Float]] = []
+            singleVectors.reserveCapacity(subBatch.count)
+            for singleText in subBatch {
+                if cancelBox.isSet || Task.isCancelled {
+                    singleVectors.append([])
+                    continue
+                }
+                if let singleVec = await embedSingleSubBatch(
+                    [singleText],
+                    embeddingsPool: embeddingsPool,
+                    embedder: embedder,
+                    cancelBox: cancelBox,
+                    expectedDimension: expectedDimension
+                ), let first = singleVec.first {
+                    singleVectors.append(first)
+                } else {
+                    singleVectors.append([])
+                }
+            }
+            return singleVectors
+        }
+        return Array(repeating: [], count: subBatch.count)
+    }
+
     /// Invokes the embeddings pool or backend for a single sub-batch of texts.
-    private func embedSingleSubBatch(_ subBatch: [String], expectedDimension: Int?) async -> [[Float]]? {
+    private static func embedSingleSubBatch(
+        _ subBatch: [String],
+        embeddingsPool: EmbeddingsBackendPool?,
+        embedder: any EmbeddingsBackend?,
+        cancelBox: IndexCancellationFlag,
+        expectedDimension: Int?
+    ) async -> [[Float]]? {
         do {
             let rawVectors: [[Float]]
             if let embeddingsPool {
@@ -840,13 +944,12 @@ extension FilesIndexer {
             } else {
                 return nil
             }
-            return Self.validatedEmbedVectors(
+            return validatedEmbedVectors(
                 rawVectors,
                 expectedCount: subBatch.count,
                 expectedDimension: expectedDimension
             )
         } catch is CancellationError {
-            isCancelled = true
             cancelBox.set()
             return nil
         } catch {

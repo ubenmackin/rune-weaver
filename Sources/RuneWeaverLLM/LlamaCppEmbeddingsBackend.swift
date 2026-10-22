@@ -11,25 +11,25 @@ import RuneWeaverCore
 #endif
 
 /// Embeddings backend running Google DeepMind's EmbeddingGemma 2 locally via `llama-server`.
-public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
+public final class LlamaCppEmbeddingsBackend: EmbeddingsBackend, @unchecked Sendable {
     /// Stable model identifier reported to stores and diagnostics.
-    public nonisolated let modelID: String = "embeddinggemma-2"
+    public let modelID: String = "embeddinggemma-2"
 
     /// Dimension of the EmbeddingGemma 2 model (768-dim).
-    public nonisolated let dimension: Int? = 768
+    public let dimension: Int? = 768
 
     /// UNIX domain socket path, or nil if using TCP.
-    public nonisolated let socketPath: String?
+    public let socketPath: String?
     /// HTTP endpoint URL if using TCP/HTTP directly.
-    public nonisolated let httpURL: URL?
+    public let httpURL: URL?
     /// Optional supervisor managing the server lifecycle.
-    public nonisolated let supervisor: LlamaEmbeddingSupervisor?
+    public let supervisor: LlamaEmbeddingSupervisor?
 
     /// Default maximum image file size accepted for visual embedding (30 MB).
     public static let defaultMaxImageBytes = 30 * 1024 * 1024
 
     /// Maximum image file size accepted for visual embedding in bytes.
-    public nonisolated let maxImageBytes: Int
+    public let maxImageBytes: Int
 
     /// Injected vector embedder for deterministic unit testing.
     private let customEmbedder: (@Sendable ([String]) async throws -> [[Float]])?
@@ -224,7 +224,7 @@ public actor LlamaCppEmbeddingsBackend: EmbeddingsBackend {
     }
 
     /// Extracts a dimension-matching embedding vector from OpenAI-compatible or native responses.
-    nonisolated func parseEmbeddingVector(from responseData: Data, expectedDim: Int) -> [Float]? {
+    func parseEmbeddingVector(from responseData: Data, expectedDim: Int) -> [Float]? {
         if let parsed = try? JSONDecoder().decode(EmbeddingResponsePayload.self, from: responseData),
            let vector = parsed.data.first?.embedding, vector.count == expectedDim
         {

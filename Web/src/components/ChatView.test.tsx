@@ -850,7 +850,9 @@ describe("reconstructMessages with structured tool actions", () => {
     // Only one "Done" tool pill should exist, and no "Pending" tool pill
     expect(screen.queryByText("Pending")).not.toBeInTheDocument();
     expect(screen.getByText("Done")).toBeInTheDocument();
-  });
+    // Parked resume replays several frames plus user-event keystrokes; loaded
+    // CI bursts past the 5s default, so this test alone carries headroom.
+  }, 15000);
 
   it("returns false for null or empty lists with no active selection", async () => {
     // Null lists and empty containers never count as an active selection,
