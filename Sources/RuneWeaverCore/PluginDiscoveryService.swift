@@ -313,8 +313,19 @@ extension PluginDiscoveryService {
         // Enable is an explicit operator action with bounded timeouts, the documented egress exception.
         try validatePinnedRequirements(at: reqURL)
 
+        // Fresh enables converge on the pinned runtime before venv creation.
+        let provisioner = PythonProvisioner()
+        do {
+            _ = try await provisioner.ensureProvisioned()
+        } catch {
+            throw PluginDiscoveryError.provisioningFailed(
+                "Failed to provision Python 3.12 runtime at \(provisioner.destinationInterpreterURL.path) (unknown): \(error.localizedDescription)"
+            )
+        }
+
         RuneWeaverLog.tools.info("PluginDiscoveryService: provisioning .venv for \(directory.lastPathComponent)...")
         let python = resolveProvisioningInterpreter()
+        let version = await provisioningInterpreterVersion(for: python)
         do {
             let venvResult = try await BoundedProcessRunner.runAsync(
                 executableURL: python,
@@ -325,13 +336,16 @@ extension PluginDiscoveryService {
             )
             guard venvResult.exitCode == 0 else {
                 throw PluginDiscoveryError.provisioningFailed(
-                    "Failed to create Python virtual environment at \(directory.path) (code \(venvResult.exitCode)): \(venvResult.stderrString)"
+                    "Failed to create Python virtual environment at \(directory.path) using interpreter "
+                        + "\(python.path) (\(version)) (code \(venvResult.exitCode)): \(venvResult.stderrString)"
                 )
             }
         } catch let error as PluginDiscoveryError {
             throw error
         } catch {
-            throw PluginDiscoveryError.provisioningFailed("Failed to create Python virtual environment at \(directory.path): \(error.localizedDescription)")
+            throw PluginDiscoveryError.provisioningFailed(
+                "Failed to create Python virtual environment at \(directory.path) using interpreter \(python.path) (\(version)): \(error.localizedDescription)"
+            )
         }
 
         do {
@@ -343,16 +357,39 @@ extension PluginDiscoveryService {
                 maxErrorBytes: 64 * 1024
             )
             guard pipResult.exitCode == 0 else {
+                // Partial installs must not masquerade as ready venvs.
+                try? fileManager.removeItem(at: venvDir)
                 throw PluginDiscoveryError.provisioningFailed(
-                    "Failed to install requirements.txt for \(directory.lastPathComponent) (code \(pipResult.exitCode)): \(pipResult.stderrString)"
+                    "Failed to install requirements.txt for \(directory.lastPathComponent) using interpreter "
+                        + "\(python.path) (\(version)) (code \(pipResult.exitCode)): \(pipResult.stderrString)"
                 )
             }
         } catch let error as PluginDiscoveryError {
             throw error
         } catch {
+            // Failed installs leave no partial venv behind.
+            try? fileManager.removeItem(at: venvDir)
             throw PluginDiscoveryError.provisioningFailed(
-                "Failed to install requirements.txt for \(directory.lastPathComponent): \(error.localizedDescription)"
+                "Failed to install requirements.txt for \(directory.lastPathComponent) using interpreter "
+                    + "\(python.path) (\(version)): \(error.localizedDescription)"
             )
+        }
+    }
+
+    private func provisioningInterpreterVersion(for python: URL) async -> String {
+        // --version may report on either stream, so both are combined.
+        do {
+            let result = try await BoundedProcessRunner.runAsync(
+                executableURL: python,
+                arguments: ["--version"],
+                timeoutSeconds: 10,
+                maxOutputBytes: 4 * 1024,
+                maxErrorBytes: 4 * 1024
+            )
+            let combined = "\(result.stdoutString) \(result.stderrString)".trimmingCharacters(in: .whitespacesAndNewlines)
+            return combined.isEmpty ? "unknown" : combined
+        } catch {
+            return "unknown"
         }
     }
 
@@ -360,6 +397,11 @@ extension PluginDiscoveryService {
         // Env override first so operators pin the interpreter without editing code.
         if let override = ProcessInfo.processInfo.environment["RUNEWEAVER_PYTHON_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
             return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        }
+        // Provisioned 3.12 next so fresh enables use the pinned runtime.
+        let provisioned = PythonProvisioner().destinationInterpreterURL
+        if FileManager.default.fileExists(atPath: provisioned.path) {
+            return provisioned
         }
         for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] where FileManager.default.fileExists(atPath: candidate) {
             return URL(fileURLWithPath: candidate)
