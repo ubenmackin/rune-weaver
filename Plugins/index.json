@@ -7,7 +7,7 @@
       "version": "1.0.0",
       "author": "Rune Weaver Community",
       "description": "Query accounts, balances, transactions, budgets, cashflow, and holdings, or update transactions and budgets via Monarch Money.",
-      "downloadURL": "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/Plugins/community.monarch-money/rune.json",
+      "downloadURL": "https://raw.githubusercontent.com/ubenmackin/rune-weaver/main/Plugins/community.monarch-money/rune.json",
       "tags": [
         "finance",
         "budgeting",
