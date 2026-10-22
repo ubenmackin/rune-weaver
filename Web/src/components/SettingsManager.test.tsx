@@ -540,7 +540,10 @@ describe("SettingsManager", () => {
       screen.getByPlaceholderText(/Search runes by name/i)
     ).toBeDefined();
     expect(within(screen.getByRole("dialog", { name: /Rune Marketplace/i })).getByRole("button", { name: /^Refresh$/i })).toBeDefined();
-    expect(screen.getByRole("button", { name: /^Install$/i })).toBeDefined();
+    const marketplaceInstallButton = screen.getByRole("button", { name: /^Install$/i });
+    expect(marketplaceInstallButton).toBeDefined();
+    expect(marketplaceInstallButton.className).toContain("primary");
+    expect(marketplaceInstallButton.className).not.toContain("btn-primary");
     expect(screen.getByText(/^Installed$/i)).toBeDefined();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/marketplace/plugins"))).toBe(
       true

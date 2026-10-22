@@ -228,57 +228,9 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
     return makePluginSummary(record: record, manifest: manifestInfo.manifest)
 }
 
-private func getCuratedMarketplaceItems(installedIDs: Set<String>) -> [MarketplacePluginItem] {
-    [
-        MarketplacePluginItem(
-            id: "community.playwright-browser",
-            name: "Playwright Web Browser",
-            version: "1.0.0",
-            author: "Rune Weaver Team",
-            description: "Automate web browsing, webpage reading, and screenshot capture in a sandboxed browser.",
-            downloadURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/plugins/playwright-browser.json",
-            tags: ["web", "automation", "browser"],
-            runtime: "python",
-            declaredTools: ["browser.navigate", "browser.read_page", "browser.screenshot"],
-            isInstalled: installedIDs.contains("community.playwright-browser")
-        ),
-        MarketplacePluginItem(
-            id: "community.homeassistant-control",
-            name: "Home Assistant Controller",
-            version: "1.1.0",
-            author: "Community",
-            description: "Query and control smart lights, switches, and climate thermostats via Home Assistant REST API.",
-            downloadURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/plugins/homeassistant.json",
-            tags: ["home", "iot", "automation"],
-            runtime: "python",
-            declaredTools: ["home.get_state", "home.call_service"],
-            isInstalled: installedIDs.contains("community.homeassistant-control")
-        ),
-        MarketplacePluginItem(
-            id: "community.github-explorer",
-            name: "GitHub Repository Explorer",
-            version: "1.0.2",
-            author: "OpenSource",
-            description: "Search repositories, list pull requests, and query issues using GitHub Personal Access Tokens.",
-            downloadURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/plugins/github.json",
-            tags: ["developer", "github", "git"],
-            runtime: "python",
-            declaredTools: ["github.search_repos", "github.list_issues"],
-            isInstalled: installedIDs.contains("community.github-explorer")
-        ),
-        MarketplacePluginItem(
-            id: "community.clock-timer",
-            name: "World Clock & Timer",
-            version: "1.0.0",
-            author: "Rune Weaver Team",
-            description: "Current time queries across world timezones and relative interval countdowns.",
-            downloadURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/plugins/clock.json",
-            tags: ["utility", "clock", "time"],
-            runtime: "python",
-            declaredTools: ["clock.current_time", "clock.convert_timezone"],
-            isInstalled: installedIDs.contains("community.clock-timer")
-        )
-    ]
+private func getCuratedMarketplaceItems(installedIDs _: Set<String>) -> [MarketplacePluginItem] {
+    // Catalog mirrors the remote index, so the curated set stays empty.
+    []
 }
 
 private func handlePluginStateUpdate(
