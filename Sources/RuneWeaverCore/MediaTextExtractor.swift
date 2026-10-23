@@ -268,6 +268,21 @@ public struct MediaTextExtractor: Sendable {
         #endif
     }
 
+    /// Checks whether a local media file contains at least one playable audio track.
+    /// - Parameter fileURL: Local URL to inspect.
+    /// - Returns: `true` when at least one `.audio` track can be loaded by `AVFoundation`.
+    public static func hasAudioTrack(fileURL: URL) async -> Bool {
+        #if canImport(AVFoundation)
+            let asset = AVURLAsset(url: fileURL)
+            guard let tracks = try? await asset.loadTracks(withMediaType: .audio) else {
+                return false
+            }
+            return !tracks.isEmpty
+        #else
+            return false
+        #endif
+    }
+
     /// Transcribes speech from an audio or video file URL using Apple Speech.framework.
     public static func transcribeAudio(fileURL: URL) async throws -> String {
         if let custom = customAudioTranscription {
@@ -275,17 +290,15 @@ public struct MediaTextExtractor: Sendable {
         }
 
         #if canImport(Speech)
-            guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
-                return ""
-            }
             try Task.checkCancellation()
 
             let ext = fileURL.pathExtension.lowercased()
             var targetURL = fileURL
             var cleanupURL: URL?
-            if supportedVideoExtensions.contains(ext),
-               let extracted = await extractAudioTrack(from: fileURL)
-            {
+            if supportedVideoExtensions.contains(ext) {
+                guard let extracted = await extractAudioTrack(from: fileURL) else {
+                    return ""
+                }
                 targetURL = extracted
                 cleanupURL = extracted
             }
@@ -295,6 +308,12 @@ public struct MediaTextExtractor: Sendable {
                 }
             }
             try Task.checkCancellation()
+
+            // Guard against 0-track audio/container files before passing to SFSpeechURLRecognitionRequest,
+            // which otherwise throws an uncaught Objective-C NSInvalidArgumentException in AVAssetReaderAudioMixOutput.
+            guard await hasAudioTrack(fileURL: targetURL), SFSpeechRecognizer.authorizationStatus() == .authorized else {
+                return ""
+            }
 
             let coordinator = AudioTranscriptionCoordinator()
             return try await withTaskCancellationHandler {

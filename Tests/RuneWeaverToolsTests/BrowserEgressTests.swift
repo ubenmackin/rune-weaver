@@ -652,6 +652,13 @@ struct BrowserEgressTests {
         // would leave the profile locked after an early return or failure.
         #expect(BrowserPlaywrightScript.source.contains("finally:"))
         #expect(BrowserPlaywrightScript.source.contains("context.close()"))
+        #expect(BrowserPlaywrightScript.source.contains("storage_state.json"))
+        #expect(BrowserPlaywrightScript.source.contains("save_storage_state"))
+        #expect(BrowserPlaywrightScript.source.contains("restore_storage_state"))
+        #expect(BrowserPlaywrightScript.source.contains("ctx.add_cookies(cookies)"))
+        #expect(BrowserPlaywrightScript.source.contains("--disable-blink-features=AutomationControlled"))
+        #expect(BrowserPlaywrightScript.source.contains("host_and_path = ((parsed_url.hostname or \"\") + (parsed_url.path or \"\")).lower()"))
+        #expect(BrowserPlaywrightScript.source.contains("/errors/validateCaptcha"))
     }
 
     @Test

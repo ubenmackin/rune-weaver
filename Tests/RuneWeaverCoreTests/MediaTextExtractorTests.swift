@@ -117,4 +117,27 @@ struct MediaTextExtractorTests {
             #expect(result.text.contains("Is that Daddy?"))
         }
     }
+
+    @Test
+    func `MediaTextExtractor safely rejects silent videos and trackless audio files without crashing`() async throws {
+        let silentVideoURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silent-video-\(UUID().uuidString).mp4")
+        let tracklessAudioURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trackless-audio-\(UUID().uuidString).m4a")
+        try Data("not-a-valid-audio-track".utf8).write(to: silentVideoURL)
+        try Data("not-a-valid-audio-track".utf8).write(to: tracklessAudioURL)
+        defer {
+            try? FileManager.default.removeItem(at: silentVideoURL)
+            try? FileManager.default.removeItem(at: tracklessAudioURL)
+        }
+
+        #expect(await MediaTextExtractor.extractAudioTrack(from: silentVideoURL) == nil)
+        #expect(await !MediaTextExtractor.hasAudioTrack(fileURL: silentVideoURL))
+        #expect(await !MediaTextExtractor.hasAudioTrack(fileURL: tracklessAudioURL))
+
+        let videoTranscription = try await MediaTextExtractor.transcribeAudio(fileURL: silentVideoURL)
+        let audioTranscription = try await MediaTextExtractor.transcribeAudio(fileURL: tracklessAudioURL)
+        #expect(videoTranscription.isEmpty)
+        #expect(audioTranscription.isEmpty)
+    }
 }

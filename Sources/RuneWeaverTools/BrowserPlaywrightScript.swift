@@ -176,9 +176,11 @@ enum BrowserPlaywrightScriptBody: Sendable {
         if is_auth_wall(page):
             return True
         try:
-            url_lower = (page.url or "").lower()
-            auth_terms = ("login", "signin", "sign-in", "auth", "challenge", "captcha", "waf")
-            if any(k in url_lower for k in auth_terms):
+            import urllib.parse as _urlparse
+            parsed_url = _urlparse.urlparse(page.url or "")
+            host_and_path = ((parsed_url.hostname or "") + (parsed_url.path or "")).lower()
+            auth_terms = ("login", "signin", "sign-in", "auth", "challenge", "captcha", "waf", "ap/cvf")
+            if any(k in host_and_path for k in auth_terms):
                 return True
         except Exception:
             pass
@@ -198,6 +200,8 @@ enum BrowserPlaywrightScriptBody: Sendable {
                     document.querySelector('#challenge-stage') ||
                     document.querySelector('.cf-turnstile') ||
                     document.querySelector('#cf-wrapper') ||
+                    document.querySelector('form[action*="/errors/validateCaptcha"]') ||
+                    document.querySelector('input[name="amzn"]') ||
                     document.title.toLowerCase().includes('robot check') ||
                     document.title.toLowerCase().includes('just a moment') ||
                     document.title.toLowerCase().includes('captcha')
@@ -383,6 +387,23 @@ enum BrowserPlaywrightScriptTail: Sendable {
         try:
             profile_dir = os.path.expanduser("~/.runeweaver/browser_profiles/default")
             os.makedirs(profile_dir, exist_ok=True)
+            storage_state_path = os.path.join(profile_dir, "storage_state.json")
+            def save_storage_state(ctx):
+                try:
+                    if ctx.pages and not all(p.is_closed() for p in ctx.pages):
+                        ctx.storage_state(path=storage_state_path)
+                except Exception:
+                    pass
+            def restore_storage_state(ctx):
+                try:
+                    if os.path.isfile(storage_state_path):
+                        with open(storage_state_path, "r", encoding="utf-8") as f:
+                            state = json.load(f)
+                        cookies = state.get("cookies") if isinstance(state, dict) else None
+                        if isinstance(cookies, list) and cookies:
+                            ctx.add_cookies(cookies)
+                except Exception:
+                    pass
             is_headed = bool(req.get("headed") or req.get("interactive")) if op == "navigate" else False
             with sync_playwright() as pw:
                 try:
@@ -392,14 +413,17 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     # enforces the 500KB bound before Swift's fail-closed check.
                     vw = \#(BrowserScreenshotPolicy.captureViewportWidth)
                     vh = \#(BrowserScreenshotPolicy.captureViewportHeight)
-                    launch_args = ["--disable-notifications"]
+                    launch_args = ["--disable-notifications", "--disable-blink-features=AutomationControlled"]
+                    default_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
                     context = pw.chromium.launch_persistent_context(
                         user_data_dir=profile_dir,
                         headless=not is_headed,
                         accept_downloads=False,
                         args=launch_args,
+                        user_agent=default_ua,
                         viewport={"width": vw, "height": vh} if want_screenshot else None,
                         device_scale_factor=1 if want_screenshot else None)
+                    restore_storage_state(context)
                     page = context.pages[0] if context.pages else context.new_page()
                     if is_headed and sys.platform == "darwin":
                         try:
@@ -422,6 +446,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
                             active = context.pages[-1] if context.pages else page
                             if not context.pages or (active and active.is_closed()):
                                 break
+                            save_storage_state(context)
                             current_in_auth = is_challenge_or_auth(active)
                             if current_in_auth:
                                 was_in_auth_or_challenge = True
@@ -430,9 +455,11 @@ enum BrowserPlaywrightScriptTail: Sendable {
                                     active.wait_for_load_state("domcontentloaded", timeout=4000)
                                 except Exception:
                                     pass
+                                save_storage_state(context)
                                 page = active
                                 break
                             elif not was_in_auth_or_challenge and (time.time() - start_wait > 15.0):
+                                save_storage_state(context)
                                 page = active
                                 break
                             try:
@@ -455,6 +482,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         refs = collect_refs(target_page) if not target_page.is_closed() else []
                         chain = redirect_chain_for(goto_response, url, final_url)
                         shot = capture_screenshot(target_page) if want_screenshot and not target_page.is_closed() else ""
+                        save_storage_state(context)
                         sys.stdout.write(json.dumps({
                             "ok": True,
                             "url": final_url,
@@ -502,6 +530,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     if landed_after_reason:
                         fail(landed_after_reason)
                         return
+                    save_storage_state(context)
                     sys.stdout.write(json.dumps({
                         "ok": True,
                         "url": page.url or url,
@@ -511,6 +540,10 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     }))
                     sys.stdout.flush()
                 finally:
+                    try:
+                        save_storage_state(context)
+                    except Exception:
+                        pass
                     try:
                         context.close()
                     except Exception:

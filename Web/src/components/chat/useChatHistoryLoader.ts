@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
 import {
   ApiError,
+  compareToolActionsByRound,
   getLiveTurn,
   getSession,
   getSessionToolActions,
@@ -12,6 +13,7 @@ import {
   parseRunTimestamp,
   toNonNegativeInt,
   type ChatSegment,
+  type ToolAction,
 } from "../../api";
 import { normalizeSessionID } from "../../approvalsSession";
 import type { FrozenRunLogEntry } from "../../hooks/useRunningRuns";
@@ -24,6 +26,8 @@ import {
   persistInputHistory,
 } from "./chatHistoryRecall";
 import {
+  deduplicateToolActionsByCallID,
+  flatTextFromSegments,
   messagesUpToLastUser,
   normalizeCompletedAtMs,
   reconstructMessages,
@@ -32,10 +36,191 @@ import {
 } from "./chatTimeline";
 import {
   PARKED_SETTLE_GRACE_MS,
+  WAITING_PREFIX,
   type InFlightTurn,
   type MessageItem,
   type ParkedFlight,
 } from "./chatTypes";
+
+// Merges GET /sessions/:id/live-turn into inFlightTurn, preserving any earlier or already-streamed
+// segments and prepending pre-refresh tool batches in round order.
+export function mergeLiveSnapshotIntoInFlightTurn(
+  current: InFlightTurn | null,
+  live: {
+    reasoning?: string;
+    toolActions?: ToolAction[];
+    text?: string;
+  },
+): InFlightTurn {
+  const base: InFlightTurn = current ?? {
+    toolActions: [],
+    text: "",
+    held: "",
+    segments: [],
+  };
+  const currentHasData =
+    base.text.length > 0 ||
+    base.toolActions.length > 0 ||
+    base.segments.length > 0;
+
+  if (!currentHasData) {
+    const newSegments: ChatSegment[] = [];
+    if (live.reasoning && live.reasoning.trim().length > 0) {
+      newSegments.push({ kind: "thought", text: live.reasoning });
+    }
+    if (live.toolActions && live.toolActions.length > 0) {
+      const groups = groupToolActionsByRound(
+        deduplicateToolActionsByCallID(live.toolActions),
+      );
+      for (const group of groups) {
+        newSegments.push({ kind: "tools", actions: group });
+      }
+    }
+    if (live.text && live.text.trim().length > 0) {
+      newSegments.push({ kind: "text", text: live.text });
+    }
+    return {
+      toolActions: deduplicateToolActionsByCallID(live.toolActions ?? []),
+      text: live.text ?? "",
+      held: base.held ?? "",
+      segments: newSegments,
+    };
+  }
+
+  let nextSegments = [...base.segments];
+  let nextActions = [...base.toolActions];
+  let nextText = base.text;
+
+  if (
+    live.reasoning &&
+    live.reasoning.trim().length > 0 &&
+    !nextSegments.some((s) => s.kind === "thought")
+  ) {
+    nextSegments = [
+      { kind: "thought" as const, text: live.reasoning },
+      ...nextSegments,
+    ];
+  }
+
+  if (live.toolActions && live.toolActions.length > 0) {
+    const liveDeduped = deduplicateToolActionsByCallID(live.toolActions);
+    const liveByCallID = new Map<string, ToolAction>();
+    for (const a of liveDeduped) {
+      if (a.callID) liveByCallID.set(a.callID, a);
+    }
+    const existingIDs = new Set(nextActions.map((a) => a.callID));
+    nextActions = nextActions.map((a) => {
+      const match = a.callID ? liveByCallID.get(a.callID) : undefined;
+      return match && a.result == null && match.result != null
+        ? { ...a, ...match }
+        : a;
+    });
+    nextSegments = nextSegments.map((seg) => {
+      if (seg.kind !== "tools") return seg;
+      return {
+        kind: "tools" as const,
+        actions: seg.actions.map((a) => {
+          const match = a.callID ? liveByCallID.get(a.callID) : undefined;
+          return match && a.result == null && match.result != null
+            ? { ...a, ...match }
+            : a;
+        }),
+      };
+    });
+
+    const missing = liveDeduped.filter(
+      (a) => a.callID && !existingIDs.has(a.callID),
+    );
+    if (missing.length > 0) {
+      nextActions = deduplicateToolActionsByCallID([
+        ...missing,
+        ...nextActions,
+      ]).sort(compareToolActionsByRound);
+      const groups = groupToolActionsByRound(
+        [...missing].sort(compareToolActionsByRound),
+      );
+      const insertIdx = nextSegments[0]?.kind === "thought" ? 1 : 0;
+      nextSegments.splice(
+        insertIdx,
+        0,
+        ...groups.map((actions) => ({ kind: "tools" as const, actions })),
+      );
+    }
+  }
+
+  if (
+    nextText.trim().length === 0 &&
+    live.text &&
+    live.text.trim().length > 0
+  ) {
+    nextText = live.text;
+    if (!nextSegments.some((s) => s.kind === "text")) {
+      nextSegments.push({ kind: "text", text: live.text });
+    }
+  }
+
+  return {
+    ...base,
+    toolActions: nextActions,
+    text: nextText,
+    segments: nextSegments,
+  };
+}
+
+// Merges already-persisted current-turn rounds (loaded from GET /sessions/:id + tool-actions)
+// into inFlightTurn so mid-turn page refreshes display completed rounds immediately.
+export function mergePersistedMessagesIntoInFlightTurn(
+  current: InFlightTurn | null,
+  persistedMessages: MessageItem[],
+): InFlightTurn {
+  const persistedSegments: ChatSegment[] = [];
+  const persistedActions: ToolAction[] = [];
+  for (const m of persistedMessages) {
+    if (m.role !== "assistant") continue;
+    if (m.segments && m.segments.length > 0) {
+      for (const seg of m.segments) {
+        if (seg.kind === "text" && seg.text.trim().startsWith(WAITING_PREFIX)) {
+          continue;
+        }
+        persistedSegments.push(seg);
+      }
+    } else if (
+      m.text.trim().length > 0 &&
+      !m.text.trim().startsWith(WAITING_PREFIX)
+    ) {
+      persistedSegments.push({ kind: "text", text: m.text });
+    }
+    if (m.toolActions) {
+      persistedActions.push(...m.toolActions);
+    }
+  }
+  const base: InFlightTurn = current ?? {
+    toolActions: [],
+    text: "",
+    held: "",
+    segments: [],
+  };
+  if (persistedSegments.length === 0 && persistedActions.length === 0) {
+    return base;
+  }
+  const currentHasData =
+    base.text.length > 0 ||
+    base.toolActions.length > 0 ||
+    base.segments.length > 0;
+  if (!currentHasData) {
+    const deduped = deduplicateToolActionsByCallID(persistedActions);
+    return {
+      toolActions: deduped,
+      text: flatTextFromSegments(persistedSegments),
+      held: base.held ?? "",
+      segments: persistedSegments,
+    };
+  }
+  return mergeLiveSnapshotIntoInFlightTurn(base, {
+    toolActions: persistedActions,
+    text: flatTextFromSegments(persistedSegments),
+  });
+}
 
 interface UseChatHistoryLoaderOptions {
   sessionID: string;
@@ -135,16 +320,20 @@ export function useChatHistoryLoader({
             pendingRef.current &&
             normalizeSessionID(turnSessionIDRef.current) ===
               normalizeSessionID(snapshotID);
+          const actionMap = structured
+            ? toolActionMap(structured.actions)
+            : undefined;
+          const completedAtMap = structured
+            ? toolActionCompletedAtMap(structured.actions)
+            : undefined;
           let messagesToMap = res.messages;
           if (isTurnPending) {
             messagesToMap = messagesUpToLastUser(res.messages);
           }
           const mapped = reconstructMessages(
             messagesToMap,
-            structured ? toolActionMap(structured.actions) : undefined,
-            structured
-              ? toolActionCompletedAtMap(structured.actions)
-              : undefined,
+            actionMap,
+            completedAtMap,
           );
           const prevList = messagesRef.current;
           const lastPrev = prevList[prevList.length - 1];
@@ -158,6 +347,22 @@ export function useChatHistoryLoader({
           const finalMessages = keep ? prevList : mapped;
           setMessages(finalMessages);
           messagesRef.current = finalMessages;
+          if (isTurnPending) {
+            const fullMapped = reconstructMessages(
+              res.messages,
+              actionMap,
+              completedAtMap,
+            );
+            const inFlightMessages = fullMapped.slice(mapped.length);
+            if (inFlightMessages.length > 0) {
+              const merged = mergePersistedMessagesIntoInFlightTurn(
+                inFlightTurnRef.current,
+                inFlightMessages,
+              );
+              inFlightTurnRef.current = merged;
+              setInFlightTurn(merged);
+            }
+          }
         }
       })
       .catch((failure) => {
@@ -179,7 +384,7 @@ export function useChatHistoryLoader({
           setSessionID(next);
         }
       });
-  }, [sessionIDRef, knownDraftIDRef, didRecoverSessionRef, pendingRef, turnSessionIDRef, messagesRef, setMessages, setSessionID]);
+  }, [sessionIDRef, knownDraftIDRef, didRecoverSessionRef, pendingRef, turnSessionIDRef, messagesRef, inFlightTurnRef, setInFlightTurn, setMessages, setSessionID]);
 
   // Reattaches a reloaded tab to a turn the server still owns.
   const tryAdoptReloadedTurn = useCallback(() => {
@@ -232,53 +437,7 @@ export function useChatHistoryLoader({
         const isLiveActive = live.active ?? false;
         if (live && isLiveActive) {
           const current = inFlightTurnRef.current;
-          const currentHasData =
-            current &&
-            (current.text.length > 0 ||
-              current.toolActions.length > 0 ||
-              current.segments.length > 0);
-          let next: InFlightTurn | null = current;
-          if (currentHasData && current) {
-            if (
-              live.reasoning &&
-              live.reasoning.trim().length > 0 &&
-              !current.segments.some((s) => s.kind === "thought")
-            ) {
-              next = {
-                ...current,
-                segments: [
-                  { kind: "thought" as const, text: live.reasoning },
-                  ...current.segments,
-                ],
-              };
-            }
-          } else {
-            const newSegments: ChatSegment[] = [];
-            if (live.reasoning && live.reasoning.trim().length > 0) {
-              newSegments.push({
-                kind: "thought",
-                text: live.reasoning,
-              });
-            }
-            if (live.toolActions && live.toolActions.length > 0) {
-              const groups = groupToolActionsByRound(live.toolActions);
-              for (const group of groups) {
-                newSegments.push({ kind: "tools", actions: group });
-              }
-            }
-            if (live.text && live.text.trim().length > 0) {
-              newSegments.push({
-                kind: "text",
-                text: live.text,
-              });
-            }
-            next = {
-              toolActions: live.toolActions ?? [],
-              text: live.text ?? "",
-              held: "",
-              segments: newSegments,
-            };
-          }
+          const next = mergeLiveSnapshotIntoInFlightTurn(current, live);
           if (next !== current) {
             setInFlightTurn(next);
             inFlightTurnRef.current = next;
@@ -327,6 +486,13 @@ export function useChatHistoryLoader({
             normalizeSessionID(turnSessionIDRef.current) ===
               normalizeSessionID(activeID);
 
+          const actionMap = structured
+            ? toolActionMap(structured.actions)
+            : undefined;
+          const completedAtMap = structured
+            ? toolActionCompletedAtMap(structured.actions)
+            : undefined;
+
           let messagesToMap = res.messages;
           if (isTurnPending) {
             messagesToMap = messagesUpToLastUser(res.messages);
@@ -334,13 +500,27 @@ export function useChatHistoryLoader({
 
           const mapped = reconstructMessages(
             messagesToMap,
-            structured ? toolActionMap(structured.actions) : undefined,
-            structured
-              ? toolActionCompletedAtMap(structured.actions)
-              : undefined,
+            actionMap,
+            completedAtMap,
           );
           setMessages(mapped);
           messagesRef.current = mapped;
+          if (isTurnPending) {
+            const fullMapped = reconstructMessages(
+              res.messages,
+              actionMap,
+              completedAtMap,
+            );
+            const inFlightMessages = fullMapped.slice(mapped.length);
+            if (inFlightMessages.length > 0) {
+              const merged = mergePersistedMessagesIntoInFlightTurn(
+                inFlightTurnRef.current,
+                inFlightMessages,
+              );
+              inFlightTurnRef.current = merged;
+              setInFlightTurn(merged);
+            }
+          }
           setSessionGoalId(
             typeof res.goalId === "string" && res.goalId.trim().length > 0
               ? res.goalId
@@ -394,7 +574,7 @@ export function useChatHistoryLoader({
     return () => {
       cancelled = true;
     };
-  }, [sessionID, setSessionTokens, sessionBaseRef, setContextTokens, setLastTurnTokens, setSessionGoalId, inputHistoryRef, historyIndexRef, draftRef, knownDraftIDRef, setMessages, pendingRef, turnSessionIDRef, messagesRef, sessionIDRef, didRecoverSessionRef, setSessionID]);
+  }, [sessionID, setSessionTokens, sessionBaseRef, setContextTokens, setLastTurnTokens, setSessionGoalId, inputHistoryRef, historyIndexRef, draftRef, knownDraftIDRef, setMessages, pendingRef, turnSessionIDRef, messagesRef, inFlightTurnRef, setInFlightTurn, sessionIDRef, didRecoverSessionRef, setSessionID]);
 
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
