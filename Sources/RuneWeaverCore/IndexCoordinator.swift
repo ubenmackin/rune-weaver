@@ -108,14 +108,16 @@ public actor IndexCoordinator {
     /// Per-source reports completed in the run in flight, in completion order.
     private var currentSourceReports: [IndexSourceRunReport] = []
 
-    /// Rolling rate sample tracking indexed progress over a moving window.
+    /// Rolling rate sample tracking progress over a moving window.
     private struct RateSample: Sendable {
         let timestamp: Date
-        let indexed: Int
+        let work: Int
     }
 
     /// Samples collected during the active run for moving-average rate calculation.
     private var rateSamples: [RateSample] = []
+    /// Last non-zero moving average held during in-flight batch evaluation so rates never vanish.
+    private var lastNonZeroRate: Double = 0.0
     /// Window duration in seconds for rolling docs/s rate.
     private static let rateWindowSeconds: TimeInterval = 30.0
 
@@ -159,8 +161,15 @@ public actor IndexCoordinator {
         else { return nil }
         let timestamp = now()
         let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
+        let totalQueueProcessed = liveQueues.reduce(0) { $0 + $1.processed }
+        let currentWork = Self.resolveCurrentWork(
+            phase: phase,
+            queuesProcessed: totalQueueProcessed,
+            scanned: liveScanned,
+            indexed: liveIndexed
+        )
         let rate = recordAndCalculateRate(
-            currentIndexed: liveIndexed,
+            currentWork: currentWork,
             timestamp: timestamp,
             startedAt: startedAt,
             elapsedMs: elapsedMs
@@ -393,6 +402,7 @@ extension IndexCoordinator {
         overlapCompleted = []
         liveQueues = []
         rateSamples = []
+        lastNonZeroRate = 0.0
     }
 
     /// Finalizes a run into its summary, watermark, and completion broadcast. - ranAny: Whether any
@@ -510,6 +520,7 @@ extension IndexCoordinator {
         overlapCompleted = []
         liveQueues = []
         rateSamples = []
+        lastNonZeroRate = 0.0
     }
 }
 
@@ -957,9 +968,22 @@ extension IndexCoordinator {
         }
     }
 
-    /// Calculates docs/s rate using recent samples over a 30s window, falling back to cumulative.
+    /// Single numerator for rate math so live and emit frames stay aligned.
+    static func resolveCurrentWork(phase: IndexPhase, queuesProcessed: Int, scanned: Int, indexed: Int) -> Int {
+        switch phase {
+        case .discovering:
+            scanned
+        case .extracting, .embedding:
+            queuesProcessed > 0 ? queuesProcessed : indexed
+        case .committing:
+            indexed
+        }
+    }
+
+    /// Calculates docs/s rate using recent samples over a 30s window, falling back to cumulative,
+    /// and holding the last non-zero moving average during in-flight evaluation pauses.
     private func recordAndCalculateRate(
-        currentIndexed: Int,
+        currentWork: Int,
         timestamp: Date,
         startedAt: Date,
         elapsedMs: Int
@@ -972,20 +996,35 @@ extension IndexCoordinator {
 
         if let last = rateSamples.last {
             if timestamp.timeIntervalSince(last.timestamp) >= 0.5 {
-                rateSamples.append(RateSample(timestamp: timestamp, indexed: currentIndexed))
+                rateSamples.append(RateSample(timestamp: timestamp, work: currentWork))
             }
         } else {
-            rateSamples.append(RateSample(timestamp: timestamp, indexed: currentIndexed))
+            rateSamples.append(RateSample(timestamp: timestamp, work: currentWork))
         }
 
         if let earliest = rateSamples.first, let latest = rateSamples.last {
             let deltaSec = latest.timestamp.timeIntervalSince(earliest.timestamp)
             if deltaSec >= 3.0 {
-                let deltaIndexed = max(0, latest.indexed - earliest.indexed)
-                return Double(deltaIndexed) / deltaSec
+                let deltaWork = max(0, latest.work - earliest.work)
+                let calculated = Double(deltaWork) / deltaSec
+                if calculated > 0 {
+                    lastNonZeroRate = calculated
+                    return calculated
+                } else if lastNonZeroRate > 0 {
+                    return lastNonZeroRate
+                }
             }
         }
-        return Double(currentIndexed) / seconds
+        let cumulative = Double(currentWork) / seconds
+        if cumulative > 0 {
+            if lastNonZeroRate == 0 {
+                lastNonZeroRate = cumulative
+            }
+            return cumulative
+        } else if lastNonZeroRate > 0 {
+            return lastNonZeroRate
+        }
+        return 0
     }
 
     /// Emits a phase frame, honoring the shared 2 Hz cadence unless forced. phase:
@@ -997,8 +1036,15 @@ extension IndexCoordinator {
         }
         lastFrameAt = timestamp
         let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
+        let totalQueueProcessed = liveQueues.reduce(0) { $0 + $1.processed }
+        let currentWork = Self.resolveCurrentWork(
+            phase: phase,
+            queuesProcessed: totalQueueProcessed,
+            scanned: totals.scanned,
+            indexed: totals.indexed
+        )
         let rate = recordAndCalculateRate(
-            currentIndexed: totals.indexed,
+            currentWork: currentWork,
             timestamp: timestamp,
             startedAt: startedAt,
             elapsedMs: elapsedMs
