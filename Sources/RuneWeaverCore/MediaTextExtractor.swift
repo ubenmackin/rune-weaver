@@ -115,6 +115,90 @@ public struct MediaTextExtractor: Sendable {
         return supportedVideoExtensions.contains(ext)
     }
 
+    #if canImport(Vision)
+        /// Bounds Vision OCR to 2 concurrent passes so the Neural Engine stays fair.
+        private actor VisionOCRThrottle {
+            private let limit: Int
+            private var inFlight: Int = 0
+            private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+
+            init(limit: Int = 2) {
+                self.limit = max(1, limit)
+            }
+
+            func withPermit<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+                try Task.checkCancellation()
+                try await acquire()
+                defer { release() }
+                try Task.checkCancellation()
+                return try await operation()
+            }
+
+            private func acquire() async throws {
+                try Task.checkCancellation()
+                if inFlight < limit {
+                    inFlight += 1
+                    return
+                }
+                let id = UUID()
+                try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                        if Task.isCancelled {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        waiters.append((id: id, continuation: continuation))
+                    }
+                } onCancel: {
+                    Task { [self, id] in await self.cancelWaiter(id: id) }
+                }
+            }
+
+            private func cancelWaiter(id: UUID) {
+                guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+                let waiter = waiters.remove(at: index)
+                waiter.continuation.resume(throwing: CancellationError())
+            }
+
+            private func release() {
+                if !waiters.isEmpty {
+                    let next = waiters.removeFirst()
+                    next.continuation.resume(returning: ())
+                } else {
+                    inFlight -= 1
+                }
+            }
+        }
+
+        private static let visionDispatchQueue = DispatchQueue(
+            label: "com.runeweaver.vision.ocr",
+            qos: .userInitiated,
+            attributes: .concurrent
+        )
+        private static let ocrThrottle = VisionOCRThrottle(limit: 2)
+
+        /// Performs Apple Vision text recognition synchronously on a private or caller queue.
+        private static func performVisionOCR(imageData: Data) throws -> String {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+
+            let handler = VNImageRequestHandler(data: imageData, options: [:])
+            try handler.perform([request])
+            guard let observations = request.results else { return "" }
+            var recognizedLines: [String] = []
+            for observation in observations {
+                if let candidate = observation.topCandidates(1).first {
+                    let string = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !string.isEmpty {
+                        recognizedLines.append(string)
+                    }
+                }
+            }
+            return recognizedLines.joined(separator: "\n")
+        }
+    #endif
+
     /// Performs on-device text recognition (OCR) synchronously on image data using Apple Vision.
     public static func recognizeTextSync(in imageData: Data) -> String {
         if let custom = customImageOCR {
@@ -122,24 +206,8 @@ public struct MediaTextExtractor: Sendable {
         }
 
         #if canImport(Vision)
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-
-            let handler = VNImageRequestHandler(data: imageData, options: [:])
             do {
-                try handler.perform([request])
-                guard let observations = request.results else { return "" }
-                var recognizedLines: [String] = []
-                for observation in observations {
-                    if let candidate = observation.topCandidates(1).first {
-                        let string = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !string.isEmpty {
-                            recognizedLines.append(string)
-                        }
-                    }
-                }
-                return recognizedLines.joined(separator: "\n")
+                return try performVisionOCR(imageData: imageData)
             } catch {
                 return ""
             }
@@ -148,7 +216,7 @@ public struct MediaTextExtractor: Sendable {
         #endif
     }
 
-    /// Performs on-device text recognition (OCR) on image data using Apple Vision.
+    /// Performs Vision OCR via dedicated queue throttled to 2, suspending without blocking.
     /// - Parameter data: Raw image bytes (PNG, JPEG, HEIC, TIFF, etc.).
     /// - Returns: Recognized text joined by line breaks, or empty string if no text found.
     public static func recognizeText(in imageData: Data) async throws -> String {
@@ -157,29 +225,18 @@ public struct MediaTextExtractor: Sendable {
         }
 
         #if canImport(Vision)
-            return try await Task.detached {
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = true
-
-                let handler = VNImageRequestHandler(data: imageData, options: [:])
-                try handler.perform([request])
-
-                guard let observations = request.results else {
-                    return ""
-                }
-
-                var recognizedLines: [String] = []
-                for observation in observations {
-                    if let candidate = observation.topCandidates(1).first {
-                        let string = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !string.isEmpty {
-                            recognizedLines.append(string)
+            return try await ocrThrottle.withPermit {
+                try await withCheckedThrowingContinuation { continuation in
+                    visionDispatchQueue.async {
+                        do {
+                            let text = try performVisionOCR(imageData: imageData)
+                            continuation.resume(returning: text)
+                        } catch {
+                            continuation.resume(throwing: error)
                         }
                     }
                 }
-                return recognizedLines.joined(separator: "\n")
-            }.value
+            }
         #else
             return ""
         #endif

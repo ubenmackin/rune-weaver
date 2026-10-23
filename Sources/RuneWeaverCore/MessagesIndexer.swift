@@ -511,7 +511,7 @@ public actor MessagesIndexer {
                 // one item instead of draining the whole batch bound.
                 try Task.checkCancellation()
                 let attachments = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
-                let payload = await makePayload(from: row, attachments: attachments, names: names)
+                let payload = try await makePayload(from: row, attachments: attachments, names: names)
                 if !payload.combinedText.isEmpty {
                     prepared.append(PreparedMessage(payload: payload))
                 }
@@ -674,16 +674,22 @@ extension MessagesIndexer {
         from row: MessagesDatabaseRow,
         attachments: [MessagesAttachmentRow],
         names: [String: String]
-    ) async -> MessagesPayload {
+    ) async throws -> MessagesPayload {
         let resolved = Self.resolveText(for: row)
-        let attachmentResults = await attachmentResults(for: attachments)
-        let attachmentNames = attachmentResults.map(\.name)
+        let fetchedAttachments: [(name: String, text: String?)]
+        do {
+            fetchedAttachments = try await attachmentResults(for: attachments)
+        } catch is CancellationError {
+            // A cancelled attachment read must abort the message so callers never commit partial text as success.
+            throw CancellationError()
+        }
+        let attachmentNames = fetchedAttachments.map(\.name)
 
         var parts: [String] = []
         if let text = resolved.text {
             parts.append(Self.replacingPlaceholders(in: text, with: attachmentNames))
         }
-        for attachment in attachmentResults {
+        for attachment in fetchedAttachments {
             if let extracted = attachment.text {
                 parts.append("[\(attachment.name)]\n\(extracted)")
             } else {
@@ -731,7 +737,7 @@ extension MessagesIndexer {
 
     /// Extracts searchable text from each attachment through the shared extractor.
     /// - Parameter attachments: Attachments joined to the message.
-    func attachmentResults(for attachments: [MessagesAttachmentRow]) async -> [(name: String, text: String?)] {
+    func attachmentResults(for attachments: [MessagesAttachmentRow]) async throws -> [(name: String, text: String?)] {
         var results: [(name: String, text: String?)] = []
         for attachment in attachments {
             let name = Self.attachmentName(for: attachment)
@@ -749,10 +755,19 @@ extension MessagesIndexer {
                 continue
             }
             let fileURL = URL(fileURLWithPath: expanded)
-            let extraction = await extractor.extract(
-                fileURL: fileURL,
-                contentType: attachment.mimeType
-            )
+            let extraction: DocumentExtraction
+            do {
+                extraction = try await extractor.extract(
+                    fileURL: fileURL,
+                    contentType: attachment.mimeType
+                )
+            } catch is CancellationError {
+                // Propagate cancellation so the message is abandoned instead of indexed with partial attachment text.
+                throw CancellationError()
+            } catch {
+                results.append((name: name, text: nil))
+                continue
+            }
             results.append((name: name, text: NormalizedText.value(extraction.text)))
         }
         return results

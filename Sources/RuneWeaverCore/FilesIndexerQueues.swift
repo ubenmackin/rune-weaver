@@ -513,10 +513,24 @@ extension FilesIndexer {
         if state.cancellation.isSet || Task.isCancelled {
             return .outcome(FileOutcome(kind: .cancelled, relative: resolved.relative))
         }
-        let extraction = await services.extractor.extract(
-            fileURL: identity.fileURL,
-            contentType: nil
-        )
+        let extraction: DocumentExtraction
+        do {
+            extraction = try await services.extractor.extract(
+                fileURL: identity.fileURL,
+                contentType: nil
+            )
+        } catch is CancellationError {
+            return .outcome(FileOutcome(kind: .cancelled, relative: resolved.relative))
+        } catch {
+            extraction = DocumentExtraction(
+                status: .failed,
+                format: .unsupported,
+                chunks: [],
+                reason: "extraction failed",
+                byteCount: data.count,
+                truncated: false
+            )
+        }
         if let terminal = await checkExtractionTerminal(
             identity: identity,
             services: services,

@@ -156,8 +156,8 @@ struct DocumentTextExtractorTests {
         try "silent-bytes".write(to: tempURL, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
-        let fileResult = await MediaTextExtractor.withAudioTranscription({ _ in "" }) {
-            await extractor.extract(fileURL: tempURL)
+        let fileResult = try await MediaTextExtractor.withAudioTranscription({ _ in "" }) {
+            try await extractor.extract(fileURL: tempURL)
         }
         #expect(fileResult.format == .audio)
         #expect(fileResult.status == .metadataOnly)

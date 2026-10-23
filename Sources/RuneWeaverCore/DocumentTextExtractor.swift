@@ -115,12 +115,13 @@ public protocol DocumentTextExtracting: Sendable {
 
     /// Extracts text from a file URL asynchronously. fileURL: Document file
     /// location on disk.
-    func extract(fileURL: URL, contentType: String?) async -> DocumentExtraction
+    func extract(fileURL: URL, contentType: String?) async throws -> DocumentExtraction
 }
 
 extension DocumentTextExtracting {
     /// Default async extraction from file URL delegating to data extraction.
-    public func extract(fileURL: URL, contentType: String? = nil) async -> DocumentExtraction {
+    public func extract(fileURL: URL, contentType: String? = nil) async throws -> DocumentExtraction {
+        try Task.checkCancellation()
         let fileName = fileURL.lastPathComponent
         guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) else {
             return DocumentExtraction(
@@ -175,7 +176,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
 
     /// Extracts text from a file URL, applying the byte bound before reading. The size check runs
     /// before the bytes are loaded so an oversized document never spends memory on the read.
-    public func extract(fileURL: URL, contentType: String? = nil) async -> DocumentExtraction {
+    public func extract(fileURL: URL, contentType: String? = nil) async throws -> DocumentExtraction {
         let fileName = fileURL.lastPathComponent
         let format = Self.detectFormat(fileName: fileName, contentType: contentType)
         let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
@@ -202,13 +203,20 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
             )
         }
         if format == .audio || format == .video {
-            let transcript = await (try? MediaTextExtractor.transcribeAudio(fileURL: fileURL))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawTranscript: String
+            do {
+                rawTranscript = try await MediaTextExtractor.transcribeAudio(fileURL: fileURL)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                rawTranscript = ""
+            }
+            let transcript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             if !transcript.isEmpty {
                 return makeTextResult(
                     text: transcript,
                     format: format,
-                    byteCount: (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? data.count,
+                    byteCount: data.count,
                     missingReason: "The media contains no extractable speech transcript."
                 )
             }
@@ -220,6 +228,27 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                 reason: "Audio/video media: stored metadata-only; on-device speech transcription detected no speech.",
                 byteCount: data.count
             )
+        }
+        if format == .image {
+            let rawOCR: String
+            do {
+                rawOCR = try await MediaTextExtractor.recognizeText(in: data)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                rawOCR = ""
+            }
+            let ocrText = rawOCR.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ocrText.isEmpty {
+                return makeTextResult(
+                    text: ocrText,
+                    format: format,
+                    byteCount: data.count,
+                    missingReason: "The image contains no extractable text."
+                )
+            } else {
+                return makeImageEmptyResult(fileName: fileName, byteCount: data.count)
+            }
         }
         return extract(data: data, fileName: fileName, contentType: contentType)
     }
@@ -275,18 +304,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                     missingReason: "The image contains no extractable text."
                 )
             } else {
-                // OCR found no text, so extraction stays interim: callers attempt
-                // visual embedding separately and promote to `.extracted` only
-                // after it succeeds, instead of claiming visual work up front.
-                let fallbackText = fileName.isEmpty ? "Image" : fileName
-                let tokens = max(1, fallbackText.count / 4)
-                return makeResult(
-                    status: .partial,
-                    format: .image,
-                    chunks: [DocumentChunk(index: 0, text: fallbackText, estimatedTokens: tokens)],
-                    reason: "Image contains no OCR text; visual embedding pending.",
-                    byteCount: data.count
-                )
+                return makeImageEmptyResult(fileName: fileName, byteCount: data.count)
             }
         case .audio, .video:
             // Bytes-only extraction cannot reach the async on-device recognizer,
@@ -329,6 +347,19 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
             format: .rtf,
             byteCount: data.count,
             missingReason: "The RTF document contains no extractable text."
+        )
+    }
+
+    /// Builds the interim image result used when OCR finds no text.
+    func makeImageEmptyResult(fileName: String, byteCount: Int) -> DocumentExtraction {
+        let fallbackText = fileName.isEmpty ? "Image" : fileName
+        let tokens = max(1, fallbackText.count / 4)
+        return makeResult(
+            status: .partial,
+            format: .image,
+            chunks: [DocumentChunk(index: 0, text: fallbackText, estimatedTokens: tokens)],
+            reason: "Image contains no OCR text; visual embedding pending.",
+            byteCount: byteCount
         )
     }
 
