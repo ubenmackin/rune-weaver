@@ -126,19 +126,16 @@ describe("SettingsManager", () => {
 
     render(<SettingsManager />);
 
-    // Initial tab: LLM Providers
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
       expect(screen.getByDisplayValue("http://localhost:8080")).toBeDefined();
       expect(screen.getByText("/Users/test/.runeweaver/config.toml")).toBeDefined();
     });
 
-    // Switch to Engine and Logs tab via the vertical sidenav
     const engineTabBtn = screen.getByRole("tab", { name: /Engine and Logs/i });
     await user.click(engineTabBtn);
     expect(screen.getByDisplayValue("Test Engine")).toBeDefined();
 
-    // Switch to Security tab (containers plus file guard share one pane)
     const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(sandboxTabBtn);
     // Containers contract: no legacy sandbox editors remain and both pinned
@@ -165,7 +162,6 @@ describe("SettingsManager", () => {
     expect(screen.getByLabelText(/Max Concurrent Containers/i)).toBeDefined();
     expect(screen.getByLabelText(/Idle TTL/i)).toBeDefined();
 
-    // Switch to Email Accounts tab via the vertical sidenav
     const emailTabBtn = screen.getByRole("tab", { name: /Email Accounts/i });
     await user.click(emailTabBtn);
     expect(screen.getByDisplayValue("imap.mail.me.com")).toBeDefined();
@@ -233,13 +229,11 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Add a provider
     const addProviderBtn = screen.getByRole("button", { name: /Add Provider/i });
     await user.click(addProviderBtn);
 
     expect(screen.getByDisplayValue("provider_3")).toBeDefined();
 
-    // Save settings
     const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
@@ -268,11 +262,9 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Switch to Email Accounts tab via the vertical sidenav
     const emailTabBtn = screen.getByRole("tab", { name: /Email Accounts/i });
     await user.click(emailTabBtn);
 
-    // Add an email account
     const addAccountBtn = screen.getByRole("button", { name: /Add Account/i });
     await user.click(addAccountBtn);
 
@@ -301,11 +293,9 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Switch to Memory and Storage tab via the vertical sidenav
     const memoryTabBtn = screen.getByRole("tab", { name: /Memory and Storage/i });
     await user.click(memoryTabBtn);
 
-    // Backend select reflects the loaded value.
     const backendSelect = screen.getByLabelText(/Embedding Backend/i) as HTMLSelectElement;
     expect(backendSelect.value).toBe("local");
 
@@ -338,7 +328,6 @@ describe("SettingsManager", () => {
     await user.selectOptions(backendSelect, "provider");
     expect(backendSelect.value).toBe("provider");
 
-    // Save settings
     const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
@@ -433,27 +422,22 @@ describe("SettingsManager", () => {
 
     render(<SettingsManager />);
 
-    // Wait for initial load
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Switch to Tools and Runes tab via the vertical sidenav
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Verify warning banner for disabled-by-default discovered runes
     await waitFor(() => {
       expect(screen.getByText(/awaiting review/i)).toBeDefined();
       expect(screen.getByText("Weather Reporter")).toBeDefined();
       expect(screen.getAllByText(/PENDING REVIEW/i).length).toBeGreaterThan(0);
     });
 
-    // Verify enable button is present
     const enableBtn = screen.getByRole("button", { name: /Approve & Enable/i });
     expect(enableBtn).toBeDefined();
 
-    // Click enable
     await user.click(enableBtn);
 
     await waitFor(() => {
@@ -477,9 +461,7 @@ describe("SettingsManager", () => {
       { id: "community.clock", name: "World Clock", version: "1.0.0", author: "Community", description: "Shows time across zones.", downloadURL: "https://example.com/clock.json", tags: ["time"], runtime: "python", declaredTools: ["clock.current_time"], isInstalled: true },
     ];
 
-    // Empty registry keeps the empty state; catalog stub lists two remote runes.
-    // The second fetch parameter stays unused here because this path only
-    // serves GET fixtures and never inspects request bodies.
+    // Empty registry with two catalog runes.
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
       if (urlStr.includes("/marketplace/plugins")) {
@@ -507,7 +489,6 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Empty state still guides toward local discovery.
     await waitFor(() => {
       expect(
         screen.getByText(/No external runes discovered in plugins directory/i)
@@ -515,15 +496,12 @@ describe("SettingsManager", () => {
     });
     expect(screen.getByText(/Rescan Plugins to discover them/i)).toBeDefined();
 
-    // Header exposes the single catalog entry point beside rescan.
     const browseBtn = screen.getByRole("button", { name: /Browse Marketplace/i });
     expect(browseBtn).toBeDefined();
 
-    // Plugin Configuration stays editable so local paths keep working.
     expect(screen.getByLabelText(/^Plugins Directory$/i)).toBeDefined();
     expect(screen.getByLabelText(/Marketplace Index URL/i)).toBeDefined();
 
-    // Catalog opens on demand and lists remote runes with search and install states.
     await user.click(browseBtn);
     await waitFor(() => {
       expect(screen.getByText("Community Rune Marketplace")).toBeDefined();
@@ -541,12 +519,10 @@ describe("SettingsManager", () => {
     expect(screen.getByText(/^Installed$/i)).toBeDefined();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/marketplace/plugins"))).toBe(true);
 
-    // Closing returns to Tools; rescan still discovers local runes.
     await user.click(screen.getByRole("button", { name: /Close marketplace/i }));
     const rescanBtn = screen.getByRole("button", { name: /Rescan Plugins/i });
     await user.click(rescanBtn);
 
-    // Rescan populates the list, confirming local discovery is unaffected.
     await waitFor(() => {
       expect(screen.getByText("Weather Reporter")).toBeDefined();
     });
@@ -556,8 +532,7 @@ describe("SettingsManager", () => {
 
   it("disables an enabled builtin tool via the tool state endpoint with per-row pending", async () => {
     const user = userEvent.setup();
-    // Two sibling email tools prove per-tool granularity: toggling one must
-    // leave the other untouched in both the request payload and the UI.
+    // Sibling tools prove per-tool granularity.
     let builtinTools = [
       {
         name: "email.read",
@@ -583,9 +558,7 @@ describe("SettingsManager", () => {
       },
     ];
     const calls: Array<{ url: string; method?: string; body?: string }> = [];
-    // Hold the state POST open so the test can observe the pending row before the refreshed list
-    // resolves. A mutable holder keeps the resolver visible across the fetch closure without
-    // narrowing the local to null at the release site.
+    // Hold POST open to observe the pending row.
     const gate: { release: (() => void) | null } = { release: null };
     const stateGate = new Promise<void>((resolve) => {
       gate.release = resolve;
@@ -627,8 +600,7 @@ describe("SettingsManager", () => {
       expect(screen.getByText("email.attachment")).toBeDefined();
     });
 
-    // Both rows render their own permission badge and a state switch whose
-    // checked value mirrors the persisted bus flag (not the next action).
+    // Switch mirrors persisted bus flag.
     expect(screen.getByText("readOnly")).toBeDefined();
     expect(screen.getByText("requiresApproval")).toBeDefined();
     const readToggle = screen.getByRole("switch", { name: "email.read Enabled" });
@@ -639,7 +611,6 @@ describe("SettingsManager", () => {
     expect((attachmentToggle as HTMLInputElement).checked).toBe(true);
     expect(readToggle.getAttribute("aria-checked")).toBe("true");
     expect(attachmentToggle.getAttribute("aria-checked")).toBe("true");
-    // State text reports the current value; action phrasing must be gone.
     expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
     expect(
       screen.queryByRole("switch", { name: "Disable email.read" })
@@ -647,8 +618,7 @@ describe("SettingsManager", () => {
     expect(
       screen.queryByRole("switch", { name: "Enable email.read" })
     ).toBeNull();
-    // Visual switch affordance renders a track/knob per row driven by the
-    // persisted state so on/off is visible without reading the text.
+    // Track/knob mirrors persisted state.
     const tracks = document.querySelectorAll(".tool-switch-track");
     expect(tracks.length).toBe(2);
     tracks.forEach((track) => {
@@ -658,9 +628,7 @@ describe("SettingsManager", () => {
 
     const clickPromise = user.click(readToggle);
 
-    // The pending gate stays closed until the test releases it, so only the
-    // acted-on row may disable while its sibling stays interactive. The
-    // acted-on row announces the in-flight request with Updating… text.
+    // Pending gate isolates the acted-on row.
     await waitFor(() => {
       expect(gate.release).not.toBeNull();
       expect(screen.getByText("Updating…")).toBeDefined();
@@ -687,9 +655,7 @@ describe("SettingsManager", () => {
     expect(stateCall?.method).toBe("POST");
     expect(JSON.parse(stateCall?.body ?? "{}")).toEqual({ enabled: false });
 
-    // Refreshed list flips only the toggled switch; the sibling stays on.
-    // Checked, accessible name, and visible state text all follow the
-    // refreshed bus value together.
+    // Refreshed list flips only the toggled switch.
     await waitFor(() => {
       expect(screen.getByRole("switch", { name: "email.read Disabled" })).toBeDefined();
     });
@@ -799,8 +765,7 @@ describe("SettingsManager", () => {
     expect(stateCall?.method).toBe("POST");
     expect(JSON.parse(stateCall?.body ?? "{}")).toEqual({ enabled: true });
 
-    // Refreshed list flips only the toggled switch; the untouched sibling
-    // proves the endpoint never bulk-enables related tools.
+    // Sibling stays off: no bulk enable.
     await waitFor(() => {
       expect(
         screen.getByRole("switch", { name: "email.attachment Enabled" })
@@ -851,8 +816,7 @@ describe("SettingsManager", () => {
     const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(sandboxTabBtn);
 
-    // Containers contract: both pinned images render as read-only text with
-    // no editor, and no legacy sandbox inputs remain to suggest a choice.
+    // Containers contract: pinned images read-only, no legacy editors.
     expect(screen.queryByLabelText(/Container Runtime/i)).toBeNull();
     expect(screen.queryByLabelText(/Base Image/i)).toBeNull();
     expect(screen.queryByLabelText(/Staging Path/i)).toBeNull();
@@ -891,17 +855,14 @@ describe("SettingsManager", () => {
     });
 
     expect(sentPayload).toBeDefined();
-    // The [containers] patch carries the snake_case keys the engine persists
-    // with the edited knob values.
+    // Patch carries snake_case engine keys.
     const containersPatch = sentPayload?.["containers"] as
       | Record<string, unknown>
       | undefined;
     expect(containersPatch?.["memoryMb"]).toBe(1024);
     expect(containersPatch?.["maxConcurrent"]).toBe(7);
     expect(containersPatch?.["ttlMinutes"]).toBe(90);
-    // Replaced sandbox keys must never reach the engine; the section
-    // replaced them with no compatibility alias, so sending them would look
-    // saved without persisting.
+    // Replaced sandbox keys have no alias and must not send.
     expect(sentPayload).not.toHaveProperty("sandboxContainerBaseImage");
     expect(sentPayload).not.toHaveProperty("sandboxArchiveSessionTTLMinutes");
     expect(sentPayload).not.toHaveProperty("sandboxMaxConcurrentMachines");
@@ -935,8 +896,7 @@ describe("SettingsManager", () => {
     const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
-    // Validation mirrors the server bounds (256-8192 MB), so an out-of-range
-    // knob fails inline and no PUT leaves the pane.
+    // Out-of-range fails inline with no PUT.
     await waitFor(() => {
       expect(
         screen.getByText(
@@ -953,9 +913,7 @@ describe("SettingsManager", () => {
   });
 
   it("pins containers knob bounds to the server containers contract", () => {
-    // Manual cross-language pin: the dashboard cannot import Swift, so these
-    // literals must match ContainersConfig defaults and clamps in
-    // Sources/RuneWeaverCore/Config.swift. Update both sides together.
+    // Cross-language pin: match ContainersConfig in Config.swift.
     expect(DEFAULT_CONTAINERS_MEMORY_MB).toBe(512);
     expect(DEFAULT_CONTAINERS_MAX_CONCURRENT).toBe(5);
     expect(DEFAULT_CONTAINERS_TTL_MINUTES).toBe(60);
@@ -1017,8 +975,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files guard lives in the Access Files & Workspace section, so
-    // open it through the Access tab -> Files rail entry.
+    // Open via Access tab Files rail.
     const accessTabBtn = screen.getByRole("tab", { name: "Access" });
     await user.click(accessTabBtn);
     await user.click(screen.getByTestId("access-tab-files"));
@@ -1026,8 +983,7 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
 
-    // Multiline editor surfaces the guard boundary with example globs so a
-    // first-time reader knows the one-per-line shape without opening docs.
+    // Editor shows one-per-line shape.
     const denyTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
     ) as HTMLTextAreaElement;
@@ -1037,14 +993,12 @@ describe("SettingsManager", () => {
     expect(denyTextarea.value).toContain(".env*");
     expect(screen.getByText(/2 patterns/i)).toBeDefined();
 
-    // Blank lines and surrounding whitespace collapse on save; an emptied
-    // editor stays a valid allow-all instead of failing the form.
+    // Blanks collapse; emptied editor stays allow-all.
     await user.clear(denyTextarea);
     await user.type(denyTextarea, "  .env*  \n\n*.pem\n   \n.ssh/*  ");
     expect(screen.getByText(/3 patterns/i)).toBeDefined();
 
-    // Section Save owns the Files & Access persist: no section-level
-    // Save Configuration remains, so the files save payload carries the keys.
+    // No section-level Save Configuration remains.
     expect(
       screen.queryByRole("button", { name: /Save Configuration/i })
     ).toBeNull();
@@ -1058,14 +1012,11 @@ describe("SettingsManager", () => {
       expect(screen.getByTestId("files-write-saved")).toBeDefined();
     });
 
-    // Files editor stays mounted after the save, so the follow-up
-    // steps run against the same textarea without reopening a modal.
     const reopenedTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
     ) as HTMLTextAreaElement;
 
-    // Traversal escapes fail closed with their editor line number so the
-    // author can jump straight to the offending glob.
+    // Traversal fails closed with its line number.
     const putsBeforeTraversal = putCount;
     await user.clear(reopenedTextarea);
     await user.type(reopenedTextarea, ".env*\n../escape\n*.pem");
@@ -1075,8 +1026,7 @@ describe("SettingsManager", () => {
     });
     expect(putCount).toBe(putsBeforeTraversal);
 
-    // Empty means allow all in scope: clearing the editor saves an empty
-    // array and surfaces the allow-all hint instead of an error.
+    // Empty saves allow-all hint.
     await user.clear(reopenedTextarea);
     await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
@@ -1127,7 +1077,6 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Reset confirmations live in the Access Files & Workspace section.
     const accessTabBtn = screen.getByRole("tab", { name: "Access" });
     await user.click(accessTabBtn);
     await user.click(screen.getByTestId("access-tab-files"));
@@ -1140,8 +1089,7 @@ describe("SettingsManager", () => {
     ) as HTMLTextAreaElement;
     expect(denyTextarea.value).toContain("custom*");
 
-    // Reset opens a shared confirmation stating counts and the form-local nature; cancelling leaves
-    // the in-progress text untouched.
+    // Reset states counts; cancel keeps text.
     const resetDenyBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
     await user.click(resetDenyBtn);
     await waitFor(() => {
@@ -1155,8 +1103,7 @@ describe("SettingsManager", () => {
       "custom*"
     );
 
-    // Confirming rewrites only the form text; the guard defaults reappear in
-    // the editor without any network persistence yet.
+    // Confirm rewrites form text only.
     await user.click(screen.getByRole("button", { name: /Reset to Defaults/i }));
     await waitFor(() => {
       expect(screen.getByText(/replace 1 custom pattern/i)).toBeDefined();
@@ -1170,7 +1117,6 @@ describe("SettingsManager", () => {
       ).toContain(".env*");
     });
 
-    // Roots follow the same form-local pattern with their own counts.
     const resetRootsBtn = screen.getByRole("button", { name: /Reset Roots/i });
     await user.click(resetRootsBtn);
     await waitFor(() => {
@@ -1180,8 +1126,7 @@ describe("SettingsManager", () => {
     await user.click(
       screen.getByRole("button", { name: /Confirm reset allowed roots/i })
     );
-    // Confirming swaps the custom root for the home default; the old value
-    // leaves the form so only the default remains visible.
+    // Confirm swaps custom root for home default.
     await waitFor(() => {
       expect(screen.queryByDisplayValue("~/custom")).toBeNull();
     });
@@ -1230,7 +1175,6 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files header actions live in the Access Files & Workspace section.
     const accessTabBtn = screen.getByRole("tab", { name: "Access" });
     await user.click(accessTabBtn);
     await user.click(screen.getByTestId("access-tab-files"));
@@ -1238,8 +1182,7 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
 
-    // Ghost treatment carries the hover and alignment tokens; secondary buttons have no stylesheet
-    // entry and render misaligned, so every header action must use the shared ghost icon style.
+    // Ghost style keeps header actions aligned.
     expect(
       screen.queryByRole("button", { name: /Add Pattern/i })
     ).toBeNull();
@@ -1253,16 +1196,12 @@ describe("SettingsManager", () => {
     expect(resetRootsBtn.className).toContain("ghost");
     expect(resetRootsBtn.className).toContain("icon-text-btn");
 
-    // Subsection headings keep each policy surface discoverable in the section.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
 
-    // Approval escalation toggle stays with its explanatory hint.
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
     expect(screen.getByText(/approvals inbox instead of failing silently/i)).toBeDefined();
 
-    // Container governance lives in the Security pane;
-    // both pinned images render as read-only text lines in it.
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
     expect(screen.getByText("Containers")).toBeDefined();
@@ -1296,24 +1235,20 @@ describe("SettingsManager", () => {
 
     render(<SettingsManager />);
 
-    // Wait for initial load
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Switch to Engine tab
     const engineTabBtn = screen.getByRole("tab", { name: /Engine and Logs/i });
     await user.click(engineTabBtn);
 
-    // Verify loaded value under the chats-scoped label
     const input = await screen.findByLabelText(/Max Tool Rounds per Turn \(Chats\)/i);
     expect(input).toHaveValue(12);
 
-    // Engine control governs chats only
     expect(screen.getByText(/Applies to interactive chats only/i)).toBeDefined();
     expect(screen.getByText(/parks for your approval to continue/i)).toBeDefined();
 
-    // Live three-budget summary tracks GET values rather than hardcoded defaults
+    // Summary tracks GET values.
     const summary = screen.getByText(/Chats use/i);
     expect(summary.textContent).toContain("12");
     expect(summary.textContent).toContain("30");
@@ -1324,12 +1259,10 @@ describe("SettingsManager", () => {
     expect(summary.textContent).toMatch(/parks when the job sets on_tool_limit to park/);
     expect(summary.textContent).toMatch(/Goal runs use 40 rounds \(always synthesizes plus budget_exceeded\)/);
 
-    // Edit value
     await user.clear(input);
     await user.type(input, "15");
     expect(input).toHaveValue(15);
 
-    // Save
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -1878,17 +1811,20 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const modelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(modelInput);
+    await user.type(modelInput, "gemma-4-9b-edited");
     const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
     await waitFor(() => {
       expect(screen.getByText("Settings saved.")).toBeDefined();
     });
 
-    // Toast uses role=status so assistive technology announces it.
     const toast = screen.getByRole("status");
     expect(toast.textContent).toContain("Settings saved.");
-    // Dropped configPath from copy; the badge keeps the path separately.
     expect(toast.textContent).not.toContain("/Users/test/.runeweaver/config.toml");
     expect(toast.textContent).not.toMatch(/Restart/i);
     expect(screen.getByText("/Users/test/.runeweaver/config.toml")).toBeDefined();
@@ -1919,7 +1855,12 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const toastModelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(toastModelInput);
+    await user.type(toastModelInput, "gemma-4-9b-edited");
     const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1972,7 +1913,12 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const guardModelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(guardModelInput);
+    await user.type(guardModelInput, "gemma-4-9b-edited");
     const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1983,7 +1929,6 @@ describe("SettingsManager", () => {
       ).toBeDefined();
     });
 
-    // Cancel aborts the PUT so nothing persists and no toast appears.
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => {
@@ -2033,7 +1978,12 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const continueModelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(continueModelInput);
+    await user.type(continueModelInput, "gemma-4-9b-edited");
     const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -2204,9 +2154,7 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Header placement covers both desktop tools at once: the category holds
-    // two cards but exposes one Configure, so editing the blocklist here proves
-    // the shared editor path without a per-tool entry point.
+    // One Configure covers both desktop tools.
     const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
     expect(configureButtons.length).toBe(1);
     expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
@@ -2283,7 +2231,12 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const parkedModelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(parkedModelInput);
+    await user.type(parkedModelInput, "gemma-4-9b-edited");
     const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
     // Parked work saves directly with no confirm modal.
@@ -3955,13 +3908,19 @@ describe("SettingsManager persona pane", () => {
     expect(
       within(pane).getByTestId("persona-avatar-rose"),
     ).toHaveAttribute("aria-pressed", "false");
-    // An untouched tab never reaches the network even though the footer Save stays enabled for
-    // every pane.
+    // Pristine form keeps Save disabled with no network write.
+    const pristineSave = tabSaveButton();
+    expect(pristineSave).toBeDisabled();
+    expect(pristineSave).toHaveAttribute("title", "No unsaved changes");
+    expect(putBodies.length).toBe(0);
+    // An edit enables Save and persists only the avatar delta.
+    await user.click(within(pane).getByTestId("persona-avatar-emerald"));
+    expect(tabSaveButton()).toBeEnabled();
     await user.click(tabSaveButton());
     await waitFor(() => {
-      expect(screen.getByTestId("persona-pane")).toBeInTheDocument();
+      expect(putBodies.length).toBe(1);
     });
-    expect(putBodies.length).toBe(0);
+    expect(putBodies[0]).toEqual({ persona: { avatar: "emerald" } });
   });
 
   it("updates the style character count live while typing", async () => {
@@ -3992,14 +3951,19 @@ describe("SettingsManager persona pane", () => {
       within(pane).getByTestId("persona-avatar-violet"),
     ).toHaveAttribute("aria-pressed", "true");
     expect(peekPersonaSignals().persona).toBeNull();
-    // No delta means no PUT even through the shared footer. The pane stays
-    // mounted on Persona, so the settle wait targets the persona surface
-    // itself rather than a providers input from another tab.
+    // Pristine stock form keeps Save disabled, so no PUT leaves the pane.
+    const stockSave = tabSaveButton();
+    expect(stockSave).toBeDisabled();
+    expect(stockSave).toHaveAttribute("title", "No unsaved changes");
+    expect(putBodies.length).toBe(0);
+    // Typing a name enables Save and persists the single-key delta.
+    await user.type(within(pane).getByLabelText("Assistant Name"), "Vex");
+    expect(tabSaveButton()).toBeEnabled();
     await user.click(tabSaveButton());
     await waitFor(() => {
-      expect(screen.getByTestId("persona-pane")).toBeInTheDocument();
+      expect(putBodies.length).toBe(1);
     });
-    expect(putBodies.length).toBe(0);
+    expect(putBodies[0]).toEqual({ persona: { assistantName: "Vex" } });
   });
 
   it("lists thirteen sidebar tabs in promotion order", async () => {
@@ -4057,7 +4021,7 @@ describe("SettingsManager persona pane", () => {
       "settings-search-result-access-bash-shell"
     );
     expect(bashHit.textContent).toMatch(/Access/);
-    // Selecting a row jumps to its tab and restores the rail.
+    // Selecting a row jumps to its tab, restores the rail, and pulses the target.
     await user.click(bashHit);
     expect(railTabs()).toHaveLength(13);
     expect(
@@ -4067,6 +4031,14 @@ describe("SettingsManager persona pane", () => {
         .getByRole("tab", { name: "Access" })
         .getAttribute("aria-selected")
     ).toBe("true");
+    await waitFor(() => {
+      const target = document.getElementById("access-tab-bash");
+      expect(target).not.toBeNull();
+      const highlighted =
+        target?.classList.contains("settings-search-highlight") === true ||
+        document.activeElement === target;
+      expect(highlighted).toBe(true);
+    });
     // "policy" — the vocabulary owners still reach for — surfaces the same row.
     await user.type(finder, "policy");
     expect(
@@ -4086,6 +4058,36 @@ describe("SettingsManager persona pane", () => {
     ).toBeNull();
     await user.clear(finder);
     expect(railTabs()).toHaveLength(13);
+  });
+
+  it("drills from a Your Name item result and highlights the field", async () => {
+    stubPersonaFetch();
+    const user = userEvent.setup();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const finder = screen.getByTestId("settings-nav-search") as HTMLInputElement;
+    await user.type(finder, "Your Name");
+    const results = screen.getByRole("listbox", { name: "Matching settings" });
+    const yourNameHit = within(results).getByRole("option", {
+      name: /Your Name/,
+    });
+    expect(yourNameHit).toHaveAttribute(
+      "data-testid",
+      "settings-search-result-persona-user-name",
+    );
+    await user.click(yourNameHit);
+    expect(
+      screen.getByRole("tab", { name: /^Persona$/i }).getAttribute("aria-selected"),
+    ).toBe("true");
+    await waitFor(() => {
+      const target = document.getElementById("persona-user-name");
+      expect(target).not.toBeNull();
+      const group = target?.closest(".form-group") ?? target;
+      expect(group?.classList.contains("settings-search-highlight")).toBe(true);
+    });
+    expect(document.activeElement?.id).toBe("persona-user-name");
   });
 
   it("renders moved blocks only in their own tabs and never in engine", async () => {
@@ -4727,10 +4729,15 @@ describe("SettingsManager workspace machine control", () => {
     render(<SettingsManager onSettingsSaved={onSettingsSaved} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Save" })).toBeDefined();
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const savedModelInput = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(savedModelInput);
+    await user.type(savedModelInput, "gemma-4-9b-edited");
     const saveBtn = screen.getByRole("button", { name: "Save" });
+    expect(saveBtn).toBeEnabled();
     await user.click(saveBtn);
 
     await waitFor(() => {

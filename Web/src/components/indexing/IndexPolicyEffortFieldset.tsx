@@ -22,7 +22,7 @@ export default function IndexPolicyEffortFieldset({
   updateConfig,
 }: IndexPolicyEffortFieldsetProps) {
   return (
-    <fieldset className="index-effort-fieldset">
+    <fieldset id="index-effort-fieldset" className="index-effort-fieldset">
       <legend>Effort</legend>
       <p
         className="muted text-sm"

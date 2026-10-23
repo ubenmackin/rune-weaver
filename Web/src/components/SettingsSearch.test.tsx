@@ -131,20 +131,73 @@ describe("SettingsManager search", () => {
     });
     const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
+    // Pristine Web form keeps Save disabled until an edit lands.
+    const pristineSave = screen.getByRole("button", { name: "Save" });
+    expect(pristineSave).toBeDisabled();
+    expect(pristineSave).toHaveAttribute("title", "No unsaved changes");
     const urlInput = screen.getByLabelText(/SearXNG URL/i);
+    const nextURL = "http://127.0.0.1:8899";
     await user.clear(urlInput);
-    await user.type(urlInput, ENGINE_SEARCH_URL);
+    await user.type(urlInput, nextURL);
     const saveButton = screen.getByRole("button", {
       name: "Save",
     });
+    expect(saveButton).toBeEnabled();
     await user.click(saveButton);
     await waitFor(() => {
       expect(screen.getByText("Settings saved.")).toBeDefined();
     });
     expect(sentPayload).toBeDefined();
-    expect(sentPayload?.["searchSearxngURL"]).toBe(ENGINE_SEARCH_URL);
+    expect(sentPayload?.["searchSearxngURL"]).toBe(nextURL);
     expect(sentPayload?.["searchTimeoutSeconds"]).toBe(10);
     expect(sentPayload?.["searchMaxResults"]).toBe(10);
+  });
+
+  it("drills from a SearXNG item result and highlights the endpoint", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const finder = screen.getByTestId("settings-nav-search") as HTMLInputElement;
+    await user.type(finder, "SearXNG");
+    const results = screen.getByRole("listbox", { name: "Matching settings" });
+    const searxngHit = within(results).getByRole("option", {
+      name: /SearXNG URL/,
+    });
+    expect(searxngHit).toHaveAttribute(
+      "data-testid",
+      "settings-search-result-search-searxng-url"
+    );
+    await user.click(searxngHit);
+    expect(
+      screen.getByRole("tab", { name: /Web/i }).getAttribute("aria-selected")
+    ).toBe("true");
+    await waitFor(() => {
+      const target = document.getElementById("search-searxng-url");
+      expect(target).not.toBeNull();
+      const group = target?.closest(".form-group") ?? target;
+      expect(group?.classList.contains("settings-search-highlight")).toBe(true);
+    });
+    expect(document.activeElement?.id).toBe("search-searxng-url");
   });
 
   it("toggles search through a single button reading stopped then running", async () => {

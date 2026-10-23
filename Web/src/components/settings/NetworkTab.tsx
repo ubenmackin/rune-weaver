@@ -138,7 +138,7 @@ export function NetworkTab({
         </div>
       ) : null}
 
-      <div className="form-row">
+      <div id="server-bind-row" className="form-row">
         <div className="form-group flex-1">
           <label htmlFor="server-hostname-select">Bind interface</label>
           <select

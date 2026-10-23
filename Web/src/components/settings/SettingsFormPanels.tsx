@@ -13,6 +13,7 @@ import { ToolsTab } from "./ToolsTab";
 import { VoiceTab } from "./VoiceTab";
 import { WebSearchTab } from "./WebSearchTab";
 import type { SettingsTab } from "./settingsTypes";
+import { isSettingsFormDirty } from "./useSettingsDirty";
 import type { useSettingsFormState } from "./useSettingsFormState";
 import type { useSettingsSave } from "./useSettingsSave";
 import type { useSettingsServices } from "./useSettingsServices";
@@ -42,6 +43,7 @@ export function SettingsFormPanels({
 }: SettingsFormPanelsProps) {
   if (activeTab === "access") return <AccessPane />;
   if (activeTab === "indexing") return <IndexPolicyPanel />;
+  const dirty = isSettingsFormDirty(form);
   return (
     <form onSubmit={save.handleSave} className="settings-form" noValidate>
       {activeTab === "providers" && (
@@ -294,7 +296,12 @@ export function SettingsFormPanels({
         />
       )}
       <div className="settings-footer">
-        <button type="submit" className="primary-button save-button" disabled={save.saving}>
+        <button
+          type="submit"
+          className="primary-button save-button"
+          disabled={save.saving || !dirty}
+          title={dirty ? undefined : "No unsaved changes"}
+        >
           {save.saving ? "Saving…" : "Save"}
         </button>
       </div>

@@ -95,6 +95,7 @@ export function ProvidersTab({
         </div>
         <button
           type="button"
+          id="providers-add-button"
           className="ghost icon-text-btn"
           onClick={handleAddProvider}
         >
