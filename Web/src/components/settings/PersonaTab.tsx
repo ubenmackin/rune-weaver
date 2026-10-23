@@ -12,7 +12,6 @@ import {
 } from "../../api";
 import { PersonaAvatar } from "../PersonaAvatar";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
-import { countPersonaAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface PersonaTabProps {
   personaAssistantNameDraft: string;
@@ -53,11 +52,6 @@ export function PersonaTab({
   validationError,
 }: PersonaTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const changedCount = countPersonaAdvancedChanged(
-    personaAvatarDraft,
-    personaStyleDraft,
-    DEFAULT_PERSONA_AVATAR
-  );
   const advancedError = matchesAdvancedError(validationError)
     ? validationError
     : null;
@@ -139,12 +133,6 @@ export function PersonaTab({
       </div>
       <AdvancedDisclosure
         tabName="Persona"
-        changedCount={changedCount}
-        summary={
-          changedCount > 0
-            ? `${changedCount} advanced persona ${changedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         validationError={advancedError}

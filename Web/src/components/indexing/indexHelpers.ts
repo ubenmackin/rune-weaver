@@ -230,9 +230,20 @@ export function formatIndexRate(
   return `${rounded} docs/s`;
 }
 
-// Lane throughput: active rate, completed Done with frozen rate, queued Queued.
-// Empty lanes return null so nothing renders.
-export function formatLaneRate(lane: IndexLiveQueueLane): string | null {
+// Canonical 4-modality queue lanes so the Bento grid always mounts during live runs.
+export const CANONICAL_QUEUE_LANES: IndexLiveQueueLane[] = [
+  { lane: "keywordData", label: "Keyword Data", queued: 0, processed: 0, indexed: 0 },
+  { lane: "fastText", label: "Fast Text", queued: 0, processed: 0, indexed: 0 },
+  { lane: "imageOCR", label: "Image & PDF OCR", queued: 0, processed: 0, indexed: 0 },
+  { lane: "mediaSpeech", label: "Media Speech", queued: 0, processed: 0, indexed: 0 },
+];
+
+// Lane throughput: active rate, completed Done with frozen rate, queued Queued,
+// or discovering/up-to-date states when queued is 0.
+export function formatLaneRate(
+  lane: IndexLiveQueueLane,
+  isDiscovering = false,
+): string | null {
   const rateText = formatIndexRate(lane.rate);
   const queued = floorPositive(lane.queued);
   const processed = floorPositive(lane.processed);
@@ -242,6 +253,9 @@ export function formatLaneRate(lane: IndexLiveQueueLane): string | null {
   }
   if (queued > 0 && processed === 0) {
     return "Queued";
+  }
+  if (queued === 0 && processed === 0) {
+    return isDiscovering ? "Discovering…" : "Up to date";
   }
   return rateText;
 }
@@ -479,6 +493,19 @@ export function resolveIndexSourceContent(
   });
 }
 
+// Narrow discovering read for the live block: the walk phase with no queued
+// modality work and nothing committed yet. Extracting or embedding with
+// drained queues is not discovering, so lane copy and the pipeline track
+// share this instead of keying off queued zeros alone.
+export function isIndexDiscovering(
+  live: IndexLiveStatus | null | undefined,
+): boolean {
+  if (!live || live.phase !== "discovering") return false;
+  const queues = Array.isArray(live.queues) ? live.queues : [];
+  const hasQueues = queues.some((lane) => floorPositive(lane.queued) > 0);
+  return !hasQueues && floorPositive(live.indexed) === 0;
+}
+
 // Pipeline stage node descriptor for the animated 4-stage live flow track.
 export interface IndexPipelineStep {
   id: "discovering" | "queues" | "embedding" | "committing";
@@ -502,13 +529,13 @@ export function resolveIndexPipelineSteps(
   const totalProcessed = queues.reduce((sum, lane) => sum + floorPositive(lane.processed), 0);
   const hasQueues = totalQueued > 0;
   const liveRateText = formatIndexRate(live?.rate, live?.elapsedMs);
-  const isDiscovering = phase === "discovering" && !hasQueues && indexed === 0;
+  const isDiscovering = isIndexDiscovering(live);
   const isCommitting = phase === "committing";
   const discoveringRatePart = isDiscovering && liveRateText ? ` · ${liveRateText.replace("docs/s", "files/s")}` : "";
   const discoveringMetric = scanned > 0 ? `${formatIndexCount(scanned)} scanned${discoveringRatePart}` : undefined;
   const queuesRatePart = !isDiscovering && !isCommitting && liveRateText ? ` · ${liveRateText}` : "";
   const queuesMetric =
-    totalQueued > 0
+    hasQueues
       ? `${formatIndexCount(totalProcessed)} / ${formatIndexCount(totalQueued)}${queuesRatePart}`
       : undefined;
   const embeddingMetric = vectors > 0 ? `${formatIndexCount(vectors)} vectors` : undefined;

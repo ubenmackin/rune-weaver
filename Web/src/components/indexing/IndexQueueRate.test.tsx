@@ -54,7 +54,8 @@ describe("IndexQueueRate and Per-Lane Throughput", () => {
       processed: 0,
       indexed: 0,
     };
-    expect(formatLaneRate(emptyLane)).toBeNull();
+    expect(formatLaneRate(emptyLane)).toBe("Up to date");
+    expect(formatLaneRate(emptyLane, true)).toBe("Discovering…");
   });
 
   it("incorporates phase throughput into pipeline steps", () => {

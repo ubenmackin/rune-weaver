@@ -14,7 +14,6 @@ import {
   browserStageCopy,
 } from "./settingsTypes";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
-import { countWebAdvancedChanged } from "./settingsAdvancedCounts";
 
 // Advanced Web validation messages the disclosure can focus. Shared by the
 // panel prop and the shell error router so one message never prints twice.
@@ -111,10 +110,6 @@ export function WebSearchTab({
   validationError = null,
 }: WebSearchTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedChangedCount = countWebAdvancedChanged(
-    searchSearxngURL,
-    searchTimeoutSeconds
-  );
 
   // Reset restores stock SearXNG endpoint plus timeout defaults.
   const resetWebAdvanced = () => {
@@ -364,12 +359,6 @@ export function WebSearchTab({
       </div>
       <AdvancedDisclosure
         tabName="Web"
-        changedCount={advancedChangedCount}
-        summary={
-          advancedChangedCount > 0
-            ? `${advancedChangedCount} advanced web ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         testId="advanced-web"

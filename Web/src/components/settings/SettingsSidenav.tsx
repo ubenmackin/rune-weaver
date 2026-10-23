@@ -1,4 +1,4 @@
-// Rune Weaver Dashboard — Settings navigation drawer and vertical category tabs list.
+// Rune Weaver Dashboard — Settings navigation drawer with Mac-like find-and-highlight.
 
 import {
   ApprovalsIcon,
@@ -13,11 +13,12 @@ import {
   UserIcon,
   WrenchIcon,
 } from "../icons";
+import type { SettingsTab } from "./settingsTypes";
 import {
-  matchesSettingsTab,
-  SETTINGS_TABS,
-  type SettingsTab,
-} from "./settingsTypes";
+  highlightSettingTargetWhenReady,
+  searchSettingsItems,
+  type SettingsSearchItem,
+} from "./settingsSearchIndex";
 
 interface SettingsSidenavProps {
   settingsMenuOpen: boolean;
@@ -31,6 +32,24 @@ interface SettingsSidenavProps {
   serverRestartVisible: boolean;
 }
 
+// Single source for tab labels shared by the rail buttons and the item
+// result rows below, so a rename lands in both without a second copy.
+const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
+  access: "Access",
+  providers: "LLM Providers",
+  persona: "Persona",
+  voice: "Voice",
+  memory: "Memory and Storage",
+  goals: "Goals",
+  tools: "Tools and Runes",
+  indexing: "Indexing",
+  search: "Web",
+  email: "Email Accounts",
+  security: "Security",
+  network: "Network",
+  engine: "Engine and Logs",
+};
+
 export default function SettingsSidenav({
   settingsMenuOpen,
   activeTab,
@@ -42,9 +61,19 @@ export default function SettingsSidenav({
   tamperedCount,
   serverRestartVisible,
 }: SettingsSidenavProps) {
-  const settingsNavFilter = settingsNavQuery.trim().toLowerCase();
-  const navTabVisible = (tab: SettingsTab) =>
-    activeTab === tab || matchesSettingsTab(tab, settingsNavFilter);
+  const isSearching = settingsNavQuery.trim().length > 0;
+  const searchResults = isSearching
+    ? searchSettingsItems(settingsNavQuery)
+    : [];
+  const showEmpty = isSearching && searchResults.length === 0;
+
+  const handleSearchResultSelect = (item: SettingsSearchItem) => {
+    onSelectTab(item.tab);
+    onSearchChange("");
+    // The newly selected pane commits asynchronously; the bounded poll
+    // highlights once it mounts instead of racing the commit.
+    highlightSettingTargetWhenReady(item.targetId);
+  };
 
   return (
     <>
@@ -64,18 +93,51 @@ export default function SettingsSidenav({
             type="search"
             className="settings-nav-search-input"
             data-testid="settings-nav-search"
-            aria-label="Search settings sections"
-            placeholder="Search settings sections…"
+            aria-label="Search settings"
+            placeholder="Search settings…"
             value={settingsNavQuery}
             onChange={(e) => onSearchChange(e.target.value)}
           />
         </div>
-        <nav
-          className="settings-sidenav"
-          aria-label="Settings categories"
-          role="tablist"
-        >
-          {navTabVisible("access") ? (
+        {isSearching ? (
+          <div
+            className="settings-sidenav settings-search-results"
+            role="listbox"
+            aria-label="Matching settings"
+            data-testid="settings-search-results"
+          >
+            {searchResults.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="settings-tab-btn settings-search-result"
+                data-testid={`settings-search-result-${item.id}`}
+                onClick={() => handleSearchResultSelect(item)}
+              >
+                <span>{item.label}</span>
+                <span className="settings-search-result-tab">
+                  {SETTINGS_TAB_LABELS[item.tab]}
+                </span>
+              </button>
+            ))}
+            {showEmpty ? (
+              <p
+                className="muted text-sm"
+                data-testid="settings-nav-empty"
+                style={{ padding: "8px 6px", margin: 0 }}
+              >
+                No settings match.
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <nav
+            className="settings-sidenav"
+            aria-label="Settings categories"
+            role="tablist"
+          >
             <button
               type="button"
               role="tab"
@@ -84,11 +146,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("access")}
             >
               <KeyIcon size={16} />
-              <span>Access</span>
+              <span>{SETTINGS_TAB_LABELS.access}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("providers") ? (
             <button
               type="button"
               role="tab"
@@ -97,11 +157,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("providers")}
             >
               <ChatIcon size={16} />
-              <span>LLM Providers</span>
+              <span>{SETTINGS_TAB_LABELS.providers}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("persona") ? (
             <button
               type="button"
               role="tab"
@@ -110,11 +168,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("persona")}
             >
               <UserIcon size={16} />
-              <span>Persona</span>
+              <span>{SETTINGS_TAB_LABELS.persona}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("voice") ? (
             <button
               type="button"
               role="tab"
@@ -123,11 +179,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("voice")}
             >
               <MicIcon size={16} />
-              <span>Voice</span>
+              <span>{SETTINGS_TAB_LABELS.voice}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("memory") ? (
             <button
               type="button"
               role="tab"
@@ -136,11 +190,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("memory")}
             >
               <MemoryIcon size={16} />
-              <span>Memory and Storage</span>
+              <span>{SETTINGS_TAB_LABELS.memory}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("goals") ? (
             <button
               type="button"
               role="tab"
@@ -149,11 +201,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("goals")}
             >
               <TargetIcon size={16} />
-              <span>Goals</span>
+              <span>{SETTINGS_TAB_LABELS.goals}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("tools") ? (
             <button
               type="button"
               role="tab"
@@ -162,7 +212,7 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("tools")}
             >
               <WrenchIcon size={16} />
-              <span>Tools and Runes</span>
+              <span>{SETTINGS_TAB_LABELS.tools}</span>
               {pendingCount > 0 && (
                 <span
                   className="settings-tab-badge"
@@ -182,9 +232,7 @@ export default function SettingsSidenav({
                 </span>
               )}
             </button>
-          ) : null}
 
-          {navTabVisible("indexing") ? (
             <button
               type="button"
               role="tab"
@@ -193,11 +241,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("indexing")}
             >
               <MemoryIcon size={16} />
-              <span>Indexing</span>
+              <span>{SETTINGS_TAB_LABELS.indexing}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("search") ? (
             <button
               type="button"
               role="tab"
@@ -206,11 +252,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("search")}
             >
               <SearchIcon size={16} />
-              <span>Web</span>
+              <span>{SETTINGS_TAB_LABELS.search}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("email") ? (
             <button
               type="button"
               role="tab"
@@ -219,11 +263,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("email")}
             >
               <MailIcon size={16} />
-              <span>Email Accounts</span>
+              <span>{SETTINGS_TAB_LABELS.email}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("security") ? (
             <button
               type="button"
               role="tab"
@@ -232,11 +274,9 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("security")}
             >
               <ApprovalsIcon size={16} />
-              <span>Security</span>
+              <span>{SETTINGS_TAB_LABELS.security}</span>
             </button>
-          ) : null}
 
-          {navTabVisible("network") ? (
             <button
               type="button"
               role="tab"
@@ -245,7 +285,7 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("network")}
             >
               <SettingsIcon size={16} />
-              <span>Network</span>
+              <span>{SETTINGS_TAB_LABELS.network}</span>
               {serverRestartVisible ? (
                 <span
                   className="settings-tab-badge"
@@ -256,9 +296,7 @@ export default function SettingsSidenav({
                 </span>
               ) : null}
             </button>
-          ) : null}
 
-          {navTabVisible("engine") ? (
             <button
               type="button"
               role="tab"
@@ -267,17 +305,10 @@ export default function SettingsSidenav({
               onClick={() => onSelectTab("engine")}
             >
               <SettingsIcon size={16} />
-              <span>Engine and Logs</span>
+              <span>{SETTINGS_TAB_LABELS.engine}</span>
             </button>
-          ) : null}
-
-          {settingsNavFilter &&
-          SETTINGS_TABS.every((tab) => !matchesSettingsTab(tab, settingsNavFilter)) ? (
-            <p className="muted text-sm" data-testid="settings-nav-empty" style={{ padding: "8px 6px", margin: 0 }}>
-              No settings sections match.
-            </p>
-          ) : null}
-        </nav>
+          </nav>
+        )}
       </div>
     </>
   );

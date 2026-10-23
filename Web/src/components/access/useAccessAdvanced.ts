@@ -9,11 +9,7 @@ import {
   type SettingsResponse,
   type UpdateSettingsInput,
 } from "../../api";
-import {
-  countBashAdvancedChanged,
-  countFilesAdvancedChanged,
-  writePathRulesDiffer,
-} from "../settings/settingsAdvancedCounts";
+import { writePathRulesDiffer } from "../settings/settingsAdvancedCounts";
 import {
   bashLoadedFromDraft,
   bashDraftFromLoaded,
@@ -45,7 +41,6 @@ export interface UseBashAdvancedResult {
   saveError: string | null;
   open: boolean;
   changed: boolean;
-  changedCount: number;
   timeoutSeconds: number | string;
   cpuSeconds: number | string;
   memoryMB: number | string;
@@ -70,7 +65,6 @@ export interface UseFilesAdvancedResult {
   saveError: string | null;
   open: boolean;
   changed: boolean;
-  changedCount: number;
   filesRules: WritePathRule[];
   denyPatternsText: string;
   setOpen: (open: boolean) => void;
@@ -164,13 +158,6 @@ export function useAccessBashAdvanced(): UseBashAdvancedResult {
 
   const patch = buildPatch();
   const changed = Object.keys(patch).length > 0;
-  const changedCount = countBashAdvancedChanged(
-    timeoutSeconds,
-    cpuSeconds,
-    memoryMB,
-    sandboxMode,
-    hostAllowPatternsText
-  );
 
   function validate(): string | null {
     const tuningError = validateBashBudgets(
@@ -230,7 +217,6 @@ export function useAccessBashAdvanced(): UseBashAdvancedResult {
     saveError,
     open,
     changed,
-    changedCount,
     timeoutSeconds,
     cpuSeconds,
     memoryMB,
@@ -332,7 +318,6 @@ export function useAccessFilesAdvanced(): UseFilesAdvancedResult {
 
   const patch = buildPatch();
   const changed = Object.keys(patch).length > 0;
-  const changedCount = countFilesAdvancedChanged(filesRules, denyPatternsText);
 
   function validate(): string | null {
     return validateFilesAdvancedFields(filesRules, denyPatternsText);
@@ -366,7 +351,6 @@ export function useAccessFilesAdvanced(): UseFilesAdvancedResult {
     saveError,
     open,
     changed,
-    changedCount,
     filesRules,
     denyPatternsText,
     setOpen,

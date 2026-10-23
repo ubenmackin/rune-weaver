@@ -28,6 +28,7 @@ interface IndexBentoHeaderProps {
   liveSources: IndexLiveSourceStatus[];
   reclaimSummary: string | null;
   status: IndexStatusResponse | null;
+  isDiscovering?: boolean;
   highlightRun?: boolean;
   onRun: () => void;
   onCancel: () => void;
@@ -51,6 +52,7 @@ export default function IndexBentoHeader({
   liveSources,
   reclaimSummary,
   status,
+  isDiscovering = false,
   highlightRun = false,
   onRun,
   onCancel,
@@ -203,6 +205,8 @@ export default function IndexBentoHeader({
             })}
           </div>
 
+          {/* Lane copy reads the phase-derived discovering flag from the parent:
+              canonical zeroed lanes alone never imply discovering. */}
           {queueLanes.length > 0 ? (
             <div
               className="index-queue-lanes-grid"
@@ -214,7 +218,7 @@ export default function IndexBentoHeader({
                     ? Math.min(100, Math.round((lane.processed / lane.queued) * 100))
                     : 0;
                 const isActive = lane.queued > lane.processed;
-                const laneRate = formatLaneRate(lane);
+                const laneRate = formatLaneRate(lane, isDiscovering);
                 return (
                   <div
                     key={lane.lane}

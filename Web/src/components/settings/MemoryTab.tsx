@@ -4,7 +4,6 @@ import { useState } from "react";
 import type { EmbeddingsStatusResponse } from "../../api";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import {
-  countMemoryAdvancedChanged,
   DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
   DEFAULT_MEMORY_RECALL_DOC_POOL_MULTIPLIER,
   DEFAULT_MEMORY_RECALL_EPISODIC_WEIGHT,
@@ -65,11 +64,6 @@ export function MemoryTab({
   validationError,
 }: MemoryTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const changedCount = countMemoryAdvancedChanged(
-    memoryRecallDocPoolMultiplier,
-    memoryRecallEpisodicWeight,
-    memoryRecallAutoLimit
-  );
   const advancedError = matchesAdvancedError(validationError)
     ? validationError
     : null;
@@ -194,12 +188,6 @@ export function MemoryTab({
 
       <AdvancedDisclosure
         tabName="Memory"
-        changedCount={changedCount}
-        summary={
-          changedCount > 0
-            ? `${changedCount} advanced memory ${changedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         validationError={advancedError}

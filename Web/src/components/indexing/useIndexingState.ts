@@ -30,6 +30,7 @@ import type {
   WSToolProgressFrame,
 } from "../../hooks/useSharedWebSocket";
 import {
+  CANONICAL_QUEUE_LANES,
   DONUT_RADIUS,
   cachedHasStorage,
   cachedIndexAdoptedMidRun,
@@ -157,7 +158,12 @@ export function useIndexingState() {
     // adopted before the run projects live per-source deltas on top of the settled totals.
     const sourceContent = resolveIndexSourceContent(status, midRunAdopted ? null : live);
     const pipelineSteps = resolveIndexPipelineSteps(live, cancelling);
-    const liveQueues: IndexLiveQueueLane[] = live?.queues ?? [];
+    const liveQueues: IndexLiveQueueLane[] =
+      live?.queues && live.queues.length > 0
+        ? live.queues
+        : live
+          ? CANONICAL_QUEUE_LANES
+          : [];
     const liveSources: IndexLiveSourceStatus[] = live?.sources ?? [];
     // Displayed-total denominator for the source chart: every visible row shares
     // this sum so each bar reads as its honest fraction of the index.

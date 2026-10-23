@@ -347,13 +347,9 @@ describe("SettingsManager", () => {
     });
 
     expect(sentPayload).toBeDefined();
-    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingBackend"]).toBe(
-      "provider"
-    );
+    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingBackend"]).toBe("provider");
     // Prior model value persists untouched for forward compatibility.
-    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingModel"]).toBe(
-      "bge-small-en-v1.5"
-    );
+    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingModel"]).toBe("bge-small-en-v1.5");
   });
 
   it("renders Tools and Runes tab with disabled-by-default warning and enables discovered rune", async () => {
@@ -536,18 +532,14 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Marketplace Weather")).toBeDefined();
       expect(screen.getByText("World Clock")).toBeDefined();
     });
-    expect(
-      screen.getByPlaceholderText(/Search runes by name/i)
-    ).toBeDefined();
+    expect(screen.getByPlaceholderText(/Search runes by name/i)).toBeDefined();
     expect(within(screen.getByRole("dialog", { name: /Rune Marketplace/i })).getByRole("button", { name: /^Refresh$/i })).toBeDefined();
     const marketplaceInstallButton = screen.getByRole("button", { name: /^Install$/i });
     expect(marketplaceInstallButton).toBeDefined();
     expect(marketplaceInstallButton.className).toContain("primary");
     expect(marketplaceInstallButton.className).not.toContain("btn-primary");
     expect(screen.getByText(/^Installed$/i)).toBeDefined();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/marketplace/plugins"))).toBe(
-      true
-    );
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/marketplace/plugins"))).toBe(true);
 
     // Closing returns to Tools; rescan still discovers local runes.
     await user.click(screen.getByRole("button", { name: /Close marketplace/i }));
@@ -558,12 +550,8 @@ describe("SettingsManager", () => {
     await waitFor(() => {
       expect(screen.getByText("Weather Reporter")).toBeDefined();
     });
-    expect(
-      screen.getByRole("button", { name: /Browse Marketplace/i })
-    ).toBeDefined();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/plugins/rescan"))).toBe(
-      true
-    );
+    expect(screen.getByRole("button", { name: /Browse Marketplace/i })).toBeDefined();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/plugins/rescan"))).toBe(true);
   });
 
   it("disables an enabled builtin tool via the tool state endpoint with per-row pending", async () => {
@@ -4041,7 +4029,7 @@ describe("SettingsManager persona pane", () => {
     expect(labels.join("|")).not.toMatch(/Policy/);
   });
 
-  it("finds the Access pane from capability words in the section finder", async () => {
+  it("finds item rows from capability words in the section finder", async () => {
     stubPersonaFetch();
     const user = userEvent.setup();
     render(<SettingsManager />);
@@ -4049,28 +4037,55 @@ describe("SettingsManager persona pane", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
     const finder = screen.getByTestId("settings-nav-search") as HTMLInputElement;
-    // "bash" names an editor behind the Access rail, not the tab label, and
-    // only Access matches it among the inactive tabs.
+    expect(finder).toHaveAttribute("aria-label", "Search settings");
+    const railTabs = () =>
+      within(
+        screen.getByRole("tablist", { name: "Settings categories" })
+      ).getAllByRole("tab");
+    // "bash" names a knob behind the Access rail, not a tab label: the rail
+    // hides and only the matching item rows render with their tab.
     await user.type(finder, "bash");
-    expect(screen.getByRole("tab", { name: "Access" })).toBeDefined();
-    expect(screen.queryByRole("tab", { name: /^Voice$/i })).toBeNull();
-    expect(screen.queryByRole("tab", { name: /Engine and Logs/i })).toBeNull();
-    // The active tab never hides from its own query, so the selection state
-    // stays intact while the finder narrows the list.
-    expect(screen.getByRole("tab", { name: /LLM Providers/i })).toBeDefined();
-    // "policy" — the vocabulary owners still reach for — surfaces Access too.
-    await user.clear(finder);
+    expect(
+      screen.queryByRole("tablist", { name: "Settings categories" })
+    ).toBeNull();
+    const results = screen.getByRole("listbox", { name: "Matching settings" });
+    const bashHit = within(results).getByRole("option", {
+      name: /Bash and shell policy/,
+    });
+    expect(bashHit).toHaveAttribute(
+      "data-testid",
+      "settings-search-result-access-bash-shell"
+    );
+    expect(bashHit.textContent).toMatch(/Access/);
+    // Selecting a row jumps to its tab and restores the rail.
+    await user.click(bashHit);
+    expect(railTabs()).toHaveLength(13);
+    expect(
+      within(
+        screen.getByRole("tablist", { name: "Settings categories" })
+      )
+        .getByRole("tab", { name: "Access" })
+        .getAttribute("aria-selected")
+    ).toBe("true");
+    // "policy" — the vocabulary owners still reach for — surfaces the same row.
     await user.type(finder, "policy");
-    expect(screen.getByRole("tab", { name: "Access" })).toBeDefined();
-    expect(screen.queryByRole("tab", { name: /^Voice$/i })).toBeNull();
-    // A starved query shows the empty-state note while the active row stays
-    // as context, and clearing restores the full list.
+    expect(
+      screen.queryByRole("tablist", { name: "Settings categories" })
+    ).toBeNull();
+    expect(
+      screen.getByTestId("settings-search-result-access-bash-shell")
+    ).toBeDefined();
+    // A starved query shows the honest empty-state note with no rail and no
+    // rows, and clearing restores the full list.
     await user.clear(finder);
     await user.type(finder, "zzz-no-such-section");
     expect(screen.getByTestId("settings-nav-empty")).toBeDefined();
-    expect(screen.getByRole("tab", { name: /LLM Providers/i })).toBeDefined();
+    expect(screen.queryByTestId("settings-search-result-access-bash-shell")).toBeNull();
+    expect(
+      screen.queryByRole("tablist", { name: "Settings categories" })
+    ).toBeNull();
     await user.clear(finder);
-    expect(screen.getAllByRole("tab").length).toBe(13);
+    expect(railTabs()).toHaveLength(13);
   });
 
   it("renders moved blocks only in their own tabs and never in engine", async () => {
@@ -4573,27 +4588,13 @@ describe("bash sandbox copy and tiers", () => {
   });
 
   it("pins per-tier approval copy for every tier plus network flag", () => {
-    expect(bashSandboxSummary("strictContainer", false)).toBe(
-      "Runs in a temporary container with no internet access. Nothing is kept after the run.",
-    );
-    expect(bashSandboxSummary("strictContainer", true)).toBe(
-      "Runs in a temporary container with internet access to approved destinations only. Nothing is kept after the run.",
-    );
-    expect(bashSandboxSummary("machineScoped", false)).toBe(
-      "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.",
-    );
-    expect(bashSandboxSummary("machineScoped", true)).toBe(
-      "Runs in a persistent workspace machine with internet access to approved destinations only. Workspace files persist across runs.",
-    );
-    expect(bashSandboxSummary("hostSeatbelt", false)).toBe(
-      "Runs on your Mac as you with full access to your files.",
-    );
-    expect(bashSandboxSummary("hostSeatbelt", true)).toBe(
-      "Runs on your Mac as you with full access to your files.",
-    );
-    expect(BASH_SANDBOX_COPY.host).toBe(
-      "Runs on your Mac as you with full access to your files.",
-    );
+    expect(bashSandboxSummary("strictContainer", false)).toBe("Runs in a temporary container with no internet access. Nothing is kept after the run.");
+    expect(bashSandboxSummary("strictContainer", true)).toBe("Runs in a temporary container with internet access to approved destinations only. Nothing is kept after the run.");
+    expect(bashSandboxSummary("machineScoped", false)).toBe("Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.");
+    expect(bashSandboxSummary("machineScoped", true)).toBe("Runs in a persistent workspace machine with internet access to approved destinations only. Workspace files persist across runs.");
+    expect(bashSandboxSummary("hostSeatbelt", false)).toBe("Runs on your Mac as you with full access to your files.");
+    expect(bashSandboxSummary("hostSeatbelt", true)).toBe("Runs on your Mac as you with full access to your files.");
+    expect(BASH_SANDBOX_COPY.host).toBe("Runs on your Mac as you with full access to your files.");
   });
 });
 
@@ -4776,6 +4777,51 @@ describe("SettingsManager workspace machine control", () => {
       "Network",
       "Engine and Logs",
     ]);
+  });
+});
+
+describe("SettingsManager engine advanced disclosure", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("keeps the Engine Advanced trigger static with no chip", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
+    const trigger = screen.getByTestId("advanced-engine-trigger");
+    expect(trigger.textContent).toBe("Advanced Engine settings");
+    expect(screen.queryByTestId("advanced-engine-chip")).toBeNull();
+    await user.click(trigger);
+    await waitFor(() => {
+      expect((screen.getByTestId("advanced-engine") as HTMLDetailsElement).open).toBe(true);
+    });
+    expect(screen.getByTestId("advanced-engine-trigger").textContent).toBe("Advanced Engine settings");
+    expect(screen.queryByTestId("advanced-engine-chip")).toBeNull();
+  });
+
+  it("keeps the Engine Reset advanced button retargeted to the static trigger", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
+    await user.click(screen.getByTestId("advanced-engine-trigger"));
+    await waitFor(() => {
+      expect((screen.getByTestId("advanced-engine") as HTMLDetailsElement).open).toBe(true);
+    });
+    const reset = screen.getByTestId("advanced-engine-reset");
+    expect(reset.textContent).toBe("Reset advanced");
+    await user.click(reset);
+    expect(screen.getByTestId("advanced-engine-trigger").textContent).toBe("Advanced Engine settings");
+    expect(screen.queryByTestId("advanced-engine-chip")).toBeNull();
   });
 });
 

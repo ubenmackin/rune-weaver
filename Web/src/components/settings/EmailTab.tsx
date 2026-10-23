@@ -6,7 +6,6 @@ import { CheckIcon, KeyIcon, MailIcon, PlusIcon, TrashIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import { getEmailPasswordEnv } from "./settingsHelpers";
 import type { EmailEntry } from "./settingsTypes";
-import { countEmailAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface EmailTabProps {
   emailAccountsList: EmailEntry[];
@@ -48,7 +47,6 @@ export function EmailTab({
   validationError,
 }: EmailTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const changedCount = countEmailAdvancedChanged(emailAccountsList);
   const advancedError = matchesAdvancedError(validationError)
     ? validationError
     : null;
@@ -62,7 +60,7 @@ export function EmailTab({
   };
 
   return (
-    <div className="settings-section card">
+    <div className="settings-section card" id="email-pane">
       <div className="settings-section-header">
         <div className="settings-section-title-group">
           <h3>Email Accounts</h3>
@@ -73,6 +71,7 @@ export function EmailTab({
         <div className="row">
           <button
             type="button"
+            id="email-add-account"
             className="ghost icon-text-btn"
             onClick={handleAddEmailAccount}
           >
@@ -243,12 +242,6 @@ export function EmailTab({
       )}
       <AdvancedDisclosure
         tabName="Email"
-        changedCount={changedCount}
-        summary={
-          changedCount > 0
-            ? `${changedCount} advanced email ${changedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         validationError={advancedError}

@@ -2,7 +2,6 @@
 import { useState } from "react";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import {
-  countVoiceAdvancedChanged,
   DEFAULT_VOICE_WHISPER_MODEL,
 } from "./settingsAdvancedCounts";
 
@@ -38,7 +37,6 @@ export function VoiceTab({
   validationError = null,
 }: VoiceTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedChangedCount = countVoiceAdvancedChanged(voiceWhisperModel);
 
   // Reset restores the stock whisper model.
   const resetVoiceAdvanced = () => {
@@ -83,12 +81,6 @@ export function VoiceTab({
       </div>
       <AdvancedDisclosure
         tabName="Voice"
-        changedCount={advancedChangedCount}
-        summary={
-          advancedChangedCount > 0
-            ? `${advancedChangedCount} advanced voice ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         testId="advanced-voice"

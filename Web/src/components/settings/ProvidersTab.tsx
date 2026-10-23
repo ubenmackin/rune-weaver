@@ -6,7 +6,6 @@ import { KNOWN_PROVIDER_TYPES } from "../../api/settings-types";
 import { CheckIcon, KeyIcon, PlusIcon, TrashIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import type { ProviderEntry } from "./settingsTypes";
-import { countProvidersAdvancedChanged } from "./settingsAdvancedCounts";
 
 export interface ProvidersTabProps {
   defaultProvider: string;
@@ -71,7 +70,6 @@ export function ProvidersTab({
   validationError,
 }: ProvidersTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const changedCount = countProvidersAdvancedChanged(providersList);
   const advancedError = matchesAdvancedError(validationError)
     ? validationError
     : null;
@@ -315,12 +313,6 @@ export function ProvidersTab({
 
       <AdvancedDisclosure
         tabName="Providers"
-        changedCount={changedCount}
-        summary={
-          changedCount > 0
-            ? `${changedCount} advanced provider ${changedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         validationError={advancedError}

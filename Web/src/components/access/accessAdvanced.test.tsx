@@ -1,4 +1,4 @@
-// Rune Weaver Dashboard — Access per-section Advanced coverage: counts, isolation,
+// Rune Weaver Dashboard — Access per-section Advanced coverage: isolation,
 // auto-expand, and single-card containment.
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -7,16 +7,9 @@ import AccessPane from "../AccessPane";
 import {
   clearAuthToken,
   DEFAULT_BASH_HOST_ALLOW_PATTERNS,
-  DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT,
-  DEFAULT_FILES_DENY_PATTERNS_TEXT,
 } from "../../api";
 import { jsonResponse } from "../../test-utils/http";
-import {
-  countBashAdvancedChanged,
-  countFilesAdvancedChanged,
-  DEFAULT_FILES_WRITE_PATH_RULES,
-  normalizeWritePathRules,
-} from "../settings/settingsAdvancedCounts";
+import { normalizeWritePathRules } from "../settings/settingsAdvancedCounts";
 
 const storedSettings = {
   configPath: "/tmp/config.toml",
@@ -83,60 +76,8 @@ async function waitForBashLoaded() {
   });
 }
 
-describe("access advanced counts", () => {
-  it("counts only the Advanced-owned Bash knobs", () => {
-    expect(
-      countBashAdvancedChanged(
-        30,
-        120,
-        1024,
-        "strictContainer",
-        DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT
-      )
-    ).toBe(0);
-    expect(
-      countBashAdvancedChanged(
-        45,
-        120,
-        1024,
-        "strictContainer",
-        DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT
-      )
-    ).toBe(1);
-    expect(
-      countBashAdvancedChanged(
-        45,
-        120,
-        1024,
-        "machineScoped",
-        DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT
-      )
-    ).toBe(2);
-    expect(
-      countBashAdvancedChanged(45, 120, 1024, "machineScoped", "codesign*")
-    ).toBe(3);
-  });
-
-  it("counts Files rules plus deny patterns and normalizes unknown postures closed", () => {
-    expect(
-      countFilesAdvancedChanged(
-        DEFAULT_FILES_WRITE_PATH_RULES,
-        DEFAULT_FILES_DENY_PATTERNS_TEXT
-      )
-    ).toBe(0);
-    const rules = [
-      { path: "~/Documents", posture: "stage" },
-      { path: "~/Secrets", posture: "deny" },
-    ];
-    expect(
-      countFilesAdvancedChanged(rules, DEFAULT_FILES_DENY_PATTERNS_TEXT)
-    ).toBe(1);
-    expect(
-      countFilesAdvancedChanged(
-        rules,
-        `${DEFAULT_FILES_DENY_PATTERNS_TEXT}\n.custom`
-      )
-    ).toBe(2);
+describe("access advanced normalization", () => {
+  it("normalizes unknown postures closed", () => {
     expect(
       normalizeWritePathRules([
         { path: "  ~/Documents  ", posture: "widen" },
@@ -161,8 +102,9 @@ describe("AccessPane advanced sections", () => {
     const bashDetails = screen.getByTestId("advanced-bash");
     expect(bashDetails.closest("section")).toBe(screen.getByTestId("bash-pane"));
     expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
-      "Advanced Bash settings (0 changed)"
+      "Advanced Bash settings"
     );
+    expect(screen.queryByTestId("advanced-bash-chip")).toBeNull();
 
     const user = userEvent.setup();
     await user.click(screen.getByTestId("access-tab-files"));
@@ -174,11 +116,12 @@ describe("AccessPane advanced sections", () => {
       screen.getByTestId("files-access-pane")
     );
     expect(screen.getByTestId("advanced-files-trigger").textContent).toBe(
-      "Advanced Files settings (2 changed)"
+      "Advanced Files settings"
     );
+    expect(screen.queryByTestId("advanced-files-chip")).toBeNull();
   });
 
-  it("saves only Bash keys and re-seeds the count from the accepted echo", async () => {
+  it("saves only Bash keys and keeps a static trigger", async () => {
     const { puts } = stubSettings();
     const user = userEvent.setup();
     render(<AccessPane initialSection="bash" />);
@@ -190,10 +133,7 @@ describe("AccessPane advanced sections", () => {
     await user.type(timeout, "45");
 
     expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
-      "Advanced Bash settings (1 changed)"
-    );
-    expect(screen.getByTestId("advanced-bash-chip").textContent).toContain(
-      "1 advanced bash setting changed"
+      "Advanced Bash settings"
     );
 
     await user.click(screen.getByTestId("bash-save"));
@@ -203,7 +143,7 @@ describe("AccessPane advanced sections", () => {
     expect(Object.keys(puts[0])).toEqual(["bash"]);
     expect(puts[0]["bash"]).toEqual({ timeoutSeconds: 45 });
     expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
-      "Advanced Bash settings (1 changed)"
+      "Advanced Bash settings"
     );
   });
 
@@ -270,7 +210,7 @@ describe("AccessPane advanced sections", () => {
       ).toBe("45");
     });
     expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
-      "Advanced Bash settings (1 changed)"
+      "Advanced Bash settings"
     );
 
     await user.click(screen.getByTestId("advanced-bash-trigger"));
@@ -284,7 +224,7 @@ describe("AccessPane advanced sections", () => {
       (screen.getByLabelText(/Timeout \(seconds\)/i) as HTMLInputElement).value
     ).toBe("30");
     expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
-      "Advanced Bash settings (0 changed)"
+      "Advanced Bash settings"
     );
 
     await user.click(screen.getByTestId("access-tab-files"));
@@ -295,7 +235,7 @@ describe("AccessPane advanced sections", () => {
       ).toBe(".env*\n.custom");
     });
     expect(screen.getByTestId("advanced-files-trigger").textContent).toBe(
-      "Advanced Files settings (2 changed)"
+      "Advanced Files settings"
     );
   });
 
@@ -330,7 +270,7 @@ describe("AccessPane advanced sections", () => {
     expect(Object.keys(puts[0])).toEqual(["filesDenyPatterns"]);
     expect(puts[0]["filesDenyPatterns"]).toEqual([".env*", ".custom"]);
     expect(screen.getByTestId("advanced-files-trigger").textContent).toBe(
-      "Advanced Files settings (2 changed)"
+      "Advanced Files settings"
     );
   });
 });

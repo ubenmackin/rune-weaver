@@ -444,9 +444,10 @@ describe("AccessBashSection", () => {
     const advanced = screen.getByTestId("advanced-bash");
     expect(advanced).not.toBeNull();
     expect((advanced as HTMLDetailsElement).open).toBe(false);
-    expect(screen.getByTestId("advanced-bash-trigger").textContent).toContain(
+    expect(screen.getByTestId("advanced-bash-trigger").textContent).toBe(
       "Advanced Bash settings"
     );
+    expect(screen.queryByTestId("advanced-bash-chip")).toBeNull();
     expect((advanced as HTMLElement).textContent).toContain("Advanced");
     const advancedScope = advanced as HTMLElement;
     expect(within(advancedScope).getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();

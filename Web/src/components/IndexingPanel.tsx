@@ -8,6 +8,7 @@ import IndexStorageBreakdownCard from "./indexing/IndexStorageBreakdownCard";
 import IndexErrorsCard from "./indexing/IndexErrorsCard";
 import IndexModals from "./indexing/IndexModals";
 import type { IndexingPanelProps } from "./indexing/indexHelpers";
+import { isIndexDiscovering } from "./indexing/indexHelpers";
 
 // Re-export all helper utilities and sub-panels so consumers and tests retain 100% API parity
 export * from "./indexing/indexHelpers";
@@ -108,6 +109,7 @@ export default function IndexingPanel({ hideHeader = false, highlightRun = false
         liveSources={state.liveSources}
         reclaimSummary={state.reclaimSummary}
         status={state.status}
+        isDiscovering={isIndexDiscovering(state.live)}
         highlightRun={highlightRun}
         onRun={() => void handleRunWithHighlight()}
         onCancel={() => void state.handleCancel()}

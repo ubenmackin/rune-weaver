@@ -16,7 +16,6 @@ import {
 } from "../../api";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import {
-  countEngineAdvancedChanged,
   DEFAULT_ENGINE_COMPACTION_THRESHOLD,
 } from "./settingsAdvancedCounts";
 
@@ -72,9 +71,6 @@ export function EngineTab({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const schedulerRounds = schedulerMaxToolIterations(settings);
   const goalRounds = goalsMaxToolIterations(settings?.goals);
-  const advancedChangedCount = countEngineAdvancedChanged(
-    compactionThresholdPercent
-  );
 
   // Reset restores the stock compaction threshold.
   const resetEngineAdvanced = () => {
@@ -182,12 +178,6 @@ export function EngineTab({
       </div>
       <AdvancedDisclosure
         tabName="Engine"
-        changedCount={advancedChangedCount}
-        summary={
-          advancedChangedCount > 0
-            ? `${advancedChangedCount} advanced engine ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         testId="advanced-engine"

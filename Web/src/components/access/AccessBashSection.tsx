@@ -24,7 +24,6 @@ import {
 } from "../../api";
 import { AlertTriangleIcon, PlusIcon } from "../icons";
 import { AdvancedDisclosure } from "../settings/AdvancedDisclosure";
-import { countBashAdvancedChanged } from "../settings/settingsAdvancedCounts";
 import {
   BashConfinementFields,
   BashTuningFields,
@@ -401,10 +400,8 @@ export function AccessBashSection({
   const effectiveHostAllowPatternsText = advanced ? advanced.hostAllowPatternsText : hostAllowPatternsText;
   const effectiveHostPatternCount = parseHostAllowPatternsUncapped(effectiveHostAllowPatternsText).length;
   const advancedChanged = advanced?.changed ?? false;
-  // Single disclosure source: hook owns count plus open plus reset when
+  // Single disclosure source: hook owns open plus reset when
   // present, otherwise local tuning drives the same disclosure.
-  const localAdvancedChangedCount = countBashAdvancedChanged(timeoutSeconds, cpuSeconds, memoryMB, sandboxMode, hostAllowPatternsText);
-  const unifiedChangedCount = advanced ? advanced.changedCount : localAdvancedChangedCount;
   const unifiedOpen = advanced ? advanced.open : localAdvancedOpen;
   const unifiedSetOpen = advanced ? advanced.setOpen : setLocalAdvancedOpen;
   const unifiedValidationError = advanced ? advanced.saveError : saveError;
@@ -553,12 +550,6 @@ export function AccessBashSection({
 
           <AdvancedDisclosure
             tabName="Bash"
-            changedCount={unifiedChangedCount}
-            summary={
-              unifiedChangedCount > 0
-                ? `${unifiedChangedCount} advanced bash ${unifiedChangedCount === 1 ? "setting" : "settings"} changed`
-                : undefined
-            }
             open={unifiedOpen}
             onOpenChange={unifiedSetOpen}
             testId="advanced-bash"

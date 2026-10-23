@@ -178,7 +178,10 @@ public actor FilesIndexer {
         /// Whether any `last_seen_run` stamp failed, forcing the reconcile to stay skipped.
         var stampFailed = false
         /// Live modality queue progress across the 4 file processing lanes.
-        var queueLanes: [IndexQueueLaneProgress] = []
+        var queueLanes: [IndexQueueLaneProgress] = FilesModalityLane.allCases.map { lane in
+            IndexQueueLaneProgress(lane: lane.key, label: lane.label, queued: 0, processed: 0, indexed: 0)
+        }
+
         /// Start timestamps for modality lanes to track per-lane throughput.
         var laneStarts: [ContinuousClock.Instant?] = [nil, nil, nil, nil]
     }

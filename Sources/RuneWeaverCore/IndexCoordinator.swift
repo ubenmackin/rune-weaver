@@ -974,7 +974,7 @@ extension IndexCoordinator {
         case .discovering:
             scanned
         case .extracting, .embedding:
-            queuesProcessed > 0 ? queuesProcessed : indexed
+            queuesProcessed > 0 ? queuesProcessed : (scanned > indexed ? scanned : indexed)
         case .committing:
             indexed
         }

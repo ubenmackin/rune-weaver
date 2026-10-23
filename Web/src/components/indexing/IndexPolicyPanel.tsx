@@ -18,7 +18,6 @@ import {
 import { ToastStack } from "../Toast";
 import { useToastStack } from "../../hooks/useToastStack";
 import { AdvancedDisclosure } from "../settings/AdvancedDisclosure";
-import { countIndexAdvancedChanged } from "../settings/settingsAdvancedCounts";
 import {
   describeEffortReality,
   describeIndexScope,
@@ -263,15 +262,6 @@ export function IndexPolicyPanel() {
   const pauseOnBattery =
     config.pauseOnBattery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY;
 
-  // Single-source Advanced count for the trigger label.
-  const indexAdvancedChanged = countIndexAdvancedChanged(
-    vectorCap,
-    excludeText,
-    mailboxDenyText,
-    config.mailVectorWindow,
-    config.iCloudEvicted
-  );
-
   function handleResetIndexAdvanced() {
     updateConfig({
       maxVectorChunksPerDocument: DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
@@ -392,12 +382,6 @@ export function IndexPolicyPanel() {
         />
         <AdvancedDisclosure
           tabName="Index"
-          changedCount={indexAdvancedChanged}
-          summary={
-            indexAdvancedChanged > 0
-              ? `${indexAdvancedChanged} advanced index ${indexAdvancedChanged === 1 ? "setting" : "settings"} changed`
-              : undefined
-          }
           open={advancedOpen}
           onOpenChange={setAdvancedOpen}
           testId="advanced-index"
