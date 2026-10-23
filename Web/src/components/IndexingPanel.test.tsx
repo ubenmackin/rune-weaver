@@ -1173,6 +1173,7 @@ describe("IndexingPanel", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
+    await user.click(screen.getByLabelText("Index Mail"));
     await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
 
     await waitFor(() => {
@@ -1222,6 +1223,7 @@ describe("IndexingPanel", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
+    await user.click(screen.getByLabelText("Index Mail"));
     await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
 
     await waitFor(() => {
@@ -1283,6 +1285,7 @@ describe("IndexingPanel", () => {
     });
     expect(screen.getByLabelText("Custom workers")).toHaveValue(6);
 
+    await user.click(screen.getByLabelText("Enable background indexing"));
     await user.click(
       screen.getByRole("button", { name: "Save Index Settings" }),
     );

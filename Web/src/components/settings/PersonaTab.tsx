@@ -165,6 +165,7 @@ export function PersonaTab({
             Avatar accent: A client-side colorway for the assistant sprite. It never reaches the prompt.
           </p>
           <div
+            id="persona-avatar-grid"
             className="persona-avatar-grid"
             role="group"
             aria-label="Avatar accent"

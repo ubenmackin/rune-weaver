@@ -8,8 +8,8 @@ import {
 } from "./settingsSearchIndex";
 
 describe("searchSettingsItems", () => {
-  it("covers every tab twice within the entry budget", () => {
-    expect(SETTINGS_SEARCH_ITEMS.length).toBeLessThanOrEqual(40);
+  it("covers every tab three times within the entry budget", () => {
+    expect(SETTINGS_SEARCH_ITEMS.length).toBeLessThanOrEqual(80);
     const counts = new Map<string, number>();
     for (const item of SETTINGS_SEARCH_ITEMS) {
       counts.set(item.tab, (counts.get(item.tab) ?? 0) + 1);
@@ -30,7 +30,43 @@ describe("searchSettingsItems", () => {
       "memory",
       "voice",
     ]) {
-      expect(counts.get(tab) ?? 0).toBeGreaterThanOrEqual(2);
+      expect(counts.get(tab) ?? 0).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("returns assistant, user, and engine names for a name query", () => {
+    const results = searchSettingsItems("name");
+    const ids = results.map((item) => item.id);
+    expect(ids).toContain("persona-assistant-name");
+    expect(ids).toContain("persona-user-name");
+    expect(ids).toContain("engine-name");
+    const yourName = results.find((item) => item.id === "persona-user-name");
+    expect(yourName?.label).toBe("Your Name");
+    expect(yourName?.targetId).toBe("persona-user-name");
+    const yourNameQuery = searchSettingsItems("Your Name").map((item) => item.id);
+    expect(yourNameQuery).toContain("persona-user-name");
+  });
+
+  it("returns at least three results per tab for its own query", () => {
+    const tabs = [
+      "access",
+      "providers",
+      "persona",
+      "goals",
+      "engine",
+      "tools",
+      "indexing",
+      "search",
+      "email",
+      "security",
+      "network",
+      "memory",
+      "voice",
+    ] as const;
+    for (const tab of tabs) {
+      const results = searchSettingsItems(tab);
+      const ownTab = results.filter((item) => item.tab === tab);
+      expect(ownTab.length).toBeGreaterThanOrEqual(3);
     }
   });
 
@@ -46,23 +82,24 @@ describe("searchSettingsItems", () => {
     );
   });
 
-  it("ranks label substring above keyword-only substring", () => {
-    const results = searchSettingsItems("provider");
-    const defaultIndex = results.findIndex(
-      (item) => item.id === "providers-default",
+  it("ranks label substring above keyword-only substring in the same tab", () => {
+    const results = searchSettingsItems("searxng");
+    const urlIndex = results.findIndex(
+      (item) => item.id === "search-searxng-url",
     );
-    const backendIndex = results.findIndex(
-      (item) => item.id === "memory-backend",
+    const timeoutIndex = results.findIndex(
+      (item) => item.id === "search-timeout",
     );
-    expect(defaultIndex).toBeGreaterThanOrEqual(0);
-    expect(backendIndex).toBeGreaterThanOrEqual(0);
-    expect(defaultIndex).toBeLessThan(backendIndex);
+    expect(urlIndex).toBeGreaterThanOrEqual(0);
+    expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+    expect(results[urlIndex]?.tab).toBe("search");
+    expect(results[timeoutIndex]?.tab).toBe("search");
+    expect(urlIndex).toBeLessThan(timeoutIndex);
   });
 
   it("caps results at twenty matches", () => {
     const results = searchSettingsItems("a");
-    expect(results.length).toBeGreaterThan(0);
-    expect(results.length).toBeLessThanOrEqual(20);
+    expect(results.length).toBe(20);
   });
 
   it("returns empty for blank queries", () => {

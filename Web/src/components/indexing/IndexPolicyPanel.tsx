@@ -40,6 +40,11 @@ import {
   INDEX_ADVANCED_ERROR_KEYWORDS,
   useIndexPolicySave,
 } from "./useIndexPolicySave";
+import {
+  buildIndexPolicySnapshot,
+  isIndexPolicySnapshotDirty,
+  type IndexPolicySnapshot,
+} from "./indexPolicySnapshot";
 
 export function IndexPolicyPanel() {
   const [config, setConfig] = useState<IndexConfigData>(DEFAULT_INDEX_CONFIG);
@@ -80,6 +85,30 @@ export function IndexPolicyPanel() {
     };
   }, []);
   const lastSavedSourcesRef = useRef<{ calendars: boolean; reminders: boolean } | null>(null);
+  // Last-saved snapshot for the Save gate: seeded from loadConfig, refreshed
+  // from the persist echo so the button returns to disabled after a save.
+  // Held in state so snapshot updates re-render the gate without coincidental renders.
+  const [loadedSnapshot, setLoadedSnapshot] =
+    useState<IndexPolicySnapshot | null>(null);
+  // Live mirrors so the echo setters rebuild the snapshot from post-save
+  // truth before the echoed state re-renders. Synced in effects so concurrent
+  // renders never observe a half-written mirror.
+  const configRef = useRef(config);
+  const excludeTextRef = useRef(excludeText);
+  const mailboxDenyTextRef = useRef(mailboxDenyText);
+  const rootsTextRef = useRef(rootsText);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+  useEffect(() => {
+    excludeTextRef.current = excludeText;
+  }, [excludeText]);
+  useEffect(() => {
+    mailboxDenyTextRef.current = mailboxDenyText;
+  }, [mailboxDenyText]);
+  useEffect(() => {
+    rootsTextRef.current = rootsText;
+  }, [rootsText]);
 
   // Fresh status read shared by boot load and save-and-restart: the saved policy
   // stays enabled-aware while the running flag settles for the restart decision.
@@ -94,6 +123,62 @@ export function IndexPolicyPanel() {
     }
   }, []);
 
+  // Rebuilds the snapshot from the live mirrors after each echo write; the
+  // sequential echo writes converge on the saved values.
+  const refreshSnapshotFromRefs = useCallback(() => {
+    setLoadedSnapshot(
+      buildIndexPolicySnapshot(
+        configRef.current,
+        excludeTextRef.current,
+        mailboxDenyTextRef.current,
+        rootsTextRef.current,
+      ),
+    );
+  }, []);
+
+  // Echo-only setters: user edits go through `updateConfig` and the raw text
+  // setters, so only a successful persist moves the snapshot.
+  const setConfigFromEcho = useCallback(
+    (next: IndexConfigData | ((prev: IndexConfigData) => IndexConfigData)) => {
+      const resolved =
+        typeof next === "function" ? next(configRef.current) : next;
+      configRef.current = resolved;
+      setConfig(resolved);
+      refreshSnapshotFromRefs();
+    },
+    [refreshSnapshotFromRefs],
+  );
+  const setExcludeTextFromEcho = useCallback(
+    (next: string | ((prev: string) => string)) => {
+      const resolved =
+        typeof next === "function" ? next(excludeTextRef.current) : next;
+      excludeTextRef.current = resolved;
+      setExcludeText(resolved);
+      refreshSnapshotFromRefs();
+    },
+    [refreshSnapshotFromRefs],
+  );
+  const setMailboxDenyTextFromEcho = useCallback(
+    (next: string | ((prev: string) => string)) => {
+      const resolved =
+        typeof next === "function" ? next(mailboxDenyTextRef.current) : next;
+      mailboxDenyTextRef.current = resolved;
+      setMailboxDenyText(resolved);
+      refreshSnapshotFromRefs();
+    },
+    [refreshSnapshotFromRefs],
+  );
+  const setRootsTextFromEcho = useCallback(
+    (next: string | ((prev: string) => string)) => {
+      const resolved =
+        typeof next === "function" ? next(rootsTextRef.current) : next;
+      rootsTextRef.current = resolved;
+      setRootsText(resolved);
+      refreshSnapshotFromRefs();
+    },
+    [refreshSnapshotFromRefs],
+  );
+
   // Save-and-restart lives in the hook so the panel stays under budget while
   // the Advanced disclosure keeps zero-content wrapping above the footer.
   const {
@@ -104,13 +189,13 @@ export function IndexPolicyPanel() {
     handleSave,
   } = useIndexPolicySave({
     config,
-    setConfig,
+    setConfig: setConfigFromEcho,
     excludeText,
-    setExcludeText,
+    setExcludeText: setExcludeTextFromEcho,
     mailboxDenyText,
-    setMailboxDenyText,
+    setMailboxDenyText: setMailboxDenyTextFromEcho,
     rootsText,
-    setRootsText,
+    setRootsText: setRootsTextFromEcho,
     loadStatus,
     pushSuccessToast,
     pushErrorToast,
@@ -196,6 +281,17 @@ export function IndexPolicyPanel() {
           calendars: !!merged.calendars,
           reminders: !!merged.reminders,
         };
+        // Seed the Save gate from the loaded policy so pristine reads clean.
+        if (mountedRef.current) {
+          setLoadedSnapshot(
+            buildIndexPolicySnapshot(
+              merged,
+              merged.exclude.join("\n"),
+              formatMailboxDenyText(merged.mailboxDeny),
+              formatIndexRootsText(merged.roots),
+            ),
+          );
+        }
       }
     } catch {
       // A settings read failure leaves the local defaults; the save path
@@ -261,6 +357,19 @@ export function IndexPolicyPanel() {
     config.thermalBackoff ?? DEFAULT_INDEX_THERMAL_BACKOFF;
   const pauseOnBattery =
     config.pauseOnBattery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY;
+
+  // Dirty when the draft differs from the last save with trim and Number
+  // canonicalization, so formatting-only edits keep Save disabled.
+  const savedSnapshot = loadedSnapshot;
+  const isDirty =
+    savedSnapshot != null &&
+    isIndexPolicySnapshotDirty(
+      savedSnapshot,
+      config,
+      excludeText,
+      mailboxDenyText,
+      rootsText,
+    );
 
   function handleResetIndexAdvanced() {
     updateConfig({
@@ -414,7 +523,8 @@ export function IndexPolicyPanel() {
             type="button"
             className="primary-button save-button"
             onClick={() => void handleSave()}
-            disabled={saving}
+            disabled={saving || !isDirty}
+            title={isDirty ? undefined : "No unsaved changes"}
           >
             {saving ? "Saving…" : "Save Index Settings"}
           </button>

@@ -247,7 +247,7 @@ export function EmailTab({
         validationError={advancedError}
         onReset={handleResetAdvanced}
       >
-        <div className="email-accounts-list">
+        <div className="email-accounts-list" id="email-smtp-section">
           {emailAccountsList.length === 0 ? (
             <p className="muted text-sm">
               Add an account above to tune delivery overrides, batch sizes, and archive handling.
