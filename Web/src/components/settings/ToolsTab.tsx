@@ -4,7 +4,6 @@ import { DEFAULT_WORKSPACE_CONFIG, type PluginSummary, type ToolInfo } from "../
 import { AlertTriangleIcon, RefreshIcon, SearchIcon, SettingsIcon, WrenchIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
 import {
-  countToolsAdvancedChanged,
   DEFAULT_TOOLS_AUTO_RESCAN,
   DEFAULT_TOOLS_MARKETPLACE_INDEX_URL,
   DEFAULT_TOOLS_PLUGINS_DIR,
@@ -132,14 +131,6 @@ export function ToolsTab({
   validationError = null,
 }: ToolsTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedChangedCount = countToolsAdvancedChanged(
-    pluginsDir,
-    pluginsMarketplaceIndexURL,
-    pluginsAutoRescan,
-    workspaceQuotaMB,
-    workspaceQuotaFiles,
-    workspaceTmpTTLDays
-  );
 
   // Reset restores stock plugin location, catalog URL, scan behavior,
   // plus workspace quotas and tmp retention.
@@ -479,12 +470,6 @@ export function ToolsTab({
 
       <AdvancedDisclosure
         tabName="Tools"
-        changedCount={advancedChangedCount}
-        summary={
-          advancedChangedCount > 0
-            ? `${advancedChangedCount} advanced tools ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         testId="advanced-tools"

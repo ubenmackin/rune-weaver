@@ -1,12 +1,10 @@
-// Rune Weaver Dashboard — Shared advanced settings disclosure with changed-count trigger.
+// Rune Weaver Dashboard — Shared advanced settings disclosure.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface AdvancedDisclosureProps {
   tabName: string;
-  changedCount: number;
   children: React.ReactNode;
-  summary?: string;
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -19,9 +17,7 @@ export interface AdvancedDisclosureProps {
 
 export function AdvancedDisclosure({
   tabName,
-  changedCount,
   children,
-  summary,
   open,
   defaultOpen = false,
   onOpenChange,
@@ -33,8 +29,6 @@ export function AdvancedDisclosure({
 }: AdvancedDisclosureProps) {
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
   const errorLinkRef = useRef<HTMLAnchorElement | null>(null);
-  const isControlled = open !== undefined;
-  const isOpen = isControlled ? (open as boolean) : internalOpen;
 
   const matchesError = useCallback(
     (message: string | null | undefined): boolean => {
@@ -45,6 +39,14 @@ export function AdvancedDisclosure({
     },
     [errorKeywords]
   );
+
+  const isControlled = open !== undefined;
+  // Controlled panels stay shut on matching errors when the parent lags,
+  // so derive force-open for an immediate render plus the state push.
+  const forceOpen = validationError != null && matchesError(validationError);
+  const isOpen = isControlled
+    ? ((open as boolean) || forceOpen)
+    : (internalOpen || forceOpen);
 
   const setOpen = useCallback(
     (next: boolean) => {
@@ -63,10 +65,13 @@ export function AdvancedDisclosure({
   // collapsed disclosure.
   useEffect(() => {
     if (!validationError) return;
-    if (matchesError(validationError) && !isOpen) {
+    if (!matchesError(validationError)) return;
+    if (isControlled) {
+      if (!(open as boolean)) setOpen(true);
+    } else if (!internalOpen) {
       setOpen(true);
     }
-  }, [validationError, isOpen, matchesError, setOpen]);
+  }, [validationError, open, internalOpen, isControlled, matchesError, setOpen]);
 
   useEffect(() => {
     if (isOpen && validationError && matchesError(validationError)) {
@@ -76,7 +81,6 @@ export function AdvancedDisclosure({
 
   const slug =
     testId ?? `advanced-${tabName.toLowerCase().replace(/\s+/g, "-")}`;
-  const chipText = summary ?? `${changedCount} advanced changed`;
 
   return (
     <div style={{ marginTop: "16px" }}>
@@ -93,7 +97,7 @@ export function AdvancedDisclosure({
           data-testid={`${slug}-trigger`}
           style={{ cursor: "pointer", fontWeight: 600 }}
         >
-          Advanced {tabName} settings ({changedCount} changed)
+          Advanced {tabName} settings
         </summary>
         <div style={{ marginTop: "12px" }}>{children}</div>
         {isOpen && validationError && matchesError(validationError) ? (
@@ -121,15 +125,6 @@ export function AdvancedDisclosure({
           </div>
         ) : null}
       </details>
-      {!isOpen && changedCount > 0 ? (
-        <span
-          className="advanced-summary-chip"
-          data-testid={`${slug}-chip`}
-          style={{ marginLeft: "8px" }}
-        >
-          {chipText}
-        </span>
-      ) : null}
     </div>
   );
 }

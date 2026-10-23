@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager search wiring.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager from "./SettingsManager";
@@ -653,5 +653,132 @@ describe("SettingsManager search", () => {
     });
     // No chain means no collapsed element, so the banner still renders once alone.
     expect(screen.queryByTestId("search-health-diagnostics")).toBeNull();
+  });
+
+  it("keeps the Web Advanced trigger static with no chip", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
+    await user.click(searchTab);
+    const trigger = screen.getByTestId("advanced-web-trigger");
+    expect(trigger.textContent).toBe("Advanced Web settings");
+    expect(screen.queryByTestId("advanced-web-chip")).toBeNull();
+    await user.click(trigger);
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("advanced-web") as HTMLDetailsElement).open
+      ).toBe(true);
+    });
+    expect(screen.getByTestId("advanced-web-trigger").textContent).toBe(
+      "Advanced Web settings"
+    );
+    expect(screen.queryByTestId("advanced-web-chip")).toBeNull();
+  });
+
+  it("force-opens Web Advanced on a matching validation error and resets to defaults", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
+    await user.click(searchTab);
+    const details = screen.getByTestId("advanced-web");
+    const timeout = within(details).getByLabelText(
+      /Timeout \(seconds\)/i
+    ) as HTMLInputElement;
+    await user.clear(timeout);
+    await user.type(timeout, "0");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("advanced-web") as HTMLDetailsElement).open
+      ).toBe(true);
+    });
+    expect(screen.getByTestId("advanced-web-error").textContent).toContain(
+      "Invalid search timeout"
+    );
+    await user.click(screen.getByTestId("advanced-web-reset"));
+    expect(
+      (within(details).getByLabelText(/Timeout \(seconds\)/i) as HTMLInputElement)
+        .value
+    ).toBe("10");
+    expect(screen.getByTestId("advanced-web-trigger").textContent).toBe(
+      "Advanced Web settings"
+    );
+  });
+
+  it("disables native validation so custom errors force-open Advanced", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    // Native min/required checks would intercept out-of-range values (e.g. a
+    // "0" timeout against min=1) before handleSave runs, so the custom
+    // validationError banner plus Advanced force-open above could never fire
+    // for exactly the inputs that need it most. The form stays noValidate so
+    // every violation reaches the custom validator instead.
+    const form = document.querySelector(
+      "form.settings-form"
+    ) as HTMLFormElement | null;
+    expect(form).not.toBeNull();
+    expect(form?.noValidate).toBe(true);
   });
 });

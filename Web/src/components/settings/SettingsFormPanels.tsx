@@ -43,7 +43,7 @@ export function SettingsFormPanels({
   if (activeTab === "access") return <AccessPane />;
   if (activeTab === "indexing") return <IndexPolicyPanel />;
   return (
-    <form onSubmit={save.handleSave} className="settings-form">
+    <form onSubmit={save.handleSave} className="settings-form" noValidate>
       {activeTab === "providers" && (
         <ProvidersTab
           providersList={form.providersList}

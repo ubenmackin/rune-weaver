@@ -667,3 +667,32 @@ section[data-testid="policy-pane"] .settings-footer {
   margin-bottom: 12px;
 }
 
+/* Search-result tab name stays muted at the row end while the setting label keeps tab-btn emphasis. */
+.settings-search-result-tab {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 8px;
+}
+
+/* Outline-only pulse so the 2400ms highlight never moves surrounding layout. */
+.settings-search-highlight {
+  outline: 2px solid var(--accent-purple, #9f7aea);
+  outline-offset: 2px;
+  border-radius: 6px;
+  animation: settings-search-pulse 2.4s ease-out;
+}
+
+@keyframes settings-search-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(159, 122, 234, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(159, 122, 234, 0);
+  }
+}
+

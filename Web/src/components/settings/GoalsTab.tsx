@@ -20,7 +20,6 @@ import {
   TOOL_ROUNDS_MIN,
 } from "../../api";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
-import { countGoalsAdvancedChanged } from "./settingsAdvancedCounts";
 
 // Advanced Goals validation messages the disclosure can focus. Shared by the
 // panel prop and the shell error router so one message never prints twice.
@@ -89,12 +88,6 @@ export function GoalsTab({
   validationError = null,
 }: GoalsTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedChangedCount = countGoalsAdvancedChanged(
-    goalsMaxActiveGoals,
-    goalsMaxStepsPerGoal,
-    goalsPlanTimeoutSeconds,
-    goalsMaxTriggersPerGoal
-  );
 
   // Reset restores stock goals caps and budgets.
   const resetGoalsAdvanced = () => {
@@ -214,12 +207,6 @@ export function GoalsTab({
       </div>
       <AdvancedDisclosure
         tabName="Goals"
-        changedCount={advancedChangedCount}
-        summary={
-          advancedChangedCount > 0
-            ? `${advancedChangedCount} advanced goals ${advancedChangedCount === 1 ? "setting" : "settings"} changed`
-            : undefined
-        }
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         testId="advanced-goals"

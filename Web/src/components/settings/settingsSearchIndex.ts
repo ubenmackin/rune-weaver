@@ -1,0 +1,335 @@
+// Rune Weaver Dashboard — Settings item search index and highlight helper.
+
+import { SETTINGS_TABS, type SettingsTab } from "./settingsTypes";
+
+export interface SettingsSearchItem {
+  id: string;
+  tab: SettingsTab;
+  label: string;
+  keywords: string;
+  targetId: string;
+}
+
+export const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
+  {
+    id: "access-rules",
+    tab: "access",
+    label: "Access rules",
+    keywords: "access rules allow deny standing trust scope duration",
+    targetId: "access-tab-rules",
+  },
+  {
+    id: "access-bash-shell",
+    tab: "access",
+    label: "Bash and shell policy",
+    keywords: "access bash shell sandbox tier rules default action network",
+    targetId: "access-tab-bash",
+  },
+  {
+    id: "providers-default",
+    tab: "providers",
+    label: "Default provider",
+    keywords: "providers llm default routing model chat",
+    targetId: "default-provider",
+  },
+  {
+    id: "providers-fallback",
+    tab: "providers",
+    label: "Fallback provider",
+    keywords: "providers llm fallback backup routing model",
+    targetId: "fallback-provider",
+  },
+  {
+    id: "persona-assistant-name",
+    tab: "persona",
+    label: "Assistant name",
+    keywords: "persona assistant name identity",
+    targetId: "persona-assistant-name",
+  },
+  {
+    id: "persona-tone",
+    tab: "persona",
+    label: "Persona tone",
+    keywords: "persona tone posture voice style",
+    targetId: "persona-tone",
+  },
+  {
+    id: "voice-stt",
+    tab: "voice",
+    label: "Speech-to-text provider",
+    keywords: "voice stt provider whisper speech transcription",
+    targetId: "stt-provider",
+  },
+  {
+    id: "voice-tts",
+    tab: "voice",
+    label: "Text-to-speech provider",
+    keywords: "voice tts provider speech synthesis system",
+    targetId: "tts-provider",
+  },
+  {
+    id: "memory-backend",
+    tab: "memory",
+    label: "Embedding backend",
+    keywords: "memory embedding backend local provider none vectors metal",
+    targetId: "embedding-backend",
+  },
+  {
+    id: "memory-episodes-path",
+    tab: "memory",
+    label: "Episodes database path",
+    keywords: "memory episodes db path storage persistence sqlite",
+    targetId: "episodes-path",
+  },
+  {
+    id: "goals-enabled",
+    tab: "goals",
+    label: "Enable goal pursuit",
+    keywords: "goals enable pursuit cadence background proactive",
+    targetId: "goals-enabled",
+  },
+  {
+    id: "goals-cadence",
+    tab: "goals",
+    label: "Default cadence",
+    keywords: "goals cadence step interval minutes daily schedule",
+    targetId: "goals-step-interval",
+  },
+  {
+    id: "tools-plugins-dir",
+    tab: "tools",
+    label: "Plugins directory",
+    keywords: "tools plugins directory runes packages scan marketplace",
+    targetId: "plugins-dir",
+  },
+  {
+    id: "tools-workspace-quota",
+    tab: "tools",
+    label: "Workspace quota",
+    keywords: "tools workspace quota storage mb files prune tmp",
+    targetId: "workspace-quota-mb",
+  },
+  {
+    id: "indexing-roots",
+    tab: "indexing",
+    label: "Index roots",
+    keywords: "indexing roots folders walk boundary allow files",
+    targetId: "index-roots",
+  },
+  {
+    id: "indexing-vector-cap",
+    tab: "indexing",
+    label: "Vector cap per document",
+    keywords: "indexing vector cap chunks per document embeddings limit",
+    targetId: "index-vector-cap",
+  },
+  {
+    id: "search-max-results",
+    tab: "search",
+    label: "Max results",
+    keywords: "search max results provider pick browser web",
+    targetId: "search-max-results",
+  },
+  {
+    id: "search-searxng-url",
+    tab: "search",
+    label: "SearXNG URL",
+    keywords: "search searxng url endpoint override browser container",
+    targetId: "search-searxng-url",
+  },
+  {
+    id: "email-accounts",
+    tab: "email",
+    label: "Email accounts",
+    keywords: "email accounts imap mailboxes monitoring schedules",
+    targetId: "email-pane",
+  },
+  {
+    id: "email-add-account",
+    tab: "email",
+    label: "Add email account",
+    keywords: "email add account imap configure nickname",
+    targetId: "email-add-account",
+  },
+  {
+    id: "security-memory",
+    tab: "security",
+    label: "Container memory",
+    keywords: "security containers memory mb budget sandbox spawn",
+    targetId: "containers-memory-mb",
+  },
+  {
+    id: "security-concurrency",
+    tab: "security",
+    label: "Max concurrent containers",
+    keywords: "security containers concurrent capacity ttl idle reclamation",
+    targetId: "containers-max-concurrent",
+  },
+  {
+    id: "network-bind",
+    tab: "network",
+    label: "Bind interface",
+    keywords: "network server hostname bind interface loopback lan",
+    targetId: "server-hostname-select",
+  },
+  {
+    id: "network-port",
+    tab: "network",
+    label: "Server port",
+    keywords: "network server port tcp bind restart",
+    targetId: "server-port",
+  },
+  {
+    id: "engine-name",
+    tab: "engine",
+    label: "Engine name",
+    keywords: "engine name identity daemon log",
+    targetId: "engine-name",
+  },
+  {
+    id: "engine-log-level",
+    tab: "engine",
+    label: "Log level",
+    keywords: "engine log level verbosity trace debug info",
+    targetId: "log-level",
+  },
+];
+
+const MAX_SEARCH_RESULTS = 20;
+const HIGHLIGHT_CLASS = "settings-search-highlight";
+const HIGHLIGHT_MS = 2400;
+const HIGHLIGHT_POLL_MS = 50;
+const HIGHLIGHT_MAX_ATTEMPTS = 20;
+
+// Tab promotion order shared with the sidenav rail: results group by tab
+// order first, then label-vs-keyword score, then label.
+const TAB_ORDER = new Map<SettingsTab, number>(
+  SETTINGS_TABS.map((tab, index) => [tab, index] as const),
+);
+
+let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
+let activeHighlight: Element | null = null;
+
+export function searchSettingsItems(query: string): SettingsSearchItem[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [];
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const scored: Array<{ item: SettingsSearchItem; score: number }> = [];
+  for (const item of SETTINGS_SEARCH_ITEMS) {
+    const labelLower = item.label.toLowerCase();
+    const keywordsLower = item.keywords.toLowerCase();
+    const allInLabel = tokens.every((token) => labelLower.includes(token));
+    if (allInLabel) {
+      scored.push({ item, score: 0 });
+      continue;
+    }
+    const allInEither = tokens.every(
+      (token) => labelLower.includes(token) || keywordsLower.includes(token),
+    );
+    if (allInEither) scored.push({ item, score: 1 });
+  }
+  scored.sort((a, b) => {
+    const tabOrder =
+      (TAB_ORDER.get(a.item.tab) ?? SETTINGS_TABS.length) -
+      (TAB_ORDER.get(b.item.tab) ?? SETTINGS_TABS.length);
+    if (tabOrder !== 0) return tabOrder;
+    if (a.score !== b.score) return a.score - b.score;
+    return a.item.label.localeCompare(b.item.label);
+  });
+  return scored.slice(0, MAX_SEARCH_RESULTS).map((entry) => entry.item);
+}
+
+export function highlightSettingTarget(targetId: string): void {
+  if (typeof document === "undefined") return;
+  if (!targetId) return;
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  // Open every collapsed ancestor disclosure: the target may sit behind
+  // nested details (e.g. an advanced panel inside a section group).
+  let ancestor: Element | null = target.parentElement;
+  while (ancestor !== null) {
+    if (ancestor instanceof HTMLDetailsElement && !ancestor.open) {
+      ancestor.open = true;
+      // Toggle-aware open: AdvancedDisclosure panels are React-controlled
+      // (`open` prop plus `onToggle`), so a bare DOM mutation would revert
+      // on the next render. Firing the observed toggle event lets the owner
+      // sync its state and keep the panel open.
+      ancestor.dispatchEvent(new Event("toggle"));
+    }
+    ancestor = ancestor.parentElement;
+  }
+  try {
+    const scroller = target.scrollIntoView;
+    if (typeof scroller === "function") {
+      scroller.call(target, { behavior: "smooth", block: "center" });
+    }
+  } catch {
+    // jsdom and background tabs may lack smooth scrolling; highlight still applies.
+  }
+  const highlightEl = target.closest(".form-group") ?? target;
+  if (highlightTimeout !== null) {
+    clearTimeout(highlightTimeout);
+    highlightTimeout = null;
+  }
+  if (activeHighlight !== null && activeHighlight !== highlightEl) {
+    activeHighlight.classList.remove(HIGHLIGHT_CLASS);
+  }
+  activeHighlight = highlightEl;
+  highlightEl.classList.add(HIGHLIGHT_CLASS);
+  const focusable = target as HTMLElement;
+  if (typeof focusable.focus === "function") {
+    const tag = focusable.tagName;
+    const isTagFocusable =
+      tag === "INPUT" ||
+      tag === "SELECT" ||
+      tag === "TEXTAREA" ||
+      tag === "BUTTON" ||
+      (tag === "A" && focusable.hasAttribute("href"));
+    if (isTagFocusable || focusable.tabIndex >= 0 || focusable.isContentEditable) {
+      try {
+        focusable.focus({ preventScroll: true });
+      } catch {
+        try {
+          focusable.focus();
+        } catch {
+          // Non-focusable targets keep the visual pulse without focus.
+        }
+      }
+    }
+  }
+  highlightTimeout = setTimeout(() => {
+    highlightEl.classList.remove(HIGHLIGHT_CLASS);
+    if (activeHighlight === highlightEl) activeHighlight = null;
+    highlightTimeout = null;
+  }, HIGHLIGHT_MS);
+}
+
+// Tab switches commit asynchronously, so the pane for a freshly selected
+// result may not be mounted yet. Double rAF lets React commit the new tab
+// and paint the pane, then a bounded poll resolves the target and
+// highlights exactly once instead of losing the pulse when the pane lags.
+export function highlightSettingTargetWhenReady(
+  targetId: string,
+  maxAttempts = HIGHLIGHT_MAX_ATTEMPTS,
+): void {
+  if (typeof document === "undefined" || !targetId) return;
+  if (document.getElementById(targetId) !== null) {
+    highlightSettingTarget(targetId);
+    return;
+  }
+  const poll = (remaining: number): void => {
+    if (document.getElementById(targetId) !== null) {
+      highlightSettingTarget(targetId);
+      return;
+    }
+    if (remaining <= 0) return;
+    setTimeout(() => poll(remaining - 1), HIGHLIGHT_POLL_MS);
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => poll(maxAttempts));
+    });
+  } else {
+    setTimeout(() => poll(maxAttempts), 0);
+  }
+}

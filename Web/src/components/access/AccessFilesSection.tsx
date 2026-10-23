@@ -365,12 +365,6 @@ export function AccessFilesSection({
                 {advanced ? (
                 <AdvancedDisclosure
                   tabName="Files"
-                  changedCount={advanced.changedCount}
-                  summary={
-                    advanced.changedCount > 0
-                      ? `${advanced.changedCount} advanced files ${advanced.changedCount === 1 ? "setting" : "settings"} changed`
-                      : undefined
-                  }
                   open={advanced.open}
                   onOpenChange={advanced.setOpen}
                   testId="advanced-files"
