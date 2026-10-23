@@ -542,10 +542,20 @@ extension MailIndexer {
             defer { discardStaged(at: staged.directory) }
 
             let contentType = NormalizedText.value(info.contentType) ?? attachmentData.contentType
-            let extraction = await extractor.extract(
-                fileURL: staged.file,
-                contentType: contentType
-            )
+            let extraction: DocumentExtraction
+            do {
+                extraction = try await extractor.extract(
+                    fileURL: staged.file,
+                    contentType: contentType
+                )
+            } catch is CancellationError {
+                // A cancelled read must abort the page so cooperative cancellation stays observable.
+                throw CancellationError()
+            } catch {
+                // One unreadable attachment degrades the message only; the deferred staging cleanup still runs.
+                staging.degraded = true
+                continue
+            }
             staging.outcome.staged += 1
 
             if extraction.format == .image, eligible, let embedder {

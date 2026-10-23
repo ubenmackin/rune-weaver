@@ -56,16 +56,33 @@ struct MediaTextExtractorTests {
     }
 
     @Test
+    func `DocumentTextExtractor asynchronously extracts image text using non-blocking OCR`() async throws {
+        try await MediaTextExtractor.withImageOCR({ _ in
+            "Receipt Total: $42.50\nThank you for shopping!"
+        }) {
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-receipt-\(UUID().uuidString).png")
+            try "fake-png-bytes".write(to: tempURL, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            let extractor = DocumentTextExtractor()
+            let result = try await extractor.extract(fileURL: tempURL)
+            #expect(result.format == .image)
+            #expect(result.status == .extracted)
+            #expect(result.text.contains("Receipt Total: $42.50"))
+        }
+    }
+
+    @Test
     func `Custom audio transcription hook returns simulated speech`() async throws {
         try await MediaTextExtractor.withAudioTranscription({ _ in
             "Simulated audio transcription text"
         }) {
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-audio.m4a")
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-audio-\(UUID().uuidString).m4a")
             try "audio-bytes".write(to: tempURL, atomically: true, encoding: .utf8)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
             let extractor = DocumentTextExtractor()
-            let result = await extractor.extract(fileURL: tempURL)
+            let result = try await extractor.extract(fileURL: tempURL)
             #expect(result.format == .audio)
             #expect(result.status == .extracted)
             #expect(result.text.contains("Simulated audio transcription text"))
@@ -93,7 +110,7 @@ struct MediaTextExtractorTests {
             // Even with a tiny 16-byte cap, .video and .audio files bypass the raw byte guard
             // so their audio track can be demuxed and transcribed.
             let extractor = DocumentTextExtractor(maxFileBytes: 16)
-            let result = await extractor.extract(fileURL: tempURL)
+            let result = try await extractor.extract(fileURL: tempURL)
             #expect(result.format == .video)
             #expect(result.status == .extracted)
             #expect(!result.truncated)

@@ -99,8 +99,7 @@ extension FilesIndexer {
             return
         }
         if values.isSymbolicLink == true || values.isAliasFile == true || filename.hasPrefix("._") {
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(relative, counters: &counters, start: start)
             return
         }
         // An evicted iCloud file has no local bytes to hash or extract: skip
@@ -113,21 +112,18 @@ extension FilesIndexer {
             // The file exists and is in policy; stamping keeps a previously
             // indexed row alive so eviction alone never retires it.
             await stampSeen(canonicalPath, counters: &counters)
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(relative, counters: &counters, start: start)
             return
         }
         let size = values.fileSize ?? 0
         let isMediaCandidate = MediaTextExtractor.isAudioOrVideoFile(fileName: filename)
         guard isMediaCandidate || size <= maxFileBytes else {
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(relative, counters: &counters, start: start)
             return
         }
         let decision = accessGuard.evaluate(path: canonicalPath, homeDirectoryURL: homeDirectoryURL)
         guard decision.allowed else {
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(relative, counters: &counters, start: start)
             return
         }
         if await checkFingerprintCurrent(
@@ -150,45 +146,89 @@ extension FilesIndexer {
             return
         }
         guard isMediaCandidate || data.count <= maxFileBytes else {
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(relative, counters: &counters, start: start)
             return
         }
+        await extractAndPersist(
+            ExtractAndPersistInput(
+                data: data,
+                values: values,
+                canonicalURL: canonicalURL,
+                canonicalPath: canonicalPath,
+                relative: relative
+            ),
+            start: start,
+            counters: &counters
+        )
+    }
 
-        let hash = Self.contentHash(for: data)
+    /// Counts one skipped file and emits its work frame.
+    private func skipFile(_ relative: String, counters: inout Counters, start: ContinuousClock.Instant) async {
+        counters.skipped += 1
+        await reportWork(relative, counters: counters, start: start)
+    }
+
+    /// Bundled inputs for one extraction pass.
+    struct ExtractAndPersistInput {
+        /// Raw file bytes for hashing and extraction.
+        let data: Data
+        /// Resolved resource values for the canonical URL.
+        let values: URLResourceValues
+        /// Canonical file location.
+        let canonicalURL: URL
+        /// Stable external identifier and path.
+        let canonicalPath: String
+        /// Root-relative item path.
+        let relative: String
+    }
+
+    /// Runs content-hash gating, async extraction, and persistence for one file.
+    private func extractAndPersist(
+        _ input: ExtractAndPersistInput,
+        start: ContinuousClock.Instant,
+        counters: inout Counters
+    ) async {
+        let hash = Self.contentHash(for: input.data)
         guard await checkContentNeedsReindex(
-            canonicalPath: canonicalPath,
+            canonicalPath: input.canonicalPath,
             hash: hash,
-            relative: relative,
+            relative: input.relative,
             start: start,
             counters: &counters
         ) else {
             return
         }
-
-        let extraction = await extractor.extract(fileURL: canonicalURL, contentType: nil)
+        let extraction: DocumentExtraction
+        do {
+            extraction = try await extractor.extract(fileURL: input.canonicalURL, contentType: nil)
+        } catch is CancellationError {
+            isCancelled = true
+            cancelBox.set()
+            return
+        } catch {
+            await fail(input.relative, counters: &counters, start: start, reason: "extraction failed")
+            return
+        }
         switch extraction.status {
         case .unsupported:
-            counters.skipped += 1
-            await reportWork(relative, counters: counters, start: start)
+            await skipFile(input.relative, counters: &counters, start: start)
             return
         case .failed:
-            await stampSeen(canonicalPath, counters: &counters)
-            await fail(relative, counters: &counters, start: start, reason: "extraction failed")
+            await stampSeen(input.canonicalPath, counters: &counters)
+            await fail(input.relative, counters: &counters, start: start, reason: "extraction failed")
             return
         default:
             break
         }
-
         await persistExtraction(
             pending: PendingExtraction(
                 extraction: extraction,
-                canonicalPath: canonicalPath,
+                canonicalPath: input.canonicalPath,
                 contentHash: hash,
-                modificationDate: values.contentModificationDate,
-                byteCount: data.count
+                modificationDate: input.values.contentModificationDate,
+                byteCount: input.data.count
             ),
-            relative: relative,
+            relative: input.relative,
             start: start,
             counters: &counters
         )
