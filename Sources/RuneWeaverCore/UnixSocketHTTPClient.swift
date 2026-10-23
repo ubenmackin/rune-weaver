@@ -16,7 +16,7 @@ public enum UnixSocketHTTPClient {
         path: String,
         body: Data? = nil,
         contentType: String? = "application/json",
-        timeoutSeconds: Int = 15
+        timeoutSeconds: Int = 90
     ) throws -> Data {
         #if canImport(Darwin)
             let fd = try connect(socketPath: socketPath, timeoutSeconds: timeoutSeconds)

@@ -61,7 +61,6 @@ export default function IndexBentoHeader({
     <>
       <div className="index-actions-section index-bento-header">
         <div className="index-bento-header-top">
-          <h3>Run</h3>
           <div className="row">
             <button
               type="button"
