@@ -461,7 +461,7 @@ export type AccessScopeDTO =
   | { kind: "tool" }
   | { kind: "exactTarget"; target: string }
   | { kind: "recipientSet"; handles: string[] }
-  | { kind: "domain"; host: string };
+  | { kind: "domain"; host: string; subdomains?: boolean };
 
 // Shared scope-text check: a scope field must carry visible characters, so a
 // blank or whitespace-only value names no target and fails the guard.
@@ -487,7 +487,10 @@ export function isAccessScope(value: unknown): value is AccessScopeDTO {
         value.handles.every((handle) => isScopeText(handle))
       );
     case "domain":
-      return isScopeText(value.host);
+      return (
+        isScopeText(value.host) &&
+        (value.subdomains === undefined || typeof value.subdomains === "boolean")
+      );
     default:
       return false;
   }

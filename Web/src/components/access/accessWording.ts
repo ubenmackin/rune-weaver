@@ -119,7 +119,13 @@ function coverageClause(tool: string, scopes: AccessScopeDTO[]): string {
       if (typeof target === "string" && target.trim()) targets.add(target.trim());
     } else if (kind === "domain") {
       const host = (scope as unknown as { host?: unknown }).host;
-      if (typeof host === "string" && host.trim()) targets.add(host.trim());
+      if (typeof host === "string" && host.trim()) {
+        // A widened domain rule names the whole zone, so the wildcard spelling
+        // names its coverage instead of reading like one literal host.
+        const subdomains = (scope as unknown as { subdomains?: unknown })
+          .subdomains;
+        targets.add(subdomains === true ? `*.${host.trim()}` : host.trim());
+      }
     } else if (kind === "recipientSet") {
       const handles = (scope as unknown as { handles?: unknown }).handles;
       if (Array.isArray(handles)) {

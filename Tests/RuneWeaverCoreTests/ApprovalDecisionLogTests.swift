@@ -246,7 +246,7 @@ struct ApprovalDecisionLogTests {
         #expect(recipients.data == "a@x.com,b@x.com")
         let domain = ApprovalDecisionLog.scopeFields(for: .domain(host: "example.com", subdomains: true))
         #expect(domain.kind == "domain")
-        #expect(domain.data == "example.com")
+        #expect(domain.data == "*.example.com")
         let prefix = try #require(AccessScope.canonicalPathPrefix("/tmp"))
         let path = ApprovalDecisionLog.scopeFields(for: .pathPrefix(prefix))
         #expect(path.kind == "pathPrefix")

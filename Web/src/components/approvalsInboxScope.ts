@@ -1,7 +1,7 @@
 // Rune Weaver Dashboard — Inbox custom-scope editor vocabulary.
 
 import type { AccessScopeDTO, PermissionRequest } from "../api";
-import { deriveRequestTarget } from "../approvalsShared";
+import { deriveRequestTarget, widenableBaseDomain } from "../approvalsShared";
 import { resolveEgressHost } from "./InlineApprovalBanner";
 
 // Engine recipient-set bound, mirrored so the editor refuses a set the rule
@@ -83,8 +83,13 @@ export function buildCustomScope(
   switch (kind) {
     case "recipients":
       return { kind: "recipientSet", handles: entries };
-    case "hosts":
-      return { kind: "domain", host: entries[0] };
+    case "hosts": {
+      const first = entries[0];
+      if (first.startsWith("*.") && first.length > 2) {
+        return { kind: "domain", host: first.slice(2), subdomains: true };
+      }
+      return { kind: "domain", host: first };
+    }
     default:
       return { kind: "exactTarget", target: entries[0] };
   }
@@ -101,7 +106,7 @@ export function scopeToText(scope: AccessScopeDTO): string {
     case "recipientSet":
       return scope.handles.join("\n");
     case "domain":
-      return scope.host;
+      return scope.subdomains ? `*.${scope.host}` : scope.host;
   }
 }
 
@@ -115,14 +120,42 @@ export function describeScope(scope: AccessScopeDTO): string {
     case "recipientSet":
       return `${scope.handles.length} recipients`;
     case "domain":
-      return scope.host;
+      return scope.subdomains ? `*.${scope.host}` : scope.host;
   }
 }
 
-export type ScopeChoice = "thisTarget" | "allTargets" | "custom";
+export type ScopeChoice =
+  | "thisTarget"
+  | "domainSubdomains"
+  | "allTargets"
+  | "custom";
 
 export interface ScopeDraft {
   id: string;
   kind: ScopeEditorKind;
   text: string;
+}
+
+// Scope choices one card offers. Egress resolves only the dialed host and its
+// widenable base, so wider scopes would store nothing and fail closed; they are
+// offered only when the request names no egress host.
+export function scopeChoicesFor(request: PermissionRequest): ScopeChoice[] {
+  const egressHost = resolveEgressHost(request);
+  if (!egressHost) return ["thisTarget", "allTargets", "custom"];
+  return widenableBaseDomain(egressHost)
+    ? ["thisTarget", "domainSubdomains"]
+    : ["thisTarget"];
+}
+
+// Constrains a stored choice to what the card offers: enrichment can add an
+// egress host the prior choice cannot express, so fall back to the request's
+// own target instead of shipping a scope the engine would refuse.
+export function effectiveScopeChoice(
+  request: PermissionRequest,
+  stored: ScopeChoice | undefined,
+): ScopeChoice {
+  const choices = scopeChoicesFor(request);
+  return stored !== undefined && choices.includes(stored)
+    ? stored
+    : "thisTarget";
 }

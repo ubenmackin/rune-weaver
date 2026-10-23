@@ -705,10 +705,15 @@ extension PermissionGate {
             let tables = [taskGrants[sessionID], sessionGrants[sessionID]].compactMap(\.self)
             for table in tables {
                 for grant in table where toolName == nil || grant.toolName == toolName {
-                    if case let .domain(ruleHost, subdomains) = grant.scope,
-                       want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost))
-                    {
-                        return true
+                    if case let .domain(ruleHost, subdomains) = grant.scope {
+                        // Wildcard cover needs a widenable base, so a stray *.co.uk
+                        // grant never authorizes a sibling tenant, apex included.
+                        if subdomains, !AccessScope.isWidenableDomainBase(ruleHost) {
+                            continue
+                        }
+                        if want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost)) {
+                            return true
+                        }
                     }
                 }
             }
@@ -717,10 +722,15 @@ extension PermissionGate {
             if let toolName, rule.toolName != toolName {
                 continue
             }
-            if case let .domain(ruleHost, subdomains) = rule.scope,
-               want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost))
-            {
-                return true
+            if case let .domain(ruleHost, subdomains) = rule.scope {
+                // Wildcard cover needs a widenable base, so a stray *.co.uk rule
+                // never authorizes a sibling tenant, apex included.
+                if subdomains, !AccessScope.isWidenableDomainBase(ruleHost) {
+                    continue
+                }
+                if want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost)) {
+                    return true
+                }
             }
         }
         return false

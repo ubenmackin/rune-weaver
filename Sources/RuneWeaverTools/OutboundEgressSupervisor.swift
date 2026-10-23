@@ -176,7 +176,8 @@ public actor OutboundEgressSupervisor {
         method: String = "GET",
         headers: [String: String] = [:],
         sessionID: UUID? = nil,
-        resolvesCredentials: Bool = true
+        resolvesCredentials: Bool = true,
+        previouslyVettedHosts: Set<String> = []
     ) async -> EgressVerdict {
         let policy: SecurityPolicy
         do {
@@ -188,7 +189,13 @@ public actor OutboundEgressSupervisor {
             return .denied("Invalid URL: missing host component.")
         }
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
-        if let verdict = await networkGateVerdict(policy: policy, host: host, canonicalHost: canonicalHost, sessionID: sessionID) {
+        if let verdict = await networkGateVerdict(
+            policy: policy,
+            host: host,
+            canonicalHost: canonicalHost,
+            sessionID: sessionID,
+            previouslyVettedHosts: previouslyVettedHosts
+        ) {
             return verdict
         }
         let binding = bindingGateContext(policy: policy, headers: headers, url: url, method: method, host: host)
@@ -255,7 +262,7 @@ public actor OutboundEgressSupervisor {
             if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
                 break
             }
-            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+            if isSessionAllowed(host: canonicalHost, sessionID: sessionID) {
                 break
             }
             // A covering domain allow in the gate authorizes the read: durable
@@ -283,6 +290,35 @@ public actor OutboundEgressSupervisor {
         )
     }
 
+    /// Whether one granted domain entry (exact host or leading `*.domain`) covers `canonicalHost`.
+    /// A wildcard entry covers the apex plus every subdomain only for a widenable base; a public
+    /// suffix, single label, address literal, or localhost member base covers nothing fail-closed.
+    public nonisolated static func grantEntry(_ entry: String, covers canonicalHost: String) -> Bool {
+        if entry == canonicalHost {
+            return true
+        }
+        if entry.hasPrefix("*.") {
+            let base = String(entry.dropFirst(2))
+            guard !base.isEmpty, Self.widenableScopeBase(base) else { return false }
+            return canonicalHost == base || canonicalHost.hasSuffix("." + base)
+        }
+        return false
+    }
+
+    /// Whether a redirect hop target is the same host or `www.`-equivalent to an already-vetted host.
+    public nonisolated static func isRedirectEquivalentHost(_ previousHost: String, _ nextHost: String) -> Bool {
+        if grantEntry(previousHost, covers: nextHost) {
+            return true
+        }
+        if previousHost.hasPrefix("www.") {
+            return String(previousHost.dropFirst(4)) == nextHost
+        }
+        if nextHost.hasPrefix("www.") {
+            return String(nextHost.dropFirst(4)) == previousHost
+        }
+        return false
+    }
+
     /// Compares screened dials against caller-declared hosts.
     public nonisolated func checkHosts(_ screenedHosts: [String], against declaredHosts: [String]) -> [String] {
         let declared = Set(declaredHosts.map { SensitiveAddressNormalization.normalizedHost($0) }.filter { !$0.isEmpty })
@@ -292,11 +328,17 @@ public actor OutboundEgressSupervisor {
             let canonical = SensitiveAddressNormalization.normalizedHost(raw)
             guard !canonical.isEmpty, !seen.contains(canonical) else { continue }
             seen.insert(canonical)
-            if !declared.contains(canonical) {
+            if !declared.contains(where: { Self.grantEntry($0, covers: canonical) }) {
                 undeclared.append(raw)
             }
         }
         return undeclared
+    }
+
+    /// Shared widening guard owned by RuneWeaverCore, so runtime cover
+    /// refuses the same bases the approval flow refuses.
+    private nonisolated static func widenableScopeBase(_ base: String) -> Bool {
+        EgressWideningPolicy.isWidenableScopeBase(base)
     }
 
     /// Sweeps resolved secret values from response content.
@@ -326,7 +368,8 @@ extension OutboundEgressSupervisor {
         policy: SecurityPolicy,
         host: String,
         canonicalHost: String,
-        sessionID: UUID?
+        sessionID: UUID?,
+        previouslyVettedHosts: Set<String> = []
     ) async -> EgressVerdict? {
         switch policy.network.hostStatus(for: host) {
         case let .explicitlyBlocked(reason):
@@ -335,10 +378,13 @@ extension OutboundEgressSupervisor {
             return nil
         case let .unlisted(reason):
             evictStaleSessionGrants()
+            if previouslyVettedHosts.contains(where: { Self.isRedirectEquivalentHost($0, canonicalHost) }) {
+                return nil
+            }
             if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
                 return nil
             }
-            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+            if isSessionAllowed(host: canonicalHost, sessionID: sessionID) {
                 return nil
             }
             // A covering domain allow in the gate authorizes the hop: durable
@@ -563,10 +609,19 @@ extension OutboundEgressSupervisor {
         }
     }
 
+    /// Whether a session grant covers this host.
+    private func isSessionAllowed(host: String, sessionID: UUID?) -> Bool {
+        guard let sessionID, let domains = sessionAllowedDomains[sessionID]?.domains else { return false }
+        return domains.contains { Self.grantEntry($0, covers: host) }
+    }
+
     /// Whether a one-shot grant covers this host for this session, consuming it.
     private func consumeOneShot(host: String, sessionID: UUID?) -> Bool {
-        if let sessionID, var scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
-            scoped.remove(host)
+        if let sessionID,
+           var scoped = oneShotAllowedDomains[sessionID],
+           let match = scoped.contains(host) ? host : scoped.sorted().first(where: { Self.grantEntry($0, covers: host) })
+        {
+            scoped.remove(match)
             if scoped.isEmpty {
                 oneShotAllowedDomains.removeValue(forKey: sessionID)
                 oneShotIssuedAt.removeValue(forKey: sessionID)
@@ -575,8 +630,10 @@ extension OutboundEgressSupervisor {
             }
             return true
         }
-        if var open = oneShotAllowedDomains[nil], open.contains(host) {
-            open.remove(host)
+        if var open = oneShotAllowedDomains[nil],
+           let match = open.contains(host) ? host : open.sorted().first(where: { Self.grantEntry($0, covers: host) })
+        {
+            open.remove(match)
             if open.isEmpty {
                 oneShotAllowedDomains.removeValue(forKey: nil)
                 oneShotIssuedAt.removeValue(forKey: nil)
@@ -594,10 +651,10 @@ extension OutboundEgressSupervisor {
 extension OutboundEgressSupervisor: EgressPolicyEvaluator {
     /// Checks whether a one-shot grant exists for this host and session without consuming it.
     private func isOneShotAllowed(host: String, sessionID: UUID?) -> Bool {
-        if let sessionID, let scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
+        if let sessionID, let scoped = oneShotAllowedDomains[sessionID], scoped.contains(where: { Self.grantEntry($0, covers: host) }) {
             return true
         }
-        if let open = oneShotAllowedDomains[nil], open.contains(host) {
+        if let open = oneShotAllowedDomains[nil], open.contains(where: { Self.grantEntry($0, covers: host) }) {
             return true
         }
         return false
@@ -623,7 +680,7 @@ extension OutboundEgressSupervisor: EgressPolicyEvaluator {
             if isOneShotAllowed(host: canonicalHost, sessionID: sessionID) {
                 return .allowed
             }
-            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+            if isSessionAllowed(host: canonicalHost, sessionID: sessionID) {
                 return .allowed
             }
             // A covering domain allow in the gate authorizes the host: durable

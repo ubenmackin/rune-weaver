@@ -305,7 +305,7 @@ describe("NeedsActionQueue", () => {
     }
   });
 
-  it("lists exactly the three egress durations for an egress-parked card", async () => {
+  it("lists all seven egress durations for an egress-parked card", async () => {
     const user = userEvent.setup();
     const egress = makeApproval({
       id: "egress-1",
@@ -315,7 +315,11 @@ describe("NeedsActionQueue", () => {
     const expected = durationOptionsFor(egress);
     expect(expected.map((option) => option.value)).toEqual([
       "thisTime",
+      "forTask",
       "forSession",
+      "fiveMinutes",
+      "oneHour",
+      "oneDay",
       "forever",
     ]);
     const { decideCalls } = stubApi([egress]);
@@ -326,7 +330,7 @@ describe("NeedsActionQueue", () => {
       await screen.findByRole("button", { name: /Allow options for api.request/i }),
     );
     const items = await screen.findAllByRole("menuitem");
-    expect(items).toHaveLength(3);
+    expect(items).toHaveLength(7);
     expect(items.map((item) => item.textContent)).toEqual(
       expected.map((option) => option.label),
     );

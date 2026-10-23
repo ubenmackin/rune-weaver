@@ -63,7 +63,7 @@ function describeGrantScope(scope: AccessScopeDTO | undefined): string {
         ? scope.handles[0]
         : `${scope.handles.length} recipients`;
     case "domain":
-      return scope.host;
+      return scope.subdomains ? `*.${scope.host}` : scope.host;
   }
 }
 

@@ -55,6 +55,14 @@ private struct SandboxTargetRequest: Sendable {
     let workspaceRoot: URL?
 }
 
+/// Resolved network gating for one run. Bundles capability plus allowance plus hosts so dry-run
+/// and live paths share one decision without a 3-tuple.
+private struct BashNetworkGating: Sendable {
+    let isNetworkCapable: Bool
+    let effectiveAllowNetwork: Bool
+    let effectiveDeclaredHosts: [String]
+}
+
 /// Tool for executing shell commands with granular per-command permissions,
 /// strict chaining protection, and optional Seatbelt sandbox confinement.
 public struct BashTool: Tool {
@@ -295,20 +303,15 @@ extension BashTool {
     ) async throws -> ToolOutput {
         let workspace = effectiveWorkspaceStore
         let tierRoot = await workspace.root()
-        let baseTier = tier
         // Host fallback stays single-sourced on the router with the live
         // workspace root so approval stamping observes the identical tier execution runs.
-        let tier: BashSandboxMode = BashSandboxRouter.applyHostFallback(
-            baseTier: baseTier,
-            command: command,
-            rawCwd: args.cwd,
-            workspaceRoot: tierRoot
-        )
+        let tier = BashSandboxRouter.applyHostFallback(baseTier: tier, command: command, rawCwd: args.cwd, workspaceRoot: tierRoot)
         let decision = BashSecurity.evaluate(command: command, config: bashConfig)
-        let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
-        let screenHosts = collectedScreenHosts(in: command)
-        let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty
-        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), declaredHosts.isEmpty {
+        let gating = resolvedNetworkGating(command: command, args: args, declaredHosts: declaredHosts, context: context)
+        let isNetworkCapable = gating.isNetworkCapable
+        let effectiveAllowNetwork = gating.effectiveAllowNetwork
+        let effectiveDeclaredHosts = gating.effectiveDeclaredHosts
+        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), effectiveDeclaredHosts.isEmpty {
             let diagnostic = "Command requires network access but declares no network_hosts;"
                 + " declare every dial in network_hosts for isolated tiers."
             let envelope = BashResultEnvelope(
@@ -326,22 +329,15 @@ extension BashTool {
             tier: tier,
             isNetworkCapable: isNetworkCapable
         )
-        if shouldScreen {
-            if let envelope = await screenExplicitURLs(
-                command: command,
-                declaredHosts: declaredHosts,
-                isChained: decision.isChained,
-                sessionID: context.sessionID
-            ) {
-                return .failure(encodeEnvelope(envelope), callID: callID)
-            }
-        }
-        if let quotaFailure = await checkedQuotaFailure(
-            workspace: workspace,
+        if shouldScreen, let envelope = await screenExplicitURLs(
             command: command,
-            decision: decision,
-            callID: callID
+            declaredHosts: effectiveDeclaredHosts,
+            isChained: decision.isChained,
+            sessionID: context.sessionID
         ) {
+            return .failure(encodeEnvelope(envelope), callID: callID)
+        }
+        if let quotaFailure = await checkedQuotaFailure(workspace: workspace, command: command, decision: decision, callID: callID) {
             return quotaFailure
         }
         let cwdResult = await checkedWorkingDirectory(
@@ -389,7 +385,7 @@ extension BashTool {
                 workingDirURL: cwdResult.url,
                 timeoutSeconds: timeout,
                 allowNetwork: effectiveAllowNetwork,
-                allowedEgressHosts: declaredHosts,
+                allowedEgressHosts: effectiveDeclaredHosts,
                 additionalReadPaths: [workspaceTmpPath],
                 callID: callID,
                 tier: tier,
@@ -644,6 +640,24 @@ extension BashTool {
         }
     }
 
+    /// Single source for dry-run and live network gating so preview screens like execution.
+    /// Approval never implies network: callers declare every dial explicitly.
+    private func resolvedNetworkGating(
+        command: String,
+        args: BashArgs,
+        declaredHosts: [String],
+        context: ToolContext
+    ) -> BashNetworkGating {
+        let screenHosts = collectedScreenHosts(in: command)
+        let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty || !declaredHosts.isEmpty
+        let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
+        return BashNetworkGating(
+            isNetworkCapable: isNetworkCapable,
+            effectiveAllowNetwork: effectiveAllowNetwork,
+            effectiveDeclaredHosts: declaredHosts
+        )
+    }
+
     /// Screens one dry-run preview through declared-hosts plus network access plus supervisor
     /// screening without spawning.
     private func dryRunNetworkFailure(
@@ -676,10 +690,10 @@ extension BashTool {
             rawCwd: args.cwd,
             workspaceRoot: workspaceRoot
         )
-        let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
-        let screenHosts = collectedScreenHosts(in: command)
-        let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty
-        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), declaredHosts.isEmpty {
+        let gating = resolvedNetworkGating(command: command, args: args, declaredHosts: declaredHosts, context: context)
+        let isNetworkCapable = gating.isNetworkCapable
+        let effectiveAllowNetwork = gating.effectiveAllowNetwork
+        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), gating.effectiveDeclaredHosts.isEmpty {
             let diagnostic = "Command requires network access but declares no network_hosts;"
                 + " declare every dial in network_hosts for isolated tiers."
             let envelope = BashResultEnvelope(
@@ -699,7 +713,7 @@ extension BashTool {
         )
         if shouldScreen, let envelope = await screenExplicitURLs(
             command: command,
-            declaredHosts: declaredHosts,
+            declaredHosts: gating.effectiveDeclaredHosts,
             isChained: decision.isChained,
             sessionID: context.sessionID
         ) {
@@ -893,16 +907,16 @@ extension BashTool {
         workspaceRoot: URL? = nil
     ) -> BashResultEnvelope? {
         let requiresNetwork = BashNetworkGuard.requiresNetworkAccess(command)
-        if requiresNetwork, !bashConfig.allowNetwork, !args.requestNetwork {
+        if requiresNetwork, !bashConfig.allowNetwork, !args.requestNetwork, !context.approved {
             let diagnostic = "Command requires network access,"
                 + " but network access is disabled in Seatbelt sandbox"
                 + " (bash.allow_network = false)."
-                + " Retry with request_network: true to request operator approval."
+                + " Retry with request_network: true or approve to allow network access."
             return BashResultEnvelope(
                 command: command,
-                approvalRequired: false,
+                approvalRequired: true,
                 isChained: decision.isChained,
-                denied: true,
+                denied: false,
                 error: diagnostic,
                 reason: diagnostic
             )
@@ -961,9 +975,20 @@ extension BashTool {
                 isChained: isChained
             )
         }
+        var policyHosts = hosts
+        for declared in declaredHosts {
+            let canonical = SensitiveAddressNormalization.normalizedHost(declared)
+            guard !canonical.isEmpty,
+                  !policyHosts.contains(where: {
+                      $0.url.host.map { SensitiveAddressNormalization.normalizedHost($0) } == canonical
+                  }),
+                  let assumed = URL(string: "https://" + canonical)
+            else { continue }
+            policyHosts.append((display: declared, url: assumed))
+        }
         return await screenedPolicyVerdict(
             command: command,
-            hosts: hosts,
+            hosts: policyHosts,
             isChained: isChained,
             sessionID: sessionID
         )

@@ -404,14 +404,17 @@ extension WebFetchTool {
             return "Unsafe redirect target: refusing to dereference \(url.absoluteString)."
         }
         let canonicalHost = url.host.map { SensitiveAddressNormalization.normalizedHost($0) } ?? ""
-        let freshHost = !canonicalHost.isEmpty && !vettedHosts.contains(canonicalHost)
-        if freshHost, let supervisor = egressSupervisor {
+        // Repeat hosts still re-enter the supervisor so blocked plus
+        // credential plus SSRF checks run on every hop; the supervisor
+        // carries redirect equivalence via previouslyVettedHosts.
+        if let supervisor = egressSupervisor {
             let verdict = await supervisor.validate(
                 url: url,
                 method: "GET",
                 headers: [:],
                 sessionID: sessionID,
-                resolvesCredentials: false
+                resolvesCredentials: false,
+                previouslyVettedHosts: vettedHosts
             )
             switch verdict {
             case .allowed:
@@ -428,7 +431,7 @@ extension WebFetchTool {
         ) {
             return refusal
         }
-        if freshHost, !canonicalHost.isEmpty {
+        if !canonicalHost.isEmpty {
             vettedHosts.insert(canonicalHost)
         }
         return nil

@@ -972,4 +972,41 @@ struct ApiRequestToolSupervisionTests {
             #expect(counter.value == 0)
         }
     }
+
+    @Test
+    func `Session-scoped one-shot grant authorizes ApiRequestTool and survives www redirect`() async throws {
+        try await withTaskScopedDNS({ _ in ["93.184.216.34"] }) {
+            let policy = SecurityPolicy(
+                network: NetworkEgressPolicy(mode: .allowlistOnly, allowedDomains: [])
+            )
+            let store = await makePolicyStore(policy)
+            let supervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+            let sessionID = UUID()
+            await supervisor.allowDomainOnce(domain: "example.com", sessionID: sessionID)
+
+            let recorder = WireHopRecorder()
+            let tool = ApiRequestTool(
+                transport: ScriptedRedirectTransport(
+                    recorder: recorder,
+                    script: [
+                        "https://example.com/v1": ScriptedResponse(
+                            statusCode: 302,
+                            location: "https://www.example.com/v1/items"
+                        )
+                    ]
+                ),
+                egressSupervisor: supervisor
+            )
+            let output = try await tool.execute(
+                input: ToolInput(
+                    toolName: "api.request",
+                    argumentsJSON: #"{"method":"GET","url":"https://example.com/v1"}"#
+                ),
+                context: ToolContext(conversationID: sessionID, approved: true)
+            )
+            #expect(!output.isError)
+            #expect(recorder.hops.count == 2)
+            #expect(await supervisor.activeGrants(sessionID: sessionID).oneShotDomains.isEmpty)
+        }
+    }
 }

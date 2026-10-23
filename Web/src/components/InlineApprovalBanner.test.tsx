@@ -546,7 +546,7 @@ describe("InlineApprovalBanner pending assessment", () => {
 });
 
 describe("InlineApprovalBanner network egress approval", () => {
-  it("lists exactly the 3 egress durations with no scope row", async () => {
+  it("lists all 7 egress durations with no custom targets menu item", async () => {
     const onDecide = vi.fn();
     const user = userEvent.setup();
     const request = egressRequest();
@@ -564,9 +564,9 @@ describe("InlineApprovalBanner network egress approval", () => {
     await user.click(chevronBtn);
 
     const expected = durationOptionsFor(request);
-    expect(expected).toHaveLength(3);
+    expect(expected).toHaveLength(7);
     const items = screen.getAllByRole("menuitem");
-    expect(items).toHaveLength(3);
+    expect(items).toHaveLength(7);
     expect(items.map((item) => item.textContent)).toEqual(
       expected.map((option) => option.label),
     );

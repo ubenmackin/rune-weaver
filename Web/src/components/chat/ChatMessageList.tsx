@@ -4,6 +4,7 @@ import type { RefObject } from "react";
 import {
   isRecallDiagnosticsVisible,
   parseRecallDiagnostics,
+  type AccessScopeDTO,
   type FileReviewStates,
   type PermissionRequest,
   type ToolAction,
@@ -49,7 +50,12 @@ interface ChatMessageListProps {
   onDismissWarnings: () => void;
   sessionApprovals: PermissionRequest[];
   decidingApprovalIDs: Set<string>;
-  onDecideApproval: (id: string, approved: boolean, duration: TrustDuration) => void;
+  onDecideApproval: (
+    id: string,
+    approved: boolean,
+    duration: TrustDuration,
+    scope?: AccessScopeDTO,
+  ) => void;
   onRespondQuestion: (id: string, answer?: string, cancelled?: boolean) => void;
 }
 
@@ -548,8 +554,8 @@ export default function ChatMessageList({
                 key={request.id}
                 request={request}
                 deciding={decidingApprovalIDs.has(request.id)}
-                onDecide={(id, approved, duration) =>
-                  void onDecideApproval(id, approved, duration)
+                onDecide={(id, approved, duration, scope) =>
+                  void onDecideApproval(id, approved, duration, scope)
                 }
               />
             ),
