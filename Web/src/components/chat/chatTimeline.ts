@@ -60,6 +60,31 @@ export function appendToolStartToSegments(
   segments: ChatSegment[],
   action: ToolAction,
 ): ChatSegment[] {
+  if (
+    action.callID &&
+    segments.some(
+      (segment) =>
+        segment.kind === "tools" &&
+        segment.actions.some((existing) => existing.callID === action.callID),
+    )
+  ) {
+    return segments.map((segment) =>
+      segment.kind === "tools"
+        ? {
+            kind: "tools" as const,
+            actions: segment.actions.map((existing) =>
+              existing.callID === action.callID
+                ? {
+                    ...existing,
+                    ...action,
+                    result: action.result ?? existing.result,
+                  }
+                : existing,
+            ),
+          }
+        : { ...segment },
+    );
+  }
   const next = segments.map((segment) =>
     segment.kind === "tools"
       ? { kind: "tools" as const, actions: [...segment.actions] }
@@ -284,24 +309,64 @@ export function buildDoneSegments(
         actions: deduplicateToolActionsByCallID(refreshed),
       };
     });
-    // Done actions for calls never streamed (parked resumes) append as their own
-    // round groups so the same turn timeline grows instead of dropping them.
+    // Done actions for calls never streamed (pre-refresh rounds or parked resumes)
+    // are partitioned relative to the earliest streamed tool batch so pre-refresh
+    // rounds prepend at the start of the timeline instead of appearing at the bottom.
+    const streamedActions = merged.flatMap((segment) =>
+      segment.kind === "tools" ? segment.actions : [],
+    );
     const streamedCallIDs = new Set(
-      merged.flatMap((segment) =>
-        segment.kind === "tools"
-          ? segment.actions.map((action) => action.callID)
-          : [],
-      ),
+      streamedActions.map((action) => action.callID),
     );
     const missing = dedupedDone.filter(
       (action) => action.callID && !streamedCallIDs.has(action.callID),
     );
     if (missing.length > 0) {
-      const groups = groupToolActionsByRound(
-        [...missing].sort(compareToolActionsByRound),
+      const streamedRounds = streamedActions
+        .map((action) => action.roundIndex)
+        .filter((r): r is number => typeof r === "number");
+      const minStreamedRound =
+        streamedRounds.length > 0 ? Math.min(...streamedRounds) : undefined;
+      const firstStreamedDoneIdx = dedupedDone.findIndex(
+        (action) => action.callID && streamedCallIDs.has(action.callID),
       );
-      for (const group of groups) {
-        merged.push({ kind: "tools" as const, actions: group });
+      const preStreamed: ToolAction[] = [];
+      const postStreamed: ToolAction[] = [];
+      for (const action of missing) {
+        const doneIdx = dedupedDone.indexOf(action);
+        const isBeforeStreamed =
+          streamedActions.length > 0 &&
+          (typeof action.roundIndex === "number" &&
+          minStreamedRound !== undefined
+            ? action.roundIndex < minStreamedRound ||
+              (action.roundIndex === minStreamedRound &&
+                firstStreamedDoneIdx !== -1 &&
+                doneIdx < firstStreamedDoneIdx)
+            : firstStreamedDoneIdx !== -1 && doneIdx < firstStreamedDoneIdx);
+        if (isBeforeStreamed) {
+          preStreamed.push(action);
+        } else {
+          postStreamed.push(action);
+        }
+      }
+      if (preStreamed.length > 0) {
+        const preGroups = groupToolActionsByRound(
+          [...preStreamed].sort(compareToolActionsByRound),
+        );
+        const insertIdx = merged[0]?.kind === "thought" ? 1 : 0;
+        merged.splice(
+          insertIdx,
+          0,
+          ...preGroups.map((actions) => ({ kind: "tools" as const, actions })),
+        );
+      }
+      if (postStreamed.length > 0) {
+        const postGroups = groupToolActionsByRound(
+          [...postStreamed].sort(compareToolActionsByRound),
+        );
+        for (const group of postGroups) {
+          merged.push({ kind: "tools" as const, actions: group });
+        }
       }
     }
     // The streamed skeleton already carries every round's prose in order; the terminal text repeats
@@ -703,4 +768,87 @@ export function renderedToolActions(
     }
   }
   return actions;
+}
+
+// Removes a resumed pending tool call (and any approval-waiting placeholder text) from committed
+// messages once the live turn takes ownership of that callID, preventing duplicate Pending + Done cards.
+export function removeResumedCallFromMessages(
+  messages: MessageItem[],
+  callID: string,
+): MessageItem[] {
+  if (!callID) return messages;
+  const hasMatch = messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      ((m.toolActions?.some((a) => a.callID === callID && a.result == null) ??
+        false) ||
+        (m.segments?.some(
+          (s) =>
+            s.kind === "tools" &&
+            s.actions.some((a) => a.callID === callID && a.result == null),
+        ) ??
+          false)),
+  );
+  if (!hasMatch) return messages;
+
+  const updated: MessageItem[] = [];
+  for (const m of messages) {
+    if (m.role !== "assistant") {
+      updated.push(m);
+      continue;
+    }
+    const matchesPendingCall =
+      (m.toolActions?.some((a) => a.callID === callID && a.result == null) ??
+        false) ||
+      (m.segments?.some(
+        (s) =>
+          s.kind === "tools" &&
+          s.actions.some((a) => a.callID === callID && a.result == null),
+      ) ??
+        false);
+    if (!matchesPendingCall) {
+      updated.push(m);
+      continue;
+    }
+    const nextSegments = (m.segments ?? [])
+      .map((s) => {
+        if (s.kind === "tools") {
+          return {
+            kind: "tools" as const,
+            actions: s.actions.filter(
+              (a) => !(a.callID === callID && a.result == null),
+            ),
+          };
+        }
+        return s;
+      })
+      .filter((s) => {
+        if (s.kind === "tools") return s.actions.length > 0;
+        if (s.kind === "text") return !s.text.trim().startsWith(WAITING_PREFIX);
+        return true;
+      });
+    const nextActions = (m.toolActions ?? []).filter(
+      (a) => !(a.callID === callID && a.result == null),
+    );
+    const nextText =
+      nextSegments.length > 0
+        ? flatTextFromSegments(nextSegments)
+        : m.text.trim().startsWith(WAITING_PREFIX)
+          ? ""
+          : m.text;
+    if (
+      nextActions.length === 0 &&
+      nextText.trim().length === 0 &&
+      !nextSegments.some((s) => s.kind === "thought")
+    ) {
+      continue;
+    }
+    updated.push({
+      ...m,
+      text: nextText,
+      toolActions: nextActions.length > 0 ? nextActions : undefined,
+      segments: nextSegments.length > 0 ? nextSegments : undefined,
+    });
+  }
+  return updated;
 }

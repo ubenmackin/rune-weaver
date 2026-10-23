@@ -107,7 +107,12 @@ public func resumeNarratedApproval(
 
     // If approving, immediately transition the run row to "running" and broadcast run_started
     // so Working Right Now stream and Chat history badge immediately reflect active execution.
-    if approved, let targetSessionID, let awaiting = await strandedParkedRun(sessionID: targetSessionID, decidedCallID: decidedCallID, context: context) {
+    let awaitingRun: RunLogEntry? = if let targetSessionID {
+        await strandedParkedRun(sessionID: targetSessionID, decidedCallID: decidedCallID, context: context)
+    } else {
+        nil
+    }
+    if approved, let awaiting = awaitingRun {
         let runningEntry = await context.runs.update(
             id: awaiting.id,
             status: "running"
@@ -115,19 +120,55 @@ public func resumeNarratedApproval(
         await context.hub.broadcastRun(runningEntry)
     }
 
+    // Track the resumed turn in ActiveTurnTracker and seed ChatTurnAuditProgress with prior
+    // completed actions so mid-turn page refreshes (GET /sessions/:id/live-turn) see active=true
+    // along with both pre-park and post-park tool actions.
+    let auditProgress = ChatTurnAuditProgress(initialActions: awaitingRun?.toolActions ?? [])
+    let taskBox = TurnTaskBox()
+    var registration: TurnRegistration?
+    if let targetSessionID {
+        let reg = await context.activeTurns.register(
+            sessionID: targetSessionID,
+            onCancel: { taskBox.cancel() }
+        )
+        registration = reg
+        await context.activeTurns.registerSnapshotProvider(sessionID: targetSessionID) {
+            let snap = auditProgress.snapshot()
+            return LiveTurnSnapshot(
+                sessionID: targetSessionID,
+                text: snap.partialText,
+                reasoning: snap.partialReasoning,
+                toolActions: snap.toolActions,
+                totalTokens: snap.totalTokens
+            )
+        }
+    }
+
     let resumed: OrchestratorResponse?
     do {
-        resumed = try await context.orchestrator.resumeNarratedApproval(
-            id: id,
-            approved: approved,
-            answer: answer,
-            onEvent: { event in
-                if let targetSessionID {
-                    await broadcastWSEventFrame(event, sessionID: targetSessionID, context: context)
+        let resumeTask: Task<OrchestratorResponse?, Error> = Task {
+            try await context.orchestrator.resumeNarratedApproval(
+                id: id,
+                approved: approved,
+                answer: answer,
+                onEvent: { event in
+                    auditProgress.record(event)
+                    if let targetSessionID {
+                        await broadcastWSEventFrame(event, sessionID: targetSessionID, context: context)
+                    }
                 }
-            }
-        )
+            )
+        }
+        taskBox.set(resumeTask)
+        resumed = try await withTaskCancellationHandler {
+            try await resumeTask.value
+        } onCancel: {
+            resumeTask.cancel()
+        }
     } catch {
+        if let targetSessionID, let registration {
+            await context.activeTurns.unregister(sessionID: targetSessionID, token: registration.token)
+        }
         await handleResumeFailure(
             id: id,
             detail: error.localizedDescription,
@@ -136,6 +177,9 @@ public func resumeNarratedApproval(
             context: context
         )
         return
+    }
+    if let targetSessionID, let registration {
+        await context.activeTurns.unregister(sessionID: targetSessionID, token: registration.token)
     }
     guard let resumed else {
         return

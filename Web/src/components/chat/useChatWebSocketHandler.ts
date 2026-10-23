@@ -55,6 +55,7 @@ import {
   isToolAction,
   isToolResult,
   normalizeCompletedAtMs,
+  removeResumedCallFromMessages,
   updateToolEndInSegments,
 } from "./chatTimeline";
 import {
@@ -354,11 +355,15 @@ export function useChatWebSocketHandler({
               }
             : {}),
         };
+        setMessages((prev) => removeResumedCallFromMessages(prev, callID));
         setInFlightTurn((prev) => {
           const existing = prev ? prev.toolActions : [];
           const existingSegments = prev ? prev.segments : [];
+          const nextActions = existing.some((a) => a.callID === callID)
+            ? existing.map((a) => (a.callID === callID ? { ...a, ...started } : a))
+            : [...existing, started];
           return {
-            toolActions: [...existing, started],
+            toolActions: nextActions,
             text: prev ? prev.text : "",
             held: prev ? (prev.held ?? "") : "",
             segments: appendToolStartToSegments(existingSegments, started),
@@ -395,6 +400,7 @@ export function useChatWebSocketHandler({
           (data as WSToolEndFrame).roundIndex,
         );
         forgetToolCall(callID);
+        setMessages((prev) => removeResumedCallFromMessages(prev, callID));
         setInFlightTurn((prev) => {
           if (!prev) return null;
           const hasMatch = prev.toolActions.some(
@@ -672,31 +678,30 @@ export function useChatWebSocketHandler({
           ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),
         };
         setMessages((prev) => {
-          const base = !isParked
-            ? prev.filter((m) => {
-                if (m.role !== "assistant") return true;
-                const overlaps =
-                  finalActions.length > 0 &&
-                  ((m.toolActions?.some((a) =>
-                    finalActions.some(
-                      (fa) => fa.callID && fa.callID === a.callID,
-                    ),
-                  ) ??
-                    false) ||
-                    finalActions.some(
-                      (fa) =>
-                        fa.callID &&
-                        textContainsPlaceholderForCall(m.text, fa.callID),
-                    ));
-                if (overlaps) return false;
-                const isWaiting = m.text.trim().startsWith(WAITING_PREFIX);
-                if (!isWaiting) return true;
-                const hasActions =
-                  !!m.toolActions && m.toolActions.length > 0;
-                if (!hasActions) return false;
-                return true;
-              })
-            : prev;
+          const base = prev.filter((m) => {
+            if (m.role !== "assistant") return true;
+            const overlaps =
+              finalActions.length > 0 &&
+              ((m.toolActions?.some((a) =>
+                finalActions.some(
+                  (fa) => fa.callID && fa.callID === a.callID,
+                ),
+              ) ??
+                false) ||
+                finalActions.some(
+                  (fa) =>
+                    fa.callID &&
+                    textContainsPlaceholderForCall(m.text, fa.callID),
+                ));
+            if (overlaps) return false;
+            if (isParked) return true;
+            const isWaiting = m.text.trim().startsWith(WAITING_PREFIX);
+            if (!isWaiting) return true;
+            const hasActions =
+              !!m.toolActions && m.toolActions.length > 0;
+            if (!hasActions) return false;
+            return true;
+          });
           return [...base, finalMsg].slice(-MAX_MESSAGES);
         });
         setInFlightTurn(null);

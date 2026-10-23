@@ -131,10 +131,14 @@ final class ChatTurnAuditProgress: Sendable {
         var totalTokens: Int?
     }
 
-    private let state = OSAllocatedUnfairLock(initialState: ProgressState())
+    private let state: OSAllocatedUnfairLock<ProgressState>
 
-    /// Creates an empty accumulator.
-    init() {}
+    /// Creates an accumulator, optionally seeded with prior completed actions from a parked turn.
+    init(initialActions: [ToolAction] = []) {
+        state = OSAllocatedUnfairLock(initialState: ProgressState(
+            completed: initialActions.filter { $0.result != nil }
+        ))
+    }
 
     /// Folds one orchestrator event into the partial audit snapshot.
     /// - Parameter event: Live turn event to accumulate.
