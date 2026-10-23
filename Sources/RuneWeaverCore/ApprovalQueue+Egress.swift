@@ -35,55 +35,98 @@ extension ApprovalQueue {
 
         switch toolName {
         case "bash.exec":
-            guard let cmd = dict["command"] as? String else { return [] }
-            return allHostsFromCommandText(cmd)
+            return bashEgressHosts(from: dict)
         case "desktop.action":
-            guard let actions = dict["actions"] as? [[String: Any]] else { return [] }
-            var hosts: [String] = []
-            var seen = Set<String>()
-            for action in actions {
-                guard let text = action["text"] as? String else { continue }
-                for host in allHostsFromCommandText(text) {
-                    let canonical = host.lowercased()
-                    guard !seen.contains(canonical) else { continue }
-                    seen.insert(canonical)
-                    hosts.append(host)
-                }
-            }
-            return hosts
+            return desktopActionEgressHosts(from: dict)
         case "api.request", "web.fetch", "browser.navigate", "browser.act", "web.search":
             guard let host = hostFromURLAliases(dict) else { return [] }
             return [host]
         default:
-            var hosts: [String] = []
-            var seen = Set<String>()
-            func appendUnique(_ host: String) {
+            return fallbackEgressHosts(from: dict)
+        }
+    }
+
+    /// Extracts every egress host from `bash.exec` command text and `network_hosts`.
+    private static func bashEgressHosts(from dict: [String: Any]) -> [String] {
+        var hosts: [String] = []
+        var seen = Set<String>()
+        func appendUnique(_ rawHost: String) {
+            let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let host: String = if let parsed = URL(string: trimmed), let urlHost = parsed.host, !urlHost.isEmpty {
+                urlHost
+            } else {
+                trimmed
+            }
+            // Wildcard declarations describe scope, not a dialable host, and never match a domain allow.
+            guard !host.hasPrefix("*.") else { return }
+            let canonical = host.lowercased()
+            guard !seen.contains(canonical) else { return }
+            seen.insert(canonical)
+            hosts.append(host)
+        }
+        if let cmd = dict["command"] as? String {
+            for host in allHostsFromCommandText(cmd) {
+                appendUnique(host)
+            }
+        }
+        if let declared = dict["network_hosts"] as? [String] {
+            for host in declared {
+                appendUnique(host)
+            }
+        }
+        return hosts
+    }
+
+    /// Extracts every egress host from `desktop.action` typed text steps.
+    private static func desktopActionEgressHosts(from dict: [String: Any]) -> [String] {
+        guard let actions = dict["actions"] as? [[String: Any]] else { return [] }
+        var hosts: [String] = []
+        var seen = Set<String>()
+        for action in actions {
+            guard let text = action["text"] as? String else { continue }
+            for host in allHostsFromCommandText(text) {
                 let canonical = host.lowercased()
-                guard !seen.contains(canonical) else { return }
+                guard !seen.contains(canonical) else { continue }
                 seen.insert(canonical)
                 hosts.append(host)
             }
-            if let host = hostFromURLAliases(dict) {
+        }
+        return hosts
+    }
+
+    /// Extracts every egress host from unrecognized tools using URL aliases and text fields.
+    private static func fallbackEgressHosts(from dict: [String: Any]) -> [String] {
+        var hosts: [String] = []
+        var seen = Set<String>()
+        func appendUnique(_ host: String) {
+            // Wildcard declarations describe scope, not a dialable host, and never match a domain allow.
+            guard !host.hasPrefix("*.") else { return }
+            let canonical = host.lowercased()
+            guard !seen.contains(canonical) else { return }
+            seen.insert(canonical)
+            hosts.append(host)
+        }
+        if let host = hostFromURLAliases(dict) {
+            appendUnique(host)
+        }
+        var textCandidates: [String] = []
+        if let cmd = dict["command"] as? String {
+            textCandidates.append(cmd)
+        }
+        if let actions = dict["actions"] as? [[String: Any]] {
+            for action in actions {
+                if let text = action["text"] as? String {
+                    textCandidates.append(text)
+                }
+            }
+        }
+        for text in textCandidates {
+            for host in allHostsFromCommandText(text) {
                 appendUnique(host)
             }
-            var textCandidates: [String] = []
-            if let cmd = dict["command"] as? String {
-                textCandidates.append(cmd)
-            }
-            if let actions = dict["actions"] as? [[String: Any]] {
-                for action in actions {
-                    if let text = action["text"] as? String {
-                        textCandidates.append(text)
-                    }
-                }
-            }
-            for text in textCandidates {
-                for host in allHostsFromCommandText(text) {
-                    appendUnique(host)
-                }
-            }
-            return hosts
         }
+        return hosts
     }
 
     /// Reads the first URL-alias key carrying an absolute or bare host value.

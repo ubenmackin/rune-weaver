@@ -796,4 +796,23 @@ struct OutboundEgressSupervisorTests {
             #expect(summary.oneShotDomains.isEmpty)
         }
     }
+
+    @Test
+    func `Sibling-tenant wildcard grants cover nothing fail-closed`() {
+        // A bare shared-parent wildcard must not cover its tenants, while the
+        // tenant wildcard itself still covers the tenant and its subdomains.
+        let suffixes = [
+            "co.at", "co.id", "co.il", "co.ke", "co.th",
+            "ltd.uk", "plc.uk", "sch.uk", "asn.au", "id.au",
+            "wordpress.com", "tumblr.com", "myshopify.com",
+            "github.dev", "githubusercontent.com", "googleusercontent.com",
+            "deno.dev", "repl.co", "duckdns.org", "ngrok.io", "trycloudflare.com"
+        ]
+        for suffix in suffixes {
+            let tenant = "evil.\(suffix)"
+            #expect(OutboundEgressSupervisor.grantEntry("*.\(suffix)", covers: tenant) == false)
+            #expect(OutboundEgressSupervisor.grantEntry("*.\(tenant)", covers: tenant) == true)
+            #expect(OutboundEgressSupervisor.grantEntry("*.\(tenant)", covers: "sub.\(tenant)") == true)
+        }
+    }
 }

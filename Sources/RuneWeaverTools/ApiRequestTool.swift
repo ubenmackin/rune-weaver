@@ -370,6 +370,7 @@ public struct ApiRequestTool: Tool, Sendable {
                 headers: headers,
                 requestURL: requestURL,
                 method: method,
+                sessionID: context.sessionID,
                 resolvesCredentials: !context.dryRun
             )
             resolvedHeaders = resolved.headers
@@ -402,7 +403,8 @@ public struct ApiRequestTool: Tool, Sendable {
             let outcome = try await requestChain(
                 initialHop: initialHop,
                 initialSecrets: resolvedSecrets,
-                originalURL: rawURL
+                originalURL: rawURL,
+                sessionID: context.sessionID
             )
             let envelope = outcome.envelope
             let encoded = try ToolEnvelopeEncoding.encode(envelope)
@@ -459,11 +461,19 @@ public struct ApiRequestTool: Tool, Sendable {
     private func requestChain(
         initialHop: ApiRequestHop,
         initialSecrets: [String],
-        originalURL: String
+        originalURL: String,
+        sessionID: UUID?
     ) async throws -> (envelope: ApiRequestEnvelope, injectedSecrets: [String]) {
         var hop = initialHop
         // Every live value injected on any hop, swept from the response at the end.
         var injectedSecrets = initialSecrets
+        var vettedHosts: Set<String> = []
+        if let initialHost = initialHop.url.host, !initialHost.isEmpty {
+            let canonical = SensitiveAddressNormalization.normalizedHost(initialHost)
+            if !canonical.isEmpty {
+                vettedHosts.insert(canonical)
+            }
+        }
         var hops = 0
         while true {
             try validateHopURL(hop.url.absoluteString)
@@ -533,8 +543,20 @@ public struct ApiRequestTool: Tool, Sendable {
                 throw refusal
             }
             try validateHopURL(next.absoluteString)
-            let advanced = try await validatedRedirectHop(statusCode: statusCode, current: hop, nextURL: next)
+            let advanced = try await validatedRedirectHop(
+                statusCode: statusCode,
+                current: hop,
+                nextURL: next,
+                sessionID: sessionID,
+                previouslyVettedHosts: vettedHosts
+            )
             hop = advanced.hop
+            if let nextHost = hop.url.host, !nextHost.isEmpty {
+                let canonical = SensitiveAddressNormalization.normalizedHost(nextHost)
+                if !canonical.isEmpty {
+                    vettedHosts.insert(canonical)
+                }
+            }
             injectedSecrets.append(contentsOf: advanced.injectedSecrets)
             hops += 1
         }
@@ -598,13 +620,17 @@ extension ApiRequestTool {
         headers: [String: String],
         requestURL: URL,
         method: ApiMethod,
-        resolvesCredentials: Bool
+        sessionID: UUID?,
+        resolvesCredentials: Bool,
+        previouslyVettedHosts: Set<String> = []
     ) async throws -> ResolvedEgressHeaders {
         let verdict = await egressSupervisor.validate(
             url: requestURL,
             method: method.rawValue,
             headers: headers,
-            resolvesCredentials: resolvesCredentials
+            sessionID: sessionID,
+            resolvesCredentials: resolvesCredentials,
+            previouslyVettedHosts: previouslyVettedHosts
         )
         switch verdict {
         case let .allowed(outcome):
@@ -624,7 +650,9 @@ extension ApiRequestTool {
     private func validatedRedirectHop(
         statusCode: Int,
         current: ApiRequestHop,
-        nextURL: URL
+        nextURL: URL,
+        sessionID: UUID?,
+        previouslyVettedHosts: Set<String>
     ) async throws -> (hop: ApiRequestHop, injectedSecrets: [String]) {
         let preservesMethodAndBody = statusCode == 307 || statusCode == 308
         let method: ApiMethod = preservesMethodAndBody ? current.method : .GET
@@ -650,7 +678,9 @@ extension ApiRequestTool {
             headers: surrogateHeaders,
             requestURL: nextURL,
             method: method,
-            resolvesCredentials: true
+            sessionID: sessionID,
+            resolvesCredentials: true,
+            previouslyVettedHosts: previouslyVettedHosts
         )
         let hop = ApiRequestHop(
             url: nextURL,

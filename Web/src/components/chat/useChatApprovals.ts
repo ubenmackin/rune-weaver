@@ -6,6 +6,7 @@ import {
   decideApproval,
   listApprovals,
   respondToQuestion,
+  type AccessScopeDTO,
   type PermissionRequest,
   type TrustDuration,
 } from "../../api";
@@ -50,10 +51,15 @@ export function useChatApprovals({ sessionID, onError }: UseChatApprovalsOptions
   }, [sessionID]);
 
   const handleDecideApproval = useCallback(
-    async (id: string, approved: boolean, duration: TrustDuration) => {
+    async (
+      id: string,
+      approved: boolean,
+      duration: TrustDuration,
+      scope?: AccessScopeDTO,
+    ) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
       try {
-        await decideApproval(id, approved, duration, undefined, "chat");
+        await decideApproval(id, approved, duration, scope, "chat");
         setPendingApprovals((previous) =>
           previous.filter((item) => item.id !== id),
         );

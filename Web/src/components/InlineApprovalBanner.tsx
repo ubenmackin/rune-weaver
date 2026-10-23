@@ -2,17 +2,23 @@
 
 import { useEffect, useState } from "react";
 import {
+  type AccessScopeDTO,
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
-import { durationOptionsFor } from "../approvalsShared";
+import { durationOptionsFor, widenableBaseDomain } from "../approvalsShared";
 import { useSplitMenu } from "../useSplitMenu";
 import BashTierLine from "./BashTierLine";
 
 export interface InlineApprovalBannerProps {
   request: PermissionRequest;
   deciding: boolean;
-  onDecide: (id: string, approved: boolean, duration: TrustDuration) => void;
+  onDecide: (
+    id: string,
+    approved: boolean,
+    duration: TrustDuration,
+    scope?: AccessScopeDTO,
+  ) => void;
   menuPlacement?: "auto" | "up" | "down";
 }
 
@@ -92,9 +98,9 @@ export default function InlineApprovalBanner({
   menuPlacement = "auto",
 }: InlineApprovalBannerProps) {
   const [renderUp, setRenderUp] = useState(false);
-  // Duration-only quick surfaces: the chevron lists exactly the shared tiers
-  // for this request — 7 for plain, 3 for egress-parked — and sends no scope,
-  // so the server resolves the request's own target.
+  // Quick-surface tiers plus optional widening: the chevron lists the shared
+  // tiers and ships no scope unless the widen box is checked, so the server
+  // resolves the request's own target otherwise.
   const allowOptions = durationOptionsFor(request);
   // Shared split-menu machine: open state, outside-pointer-down dismissal, focus-on-open, and the
   // allow/deny keyboard flow come from the hook both decision surfaces consume, so the chat banner
@@ -154,20 +160,40 @@ export default function InlineApprovalBanner({
   const egressHost = resolveEgressHost(request);
   const isEgress = Boolean(egressHost);
   const egressBlocked = isEgress ? isEgressBlocked(request) : false;
+  const widenableBase = isEgress ? widenableBaseDomain(egressHost) : null;
+  const [includeSubdomains, setIncludeSubdomains] = useState(false);
+  // Reset widening when the banner retargets: a reused row must not carry
+  // the prior host's checkbox into the next egress request.
+  useEffect(() => {
+    setIncludeSubdomains(false);
+  }, [request.id, egressHost]);
+  const selectedScope: AccessScopeDTO | undefined =
+    includeSubdomains && widenableBase
+      ? { kind: "domain", host: widenableBase, subdomains: true }
+      : undefined;
   const sandboxSummary = resolveSandboxSummary(request);
   // A one-shot request can only deny once: its durable tier coerces to thisTime inside the shared
   // decision contract and mints no rule, so the standing-deny chevron stays off the generic banner
   // entirely, matching the dashboard card.
   const isOneShot = ONE_SHOT_TOOL_NAMES.has(request.toolName);
 
+  function emitDecision(approved: boolean, duration: TrustDuration) {
+    // Deny stays exact-host: a checked widen box never widens a refusal.
+    if (selectedScope && approved) {
+      onDecide(request.id, approved, duration, selectedScope);
+    } else {
+      onDecide(request.id, approved, duration);
+    }
+  }
+
   function handlePickAllow(value: TrustDuration) {
     closeAllowMenu(false);
-    onDecide(request.id, true, value);
+    emitDecision(true, value);
   }
 
   function handlePickDenyAlways() {
     closeDenyMenu(false);
-    onDecide(request.id, false, "forever");
+    emitDecision(false, "forever");
   }
 
   const isContinuation = request.toolName === "engine.continue";
@@ -305,6 +331,28 @@ export default function InlineApprovalBanner({
           <span className="approval-section-label">Target host:</span>{" "}
           <code style={{ color: "var(--accent-purple, #a78bfa)" }}>{egressHost}</code>{" "}
           {egressBlocked ? "is blocked by policy." : "is not in allowlist."}
+          {widenableBase ? (
+            <label
+              className="approval-scope-option"
+              style={{
+                marginLeft: "0.75rem",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+              }}
+            >
+              <input
+                type="checkbox"
+                aria-label={`Include subdomains (*.${widenableBase})`}
+                checked={includeSubdomains}
+                disabled={deciding}
+                onChange={(event) => setIncludeSubdomains(event.target.checked)}
+              />
+              <span>
+                Include subdomains (<code>*.{widenableBase}</code>)
+              </span>
+            </label>
+          ) : null}
         </div>
       ) : null}
 
@@ -360,7 +408,7 @@ export default function InlineApprovalBanner({
             type="button"
             className="primary split-allow-main"
             disabled={deciding}
-            onClick={() => onDecide(request.id, true, "thisTime")}
+            onClick={() => emitDecision(true, "thisTime")}
           >
             {isEgress ? "Allow Once" : "Allow"}
           </button>
@@ -415,7 +463,7 @@ export default function InlineApprovalBanner({
             type="button"
             className="danger split-deny-main"
             disabled={deciding}
-            onClick={() => onDecide(request.id, false, "thisTime")}
+            onClick={() => emitDecision(false, "thisTime")}
           >
             Deny
           </button>

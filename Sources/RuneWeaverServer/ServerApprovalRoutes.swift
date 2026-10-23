@@ -82,28 +82,37 @@ func applyApprovalDecision(
         return .systemNoticeRequiresRemedy
     }
     let effectiveApproved: Bool
+    let resolvedScope: AccessScope?
     if let host = pending.egressHost, !host.isEmpty {
+        // Deny stays exact-host: a widened request never widens a refusal,
+        // so the durable deny and blocked entry name only the dialed host.
+        let egressScope: ResolvedEgressDecisionScope?
+        if input.approved {
+            let requested = resolvedEgressDecisionScope(host: host, requestedScope: input.scope)
+            if input.scope != nil, requested == nil {
+                return .sideEffectFailed(reason: "Requested domain scope does not cover egress host '\(host)'")
+            }
+            egressScope = requested
+        } else {
+            egressScope = resolvedEgressDecisionScope(host: host, requestedScope: nil)
+        }
         // An egress-parked request maps through the supervisor and policy
         // store; a failed side effect fails closed rather than approving.
         guard let mapped = await egressApprovalVerdict(
             approved: input.approved,
             duration: input.duration,
             host: host,
+            egressScope: egressScope,
             pending: pending,
             context: context
         ) else {
             return .sideEffectFailed(reason: "Approval decision could not be applied for this request")
         }
         effectiveApproved = mapped
+        resolvedScope = egressScope?.scope
     } else {
         effectiveApproved = input.approved
-    }
-    // An egress decision stores the host the call dialed; every other request
-    // stores the caller's scope, or the target the gate derives when omitted.
-    let resolvedScope: AccessScope? = if let host = pending.egressHost, !host.isEmpty {
-        AccessScope.canonicalized(.domain(host: host, subdomains: false))
-    } else {
-        input.scope
+        resolvedScope = input.scope
     }
     let resolved = await context.approvals.decide(
         id: input.id,
@@ -157,11 +166,60 @@ func applyApprovalDecision(
     return .resolved(approved: effectiveApproved)
 }
 
+/// Shared widening guard owned by RuneWeaverCore, so the server and the
+/// supervisor refuse the same bases the dashboard mirror refuses.
+private func isNonWidenableDomainBase(_ canonicalHost: String) -> Bool {
+    EgressWideningPolicy.isNonWidenableDomainBase(canonicalHost)
+}
+
+/// Resolved scope and supervisor domain string for an egress approval decision.
+struct ResolvedEgressDecisionScope: Sendable, Equatable {
+    let scope: AccessScope
+    let supervisorDomain: String
+}
+
+/// Resolves and validates the domain scope for an egress-parked approval decision.
+func resolvedEgressDecisionScope(
+    host: String,
+    requestedScope: AccessScope?
+) -> ResolvedEgressDecisionScope? {
+    guard let canonicalDialed = AccessScope.canonicalDomain(host) else {
+        return nil
+    }
+    guard let requestedScope else {
+        return ResolvedEgressDecisionScope(
+            scope: .domain(host: canonicalDialed, subdomains: false),
+            supervisorDomain: canonicalDialed
+        )
+    }
+    guard case let .domain(scopedHost, subdomains) = requestedScope,
+          let canonicalScoped = AccessScope.canonicalDomain(scopedHost)
+    else {
+        return nil
+    }
+    if subdomains {
+        guard !isNonWidenableDomainBase(canonicalScoped), canonicalDialed == canonicalScoped || canonicalDialed.hasSuffix("." + canonicalScoped) else {
+            return nil
+        }
+        return ResolvedEgressDecisionScope(
+            scope: .domain(host: canonicalScoped, subdomains: true),
+            supervisorDomain: "*.\(canonicalScoped)"
+        )
+    } else {
+        guard canonicalDialed == canonicalScoped else { return nil }
+        return ResolvedEgressDecisionScope(
+            scope: .domain(host: canonicalScoped, subdomains: false),
+            supervisorDomain: canonicalScoped
+        )
+    }
+}
+
 /// Maps an egress-parked decision onto its supervisor and policy side effects.
 func egressApprovalVerdict(
     approved: Bool,
     duration: TrustDuration,
     host: String,
+    egressScope: ResolvedEgressDecisionScope? = nil,
     pending: PermissionRequest,
     context: ServerContext
 ) async -> Bool? {
@@ -170,33 +228,36 @@ func egressApprovalVerdict(
     if approved, AllowedOriginPattern.classifyWildcard(host.lowercased()) != .none {
         return nil
     }
+    let resolved = egressScope ?? resolvedEgressDecisionScope(host: host, requestedScope: nil)
     if approved {
+        // An unresolvable host names no scope, so fail closed on every tier.
+        guard let resolved else { return nil }
+        let targetDomain = resolved.supervisorDomain
         switch duration {
         case .thisTime:
             // A one-shot grant is session-scoped whenever the parked request
             // carries a session, so one chat cannot spend another's approval.
             guard let supervisor = context.egressSupervisor else { return nil }
-            await supervisor.allowDomainOnce(domain: host, sessionID: pending.sessionID)
+            await supervisor.allowDomainOnce(domain: targetDomain, sessionID: pending.sessionID)
             return true
         case .forSession:
             guard let sessionID = pending.sessionID, let supervisor = context.egressSupervisor else { return nil }
-            await supervisor.allowDomainForSession(sessionID: sessionID, domain: host)
+            await supervisor.allowDomainForSession(sessionID: sessionID, domain: targetDomain)
             return true
         case .forTask, .fiveMinutes, .oneHour, .oneDay, .forever:
             // The durable half runs inside `decide`, which mints the
-            // domain-scoped rule; the host must be able to name that scope or
-            // the approval would approve a call nothing records.
-            guard AccessScope.canonicalized(.domain(host: host, subdomains: false)) != nil else { return nil }
+            // domain-scoped rule for the resolved widened scope.
             return true
         }
     }
     switch duration {
     case .forever:
-        // The blocked entry lets the next identical call auto-deny instead of
-        // re-parking; a dropped write must surface instead of resolving as a
-        // one-time deny.
+        // Deny stays exact-host even when the caller sent a widened scope:
+        // the blocked entry names only the dialed host.
+        guard let exact = resolvedEgressDecisionScope(host: host, requestedScope: nil) else { return nil }
+        let blockedTarget = exact.supervisorDomain
         do {
-            try await context.policyStore.appendBlockedDomain(host)
+            try await context.policyStore.appendBlockedDomain(blockedTarget)
         } catch {
             return nil
         }

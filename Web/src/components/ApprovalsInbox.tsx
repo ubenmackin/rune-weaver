@@ -19,6 +19,7 @@ import {
   durationOptionsFor,
   isSystemNoticeTool,
   truncateTarget,
+  widenableBaseDomain,
 } from "../approvalsShared";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { mergeApprovalFrame, normalizeSessionID } from "../approvalsSession";
@@ -29,6 +30,8 @@ import {
   SCOPE_EDITOR_COPY,
   buildCustomScope,
   describeScope,
+  effectiveScopeChoice,
+  scopeChoicesFor,
   scopeEditorKind,
   scopePrefill,
   scopeToText,
@@ -59,6 +62,10 @@ export function decisionScopeFor(
   if (choice === "custom") return custom;
   const rawHost = resolveEgressHost(request);
   const host = typeof rawHost === "string" ? rawHost.trim() : "";
+  if (choice === "domainSubdomains") {
+    const base = widenableBaseDomain(host);
+    if (base) return { kind: "domain", host: base, subdomains: true };
+  }
   if (host) return { kind: "domain", host };
   if (!deriveRequestTarget(request)) return { kind: "tool" };
   return undefined;
@@ -307,12 +314,18 @@ export default function ApprovalsInbox({
   }
 
   function decideFromCard(request: PermissionRequest, approved: boolean) {
-    const choice = scopeChoices[request.id] ?? "thisTarget";
+    // Deny stays exact-host on egress: no scope rides a refusal, so the
+    // engine resolves the dialed host exactly even when widening is checked.
+    const scope = !approved && resolveEgressHost(request) ? undefined : decisionScopeFor(
+      request,
+      effectiveScopeChoice(request, scopeChoices[request.id]),
+      customScopes[request.id],
+    );
     void submitDecision(
       request.id,
       approved,
       effectiveDurationFor(request),
-      decisionScopeFor(request, choice, customScopes[request.id]),
+      scope,
     );
   }
 
@@ -533,13 +546,19 @@ export default function ApprovalsInbox({
 
     const id = request.id;
     const isDeciding = decidingState?.id === id;
-    const choice = scopeChoices[id] ?? "thisTarget";
+    // An enrichment can re-badge a card as egress after a choice was picked,
+    // so the checked radio always resolves through what this card may offer.
+    const choice = effectiveScopeChoice(request, scopeChoices[id]);
     const customScope = customScopes[id];
     // A custom choice without a staged scope names no target, so the decision
     // controls hold until the editor saves one instead of shipping a
     // half-described payload.
     const scopeReady = choice !== "custom" || customScope !== undefined;
     const egressHost = resolveEgressHost(request);
+    const widenableBase = widenableBaseDomain(egressHost);
+    // The radios render exactly the choices the selector offers, so no card
+    // can show a stranded tool-wide or custom option the engine would refuse.
+    const choices = scopeChoicesFor(request);
     const derivedTarget = deriveRequestTarget(request);
 
     return (
@@ -638,34 +657,57 @@ export default function ApprovalsInbox({
                   )}
                 </span>
               </label>
-              <label className="approval-scope-option">
-                <input
-                  type="radio"
-                  name={`approval-scope-${id}`}
-                  checked={choice === "allTargets"}
-                  disabled={isDeciding}
-                  onChange={() => selectScopeChoice(request, "allTargets")}
-                />
-                <span>All targets</span>
-              </label>
-              <label className="approval-scope-option">
-                <input
-                  type="radio"
-                  name={`approval-scope-${id}`}
-                  checked={choice === "custom"}
-                  disabled={isDeciding}
-                  onChange={() => selectScopeChoice(request, "custom")}
-                  onClick={() => {
-                    // Re-clicking the already-checked Custom radio fires no onChange, so the click
-                    // itself reopens the editor while custom is selected with nothing staged — the
-                    // radio is the sole custom-scope entry point.
-                    if (choice === "custom" && !customScopes[id]) {
-                      openScopeDraft(request);
+              {widenableBase ? (
+                <label className="approval-scope-option">
+                  <input
+                    type="radio"
+                    name={`approval-scope-${id}`}
+                    checked={choice === "domainSubdomains"}
+                    disabled={isDeciding}
+                    onChange={() =>
+                      selectScopeChoice(request, "domainSubdomains")
                     }
-                  }}
-                />
-                <span>Custom scope</span>
-              </label>
+                  />
+                  <span>
+                    Include subdomains{" "}
+                    <code className="approval-scope-target">
+                      *.{widenableBase}
+                    </code>
+                  </span>
+                </label>
+              ) : null}
+              {choices.includes("allTargets") ? (
+                <label className="approval-scope-option">
+                  <input
+                    type="radio"
+                    name={`approval-scope-${id}`}
+                    checked={choice === "allTargets"}
+                    disabled={isDeciding}
+                    onChange={() => selectScopeChoice(request, "allTargets")}
+                  />
+                  <span>All targets</span>
+                </label>
+              ) : null}
+              {choices.includes("custom") ? (
+                <label className="approval-scope-option">
+                  <input
+                    type="radio"
+                    name={`approval-scope-${id}`}
+                    checked={choice === "custom"}
+                    disabled={isDeciding}
+                    onChange={() => selectScopeChoice(request, "custom")}
+                    onClick={() => {
+                      // Re-clicking the already-checked Custom radio fires no onChange, so the click
+                      // itself reopens the editor while custom is selected with nothing staged — the
+                      // radio is the sole custom-scope entry point.
+                      if (choice === "custom" && !customScopes[id]) {
+                        openScopeDraft(request);
+                      }
+                    }}
+                  />
+                  <span>Custom scope</span>
+                </label>
+              ) : null}
             </div>
             {choice === "custom" && customScope ? (
               <span
@@ -680,7 +722,7 @@ export default function ApprovalsInbox({
 
         {egressHost ? (
           <p className="muted text-sm approval-scope-hint">
-            {`Tiers map to ${egressHost}: once, for this session, or a durable rule.`}
+            {`Every tier maps to ${egressHost}: once, rest of this task, rest of this session, timed rules, or a durable rule.`}
           </p>
         ) : null}
 

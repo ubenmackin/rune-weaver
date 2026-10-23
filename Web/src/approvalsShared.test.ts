@@ -13,6 +13,7 @@ import {
   durationOptionsFor,
   EGRESS_DURATIONS,
   truncateTarget,
+  widenableBaseDomain,
 } from "./approvalsShared";
 import { jsonResponse } from "./test-utils/http";
 
@@ -36,8 +37,16 @@ describe("approvalsShared", () => {
     vi.unstubAllGlobals();
   });
 
-  it("exposes exactly the three egress tiers", () => {
-    expect(EGRESS_DURATIONS).toEqual(["thisTime", "forSession", "forever"]);
+  it("exposes all seven egress tiers", () => {
+    expect(EGRESS_DURATIONS).toEqual([
+      "thisTime",
+      "forTask",
+      "forSession",
+      "fiveMinutes",
+      "oneHour",
+      "oneDay",
+      "forever",
+    ]);
   });
 
   it("returns all seven durations for a plain request", () => {
@@ -50,7 +59,7 @@ describe("approvalsShared", () => {
     );
   });
 
-  it("returns the three egress tiers for an egress-parked request", () => {
+  it("returns all seven egress tiers for an egress-parked request", () => {
     const options = durationOptionsFor(
       makeRequest({
         id: "r2",
@@ -60,9 +69,76 @@ describe("approvalsShared", () => {
     );
     expect(options.map((option) => option.value)).toEqual([
       "thisTime",
+      "forTask",
       "forSession",
+      "fiveMinutes",
+      "oneHour",
+      "oneDay",
       "forever",
     ]);
+  });
+
+  it("computes widenableBaseDomain for standard and multi-part public suffix domains while rejecting literals", () => {
+    expect(widenableBaseDomain("api.example.com")).toBe("example.com");
+    expect(widenableBaseDomain("v1.api.example.com")).toBe("example.com");
+    expect(widenableBaseDomain("example.com")).toBe("example.com");
+    expect(widenableBaseDomain("api.bbc.co.uk")).toBe("bbc.co.uk");
+    expect(widenableBaseDomain("co.uk")).toBeNull();
+    expect(widenableBaseDomain("localhost")).toBeNull();
+    expect(widenableBaseDomain("93.184.216.34")).toBeNull();
+    expect(widenableBaseDomain("[::1]")).toBeNull();
+  });
+
+  it("rejects bare multi-tenant public suffixes exactly like the engine", () => {
+    expect(widenableBaseDomain("web.app")).toBeNull();
+    expect(widenableBaseDomain("blogspot.com")).toBeNull();
+    expect(widenableBaseDomain("amazonaws.com")).toBeNull();
+    // A tenant base three labels deep stays widenable on both sides.
+    expect(widenableBaseDomain("tenant.web.app")).toBe("tenant.web.app");
+    expect(widenableBaseDomain("docs.pages.dev")).toBe("docs.pages.dev");
+    // A three-label registrant in the amazonaws family widens under its own
+    // base, which the engine's widenability mirror must accept too.
+    expect(widenableBaseDomain("bucket.s3.amazonaws.com")).toBe(
+      "s3.amazonaws.com",
+    );
+  });
+
+  it("rejects all-numeric dotted hosts the resolver accepts but the engine refuses", () => {
+    expect(widenableBaseDomain("1.2.3.999")).toBeNull();
+    expect(widenableBaseDomain("123.456")).toBeNull();
+    expect(widenableBaseDomain("999.999.999.999")).toBeNull();
+  });
+
+  it("refuses sibling-tenant widening onto bare shared-parent suffixes", () => {
+    // A bare shared parent never bases a wildcard, while evil.<suffix>
+    // widens only under its own tenant base on both sides of the mirror.
+    const suffixes = [
+      "co.at",
+      "co.id",
+      "co.il",
+      "co.ke",
+      "co.th",
+      "ltd.uk",
+      "plc.uk",
+      "sch.uk",
+      "asn.au",
+      "id.au",
+      "wordpress.com",
+      "tumblr.com",
+      "myshopify.com",
+      "github.dev",
+      "githubusercontent.com",
+      "googleusercontent.com",
+      "deno.dev",
+      "repl.co",
+      "duckdns.org",
+      "ngrok.io",
+      "trycloudflare.com",
+    ];
+    for (const suffix of suffixes) {
+      expect(widenableBaseDomain(suffix)).toBeNull();
+      expect(widenableBaseDomain(`evil.${suffix}`)).toBe(`evil.${suffix}`);
+    }
   });
 
   it("prefers the stored displayTarget", () => {

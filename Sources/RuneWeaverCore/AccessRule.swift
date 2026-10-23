@@ -306,8 +306,20 @@ extension AccessScope {
         return normalized.allSatisfy { members.contains($0) }
     }
 
+    /// Whether a wildcard base can carry subdomain widening. Bare labels, loopback, literals,
+    /// and public/multi-tenant suffixes widen nothing fail-closed. Single-sourced on
+    /// `EgressWideningPolicy` so every widening guard refuses the same bases.
+    public static func isWidenableDomainBase(_ base: String) -> Bool {
+        EgressWideningPolicy.isWidenableScopeBase(base)
+    }
+
     /// Whether the scope's host covers a live call's egress hosts.
     private func matchesDomain(host: String, subdomains: Bool, toolName: String, argumentsJSON: String) -> Bool {
+        // Wildcard cover needs a widenable base, so a stray *.co.uk rule
+        // never authorizes a sibling tenant, apex included.
+        if subdomains, !Self.isWidenableDomainBase(host) {
+            return false
+        }
         for candidate in ApprovalQueue.extractAllEgressHosts(toolName: toolName, argumentsJSON: argumentsJSON) {
             let lowered = candidate.lowercased()
             if lowered == host {

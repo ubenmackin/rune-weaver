@@ -272,7 +272,14 @@ struct PermissionGatePersistenceTests {
         #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 2)
 
         await gate.startPeriodicCleanup(intervalSeconds: 0.05)
-        try await Task.sleep(nanoseconds: 250_000_000)
+        // Poll for the sweep so parallel suites sharing the serial
+        // store lane cannot flake the fixed sleep.
+        for _ in 0 ..< 100 {
+            if RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 1 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
         await gate.stopPeriodicCleanup()
 
         let stored = try await store.load()

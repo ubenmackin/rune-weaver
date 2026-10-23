@@ -118,8 +118,10 @@ public enum ApprovalDecisionLog {
             ("exactTarget", target)
         case let .recipientSet(members):
             ("recipientSet", AccessScope.normalizeRecipients(members).joined(separator: ","))
-        case let .domain(host, _):
-            ("domain", host)
+        // The audit row carries the wildcard spelling so a widened grant
+        // never reads as an exact-domain approval.
+        case let .domain(host, subdomains):
+            ("domain", subdomains ? "*." + host : host)
         case let .pathPrefix(path):
             ("pathPrefix", path)
         case let .glob(pattern):

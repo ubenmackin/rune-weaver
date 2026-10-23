@@ -898,4 +898,207 @@ struct EgressDecisionTransportTests {
         // empty and the decision needed no refresh broadcast.
         #expect(await harness.context.permissionGate.activeRules().isEmpty)
     }
+
+    @Test
+    func `widened subdomain scope authorizes sibling subdomains across tiers`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let sessionID = UUID()
+        let request = await enqueueEgressRequest(host: "api.github.com", sessionID: sessionID, context: harness.context)
+
+        let outcome = await applyApprovalDecision(
+            input: ApprovalDecisionInput(
+                id: request.id,
+                approved: true,
+                duration: .forever,
+                scope: .domain(host: "github.com", subdomains: true),
+                pending: request
+            ),
+            pulse: nil,
+            context: harness.context,
+            spawnResume: { _ in }
+        )
+        guard case let .resolved(approved) = outcome else {
+            Issue.record("Expected widened forever allow to resolve")
+            return
+        }
+        #expect(approved == true)
+
+        let rules = await harness.context.permissionGate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.scope == .domain(host: "github.com", subdomains: true))
+
+        let siblingCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://raw.github.com/file"}"#)
+        #expect(await harness.context.permissionGate.checkPermission(toolCall: siblingCall, tool: EgressGateProbeTool(name: "api.request"), sessionID: UUID()) == .allowed)
+        #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "raw.github.com", sessionID: UUID()) == .allowed)
+    }
+
+    @Test
+    func `widened subdomain scope targeting public suffix or unrelated domain fails closed`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let sessionID = UUID()
+        let request = await enqueueEgressRequest(host: "api.bbc.co.uk", sessionID: sessionID, context: harness.context)
+
+        for invalidScope in [
+            AccessScope.domain(host: "co.uk", subdomains: true),
+            AccessScope.domain(host: "evil.com", subdomains: true),
+            AccessScope.domain(host: "bbc.co.uk", subdomains: false)
+        ] {
+            let outcome = await applyApprovalDecision(
+                input: ApprovalDecisionInput(
+                    id: request.id,
+                    approved: true,
+                    duration: .forever,
+                    scope: invalidScope,
+                    pending: request
+                ),
+                pulse: nil,
+                context: harness.context,
+                spawnResume: { _ in }
+            )
+            guard case .sideEffectFailed = outcome else {
+                Issue.record("Expected invalid widened scope \(invalidScope) to fail closed")
+                continue
+            }
+        }
+        #expect(await harness.context.approvals.request(id: request.id) != nil)
+        #expect(await harness.context.permissionGate.activeRules().isEmpty)
+    }
+
+    @Test
+    func `widened subdomain scope onto bare multi-tenant suffixes and numeric hosts fails closed`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let sessionID = UUID()
+        let request = await enqueueEgressRequest(host: "site.web.app", sessionID: sessionID, context: harness.context)
+
+        // Bare multi-tenant suffixes span one shared parent across tenants, so
+        // minting a wildcard there is refused exactly as the widening mirror
+        // refuses it in the dashboard.
+        for invalidScope in [
+            AccessScope.domain(host: "web.app", subdomains: true),
+            AccessScope.domain(host: "blogspot.com", subdomains: true),
+            AccessScope.domain(host: "amazonaws.com", subdomains: true)
+        ] {
+            let outcome = await applyApprovalDecision(
+                input: ApprovalDecisionInput(
+                    id: request.id,
+                    approved: true,
+                    duration: .forever,
+                    scope: invalidScope,
+                    pending: request
+                ),
+                pulse: nil,
+                context: harness.context,
+                spawnResume: { _ in }
+            )
+            guard case .sideEffectFailed = outcome else {
+                Issue.record("Expected invalid widened scope \(invalidScope) to fail closed")
+                continue
+            }
+        }
+        #expect(await harness.context.approvals.request(id: request.id) != nil)
+        #expect(await harness.context.permissionGate.activeRules().isEmpty)
+
+        // A tenant base three labels deep still widens, while numeric quads
+        // with invalid octets stay literal-shaped on both sides of the mirror.
+        let widened = resolvedEgressDecisionScope(
+            host: "site.web.app",
+            requestedScope: .domain(host: "site.web.app", subdomains: true)
+        )
+        #expect(widened?.supervisorDomain == "*.site.web.app")
+        for numericScope in ["1.2.3.999", "123.456", "999.999.999.999"] {
+            let refused = resolvedEgressDecisionScope(
+                host: numericScope,
+                requestedScope: .domain(host: numericScope, subdomains: true)
+            )
+            #expect(refused == nil)
+        }
+    }
+
+    @Test
+    func `sibling-tenant widening onto bare suffixes fails closed`() {
+        // Dialing a tenant host must never mint its shared parent wildcard,
+        // while the tenant base itself stays widenable.
+        let suffixes = [
+            "co.at", "co.id", "co.il", "co.ke", "co.th",
+            "ltd.uk", "plc.uk", "sch.uk", "asn.au", "id.au",
+            "wordpress.com", "tumblr.com", "myshopify.com",
+            "github.dev", "githubusercontent.com", "googleusercontent.com",
+            "deno.dev", "repl.co", "duckdns.org", "ngrok.io", "trycloudflare.com"
+        ]
+        for suffix in suffixes {
+            let dialed = "evil.\(suffix)"
+            let bare = resolvedEgressDecisionScope(
+                host: dialed,
+                requestedScope: .domain(host: suffix, subdomains: true)
+            )
+            #expect(bare == nil, "expected *.\(suffix) to refuse for \(dialed)")
+            let tenant = resolvedEgressDecisionScope(
+                host: dialed,
+                requestedScope: .domain(host: dialed, subdomains: true)
+            )
+            #expect(tenant?.supervisorDomain == "*.\(dialed)")
+        }
+    }
+
+    @Test
+    func `widened deny stays exact host for rule and blocked entry`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let request = await enqueueEgressRequest(host: "api.example.com", context: harness.context)
+
+        // A checked widen box must never widen a refusal: the decision
+        // carries the widened shape but the stored rule stays exact.
+        let outcome = await applyApprovalDecision(
+            input: ApprovalDecisionInput(
+                id: request.id,
+                approved: false,
+                duration: .forever,
+                scope: .domain(host: "example.com", subdomains: true),
+                pending: request
+            ),
+            pulse: nil,
+            context: harness.context,
+            spawnResume: { _ in }
+        )
+        guard case let .resolved(approved) = outcome else {
+            Issue.record("Expected widened deny to resolve as denied")
+            return
+        }
+        #expect(approved == false)
+        let policy = try await harness.store.snapshot()
+        #expect(policy.network.blockedDomains.contains("api.example.com"))
+        #expect(policy.network.blockedDomains.contains("*.example.com") == false)
+        let rules = await harness.context.permissionGate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.action == .deny)
+        #expect(rules.first?.scope == .domain(host: "api.example.com", subdomains: false))
+    }
+
+    @Test
+    func `deny verdict writes exact host even with widened scope`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let request = await enqueueEgressRequest(host: "api.example.com", context: harness.context)
+
+        // Direct verdict path clamps the same way, so no caller can mint
+        // a wildcard deny plus wildcard blocked entry.
+        let mapped = await egressApprovalVerdict(
+            approved: false,
+            duration: .forever,
+            host: "api.example.com",
+            egressScope: resolvedEgressDecisionScope(
+                host: "api.example.com",
+                requestedScope: .domain(host: "example.com", subdomains: true)
+            ),
+            pending: request,
+            context: harness.context
+        )
+        #expect(mapped == false)
+        let policy = try await harness.store.snapshot()
+        #expect(policy.network.blockedDomains.contains("api.example.com"))
+        #expect(policy.network.blockedDomains.contains("*.example.com") == false)
+    }
 }

@@ -702,56 +702,58 @@ describe("ApprovalsInbox", () => {
     });
   });
 
-  it("derives an edited domain scope from the hosts editor on an egress card", async () => {
-    const user = userEvent.setup();
-    const calls: Array<{ path: string; body: string }> = [];
+  it("offers an egress card only the host scopes the engine can resolve", async () => {
     stubEngine({
       approvals: [
         pendingRequest({
-          id: "req-egress-edit",
+          id: "req-egress-scopes",
           toolName: "api.request",
           egressHost: "api.example.com",
           input: {
             toolName: "api.request",
             argumentsJSON: '{"method":"GET","url":"https://api.example.com/v1"}',
-            callID: "call-egress-edit",
+            callID: "call-egress-scopes",
           },
         }),
       ],
-      onCall: (path, init) => {
-        if (init?.method === "POST" && path.includes("/decide")) {
-          calls.push({ path, body: String(init?.body ?? "") });
-        }
-      },
     });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("api.request")).toBeInTheDocument();
     });
-    const card = screen.getByTestId("approval-card-req-egress-edit");
-    await user.click(within(card).getByRole("radio", { name: "Custom scope" }));
-    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
-    const editor = within(dialog).getByLabelText("Hosts / domains");
-    // The editor opens on the parked host, and the owner narrows or moves the
-    // rule to the host they actually mean.
-    expect(editor).toHaveValue("api.example.com");
-    fireEvent.change(editor, { target: { value: "cdn.example.com" } });
-    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
+    const card = screen.getByTestId("approval-card-req-egress-scopes");
+    // Only the dialed host and its widenable base resolve on the engine.
+    expect(within(card).getByRole("radio", { name: /This host/ })).toBeInTheDocument();
+    expect(within(card).getByRole("radio", { name: /Include subdomains \*\.example\.com/ })).toBeInTheDocument();
+    expect(within(card).queryByRole("radio", { name: "All targets" })).toBeNull();
+    expect(within(card).queryByRole("radio", { name: "Custom scope" })).toBeNull();
+  });
+
+  it("hides widening and scope-free choices on a non-widenable egress host", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-egress-ip",
+          toolName: "api.request",
+          egressHost: "93.184.216.34",
+          input: {
+            toolName: "api.request",
+            argumentsJSON: '{"method":"GET","url":"http://93.184.216.34/v1"}',
+            callID: "call-egress-ip",
+          },
+        }),
+      ],
+    });
+    render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(
-        screen.queryByRole("dialog", { name: "Edit decision scope" }),
-      ).not.toBeInTheDocument();
+      expect(screen.getByText("api.request")).toBeInTheDocument();
     });
-    await user.click(within(card).getByRole("button", { name: "Allow" }));
-    await waitFor(() => {
-      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
-    });
-    expect(JSON.parse(calls[0].body)).toEqual({
-      approved: true,
-      duration: "thisTime",
-      scope: { kind: "domain", host: "cdn.example.com" },
-      surface: "inbox",
-    });
+    const card = screen.getByTestId("approval-card-req-egress-ip");
+    // An IP literal has no base to widen into.
+    expect(within(card).getByRole("radio", { name: /This host/ })).toBeInTheDocument();
+    expect(within(card).queryByRole("radio", { name: /Include subdomains/ })).toBeNull();
+    expect(within(card).queryByRole("radio", { name: "All targets" })).toBeNull();
+    expect(within(card).queryByRole("radio", { name: "Custom scope" })).toBeNull();
   });
 
   it("collapses a paths list onto the first exact target for file tools", async () => {
@@ -909,15 +911,13 @@ describe("ApprovalsInbox", () => {
     });
     const card = screen.getByTestId("approval-card-req-egress");
     const duration = within(card).getByLabelText("Duration for api.request");
-    // The tier mapping reads exactly thisTime, forSession, and forever, so the
-    // picker offers those three in the shared vocabulary and nothing else.
     expect(
       Array.from(duration.querySelectorAll("option")).map((option) => option.value),
-    ).toEqual(["thisTime", "forSession", "forever"]);
+    ).toEqual(["thisTime", "forTask", "forSession", "fiveMinutes", "oneHour", "oneDay", "forever"]);
     // The mapping is stated on the card instead of a second control language.
     expect(
       within(card).getByText(
-        "Tiers map to api.example.com: once, for this session, or a durable rule.",
+        "Every tier maps to api.example.com: once, rest of this task, rest of this session, timed rules, or a durable rule.",
       ),
     ).toBeInTheDocument();
     await user.selectOptions(duration, "forSession");
@@ -934,7 +934,7 @@ describe("ApprovalsInbox", () => {
     });
   });
 
-  it("maps an egress forever denial to the durable domain scope", async () => {
+  it("maps an egress forever denial to the scope-free exact-host deny", async () => {
     const user = userEvent.setup();
     const calls: Array<{ path: string; body: string }> = [];
     stubEngine({
@@ -969,12 +969,10 @@ describe("ApprovalsInbox", () => {
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
-    // A forever refusal on a parked host carries the domain scope so the
-    // durable deny rule covers the host the owner refused.
+    // A forever refusal sends duration-only; the engine resolves the exact host.
     expect(JSON.parse(calls[0].body)).toEqual({
       approved: false,
       duration: "forever",
-      scope: { kind: "domain", host: "blocked.example.com" },
       surface: "inbox",
     });
   });

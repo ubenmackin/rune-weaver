@@ -184,8 +184,8 @@ export default function ChatView(props: ChatViewProps) {
           onDismissWarnings={() => setTurnWarnings([])}
           sessionApprovals={sessionApprovals}
           decidingApprovalIDs={decidingApprovalIDs}
-          onDecideApproval={(id, approved, duration) =>
-            void handleDecideApproval(id, approved, duration)
+          onDecideApproval={(id, approved, duration, scope) =>
+            void handleDecideApproval(id, approved, duration, scope)
           }
           onRespondQuestion={(id, answer, cancelled) =>
             void handleRespondQuestion(id, answer, cancelled)
