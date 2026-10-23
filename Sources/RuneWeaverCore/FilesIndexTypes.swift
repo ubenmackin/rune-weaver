@@ -212,13 +212,16 @@ public struct IndexQueueLaneProgress: Sendable, Codable, Equatable {
     public var processed: Int
     /// Candidate files newly written to the index in this lane.
     public var indexed: Int
+    /// Live or finalized processing throughput (items/second) for this modality lane.
+    public var rate: Double?
 
     /// Creates a modality queue lane progress snapshot.
-    public init(lane: String, label: String, queued: Int = 0, processed: Int = 0, indexed: Int = 0) {
+    public init(lane: String, label: String, queued: Int = 0, processed: Int = 0, indexed: Int = 0, rate: Double? = nil) {
         self.lane = lane
         self.label = label
         self.queued = max(0, queued)
         self.processed = max(0, processed)
         self.indexed = max(0, indexed)
+        self.rate = rate
     }
 }

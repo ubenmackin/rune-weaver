@@ -8,6 +8,7 @@ import type {
 } from "../../api";
 import {
   formatIndexCount,
+  formatLaneRate,
   sourceLabel,
   type IndexPipelineStep,
 } from "./indexHelpers";
@@ -213,6 +214,7 @@ export default function IndexBentoHeader({
                     ? Math.min(100, Math.round((lane.processed / lane.queued) * 100))
                     : 0;
                 const isActive = lane.queued > lane.processed;
+                const laneRate = formatLaneRate(lane);
                 return (
                   <div
                     key={lane.lane}
@@ -226,6 +228,7 @@ export default function IndexBentoHeader({
                         data-testid={`index-queue-counts-${lane.lane}`}
                       >
                         {formatIndexCount(lane.processed)} / {formatIndexCount(lane.queued)}
+                        {laneRate ? ` · ${laneRate}` : ""}
                       </span>
                     </div>
                     <div className="index-queue-lane-track">

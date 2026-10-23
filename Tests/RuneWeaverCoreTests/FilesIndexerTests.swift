@@ -1611,6 +1611,35 @@ struct FilesIndexerTests {
     }
 
     @Test
+    func `Modality queue lane calculates and freezes throughput rate over elapsed time`() {
+        var lanes = FilesModalityLane.allCases.map {
+            IndexQueueLaneProgress(lane: $0.key, label: $0.label, queued: 10, processed: 0, indexed: 0)
+        }
+        var starts: [ContinuousClock.Instant?] = [nil, nil, nil, nil]
+        let clock = ContinuousClock()
+        let start = clock.now
+        let outcome = FilesIndexer.FileOutcome(
+            kind: .indexed(chunks: 1, vectors: 1, truncated: false),
+            relative: "notes.md",
+            lane: .keywordData,
+            preScanned: true
+        )
+
+        FilesIndexer.recordQueueLaneOutcome(outcome, lanes: &lanes, starts: &starts, now: start)
+        #expect(lanes[0].processed == 1)
+        #expect(starts[0] == start)
+
+        let later = start + .seconds(1)
+        for _ in 0 ..< 4 {
+            FilesIndexer.recordQueueLaneOutcome(outcome, lanes: &lanes, starts: &starts, now: later)
+        }
+        #expect(lanes[0].processed == 5)
+        #expect(lanes[0].rate != nil)
+        let rate = lanes[0].rate ?? 0
+        #expect(rate >= 4.9 && rate <= 5.1)
+    }
+
+    @Test
     func `Walk-time fingerprint preflight excludes unchanged files from modality queue lanes while advancing scanned`() async {
         let (store, storeDirectory) = makeStore()
         defer { try? FileManager.default.removeItem(at: storeDirectory) }

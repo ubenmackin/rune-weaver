@@ -11,6 +11,7 @@ import {
   parseRunTimestamp,
   resolveIndexSourceAccess,
   type IndexLastRunStatus,
+  type IndexLiveQueueLane,
   type IndexLiveStatus,
   type IndexReclaimResponse,
   type IndexSourceCounts,
@@ -227,6 +228,22 @@ export function formatIndexRate(
     return null;
   const rounded = rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10;
   return `${rounded} docs/s`;
+}
+
+// Lane throughput: active rate, completed Done with frozen rate, queued Queued.
+// Empty lanes return null so nothing renders.
+export function formatLaneRate(lane: IndexLiveQueueLane): string | null {
+  const rateText = formatIndexRate(lane.rate);
+  const queued = floorPositive(lane.queued);
+  const processed = floorPositive(lane.processed);
+  const isDone = queued > 0 && processed >= queued;
+  if (isDone) {
+    return rateText ? `Done (${rateText})` : "Done";
+  }
+  if (queued > 0 && processed === 0) {
+    return "Queued";
+  }
+  return rateText;
 }
 
 // Chart palette drawn from the dashboard theme tokens: the vector segment uses
@@ -484,10 +501,15 @@ export function resolveIndexPipelineSteps(
   const totalQueued = queues.reduce((sum, lane) => sum + floorPositive(lane.queued), 0);
   const totalProcessed = queues.reduce((sum, lane) => sum + floorPositive(lane.processed), 0);
   const hasQueues = totalQueued > 0;
-  const discoveringMetric = scanned > 0 ? `${formatIndexCount(scanned)} scanned` : undefined;
+  const liveRateText = formatIndexRate(live?.rate, live?.elapsedMs);
+  const isDiscovering = phase === "discovering" && !hasQueues && indexed === 0;
+  const isCommitting = phase === "committing";
+  const discoveringRatePart = isDiscovering && liveRateText ? ` · ${liveRateText.replace("docs/s", "files/s")}` : "";
+  const discoveringMetric = scanned > 0 ? `${formatIndexCount(scanned)} scanned${discoveringRatePart}` : undefined;
+  const queuesRatePart = !isDiscovering && !isCommitting && liveRateText ? ` · ${liveRateText}` : "";
   const queuesMetric =
     totalQueued > 0
-      ? `${formatIndexCount(totalProcessed)} / ${formatIndexCount(totalQueued)}`
+      ? `${formatIndexCount(totalProcessed)} / ${formatIndexCount(totalQueued)}${queuesRatePart}`
       : undefined;
   const embeddingMetric = vectors > 0 ? `${formatIndexCount(vectors)} vectors` : undefined;
   const committingMetric = indexed > 0 ? `${formatIndexCount(indexed)} indexed` : undefined;
@@ -509,8 +531,6 @@ export function resolveIndexPipelineSteps(
       },
     ];
   }
-  const isDiscovering = phase === "discovering" && !hasQueues && indexed === 0;
-  const isCommitting = phase === "committing";
   const isEmbedding =
     phase === "embedding" || (!isDiscovering && !isCommitting && vectors > 0);
   return [

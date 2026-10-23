@@ -179,6 +179,8 @@ public actor FilesIndexer {
         var stampFailed = false
         /// Live modality queue progress across the 4 file processing lanes.
         var queueLanes: [IndexQueueLaneProgress] = []
+        /// Start timestamps for modality lanes to track per-lane throughput.
+        var laneStarts: [ContinuousClock.Instant?] = [nil, nil, nil, nil]
     }
 
     /// Runs one sequential pass over every configured root.
@@ -483,7 +485,12 @@ extension FilesIndexer {
         if !outcome.preScanned {
             counters.scanned += 1
         }
-        Self.recordQueueLaneOutcome(outcome, lanes: &counters.queueLanes)
+        Self.recordQueueLaneOutcome(
+            outcome,
+            lanes: &counters.queueLanes,
+            starts: &counters.laneStarts,
+            now: nowProvider()
+        )
         switch outcome.kind {
         case let .indexed(chunks, vectors, truncated):
             counters.indexed += 1

@@ -138,18 +138,45 @@ extension FilesIndexer {
         return .fastText
     }
 
-    /// Updates per-lane processed and indexed counters when a candidate finishes.
-    static func recordQueueLaneOutcome(_ outcome: FileOutcome, lanes: inout [IndexQueueLaneProgress]) {
+    /// Updates per-lane processed, indexed, and live throughput rate when a candidate finishes.
+    static func recordQueueLaneOutcome(
+        _ outcome: FileOutcome,
+        lanes: inout [IndexQueueLaneProgress],
+        starts: inout [ContinuousClock.Instant?],
+        now: ContinuousClock.Instant
+    ) {
         guard let lane = outcome.lane, lanes.indices.contains(lane.rawValue) else { return }
+        let idx = lane.rawValue
+        if idx >= starts.count {
+            starts.append(contentsOf: Array(repeating: nil, count: idx - starts.count + 1))
+        }
+        if starts[idx] == nil {
+            starts[idx] = now
+        }
         switch outcome.kind {
         case .indexed:
-            lanes[lane.rawValue].processed += 1
-            lanes[lane.rawValue].indexed += 1
+            lanes[idx].processed += 1
+            lanes[idx].indexed += 1
         case .unchanged, .skipped, .error:
-            lanes[lane.rawValue].processed += 1
+            lanes[idx].processed += 1
         case .overBudget, .cancelled:
             break
         }
+        if let start = starts[idx] {
+            let duration = now - start
+            let components = duration.components
+            let seconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+            if seconds >= 0.5 {
+                lanes[idx].rate = Double(lanes[idx].processed) / seconds
+            }
+        }
+    }
+
+    /// Counter-only compatibility path; fresh starts keep `rate` nil under the 0.5s floor.
+    /// Prefer the `starts`/`now` overload with persistent `laneStarts` for live rates.
+    static func recordQueueLaneOutcome(_ outcome: FileOutcome, lanes: inout [IndexQueueLaneProgress]) {
+        var dummyStarts: [ContinuousClock.Instant?] = []
+        recordQueueLaneOutcome(outcome, lanes: &lanes, starts: &dummyStarts, now: ContinuousClock().now)
     }
 
     /// Filters discovered candidates against preloaded fingerprints and walk policies so only

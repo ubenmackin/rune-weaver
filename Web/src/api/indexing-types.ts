@@ -272,6 +272,7 @@ export interface IndexLiveQueueLane {
   queued: number;
   processed: number;
   indexed: number;
+  rate?: number | null;
 }
 
 // Live snapshot of an in-flight index run on `GET /index/status`, mirroring
