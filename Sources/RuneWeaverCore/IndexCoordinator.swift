@@ -108,6 +108,17 @@ public actor IndexCoordinator {
     /// Per-source reports completed in the run in flight, in completion order.
     private var currentSourceReports: [IndexSourceRunReport] = []
 
+    /// Rolling rate sample tracking indexed progress over a moving window.
+    private struct RateSample: Sendable {
+        let timestamp: Date
+        let indexed: Int
+    }
+
+    /// Samples collected during the active run for moving-average rate calculation.
+    private var rateSamples: [RateSample] = []
+    /// Window duration in seconds for rolling docs/s rate.
+    private static let rateWindowSeconds: TimeInterval = 30.0
+
     /// Creates an index coordinator. config: Index policy; `enabled` gates every
     /// run.
     public init(
@@ -148,10 +159,12 @@ public actor IndexCoordinator {
         else { return nil }
         let timestamp = now()
         let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
-        let seconds = max(timestamp.timeIntervalSince(startedAt), 0)
-        // Honest rate: sub-half-second windows magnify one document into a
-        // triple-digit spike, so the snapshot reports zero until 500ms elapse.
-        let rate = (elapsedMs >= 500 && seconds > 0) ? Double(liveIndexed) / seconds : 0
+        let rate = recordAndCalculateRate(
+            currentIndexed: liveIndexed,
+            timestamp: timestamp,
+            startedAt: startedAt,
+            elapsedMs: elapsedMs
+        )
         return IndexLiveTotals(
             trigger: trigger,
             phase: phase,
@@ -379,6 +392,7 @@ extension IndexCoordinator {
         overlapCurrent = [:]
         overlapCompleted = []
         liveQueues = []
+        rateSamples = []
     }
 
     /// Finalizes a run into its summary, watermark, and completion broadcast. - ranAny: Whether any
@@ -495,6 +509,7 @@ extension IndexCoordinator {
         overlapCurrent = [:]
         overlapCompleted = []
         liveQueues = []
+        rateSamples = []
     }
 }
 
@@ -942,6 +957,37 @@ extension IndexCoordinator {
         }
     }
 
+    /// Calculates docs/s rate using recent samples over a 30s window, falling back to cumulative.
+    private func recordAndCalculateRate(
+        currentIndexed: Int,
+        timestamp: Date,
+        startedAt: Date,
+        elapsedMs: Int
+    ) -> Double {
+        let seconds = max(timestamp.timeIntervalSince(startedAt), 0)
+        guard elapsedMs >= 500, seconds > 0 else { return 0 }
+
+        let cutoff = timestamp.addingTimeInterval(-Self.rateWindowSeconds)
+        rateSamples.removeAll { $0.timestamp < cutoff }
+
+        if let last = rateSamples.last {
+            if timestamp.timeIntervalSince(last.timestamp) >= 0.5 {
+                rateSamples.append(RateSample(timestamp: timestamp, indexed: currentIndexed))
+            }
+        } else {
+            rateSamples.append(RateSample(timestamp: timestamp, indexed: currentIndexed))
+        }
+
+        if let earliest = rateSamples.first, let latest = rateSamples.last {
+            let deltaSec = latest.timestamp.timeIntervalSince(earliest.timestamp)
+            if deltaSec >= 3.0 {
+                let deltaIndexed = max(0, latest.indexed - earliest.indexed)
+                return Double(deltaIndexed) / deltaSec
+            }
+        }
+        return Double(currentIndexed) / seconds
+    }
+
     /// Emits a phase frame, honoring the shared 2 Hz cadence unless forced. phase:
     /// Phase being reported.
     private func emit(phase: IndexPhase, stage: IndexSourceKind? = nil, totals: Totals, startedAt: Date, force: Bool) async {
@@ -951,10 +997,12 @@ extension IndexCoordinator {
         }
         lastFrameAt = timestamp
         let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
-        let seconds = max(timestamp.timeIntervalSince(startedAt), 0)
-        // Honest rate: sub-half-second windows magnify one document into a
-        // triple-digit spike, so frames report zero until 500ms elapse.
-        let rate = (elapsedMs >= 500 && seconds > 0) ? Double(totals.indexed) / seconds : 0
+        let rate = recordAndCalculateRate(
+            currentIndexed: totals.indexed,
+            timestamp: timestamp,
+            startedAt: startedAt,
+            elapsedMs: elapsedMs
+        )
         let prefix = if let stage {
             "Indexing \(phase.rawValue) \(stage.rawValue):"
         } else {

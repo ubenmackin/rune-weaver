@@ -350,12 +350,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 12px;
-}
-
-.index-bento-header-top h3 {
-  margin: 0;
 }
 
 .index-status-section {

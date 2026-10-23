@@ -695,14 +695,8 @@ describe("IndexingPanel", () => {
     // Layout order: Run controls top, stat cards middle, charts bottom.
     expect(
       appearsBefore(
-        screen.getByRole("heading", { name: "Run" }),
-        screen.getByRole("heading", { name: "Status" }),
-      ),
-    ).toBe(true);
-    expect(
-      appearsBefore(
         screen.getByRole("button", { name: "Run" }),
-        screen.getByText("Documents"),
+        screen.getByRole("heading", { name: "Status" }),
       ),
     ).toBe(true);
     expect(
@@ -1367,7 +1361,7 @@ describe("IndexingPanel", () => {
         expect(screen.getByTestId("index-effort-reality")).toBeInTheDocument();
       });
       expect(screen.getByTestId("index-effort-reality")).toHaveTextContent(
-        "Balanced - using 4 of 10 cores",
+        "Balanced - using 4 worker threads",
       );
     } finally {
       if (hardwareConcurrency) {
@@ -3170,20 +3164,22 @@ describe("IndexingPanel effort control", () => {
     expect(normalizeIndexEffortPreset(null)).toBe("balanced");
   });
 
-  it("describes the resolved reality with the machine core count", () => {
+  it("describes the resolved reality with worker threads", () => {
     expect(describeEffortReality("balanced", 4, 10)).toBe(
-      "Balanced - using 4 of 10 cores",
+      "Balanced - using 4 worker threads",
     );
-    expect(describeEffortReality("light", 1, 10)).toContain("Light");
-    expect(describeEffortReality("light", 1, 10)).toContain("1 of 10 cores");
-    expect(describeEffortReality("performance", 9, 10)).toContain("Performance");
-    // Without a core count the line names workers alone instead of guessing.
+    expect(describeEffortReality("light", 1, 10)).toBe(
+      "Light - using 1 worker thread",
+    );
+    expect(describeEffortReality("performance", 9, 10)).toBe(
+      "Performance - using 9 worker threads",
+    );
     expect(describeEffortReality("balanced", 4, null)).toBe(
-      "Balanced - using 4 workers",
+      "Balanced - using 4 worker threads",
     );
   });
 
-  it("reflects the machine core count in the status pane", async () => {
+  it("reflects the worker threads in the status pane", async () => {
     const { fetchMock } = stubFetch({
       status: {
         ...statusPayload,
@@ -3202,7 +3198,7 @@ describe("IndexingPanel effort control", () => {
       expect(screen.getByTestId("index-effort-status")).toBeInTheDocument();
     });
     expect(screen.getByTestId("index-effort-status")).toHaveTextContent(
-      "Balanced - using 4 of 10 cores",
+      "Balanced - using 4 worker threads",
     );
   });
 
@@ -3605,7 +3601,7 @@ describe("IndexingPanel run actions wrap", () => {
     const runButton = screen.getByRole("button", { name: "Run" });
     expect(runButton).toHaveTextContent("Run");
     expect(runButton).toHaveAttribute("title", "Run an on-demand index pass");
-    expect(screen.getByRole("heading", { name: "Run" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Run" })).toBeNull();
     // The long label is gone from the live surface entirely.
     expect(screen.queryByText("Rebuild / Run Now")).toBeNull();
     expect(document.body.textContent).not.toMatch(/Rebuild \/ Run Now/);

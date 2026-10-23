@@ -261,7 +261,7 @@ public actor LlamaEmbeddingSupervisor {
                 "--pooling", pooling,
                 "--ctx-size", String(ctxSize),
                 "--batch-size", String(ctxSize),
-                "--ubatch-size", String(ctxSize),
+                "--ubatch-size", String(min(1024, ctxSize)),
                 "--parallel", "4",
                 "--n-gpu-layers", String(gpuLayers),
                 "--sleep-idle-seconds", "60"

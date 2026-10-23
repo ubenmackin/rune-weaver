@@ -210,12 +210,12 @@ export function resolveStatusEffort(status: unknown): {
   };
 }
 
-// Resolved-reality copy for the effort control: preset label plus the worker resolution against the
-// machine (`Balanced - using 4 of 10 cores`).
+// Resolved-reality copy for the effort control: preset label plus the worker resolution
+// (`Balanced - using 4 worker threads`).
 export function describeEffortReality(
   preset: string | null | undefined,
   resolvedWorkers: number | null | undefined,
-  coreCount: number | null | undefined,
+  _coreCount?: number | null | undefined,
 ): string {
   const label = indexEffortLabel(normalizeIndexEffortPreset(preset));
   const resolved =
@@ -224,19 +224,9 @@ export function describeEffortReality(
     resolvedWorkers > 0
       ? Math.floor(resolvedWorkers)
       : null;
-  const cores =
-    typeof coreCount === "number" &&
-    Number.isFinite(coreCount) &&
-    coreCount > 0
-      ? Math.floor(coreCount)
-      : null;
-  if (resolved != null && cores != null) {
-    const coreNoun = cores === 1 ? "core" : "cores";
-    return `${label} - using ${formatIndexCount(resolved)} of ${formatIndexCount(cores)} ${coreNoun}`;
-  }
   if (resolved != null) {
-    const workerNoun = resolved === 1 ? "worker" : "workers";
-    return `${label} - using ${formatIndexCount(resolved)} ${workerNoun}`;
+    const threadNoun = resolved === 1 ? "worker thread" : "worker threads";
+    return `${label} - using ${formatIndexCount(resolved)} ${threadNoun}`;
   }
   return label;
 }
