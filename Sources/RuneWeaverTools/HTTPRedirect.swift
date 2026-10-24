@@ -33,10 +33,10 @@ public enum HTTPRedirectFollower: Sendable {
 public enum ToolEnvelopeEncoding: Sendable {
     /// Encodes one envelope as the tool output document.
     /// - Parameter envelope: Encodable envelope value.
-    /// - Returns: Sorted, pretty-printed JSON document.
+    /// - Returns: Sorted compact JSON document.
     public static func encode(_ envelope: some Encodable) throws -> String {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(envelope)
         return String(bytes: data, encoding: .utf8) ?? ""
     }

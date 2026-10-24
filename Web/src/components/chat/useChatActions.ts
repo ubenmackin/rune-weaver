@@ -34,7 +34,9 @@ import {
   sessionTokensKey,
 } from "./chatHistoryRecall";
 import {
+  buildCancelledMessageItem,
   buildRestSegments,
+  commitCancelledMessage,
   flatActionsFromSegments,
   flatTextFromSegments,
   normalizeCompletedAtMs,
@@ -330,6 +332,10 @@ export function useChatActions({
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
     pendingRef.current = false;
+    const cancelledMsg = buildCancelledMessageItem(inFlightTurnRef.current);
+    if (cancelledMsg) {
+      setMessages((prev) => commitCancelledMessage(prev, cancelledMsg));
+    }
     inFlightTurnRef.current = null;
     pendingSteerRef.current = [];
     pendingNormalRef.current = null;
@@ -351,7 +357,7 @@ export function useChatActions({
       setInFlightTurn(null);
       setPending(false);
     }
-  }, [pending, lastSteerTimestampRef, turnSessionIDRef, sessionIDRef, sessionID, cancelledRef, pendingRef, inFlightTurnRef, clearTurnTimeout, clearAllToolProgress, activeTurnStartMsRef, pendingSteerRef, pendingNormalRef, parkedFlightsRef, markBackgroundRunning, isOpen, sendMessage, setInFlightTurn, setPending, setError]);
+  }, [pending, lastSteerTimestampRef, turnSessionIDRef, sessionIDRef, sessionID, cancelledRef, pendingRef, inFlightTurnRef, clearTurnTimeout, clearAllToolProgress, activeTurnStartMsRef, pendingSteerRef, pendingNormalRef, parkedFlightsRef, markBackgroundRunning, isOpen, sendMessage, setInFlightTurn, setPending, setMessages, setError]);
 
   const send = useCallback(
     async (overrideText?: string, overrideSessionID?: string) => {

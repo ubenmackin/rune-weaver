@@ -52,6 +52,8 @@ public enum BrowserActAction: String, Sendable, Codable, Equatable, CaseIterable
     case press
     /// Scrolls the element referenced by `ref` into view.
     case scroll
+    /// Hovers over the element referenced by `ref`.
+    case hover
 }
 
 /// One distilled interactive element from a page snapshot.
@@ -200,6 +202,8 @@ public struct BrowserActResult: Sendable, Equatable {
     public let text: String?
     /// Interactive snapshot refs after the action, if available.
     public let refs: [BrowserElementRef]?
+    /// Whether the text or refs were capped at the shared bounds.
+    public let truncated: Bool
 
     /// Creates an act result.
     public init(
@@ -209,7 +213,8 @@ public struct BrowserActResult: Sendable, Equatable {
         downloads: [BrowserDownloadManifest] = [],
         title: String? = nil,
         text: String? = nil,
-        refs: [BrowserElementRef]? = nil
+        refs: [BrowserElementRef]? = nil,
+        truncated: Bool = false
     ) {
         self.url = url
         self.action = action
@@ -218,15 +223,16 @@ public struct BrowserActResult: Sendable, Equatable {
         self.title = title
         self.text = text
         self.refs = refs
+        self.truncated = truncated
     }
 }
 
 /// Shared bounds keeping browser payloads predictable for the model.
 public enum BrowserBounds: Sendable {
     /// Maximum distilled text characters returned per snapshot.
-    public static let maxTextChars = 8000
+    public static let maxTextChars = 5000
     /// Maximum snapshot refs returned per snapshot.
-    public static let maxRefs = 200
+    public static let maxRefs = 100
     /// Maximum URL characters accepted before fail-closed rejection.
     public static let maxURLChars = 2048
     /// Maximum act `text` characters accepted (fill/select values, press keys, and scroll text).

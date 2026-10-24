@@ -50,6 +50,7 @@ import {
   appendToolStartToSegments,
   buildCancelledMessageItem,
   buildDoneSegments,
+  commitCancelledMessage,
   deduplicateToolActionsByCallID,
   flatActionsFromSegments,
   flatTextFromSegments,
@@ -61,7 +62,6 @@ import {
 } from "./chatTimeline";
 import {
   MAX_MESSAGES,
-  WAITING_PREFIX,
   type InFlightTurn,
   type MessageItem,
   type ParkedFlight,
@@ -679,7 +679,7 @@ export function useChatWebSocketHandler({
           ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),
         };
         setMessages((prev) => {
-          const base = prev.filter((m) => {
+          const withoutOverlaps = prev.filter((m) => {
             if (m.role !== "assistant") return true;
             const overlaps =
               finalActions.length > 0 &&
@@ -695,15 +695,10 @@ export function useChatWebSocketHandler({
                     textContainsPlaceholderForCall(m.text, fa.callID),
                 ));
             if (overlaps) return false;
-            if (isParked) return true;
-            const isWaiting = m.text.trim().startsWith(WAITING_PREFIX);
-            if (!isWaiting) return true;
-            const hasActions =
-              !!m.toolActions && m.toolActions.length > 0;
-            if (!hasActions) return false;
             return true;
           });
-          return [...base, finalMsg].slice(-MAX_MESSAGES);
+          if (isParked) return [...withoutOverlaps, finalMsg].slice(-MAX_MESSAGES);
+          return commitCancelledMessage(withoutOverlaps, finalMsg);
         });
         setInFlightTurn(null);
         inFlightTurnRef.current = null;
@@ -726,15 +721,7 @@ export function useChatWebSocketHandler({
         pendingNormalRef.current = null;
         const cancelledMsg = buildCancelledMessageItem(inFlightTurnRef.current);
         if (cancelledMsg) {
-          setMessages((prev) => {
-            const base = prev.filter((m) => {
-              if (m.role !== "assistant") return true;
-              if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
-              if (!m.toolActions || m.toolActions.length === 0) return false;
-              return true;
-            });
-            return [...base, cancelledMsg].slice(-MAX_MESSAGES);
-          });
+          setMessages((prev) => commitCancelledMessage(prev, cancelledMsg));
         }
         inFlightTurnRef.current = null;
         pendingRef.current = false;
@@ -811,7 +798,7 @@ export function useChatWebSocketHandler({
         const errorMsg: MessageItem = {
           id: newSessionId(),
           role: "assistant",
-          text: snapshotFullText ?? "",
+          text: snapshotFullText,
           toolActions:
             orderedDoneActions.length > 0 ? orderedDoneActions : undefined,
           segments: errorSegments.length > 0 ? errorSegments : undefined,
@@ -819,15 +806,7 @@ export function useChatWebSocketHandler({
           errorText: message,
           completedAt: Date.now(),
         };
-        setMessages((prev) => {
-          const base = prev.filter((m) => {
-            if (m.role !== "assistant") return true;
-            if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
-            if (!m.toolActions || m.toolActions.length === 0) return false;
-            return true;
-          });
-          return [...base, errorMsg].slice(-MAX_MESSAGES);
-        });
+        setMessages((prev) => commitCancelledMessage(prev, errorMsg));
 
         turnSessionIDRef.current = null;
         activeTurnStartMsRef.current = null;

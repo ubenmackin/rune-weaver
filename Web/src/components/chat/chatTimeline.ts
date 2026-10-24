@@ -15,6 +15,7 @@ import {
 } from "../../api";
 import { isRecord } from "../../approvalsSession";
 import {
+  MAX_MESSAGES,
   WAITING_PREFIX,
   type InFlightTurn,
   type MessageItem,
@@ -883,4 +884,19 @@ export function buildCancelledMessageItem(
     toolActions: inFlight.toolActions.length > 0 ? inFlight.toolActions : undefined,
     segments: doneSegments.length > 0 ? doneSegments : undefined,
   };
+}
+
+// Commits a settled cancelled item, shedding interim waiting placeholders while keeping
+// action-backed waiting rows so the cancelled card never duplicates a pending approval row.
+export function commitCancelledMessage(
+  prev: MessageItem[],
+  msg: MessageItem,
+): MessageItem[] {
+  const base = prev.filter((m) => {
+    if (m.role !== "assistant") return true;
+    if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+    if (!m.toolActions || m.toolActions.length === 0) return false;
+    return true;
+  });
+  return [...base, msg].slice(-MAX_MESSAGES);
 }

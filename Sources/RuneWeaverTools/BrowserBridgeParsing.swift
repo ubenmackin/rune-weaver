@@ -25,6 +25,8 @@ public enum BrowserBridgeParsing: Sendable {
         let authRequired: Bool?
         /// Manifest-only downloads.
         let downloads: [BrowserDownloadManifest]?
+        /// Whether the helper truncated text or refs at the shared bounds.
+        let truncated: Bool?
         /// Ordered redirect chain (typed steps or plain URL strings).
         let redirectChain: [BridgeRedirectEntry]?
         /// Explicit redirect count, when reported.
@@ -46,6 +48,7 @@ public enum BrowserBridgeParsing: Sendable {
             refs = try container.decodeIfPresent([BrowserElementRef].self, forKey: .refs)
             authRequired = try container.decodeIfPresent(Bool.self, forKey: .authRequired)
             downloads = try container.decodeIfPresent([BrowserDownloadManifest].self, forKey: .downloads)
+            truncated = BrowserNavigateWire.decodeFirst(container, keys: [.truncated])
             // Chain tolerates typed steps, plain strings, and the `redirects` alias.
             let typedChain: [BridgeRedirectEntry]? = BrowserNavigateWire.decodeFirst(
                 container,
@@ -86,6 +89,7 @@ public enum BrowserBridgeParsing: Sendable {
         case refs
         case authRequired
         case downloads
+        case truncated
         case redirectChain
         // Snake-case aliases keep raw values so the case names stay alphanumeric.
         case redirectChainSnake = "redirect_chain"
@@ -148,6 +152,8 @@ public enum BrowserBridgeParsing: Sendable {
         let text: String?
         /// Element refs after the action.
         let refs: [BrowserElementRef]?
+        /// Whether the helper truncated text or refs at the shared bounds.
+        let truncated: Bool?
         /// Manifest-only downloads.
         let downloads: [BrowserDownloadManifest]?
     }
@@ -181,12 +187,15 @@ public enum BrowserBridgeParsing: Sendable {
             raw: response.screenshot,
             fallbackHash: response.screenshotHash
         )
+        // The helper pre-caps at 4x the shared bounds and emits "truncated",
+        // so Swift preserves helper truncation via helperTruncated || bounded.truncated || capped.truncated.
+        let helperTruncated = response.truncated ?? false
         return BrowserSnapshot(
             url: url,
             title: title,
             text: bounded.text,
             refs: capped.refs,
-            truncated: bounded.truncated || capped.truncated,
+            truncated: helperTruncated || bounded.truncated || capped.truncated,
             authRequired: response.authRequired ?? false,
             downloads: response.downloads ?? [],
             redirectChain: chain,
@@ -240,18 +249,22 @@ public enum BrowserBridgeParsing: Sendable {
             throw classifiedBridgeError(response.error ?? "Browser action failed")
         }
         let url = NormalizedText.value(response.url, fallback: fallbackURL)
-        let boundedText = response.text.map { BrowserValidation.boundedText($0).text }
-        let cappedRefs = response.refs.map { raw in
-            BrowserValidation.boundedRefs(raw.filter { BrowserValidation.isValidRef($0.ref) }).refs
+        let bounded = response.text.map { BrowserValidation.boundedText($0) }
+        let capped = response.refs.map { raw in
+            BrowserValidation.boundedRefs(raw.filter { BrowserValidation.isValidRef($0.ref) })
         }
+        // The helper pre-caps at 4x the shared bounds and emits "truncated",
+        // so Swift preserves helper truncation via helperTruncated || bounded.truncated || capped.truncated.
+        let helperTruncated = response.truncated ?? false
         return BrowserActResult(
             url: url,
             action: action,
             ref: ref,
             downloads: response.downloads ?? [],
             title: response.title,
-            text: boundedText,
-            refs: cappedRefs
+            text: bounded?.text,
+            refs: capped?.refs,
+            truncated: helperTruncated || (bounded?.truncated ?? false) || (capped?.truncated ?? false)
         )
     }
 

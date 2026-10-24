@@ -59,7 +59,7 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
 
 /// Arguments for the `browser.act` tool.
 public struct BrowserActArgs: Sendable, Equatable, Decodable {
-    /// Single action verb (click, fill, select, press, or scroll).
+    /// Single action verb (click, fill, select, press, scroll, or hover).
     public let action: String
     /// Snapshot ref (for example `"e12"`).
     public let ref: String
@@ -245,15 +245,14 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
     public init(from decoder: Decoder) throws {
         let shared = try BrowserNavigateResult(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // `url` stays envelope-local: the shared view owns only the
-        // `finalUrl` aliases, while tool output mirrors both keys.
-        let fallbackURL: String? = BrowserNavigateWire.decodeFirst(container, keys: [.url])
+        // `url` stays envelope-local: shared owns finalUrl aliases only, envelope-local url fallback.
+        let fallbackURL: String? = BrowserNavigateWire.decodeFirst(container, keys: [.url, .finalUrl])
         let resolvedURL = [shared.finalUrl, fallbackURL].compactMap(\.self).first(where: { !$0.isEmpty }) ?? ""
         url = resolvedURL
         finalUrl = resolvedURL
         let decodedTitle: String? = BrowserNavigateWire.decodeFirst(container, keys: [.title])
         title = decodedTitle ?? ""
-        let fallbackText: String? = BrowserNavigateWire.decodeFirst(container, keys: [.text])
+        let fallbackText: String? = BrowserNavigateWire.decodeFirst(container, keys: [.text, .textSnapshot])
         let resolvedText = shared.textSnapshot ?? fallbackText ?? ""
         text = resolvedText
         textSnapshot = resolvedText
@@ -280,14 +279,12 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
         note = decodedNote
     }
 
-    /// Encodes the unified shape with both standard and display keys.
+    /// Encodes the unified shape with standard keys (omits duplicate textSnapshot and finalUrl).
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(url, forKey: .url)
-        try container.encode(finalUrl, forKey: .finalUrl)
         try container.encode(title, forKey: .title)
         try container.encode(text, forKey: .text)
-        try container.encode(textSnapshot, forKey: .textSnapshot)
         try container.encode(refs, forKey: .refs)
         try container.encode(redirectChain, forKey: .redirectChain)
         try container.encode(redirectCount, forKey: .redirectCount)
@@ -369,6 +366,8 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
     public let text: String?
     /// Interactive snapshot refs after the action.
     public let refs: [BrowserElementRef]?
+    /// Whether text or refs were capped at the shared bounds.
+    public let truncated: Bool?
 
     /// Creates an act envelope.
     public init(
@@ -381,7 +380,8 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
         note: String? = nil,
         title: String? = nil,
         text: String? = nil,
-        refs: [BrowserElementRef]? = nil
+        refs: [BrowserElementRef]? = nil,
+        truncated: Bool? = nil
     ) {
         self.url = url
         self.action = action
@@ -393,6 +393,7 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
         self.title = title
         self.text = text
         self.refs = refs
+        self.truncated = truncated
     }
 }
 
@@ -627,7 +628,7 @@ public struct BrowserActTool: Tool, Sendable {
     /// When the LLM should use this tool.
     /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
-        "Runs one validated action (click/fill/select/press/scroll) on a browser.navigate ref plus URL; "
+        "Runs one validated action (click/fill/select/press/scroll/hover) on a browser.navigate ref plus URL; "
             + "fill/select need text, press accepts key (Enter), scroll accepts direction (down/up/top/bottom or pixel count). Approval-gated. "
             + "Act URLs are SSRF-guarded like navigation: loopback, link-local, metadata, and private ranges stay denied."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
@@ -639,8 +640,8 @@ public struct BrowserActTool: Tool, Sendable {
               "properties": {
                 "action": {
                   "type": "string",
-                  "enum": ["click", "fill", "select", "press", "scroll"],
-                  "description": "Single action: click, fill, select, press, or scroll"
+                  "enum": ["click", "fill", "select", "press", "scroll", "hover"],
+                  "description": "Single action: click, fill, select, press, scroll, or hover"
                 },
                 "ref": {
                   "type": "string",
@@ -733,7 +734,9 @@ public struct BrowserActTool: Tool, Sendable {
             args = try JSONDecoder().decode(BrowserActArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure(
-                "Invalid browser.act arguments: expected {\"action\": \"click|fill|select|press|scroll\", \"ref\": \"e12\", \"url\": \"https://example.com\"}.",
+                "Invalid browser.act arguments: expected "
+                    + "{\"action\": \"click|fill|select|press|scroll|hover\", "
+                    + "\"ref\": \"e12\", \"url\": \"https://example.com\"}.",
                 callID: input.callID
             )
         }
@@ -847,6 +850,11 @@ public struct BrowserActTool: Tool, Sendable {
         let note: String? = result.downloads.isEmpty
             ? nil
             : "Downloads are manifest-only; no file was written to the host."
+        let titleValue = (result.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? result.title : nil
+        let textValue = (result.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? result.text : nil
+        let refsValue = (result.refs?.isEmpty == false) ? result.refs : nil
+        // Fill and hover share the snapshot-free shape so the payload stays under budget.
+        let isLightweight = result.action == .fill || result.action == .hover
         let envelope = BrowserActEnvelope(
             url: result.url,
             action: result.action.rawValue,
@@ -855,9 +863,10 @@ public struct BrowserActTool: Tool, Sendable {
             dryRun: false,
             downloads: result.downloads,
             note: note,
-            title: result.title,
-            text: result.text,
-            refs: result.refs
+            title: isLightweight ? nil : titleValue,
+            text: isLightweight ? nil : textValue,
+            refs: isLightweight ? nil : refsValue,
+            truncated: isLightweight ? nil : result.truncated
         )
         return try ToolEnvelopeEncoding.encode(envelope)
     }
