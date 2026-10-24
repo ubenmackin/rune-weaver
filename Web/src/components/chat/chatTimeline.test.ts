@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatSegment, ToolAction } from "../../api";
 import {
   appendToolStartToSegments,
+  buildCancelledMessageItem,
   buildDoneSegments,
   removeResumedCallFromMessages,
 } from "./chatTimeline";
@@ -282,5 +283,53 @@ describe("chatTimeline approval resume and mid-turn reload ordering", () => {
     ]);
     expect(fromPersisted.toolActions.map((a) => a.callID)).toEqual(["call-r0"]);
     expect(fromPersisted.text).toBe("Opening Amazon now.");
+  });
+
+  it("buildCancelledMessageItem preserves in-flight text and tool actions on cancellation", () => {
+    expect(buildCancelledMessageItem(null)).toBeNull();
+    expect(
+      buildCancelledMessageItem({
+        text: "   ",
+        held: "",
+        segments: [],
+        toolActions: [],
+      }),
+    ).toBeNull();
+
+    const textOnly = buildCancelledMessageItem(
+      {
+        text: "I found 3 results on Amazon for you:",
+        held: "",
+        segments: [{ kind: "text", text: "I found 3 results on Amazon for you:" }],
+        toolActions: [],
+      },
+      "msg-cancel-1",
+    );
+    expect(textOnly).not.toBeNull();
+    expect(textOnly?.role).toBe("assistant");
+    expect(textOnly?.text).toBe(
+      "I found 3 results on Amazon for you:\n\n*(Turn cancelled by user)*",
+    );
+
+    const withTools = buildCancelledMessageItem(
+      {
+        text: "",
+        held: "",
+        segments: [],
+        toolActions: [
+          {
+            toolName: "browser.navigate",
+            callID: "call-nav",
+            argumentsJSON: "{}",
+            result: { toolCallID: "call-nav", content: "ok", isError: false },
+          },
+        ],
+      },
+      "msg-cancel-2",
+    );
+    expect(withTools).not.toBeNull();
+    expect(withTools?.text).toBe("*(Turn cancelled by user)*");
+    expect(withTools?.toolActions).toHaveLength(1);
+    expect(withTools?.toolActions?.[0].callID).toBe("call-nav");
   });
 });

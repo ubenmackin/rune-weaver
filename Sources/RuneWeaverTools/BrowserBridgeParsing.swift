@@ -142,6 +142,12 @@ public enum BrowserBridgeParsing: Sendable {
         let action: String?
         /// Echoed ref.
         let ref: String?
+        /// Page title after the action.
+        let title: String?
+        /// Page text after the action.
+        let text: String?
+        /// Element refs after the action.
+        let refs: [BrowserElementRef]?
         /// Manifest-only downloads.
         let downloads: [BrowserDownloadManifest]?
     }
@@ -234,7 +240,19 @@ public enum BrowserBridgeParsing: Sendable {
             throw classifiedBridgeError(response.error ?? "Browser action failed")
         }
         let url = NormalizedText.value(response.url, fallback: fallbackURL)
-        return BrowserActResult(url: url, action: action, ref: ref, downloads: response.downloads ?? [])
+        let boundedText = response.text.map { BrowserValidation.boundedText($0).text }
+        let cappedRefs = response.refs.map { raw in
+            BrowserValidation.boundedRefs(raw.filter { BrowserValidation.isValidRef($0.ref) }).refs
+        }
+        return BrowserActResult(
+            url: url,
+            action: action,
+            ref: ref,
+            downloads: response.downloads ?? [],
+            title: response.title,
+            text: boundedText,
+            refs: cappedRefs
+        )
     }
 
     /// Maps helper stderr text to the explicit missing-dependency error when Playwright is absent.

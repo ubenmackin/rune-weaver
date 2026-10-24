@@ -339,16 +339,22 @@ public actor RunLogStore {
         return updated
     }
 
-    /// Atomically settles a live run row to `cancelled`. Only rows still `running` or
-    /// `awaiting_approval` accept the transition; settled rows return nil so the caller answers 409
-    /// instead of resurrecting history.
+    /// Atomically settles a live run row to `cancelled`. Rows still `running` or
+    /// `awaiting_approval` transition fresh; already-`cancelled` rows accept enrichment
+    /// in place while other settled rows return nil instead of resurrecting history.
     @discardableResult
-    public func cancel(id: UUID, durationMs: Int? = nil) async -> RunLogEntry? {
+    public func cancel(
+        id: UUID,
+        durationMs: Int? = nil,
+        response: String? = nil,
+        toolActions: [ToolAction]? = nil,
+        totalTokens: Int? = nil
+    ) async -> RunLogEntry? {
         guard let index = entries.firstIndex(where: { $0.id == id }) else {
             return nil
         }
         let existing = entries[index]
-        guard existing.status == "running" || existing.status == "awaiting_approval" else {
+        guard existing.status == "running" || existing.status == "awaiting_approval" || existing.status == "cancelled" else {
             return nil
         }
         let updated = RunLogEntry(
@@ -360,9 +366,9 @@ public actor RunLogStore {
             status: "cancelled",
             message: existing.message,
             timestamp: existing.timestamp,
-            response: existing.response,
-            toolActions: existing.toolActions,
-            totalTokens: existing.totalTokens,
+            response: response.map(Self.truncatedResponse) ?? existing.response,
+            toolActions: toolActions ?? existing.toolActions,
+            totalTokens: totalTokens ?? existing.totalTokens,
             durationMs: durationMs ?? existing.durationMs
         )
         entries[index] = updated
@@ -496,7 +502,11 @@ public actor RunLogStore {
         }
         return Array(matching.suffix(limit).reversed())
     }
+}
 
+// MARK: - Maintenance and Query Extensions
+
+extension RunLogStore {
     /// Looks up one entry.
     public func entry(id: UUID) async -> RunLogEntry? {
         entries.first { $0.id == id }

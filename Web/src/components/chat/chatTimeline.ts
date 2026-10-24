@@ -3,6 +3,7 @@
 import {
   compareToolActionsByRound,
   groupToolActionsByRound,
+  newSessionId,
   normalizeLineEndings,
   parseRunTimestamp,
   placeholderCallIDsInText,
@@ -851,4 +852,35 @@ export function removeResumedCallFromMessages(
     });
   }
   return updated;
+}
+
+// Builds a terminal cancelled message item from in-flight turn progress, or null if empty.
+export function buildCancelledMessageItem(
+  inFlight: InFlightTurn | null | undefined,
+  id: string = newSessionId(),
+): MessageItem | null {
+  const fullText = ((inFlight?.text ?? "") + (inFlight?.held ?? "")).trim();
+  if (
+    !inFlight ||
+    (fullText.length === 0 &&
+      inFlight.segments.length === 0 &&
+      inFlight.toolActions.length === 0)
+  ) {
+    return null;
+  }
+  const doneSegments =
+    inFlight.segments.length > 0
+      ? inFlight.segments
+      : buildDoneSegments([], inFlight.toolActions, fullText, fullText);
+  const baseText = fullText || flatTextFromSegments(doneSegments);
+  const textWithNotice = baseText
+    ? `${baseText}\n\n*(Turn cancelled by user)*`
+    : "*(Turn cancelled by user)*";
+  return {
+    id,
+    role: "assistant",
+    text: textWithNotice,
+    toolActions: inFlight.toolActions.length > 0 ? inFlight.toolActions : undefined,
+    segments: doneSegments.length > 0 ? doneSegments : undefined,
+  };
 }

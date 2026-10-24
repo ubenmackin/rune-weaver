@@ -726,4 +726,64 @@ struct BrowserEgressTests {
         let recorded = events.withLock { $0 }
         #expect(recorded == ["first-start", "first-end", "second-start", "second-end"])
     }
+
+    @Test
+    func `validateActText accepts scroll directions and distances`() throws {
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: nil) == nil)
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "   ") == nil)
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "down") == "down")
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "up") == "up")
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "top") == "top")
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "bottom") == "bottom")
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "500") == "500")
+        #expect(try BrowserValidation.validateActText(action: .scroll, text: "-250") == "-250")
+        #expect(throws: BrowserError.self) {
+            try BrowserValidation.validateActText(action: .scroll, text: "down\0line")
+        }
+        #expect(throws: BrowserError.self) {
+            try BrowserValidation.validateActText(action: .click, text: "unexpected")
+        }
+    }
+
+    @Test
+    func `parseActPayload decodes post-action title, bounded text, and refs`() throws {
+        let json = """
+        {
+            "ok": true,
+            "url": "https://www.amazon.com/cart",
+            "action": "click",
+            "ref": "e12",
+            "title": "Amazon.com Shopping Cart",
+            "text": "Added to Cart. 1 item in cart.",
+            "refs": [
+                {"ref": "e1", "role": "button", "name": "Proceed to checkout"},
+                {"ref": "invalid_ref", "role": "link", "name": "bad"}
+            ],
+            "downloads": []
+        }
+        """
+        let data = Data(json.utf8)
+        let result = try BrowserBridgeParsing.parseActPayload(
+            data,
+            action: .click,
+            ref: "e12",
+            fallbackURL: "https://www.amazon.com/cart"
+        )
+        #expect(result.url == "https://www.amazon.com/cart")
+        #expect(result.action == .click)
+        #expect(result.ref == "e12")
+        #expect(result.title == "Amazon.com Shopping Cart")
+        #expect(result.text == "Added to Cart. 1 item in cart.")
+        #expect(result.refs?.count == 1)
+        #expect(result.refs?.first?.ref == "e1")
+        #expect(result.refs?.first?.name == "Proceed to checkout")
+    }
+
+    @Test
+    func `BrowserPlaywrightScript includes key mapping and interactive selector excluding hidden inputs`() {
+        #expect(BrowserPlaywrightScript.source.contains("input:not([type=\"hidden\"])"))
+        #expect(BrowserPlaywrightScript.source.contains("\"return\": \"Enter\""))
+        #expect(BrowserPlaywrightScript.source.contains("scroll_into_view_if_needed"))
+        #expect(BrowserPlaywrightScript.source.contains("force=True"))
+    }
 }

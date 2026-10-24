@@ -281,11 +281,12 @@ struct OutcomeGateTests {
     func `Guarded slow judge times out and fails open`() async {
         // A judge slower than the bounded budget must not swallow the outcome:
         // the timeout path surfaces with the deterministic fallback headline.
+        // The judge sleeps well past the budget so executor jitter cannot flip the race.
         let gate = OutcomeGate(
             mode: .guarded,
             judgeTimeoutSeconds: 1,
             judge: { _ in
-                try await Task.sleep(nanoseconds: 2_000_000_000)
+                try await Task.sleep(nanoseconds: 10_000_000_000)
                 return SurfacingVerdict(surface: false, headline: "Too late")
             }
         )

@@ -592,7 +592,8 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
                 sessionID: sessionID,
                 registrationToken: registration.token,
                 initialEntry: initialEntry,
-                startTime: startTime
+                startTime: startTime,
+                audit: auditProgress.snapshot()
             )
             return
         }
@@ -603,7 +604,8 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
             sessionID: sessionID,
             registrationToken: registration.token,
             initialEntry: initialEntry,
-            startTime: startTime
+            startTime: startTime,
+            audit: auditProgress.snapshot()
         )
     } catch {
         guard !Task.isCancelled else {
@@ -612,7 +614,8 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
                 sessionID: sessionID,
                 registrationToken: registration.token,
                 initialEntry: initialEntry,
-                startTime: startTime
+                startTime: startTime,
+                audit: auditProgress.snapshot()
             )
             return
         }
@@ -706,9 +709,17 @@ private func handleWebSocketTurnCancellation(
     sessionID: UUID,
     registrationToken: UUID,
     initialEntry: RunLogEntry,
-    startTime: Date
+    startTime: Date,
+    audit: ChatTurnAuditSnapshot? = nil
 ) async {
-    await settleTurnCancelled(context: context, sessionID: sessionID, token: registrationToken, entry: initialEntry, startTime: startTime)
+    await settleTurnCancelled(
+        context: context,
+        sessionID: sessionID,
+        token: registrationToken,
+        entry: initialEntry,
+        startTime: startTime,
+        audit: audit
+    )
 }
 
 /// Spawns a background liveness heartbeat task for long inference turns.
