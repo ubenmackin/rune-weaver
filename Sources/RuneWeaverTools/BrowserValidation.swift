@@ -349,7 +349,7 @@ extension BrowserValidation {
         let trimmed = action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let parsed = BrowserActAction(rawValue: trimmed) else {
             throw BrowserError.invalidAction(
-                "Invalid action '\(trimmed)': action must be one of click, fill, select, press, scroll"
+                "Invalid action '\(trimmed)': action must be one of click, fill, hover, select, press, scroll"
             )
         }
         return parsed
@@ -361,7 +361,7 @@ extension BrowserValidation {
             switch action {
             case .fill, .select:
                 throw BrowserError.invalidAction("Invalid browser.act arguments: '\(action.rawValue)' requires 'text'")
-            case .click, .scroll, .press:
+            case .click, .hover, .scroll, .press:
                 return nil
             }
         }
@@ -371,31 +371,26 @@ extension BrowserValidation {
             guard !trimmed.isEmpty else {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: '\(action.rawValue)' requires non-empty 'text'")
             }
-            guard trimmed.count <= BrowserBounds.maxActTextChars else {
-                throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must be at most \(BrowserBounds.maxActTextChars) characters")
-            }
-            if trimmed.unicodeScalars.contains(where: { $0.value == 0 }) {
-                throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must not contain NUL")
-            }
+            try requireBoundedActText(trimmed)
+            try requireNoNULActText(trimmed)
             return trimmed
         case .press:
-            guard trimmed.count <= BrowserBounds.maxActTextChars else {
-                throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must be at most \(BrowserBounds.maxActTextChars) characters")
-            }
+            try requireBoundedActText(trimmed)
             if trimmed.unicodeScalars.contains(where: { $0.value == 0 || $0.value == 13 || $0.value == 10 }) {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: press key must be a single key name like Enter")
             }
             // Whitespace-only press text counts as absent so an empty key press stays uniform with omitted text.
             return NormalizedText.value(trimmed)
-        case .click:
+        case .click, .hover:
+            // Both verbs take no text; shared bound plus NUL checks keep hover fail-closed without a second branch.
+            try requireBoundedActText(trimmed)
+            try requireNoNULActText(trimmed)
             guard trimmed.isEmpty else {
-                throw BrowserError.invalidAction("Invalid browser.act arguments: 'click' takes no 'text'")
+                throw BrowserError.invalidAction("Invalid browser.act arguments: '\(action.rawValue)' takes no 'text'")
             }
             return nil
         case .scroll:
-            guard trimmed.count <= BrowserBounds.maxActTextChars else {
-                throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must be at most \(BrowserBounds.maxActTextChars) characters")
-            }
+            try requireBoundedActText(trimmed)
             if trimmed.unicodeScalars.contains(where: { $0.value == 0 || $0.value == 13 || $0.value == 10 }) {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: scroll direction must not contain control characters")
             }
@@ -407,6 +402,18 @@ extension BrowserValidation {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: scroll direction must be one of down, up, top, bottom, or a pixel count")
             }
             return direction
+        }
+    }
+
+    private static func requireBoundedActText(_ trimmed: String) throws {
+        guard trimmed.count <= BrowserBounds.maxActTextChars else {
+            throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must be at most \(BrowserBounds.maxActTextChars) characters")
+        }
+    }
+
+    private static func requireNoNULActText(_ trimmed: String) throws {
+        if trimmed.unicodeScalars.contains(where: { $0.value == 0 }) {
+            throw BrowserError.invalidAction("Invalid browser.act arguments: 'text' must not contain NUL")
         }
     }
 

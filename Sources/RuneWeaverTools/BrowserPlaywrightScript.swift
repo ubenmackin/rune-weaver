@@ -122,51 +122,88 @@ enum BrowserPlaywrightScriptBody: Sendable {
 
     _INTERACTIVE_SELECTOR = 'a, button, input:not([type="hidden"]), select, textarea, [role=button], [role=link], [role=textbox], [role=checkbox]'
 
-    def collect_refs(page, cap=200):
+    def collect_refs(page):
         try:
-            els = page.query_selector_all(_INTERACTIVE_SELECTOR)
-        except Exception:
-            return []
-        refs = []
-        for index, el in enumerate(els[:cap], start=1):
-            try:
-                role = el.get_attribute("role") or ""
-                if not role:
-                    try:
-                        role = el.evaluate("e => e.tagName ? e.tagName.toLowerCase() : ''") or ""
-                    except Exception:
-                        role = ""
-            except Exception:
-                role = ""
-            name = ""
-            for getter in ("aria-label", "value", "placeholder"):
-                try:
-                    candidate = el.get_attribute(getter) or ""
-                except Exception:
-                    candidate = ""
-                if candidate and candidate.strip():
-                    name = candidate.strip()
-                    break
-            if not name:
-                try:
-                    candidate = el.inner_text() or ""
-                except Exception:
-                    candidate = ""
-                if candidate and candidate.strip():
-                    name = " ".join(candidate.split())
-            refs.append({"ref": "e%d" % index, "role": (role or "").strip().lower()[:40], "name": (name or "")[:80]})
-        return refs
+            raw = page.evaluate('''() => {
+                const selector = 'a, button, input:not([type="hidden"]), select, textarea, [role=button], [role=link], [role=textbox], [role=checkbox]';
+                try {
+                    document.querySelectorAll('[data-rw-ref]').forEach(e => e.removeAttribute('data-rw-ref'));
+                } catch (e) {}
+                const els = document.querySelectorAll(selector);
+                const results = [];
+                let count = 0;
+                let total = 0;
+                // Python bounds above Swift so Swift stays the single truncator.
+                const maxRefs = \#(BrowserBounds.maxRefs * 4);
+                for (let i = 0; i < els.length; i++) {
+                    const el = els[i];
+                    if (el.checkVisibility) {
+                        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+                    } else {
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                    }
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
 
-    def page_text(page, cap=20000):
+                    let role = (el.getAttribute('role') || (el.tagName ? el.tagName.toLowerCase() : '')).trim().toLowerCase();
+                    let name = el.getAttribute('aria-label') || el.getAttribute('value') || el.getAttribute('placeholder') || '';
+                    if (!name) {
+                        name = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+                    }
+                    // Icon-only links/buttons stay actionable with the role as fallback name.
+                    if (!name && (role === 'a' || role === 'link' || role === 'button')) { name = role; }
+
+                    total++;
+                    if (total > maxRefs) continue;
+                    count++;
+                    const refId = 'e' + count;
+                    try {
+                        el.setAttribute('data-rw-ref', refId);
+                    } catch (e) {}
+                    results.push({
+                        ref: refId,
+                        role: role.slice(0, 40),
+                        name: name.slice(0, 80)
+                    });
+                }
+                return {refs: results, truncated: total > maxRefs};
+            }''')
+            if isinstance(raw, dict):
+                return (raw.get("refs") or [], bool(raw.get("truncated")))
+            if isinstance(raw, list):
+                return (raw, False)
+            return ([], False)
+        except Exception:
+            return ([], False)
+
+    def page_text(page, cap=\#(BrowserBounds.maxTextChars * 4)):
         try:
             body = page.query_selector("body")
             text = body.inner_text() if body else ""
         except Exception:
             text = ""
+        if not text:
+            return ("", False)
+        try:
+            import re
+            text = re.sub(r'[ \t\r\f\v]+', ' ', text)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            lines = [line.strip() for line in text.split('\n')]
+            cleaned_lines = []
+            for line in lines:
+                if line:
+                    cleaned_lines.append(line)
+                elif cleaned_lines and cleaned_lines[-1] != "":
+                    cleaned_lines.append("")
+            text = '\n'.join(cleaned_lines).strip()
+        except Exception:
+            pass
         text = (text or "").strip()
-        if len(text) > cap:
+        truncated = len(text) > cap
+        if truncated:
             text = text[:cap]
-        return text
+        return (text, truncated)
 
     def is_auth_wall(page):
         try:
@@ -377,7 +414,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
         ref = (req.get("ref") or "").strip() if op == "act" else ""
         text = req.get("text") if op == "act" else None
         want_screenshot = bool(req.get("includeScreenshot") or req.get("screenshot") or req.get("include_screenshot")) if op == "navigate" else False
-        if op == "act" and action not in ("click", "fill", "select", "press", "scroll"):
+        if op == "act" and action not in ("click", "fill", "hover", "select", "press", "scroll"):
             fail("Invalid browser action")
             return
         if op == "act":
@@ -481,7 +518,8 @@ enum BrowserPlaywrightScriptTail: Sendable {
                             final_title = target_page.title() or ""
                         except Exception:
                             final_title = ""
-                        refs = collect_refs(target_page) if not target_page.is_closed() else []
+                        page_body, page_truncated = page_text(target_page) if not target_page.is_closed() else ("", False)
+                        refs, refs_truncated = collect_refs(target_page) if not target_page.is_closed() else ([], False)
                         chain = redirect_chain_for(goto_response, url, final_url)
                         shot = capture_screenshot(target_page) if want_screenshot and not target_page.is_closed() else ""
                         save_storage_state(context)
@@ -489,8 +527,10 @@ enum BrowserPlaywrightScriptTail: Sendable {
                             "ok": True,
                             "url": final_url,
                             "title": final_title,
-                            "text": page_text(target_page) if not target_page.is_closed() else "",
+                            "text": page_body,
                             "refs": refs,
+                            # Helper pre-caps at 4x bounds; pre-slice length decides the flag.
+                            "truncated": bool(page_truncated or refs_truncated),
                             "authRequired": is_challenge_or_auth(target_page) if not target_page.is_closed() else False,
                             "downloads": [],
                             "redirectChain": chain,
@@ -499,16 +539,20 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         }))
                         sys.stdout.flush()
                         return
-                    refs = collect_refs(page)
-                    wanted = int(ref[1:]) - 1
-                    if wanted < 0 or wanted >= len(refs):
+                    el = None
+                    try:
+                        el = page.query_selector('[data-rw-ref="%s"]' % ref)
+                    except Exception:
+                        el = None
+                    if not el:
+                        _ = collect_refs(page)
+                        try:
+                            el = page.query_selector('[data-rw-ref="%s"]' % ref)
+                        except Exception:
+                            el = None
+                    if not el:
                         fail("Unknown ref '%s' for this snapshot" % ref)
                         return
-                    els = page.query_selector_all(_INTERACTIVE_SELECTOR)
-                    if wanted >= len(els):
-                        fail("Unknown ref '%s' for this snapshot" % ref)
-                        return
-                    el = els[wanted]
                     if action == "click":
                         try:
                             el.scroll_into_view_if_needed(timeout=2000)
@@ -523,6 +567,8 @@ enum BrowserPlaywrightScriptTail: Sendable {
                                 page.evaluate("e => e.click()", el)
                     elif action == "fill":
                         el.fill(text or "", timeout=action_timeout_ms)
+                    elif action == "hover":
+                        el.hover(timeout=action_timeout_ms)
                     elif action == "select":
                         el.select_option(label=text or "", timeout=action_timeout_ms)
                     elif action == "press":
@@ -580,13 +626,24 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     if landed_after_reason:
                         fail(landed_after_reason)
                         return
+                    if action in ("fill", "hover"):
+                        save_storage_state(context)
+                        sys.stdout.write(json.dumps({
+                            "ok": True,
+                            "url": page.url or url,
+                            "action": action,
+                            "ref": ref,
+                            "downloads": [],
+                        }))
+                        sys.stdout.flush()
+                        return
                     post_title = ""
                     try:
                         post_title = page.title() or ""
                     except Exception:
                         pass
-                    post_text = page_text(page)
-                    post_refs = collect_refs(page)
+                    post_text, post_text_truncated = page_text(page)
+                    post_refs, post_refs_truncated = collect_refs(page)
                     save_storage_state(context)
                     sys.stdout.write(json.dumps({
                         "ok": True,
@@ -596,6 +653,8 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         "title": post_title,
                         "text": post_text,
                         "refs": post_refs,
+                        # Helper pre-caps at 4x bounds; pre-slice length decides the flag.
+                        "truncated": bool(post_text_truncated or post_refs_truncated),
                         "downloads": [],
                     }))
                     sys.stdout.flush()

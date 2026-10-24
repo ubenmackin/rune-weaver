@@ -498,6 +498,7 @@ public struct BrowserNavigateResult: Sendable, Codable, Equatable {
     /// Decodes tolerantly across plugin shape variations.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Bare `url` stays envelope-local so act envelopes cannot satisfy the shared gate.
         let finalRaw: String? = BrowserNavigateWire.decodeFirst(container, keys: [.finalUrl, .finalURL, .finalUrlSnake])
         if let finalRaw {
             let trimmed = finalRaw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -587,6 +588,12 @@ public struct BrowserNavigateResult: Sendable, Codable, Equatable {
     public static func parse(_ content: String) -> BrowserNavigateResult? {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
+        // Act envelopes carry action+ref; reject them so navigate-vs-act discrimination holds.
+        if let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+           object["action"] is String, object["ref"] is String
+        {
+            return nil
+        }
         let decoded: BrowserNavigateResult
         do {
             decoded = try JSONDecoder().decode(BrowserNavigateResult.self, from: data)

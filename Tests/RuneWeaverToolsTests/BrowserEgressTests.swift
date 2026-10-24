@@ -785,5 +785,65 @@ struct BrowserEgressTests {
         #expect(BrowserPlaywrightScript.source.contains("\"return\": \"Enter\""))
         #expect(BrowserPlaywrightScript.source.contains("scroll_into_view_if_needed"))
         #expect(BrowserPlaywrightScript.source.contains("force=True"))
+        #expect(BrowserPlaywrightScript.source.contains("data-rw-ref"))
+        #expect(BrowserPlaywrightScript.source.contains("checkVisibility"))
+    }
+
+    @Test
+    func `BrowserNavigateEnvelope encoding omits textSnapshot duplicate and produces compact JSON`() throws {
+        let envelope = BrowserNavigateEnvelope(
+            url: "https://example.com",
+            title: "Example Title",
+            text: "Hello World Page Body",
+            refs: [BrowserElementRef(ref: "e1", role: "button", name: "Submit")]
+        )
+        let json = try ToolEnvelopeEncoding.encode(envelope)
+        #expect(!json.contains("\"textSnapshot\""))
+        #expect(!json.contains("\"finalUrl\""))
+        #expect(json.contains("\"text\":\"Hello World Page Body\""))
+        #expect(json.contains("\"url\":"))
+        #expect(!json.contains("\n"))
+
+        let decoded = try JSONDecoder().decode(BrowserNavigateEnvelope.self, from: Data(json.utf8))
+        #expect(decoded.url == "https://example.com")
+        #expect(decoded.text == "Hello World Page Body")
+        #expect(decoded.textSnapshot == "Hello World Page Body")
+        #expect(decoded.refs.count == 1)
+    }
+
+    @Test
+    func `BrowserActEnvelope for fill lightweight envelope omits title/text/refs/truncated when non-empty`() async throws {
+        let tool = BrowserActTool(
+            gateway: BrowserEgressSupport.CannedActGateway(
+                result: BrowserActResult(
+                    url: BrowserEgressSupport.publicPageURL,
+                    action: .fill,
+                    ref: "e12",
+                    title: "Non-empty title",
+                    text: "Non-empty body that must be stripped",
+                    refs: [BrowserElementRef(ref: "e1", role: "button", name: "Submit")],
+                    truncated: true
+                ),
+                navigateFlag: BrowserEgressSupport.CallFlag(),
+                actFlag: BrowserEgressSupport.CallFlag()
+            ),
+            browserConfig: BrowserEgressSupport.publicSearchConfig()
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "browser.act",
+                argumentsJSON: #"{"action":"fill","ref":"e12","text":"hello","url":"\#(BrowserEgressSupport.publicPageURL)"}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!output.isError)
+        let json = output.content
+        #expect(!json.contains("\"text\""))
+        #expect(!json.contains("\"refs\""))
+        #expect(!json.contains("\"title\""))
+        #expect(!json.contains("\"truncated\""))
+        #expect(json.contains("\"action\":\"fill\""))
+        #expect(json.contains("\"ref\":\"e12\""))
+        #expect(json.count < 150)
     }
 }
