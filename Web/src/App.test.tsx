@@ -38,8 +38,6 @@ vi.mock("./components/RunLogViewer", () => ({
 vi.mock("./components/SettingsManager", () => ({ default: () => <div data-testid="settings-manager">Settings</div> }));
 vi.mock("./hooks/useWebNotifications", () => ({
   useWebNotifications: () => ({
-    notificationsEnabled: false,
-    requestPermission: vi.fn(),
     runsBadge: 0,
     clearRunsBadge: vi.fn(),
     approvalsBadge: 0,

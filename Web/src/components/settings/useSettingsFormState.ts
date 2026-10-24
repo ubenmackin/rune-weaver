@@ -9,6 +9,7 @@ import type {
   GoalsConfigData,
   IdeasConfigData,
   MediaConfigData,
+  NotificationsConfigData,
   PersonaData,
   ProactiveConfigData,
   ProviderConfigData,
@@ -52,6 +53,7 @@ import {
   personaAssistantName,
   personaStyle,
   personaUserName,
+  resolveNotificationsConfig,
 } from "../../api";
 import { publishPersonaFromSettings } from "../PersonaAvatar";
 import {
@@ -207,6 +209,21 @@ export function useSettingsFormState() {
   const [proactiveMode, setProactiveMode] = useState<string>(DEFAULT_PROACTIVE_MODE);
   const [proactiveJudgeTimeoutSeconds, setProactiveJudgeTimeoutSeconds] =
     useState<number | string>(DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS);
+
+  // Per-type notification preferences; every switch defaults true and hydrates
+  // from `settings.notifications` with missing keys degrading to enabled.
+  const [notificationsApprovalRequested, setNotificationsApprovalRequested] =
+    useState<boolean>(true);
+  const [notificationsSchedulerRun, setNotificationsSchedulerRun] =
+    useState<boolean>(true);
+  const [notificationsGoalAdvance, setNotificationsGoalAdvance] =
+    useState<boolean>(true);
+  const [notificationsIdeaProposed, setNotificationsIdeaProposed] =
+    useState<boolean>(true);
+  const [notificationsIndexFailed, setNotificationsIndexFailed] =
+    useState<boolean>(true);
+  const [notificationsChatFailed, setNotificationsChatFailed] =
+    useState<boolean>(true);
 
   // Persona state
   const [personaAssistantNameDraft, setPersonaAssistantNameDraft] = useState("");
@@ -374,6 +391,19 @@ export function useSettingsFormState() {
     []
   );
 
+  const populateNotificationsSettings = useCallback(
+    (notifications: NotificationsConfigData | undefined | null) => {
+      const resolved = resolveNotificationsConfig(notifications ?? undefined);
+      setNotificationsApprovalRequested(resolved.approvalRequested);
+      setNotificationsSchedulerRun(resolved.schedulerRun);
+      setNotificationsGoalAdvance(resolved.goalAdvance);
+      setNotificationsIdeaProposed(resolved.ideaProposed);
+      setNotificationsIndexFailed(resolved.indexFailed);
+      setNotificationsChatFailed(resolved.chatFailed);
+    },
+    []
+  );
+
   const populatePersonaSettings = useCallback(
     (persona: PersonaData | undefined | null) => {
       const loaded = persona ?? {};
@@ -517,6 +547,7 @@ export function useSettingsFormState() {
       populateGoalsSettings(data.goals);
       populateIdeasSettings(data.ideas);
       populateProactiveSettings(data.proactive);
+      populateNotificationsSettings(data.notifications);
       populatePersonaSettings(data.persona);
       publishPersonaFromSettings(data.persona);
       populateFanoutSettings(data.fanout);
@@ -568,6 +599,7 @@ export function useSettingsFormState() {
       populateGoalsSettings,
       populateIdeasSettings,
       populateProactiveSettings,
+      populateNotificationsSettings,
       populatePersonaSettings,
       populateFanoutSettings,
       populateWorkspaceSettings,
@@ -856,6 +888,18 @@ export function useSettingsFormState() {
     setProactiveMode,
     proactiveJudgeTimeoutSeconds,
     setProactiveJudgeTimeoutSeconds,
+    notificationsApprovalRequested,
+    setNotificationsApprovalRequested,
+    notificationsSchedulerRun,
+    setNotificationsSchedulerRun,
+    notificationsGoalAdvance,
+    setNotificationsGoalAdvance,
+    notificationsIdeaProposed,
+    setNotificationsIdeaProposed,
+    notificationsIndexFailed,
+    setNotificationsIndexFailed,
+    notificationsChatFailed,
+    setNotificationsChatFailed,
     personaAssistantNameDraft,
     setPersonaAssistantNameDraft,
     personaToneDraft,

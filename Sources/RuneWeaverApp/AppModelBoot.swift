@@ -270,7 +270,8 @@ extension AppModel {
             hub: pipeline.hub,
             policyStore: pipeline.policyStore,
             workspaceConfig: pipeline.config.workspace,
-            persona: pipeline.config.persona
+            persona: pipeline.config.persona,
+            notificationsConfig: pipeline.config.notifications
         )
         // The boot pipeline reporter carries desktop-only alerts; swap in the combined
         // notifier so index failures push too while keeping one coordinator for worker and routes.

@@ -35,6 +35,7 @@ extension RuneWeaverConfig {
         try validateFanoutSection()
         try validateWorkspaceSection()
         try validatePersonaSection()
+        try validateNotificationsSection()
     }
 
     private func validateEngineSection() throws {
@@ -926,6 +927,33 @@ extension RuneWeaverConfig {
             )
         }
         _ = PersonaConfig.normalizedStyle(persona.style)
+    }
+
+    /// Validates the `[notifications]` section. Booleans need no range check.
+    private func validateNotificationsSection() throws {}
+
+    /// Known `[notifications]` TOML keys in file shape.
+    static let notificationsKnownKeys: Set<String> = [
+        "approval_requested",
+        "scheduler_run",
+        "goal_advance",
+        "idea_proposed",
+        "index_failed",
+        "chat_failed"
+    ]
+
+    /// Rejects unknown `[notifications]` keys fail-closed.
+    /// - Parameter node: Parsed `[notifications]` table.
+    static func validateNotificationsKeys(_ node: TOMLNode) throws {
+        for key in node.values.keys where !notificationsKnownKeys.contains(key) {
+            throw ConfigError.validationError(field: "notifications.\(key)", message: "unknown key '\(key)'")
+        }
+        for key in node.tables.keys where !notificationsKnownKeys.contains(key) {
+            throw ConfigError.validationError(field: "notifications.\(key)", message: "unknown key '\(key)'")
+        }
+        for key in node.arrays.keys where !notificationsKnownKeys.contains(key) {
+            throw ConfigError.validationError(field: "notifications.\(key)", message: "unknown key '\(key)'")
+        }
     }
 }
 

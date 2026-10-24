@@ -36,10 +36,38 @@ public struct NoOpWebPushTransport: WebPushTransport {
 public struct CompositeSchedulerNotifier: SchedulerNotifier {
     private let primary: any SchedulerNotifier?
     private let pushSender: WebPushSender
+    /// Live per-type preferences shared with the scheduler worker and approval handler.
+    public let notificationsBox: NotificationsConfigBox
 
-    public init(primary: any SchedulerNotifier?, pushSender: WebPushSender) {
+    public init(
+        primary: any SchedulerNotifier?,
+        pushSender: WebPushSender,
+        notificationsBox: NotificationsConfigBox = NotificationsConfigBox()
+    ) {
         self.primary = primary
         self.pushSender = pushSender
+        self.notificationsBox = notificationsBox
+    }
+
+    /// Convenience init preserving the boot call shape with a snapshot.
+    public init(
+        primary: any SchedulerNotifier?,
+        pushSender: WebPushSender,
+        notifications: NotificationsConfig
+    ) {
+        self.primary = primary
+        self.pushSender = pushSender
+        self.notificationsBox = NotificationsConfigBox(notifications)
+    }
+
+    /// Current preferences snapshot.
+    public var currentNotifications: NotificationsConfig {
+        notificationsBox.current
+    }
+
+    /// Replaces the live preferences without a restart.
+    public func updateNotifications(_ config: NotificationsConfig) {
+        notificationsBox.update(config)
     }
 
     public func notify(title: String, body: String) async {
@@ -60,6 +88,33 @@ public struct CompositeSchedulerNotifier: SchedulerNotifier {
             )
         )
     }
+
+    /// Kind-aware notify skipping both desktop and push when suppressed.
+    public func notify(title: String, body: String, identifier: String?, kind: NotificationKind) async {
+        guard NotificationsFilter.shouldSurface(kind, config: notificationsBox.current) else { return }
+        await notify(title: title, body: body, identifier: identifier)
+    }
+}
+
+/// Single owner for per-type interruption config lookup.
+public func notificationsConfig(for notifier: any SchedulerNotifier?) -> NotificationsConfig {
+    if let composite = notifier as? CompositeSchedulerNotifier {
+        return composite.currentNotifications
+    }
+    return NotificationsConfig()
+}
+
+/// Single owner for kind-aware interruption dispatch.
+public func notifyKindAware(
+    _ notifier: any SchedulerNotifier?,
+    kind: NotificationKind,
+    config: NotificationsConfig,
+    title: String,
+    body: String,
+    identifier: String?
+) async {
+    guard NotificationsFilter.shouldSurface(kind, config: config) else { return }
+    await notifier?.notify(title: title, body: body, identifier: identifier)
 }
 
 /// Encrypts and sends RFC 8291 Web Push notifications to Apple APNs and other push services.

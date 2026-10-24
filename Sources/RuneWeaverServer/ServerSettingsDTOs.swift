@@ -73,6 +73,8 @@ public struct SettingsResponse: Content, Equatable {
     public let goals: GoalsConfig
     /// Interruption policy for background scheduler and goal turns.
     public let proactive: ProactiveConfig
+    /// Per-type interruption preferences from `[notifications]`.
+    public let notifications: NotificationsConfig
     /// Proactive Wayfinder suggestion policy.
     public let ideas: IdeasConfig
     /// Parallel worker fan-out policy backing `fanout.run`.
@@ -141,6 +143,7 @@ public struct SettingsResponse: Content, Equatable {
         self.workspace = config.workspace
         self.goals = config.goals
         self.proactive = config.proactive
+        self.notifications = config.notifications
         self.ideas = config.ideas
         self.fanout = config.fanOut
         self.persona = config.persona
@@ -199,6 +202,7 @@ public struct SettingsResponse: Content, Equatable {
         case workspace
         case goals
         case proactive
+        case notifications
         case ideas
         case fanout
         case persona
@@ -271,6 +275,9 @@ public struct SettingsResponse: Content, Equatable {
         workspace = try container.decodeIfPresent(WorkspaceConfig.self, forKey: .workspace) ?? WorkspaceConfig()
         goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
+        // Absent notifications keep every interruption surfacing so payloads
+        // written before the `[notifications]` surface existed still decode.
+        notifications = try container.decodeIfPresent(NotificationsConfig.self, forKey: .notifications) ?? NotificationsConfig()
         ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
         fanout = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanout) ?? FanOutConfig()
         // Absent persona keeps the stock identity so payloads written before
@@ -335,6 +342,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(workspace, forKey: .workspace)
         try container.encode(goals, forKey: .goals)
         try container.encode(proactive, forKey: .proactive)
+        try container.encode(notifications, forKey: .notifications)
         try container.encode(ideas, forKey: .ideas)
         try container.encode(fanout, forKey: .fanout)
         try container.encode(persona, forKey: .persona)
@@ -414,6 +422,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let goals: GoalsUpdate?
     /// Partial proactive patch; a nil patch preserves the stored `[proactive]` section.
     public let proactive: ProactiveUpdate?
+    /// Partial notifications patch; a nil patch preserves the stored `[notifications]` section.
+    public let notifications: NotificationsSettingsUpdate?
     /// Partial ideas patch; a nil patch preserves the stored `[ideas]` section.
     public let ideas: IdeasUpdate?
     /// Partial fan-out patch; a nil patch preserves the stored `[fanout]` section.
@@ -474,6 +484,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         workspace: WorkspaceUpdate? = nil,
         goals: GoalsUpdate? = nil,
         proactive: ProactiveUpdate? = nil,
+        notifications: NotificationsSettingsUpdate? = nil,
         ideas: IdeasUpdate? = nil,
         fanout: FanOutSettingsUpdate? = nil,
         persona: PersonaUpdate? = nil,
@@ -527,6 +538,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.workspace = workspace
         self.goals = goals
         self.proactive = proactive
+        self.notifications = notifications
         self.ideas = ideas
         self.fanout = fanout
         self.persona = persona
@@ -549,7 +561,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         case browserTimeoutSeconds, browserFetchTimeoutSeconds
         case searchSearxngURL, searchTimeoutSeconds, searchMaxResults
         case emailAccounts, pluginsDir, pluginsMarketplaceIndexURL, pluginsAutoRescan
-        case media, index, desktop, bash, workspace, goals, proactive, ideas, fanout, persona
+        case media, index, desktop, bash, workspace, goals, proactive, notifications, ideas, fanout, persona
         case serverHostname, serverPort, serverAllowedHosts
     }
 
@@ -606,6 +618,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         workspace = try container.decodeIfPresent(WorkspaceUpdate.self, forKey: .workspace)
         goals = try container.decodeIfPresent(GoalsUpdate.self, forKey: .goals)
         proactive = try container.decodeIfPresent(ProactiveUpdate.self, forKey: .proactive)
+        notifications = try container.decodeIfPresent(NotificationsSettingsUpdate.self, forKey: .notifications)
         ideas = try container.decodeIfPresent(IdeasUpdate.self, forKey: .ideas)
         fanout = try container.decodeIfPresent(FanOutSettingsUpdate.self, forKey: .fanout)
         persona = try container.decodeIfPresent(PersonaUpdate.self, forKey: .persona)
@@ -697,6 +710,138 @@ extension UpdateSettingsRequest {
     public init(containers: ContainersConfig) {
         self.init(containers: ContainersSettingsUpdate(containers))
     }
+
+    /// Builds a request from a full notifications snapshot, routing through the same
+    /// merge path so snapshot callers keep working without hand-mapping fields.
+    /// - Parameter notifications: Complete interruption preferences.
+    public init(notifications: NotificationsConfig) {
+        self.init(notifications: NotificationsSettingsUpdate(notifications))
+    }
+}
+
+/// Partial `[notifications]` patch for `PUT /settings`. Every field stays optional so a request
+/// carrying only one key leaves the rest of the stored preferences untouched instead of resetting
+/// them.
+public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
+    /// Whether approval filings interrupt. Nil preserves the stored value.
+    public var approvalRequested: Bool?
+    /// Whether scheduler completions interrupt. Nil preserves the stored value.
+    public var schedulerRun: Bool?
+    /// Whether goal advances interrupt. Nil preserves the stored value.
+    public var goalAdvance: Bool?
+    /// Whether idea proposals interrupt. Nil preserves the stored value.
+    public var ideaProposed: Bool?
+    /// Whether index failures interrupt. Nil preserves the stored value.
+    public var indexFailed: Bool?
+    /// Whether chat failures interrupt. Nil preserves the stored value.
+    public var chatFailed: Bool?
+
+    /// Creates a partial notifications patch.
+    public init(
+        approvalRequested: Bool? = nil,
+        schedulerRun: Bool? = nil,
+        goalAdvance: Bool? = nil,
+        ideaProposed: Bool? = nil,
+        indexFailed: Bool? = nil,
+        chatFailed: Bool? = nil
+    ) {
+        self.approvalRequested = approvalRequested
+        self.schedulerRun = schedulerRun
+        self.goalAdvance = goalAdvance
+        self.ideaProposed = ideaProposed
+        self.indexFailed = indexFailed
+        self.chatFailed = chatFailed
+    }
+
+    /// Populates a patch from a full snapshot so programmatic callers holding
+    /// a complete `NotificationsConfig` reuse the same merge path.
+    /// - Parameter config: Complete interruption preferences.
+    public init(_ config: NotificationsConfig) {
+        self.approvalRequested = config.approvalRequested
+        self.schedulerRun = config.schedulerRun
+        self.goalAdvance = config.goalAdvance
+        self.ideaProposed = config.ideaProposed
+        self.indexFailed = config.indexFailed
+        self.chatFailed = config.chatFailed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case approvalRequested
+        case schedulerRun
+        case goalAdvance
+        case ideaProposed
+        case indexFailed
+        case chatFailed
+    }
+
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int?
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+        }
+
+        init?(intValue: Int) {
+            self.stringValue = "\(intValue)"
+            self.intValue = intValue
+        }
+    }
+
+    /// Decodes tolerantly on missing keys but rejects unknown keys.
+    public init(from decoder: any Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: AnyKey.self)
+        let known = Set(["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed"])
+        for key in dynamic.allKeys where !known.contains(key.stringValue) {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: dynamic,
+                debugDescription: "Unknown notifications key '\(key.stringValue)'"
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        approvalRequested = try container.decodeIfPresent(Bool.self, forKey: .approvalRequested)
+        schedulerRun = try container.decodeIfPresent(Bool.self, forKey: .schedulerRun)
+        goalAdvance = try container.decodeIfPresent(Bool.self, forKey: .goalAdvance)
+        ideaProposed = try container.decodeIfPresent(Bool.self, forKey: .ideaProposed)
+        indexFailed = try container.decodeIfPresent(Bool.self, forKey: .indexFailed)
+        chatFailed = try container.decodeIfPresent(Bool.self, forKey: .chatFailed)
+    }
+
+    /// Encodes only the present keys so an omitted patch preserves the stored section.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(approvalRequested, forKey: .approvalRequested)
+        try container.encodeIfPresent(schedulerRun, forKey: .schedulerRun)
+        try container.encodeIfPresent(goalAdvance, forKey: .goalAdvance)
+        try container.encodeIfPresent(ideaProposed, forKey: .ideaProposed)
+        try container.encodeIfPresent(indexFailed, forKey: .indexFailed)
+        try container.encodeIfPresent(chatFailed, forKey: .chatFailed)
+    }
+
+    /// Merges this patch onto the stored preferences, preserving every field the request omits.
+    /// A nil field is a no-op, so a dashboard edit to one switch never resets the rest of the
+    /// `[notifications]` section.
+    public func apply(to notifications: inout NotificationsConfig) {
+        if let approvalRequested {
+            notifications.approvalRequested = approvalRequested
+        }
+        if let schedulerRun {
+            notifications.schedulerRun = schedulerRun
+        }
+        if let goalAdvance {
+            notifications.goalAdvance = goalAdvance
+        }
+        if let ideaProposed {
+            notifications.ideaProposed = ideaProposed
+        }
+        if let indexFailed {
+            notifications.indexFailed = indexFailed
+        }
+        if let chatFailed {
+            notifications.chatFailed = chatFailed
+        }
+    }
 }
 
 /// Configuration application methods for `UpdateSettingsRequest`.
@@ -721,6 +866,7 @@ extension UpdateSettingsRequest {
         try applyWorkspace(to: &config.workspace)
         applyGoals(to: &config.goals)
         try applyProactive(to: &config.proactive)
+        applyNotifications(to: &config.notifications)
         applyIdeas(to: &config.ideas)
         applyFanOut(to: &config.fanOut)
         try applyPersona(to: &config.persona)
@@ -831,6 +977,14 @@ extension UpdateSettingsRequest {
     func applyContainers(to containers: inout ContainersConfig) throws {
         guard let update = self.containers else { return }
         try update.apply(to: &containers)
+    }
+
+    /// Merges a partial notifications patch onto the stored preferences, preserving every field the
+    /// request omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the
+    /// `[notifications]` section.
+    func applyNotifications(to notifications: inout NotificationsConfig) {
+        guard let update = self.notifications else { return }
+        update.apply(to: &notifications)
     }
 
     private func applyFiles(to files: inout FilesConfig) throws {
@@ -979,6 +1133,12 @@ extension UpdateSettingsRequest {
     public var carriesFilesPatch: Bool {
         filesDenyPatterns != nil || filesAllowRoots != nil || filesRequireApprovalOnDeny != nil
             || filesWriteMode != nil || filesWritePathRules != nil
+    }
+
+    /// Whether this request carries a `[notifications]` patch. The settings route uses this to
+    /// push the saved preferences into the live boxes without a restart.
+    public var carriesNotificationsPatch: Bool {
+        notifications != nil
     }
 
     /// Whether a hostname binds loopback only. Non-loopback binds need a resolvable owner token and

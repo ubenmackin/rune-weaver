@@ -142,6 +142,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
         await reloadLiveBashFilesTools(body: body, config: config, context: liveContext, bashChanged: bashChanged, containersChanged: containersChanged)
         await reloadLiveFanOut(body: body, config: config, context: liveContext)
+        await reloadLiveNotifications(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
         // Configured services seed the allowlist through the shared derivation
         // the boot supervisor uses, so both paths pre-authorize exactly the
@@ -571,6 +572,31 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
 private func reloadLiveFanOut(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     guard body.fanout != nil else { return }
     await context.fanOut.updateConfig(config.fanOut)
+}
+
+/// Pushes the saved `[notifications]` preferences into the live boxes so saved switches take effect
+/// without a restart. The combined notifier, the scheduler worker, and the index reporter share
+/// one box in the serving path, so updating each keeps filtering in sync even when a test wires
+/// a distinct box.
+private func reloadLiveNotifications(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    guard body.carriesNotificationsPatch else { return }
+    if let composite = context.notifier as? CompositeSchedulerNotifier {
+        composite.updateNotifications(config.notifications)
+    }
+    await context.schedulerWorker.updateNotifications(config.notifications)
+    if let coordinator = context.indexCoordinator {
+        let reporter: ServerIndexRunReporter = if let composite = context.notifier as? CompositeSchedulerNotifier {
+            ServerIndexBoot.makeReporterWithNotifier(runs: context.runs, hub: context.hub, notifier: composite)
+        } else {
+            ServerIndexRunReporter(
+                runs: context.runs,
+                hub: context.hub,
+                notifier: context.notifier,
+                notificationsBox: NotificationsConfigBox(config.notifications)
+            )
+        }
+        await coordinator.setReporter(reporter)
+    }
 }
 
 /// Applies the saved `[index]` policy to the live engine so the next run uses new values without a

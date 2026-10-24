@@ -413,7 +413,8 @@ extension ServerContext {
         secrets: SecretsManager?,
         dbPath: String,
         notifier: any SchedulerNotifier?,
-        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
+        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?,
+        notificationsBox: NotificationsConfigBox = NotificationsConfigBox()
     ) async throws -> WebPushComponents {
         let vapidKeys = try await WebPushKeys.loadOrGenerate(secrets: secrets)
         let pushSubscriptions = PushSubscriptionStore(dbPath: dbPath)
@@ -421,8 +422,13 @@ extension ServerContext {
             ? NoOpWebPushTransport()
             : URLSessionWebPushTransport()
         let pushSender = WebPushSender(vapidKeys: vapidKeys, subscriptions: pushSubscriptions, transport: pushTransport)
-        let combinedNotifier = CompositeSchedulerNotifier(primary: notifier, pushSender: pushSender)
+        let combinedNotifier = CompositeSchedulerNotifier(
+            primary: notifier,
+            pushSender: pushSender,
+            notificationsBox: notificationsBox
+        )
         let combinedApprovalHandler: (@Sendable (PermissionRequest) async -> Void)? = { request in
+            guard NotificationsFilter.shouldSurface(.approvalRequested, config: notificationsBox.current) else { return }
             if let onApprovalRequested {
                 await onApprovalRequested(request)
             }
@@ -496,7 +502,8 @@ extension ServerContext {
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil,
-        onboarding: any OnboardingStoring? = nil
+        onboarding: any OnboardingStoring? = nil,
+        notificationsConfig: NotificationsConfig = NotificationsConfig()
     ) async throws -> ServerContext {
         // Resolve the one store for this process before any tool registers: an injected store is
         // authoritative, while the factory default is loaded here so the same instance feeds both
@@ -546,11 +553,13 @@ extension ServerContext {
         // orchestrator into the fanout.run tool; engine construction is side-effect free, so the
         // earlier position changes nothing else about boot.
         let activeTurns = ActiveTurnTracker()
+        let notificationsBox = NotificationsConfigBox(notificationsConfig)
         let webPush = try await prepareWebPush(
             secrets: secrets,
             dbPath: dbPath,
             notifier: notifier,
-            onApprovalRequested: onApprovalRequested
+            onApprovalRequested: onApprovalRequested,
+            notificationsBox: notificationsBox
         )
         let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,

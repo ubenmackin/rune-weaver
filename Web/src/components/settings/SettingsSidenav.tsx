@@ -2,6 +2,7 @@
 
 import {
   ApprovalsIcon,
+  BellIcon,
   ChatIcon,
   KeyIcon,
   MailIcon,
@@ -48,6 +49,7 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   security: "Security",
   network: "Network",
   engine: "Engine and Logs",
+  notifications: "Notifications",
 };
 
 export default function SettingsSidenav({
@@ -306,6 +308,17 @@ export default function SettingsSidenav({
             >
               <SettingsIcon size={16} />
               <span>{SETTINGS_TAB_LABELS.engine}</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "notifications"}
+              className={`settings-tab-btn ${activeTab === "notifications" ? "active" : ""}`}
+              onClick={() => onSelectTab("notifications")}
+            >
+              <BellIcon size={16} />
+              <span>{SETTINGS_TAB_LABELS.notifications}</span>
             </button>
           </nav>
         )}

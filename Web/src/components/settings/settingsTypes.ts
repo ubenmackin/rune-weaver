@@ -18,6 +18,7 @@ export type SettingsTab =
   | "persona"
   | "goals"
   | "engine"
+  | "notifications"
   | "tools"
   | "security"
   | "memory"
@@ -41,6 +42,7 @@ export const SETTINGS_TABS: readonly SettingsTab[] = [
   "security",
   "network",
   "engine",
+  "notifications",
 ];
 
 export const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string> = {
@@ -50,6 +52,8 @@ export const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string> = {
   persona: "persona identity tone style avatar assistant name",
   goals: "goals pursuit cadence plan steps triggers",
   engine: "engine logs name compaction tool rounds proactive ideas interruption",
+  notifications:
+    "notification alerts bell push approval scheduler goal idea index chat mute",
   tools: "tools runes plugins builtin agents workspace scripts marketplace",
   security: "security containers sandbox files allow roots deny approval blocked paths token rotation",
   memory: "memory storage vectors episodes embeddings recall",

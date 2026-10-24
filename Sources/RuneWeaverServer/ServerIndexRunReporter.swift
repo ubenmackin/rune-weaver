@@ -15,12 +15,36 @@ public struct ServerIndexRunReporter: IndexRunReporting {
     private let hub: WSHub
     /// Optional notification dispatcher for failed index runs.
     private let notifier: any SchedulerNotifier?
+    /// Live per-type preferences.
+    private let notificationsBox: NotificationsConfigBox
 
     /// Creates a reporter. runs: Run audit trail to persist into.
-    public init(runs: RunLogStore, hub: WSHub, notifier: any SchedulerNotifier? = nil) {
+    public init(
+        runs: RunLogStore,
+        hub: WSHub,
+        notifier: any SchedulerNotifier? = nil,
+        notificationsBox: NotificationsConfigBox? = nil
+    ) {
         self.runs = runs
         self.hub = hub
         self.notifier = notifier
+        if let notificationsBox {
+            self.notificationsBox = notificationsBox
+        } else if let composite = notifier as? CompositeSchedulerNotifier {
+            self.notificationsBox = composite.notificationsBox
+        } else {
+            self.notificationsBox = NotificationsConfigBox()
+        }
+    }
+
+    /// Current preferences snapshot.
+    public var currentNotifications: NotificationsConfig {
+        notificationsBox.current
+    }
+
+    /// Replaces the live preferences without a restart.
+    public func updateNotifications(_ config: NotificationsConfig) {
+        notificationsBox.update(config)
     }
 
     /// Persists and broadcasts a run start.
@@ -45,7 +69,10 @@ public struct ServerIndexRunReporter: IndexRunReporting {
     public func runCompleted(_ event: IndexRunEvent) async {
         if event.status == .error {
             let detail = event.response ?? event.message
-            await notifier?.notify(
+            await notifyKindAware(
+                notifier,
+                kind: .indexFailed,
+                config: notificationsBox.current,
                 title: "Rune Weaver: Index Run Failed",
                 body: detail.isEmpty ? "Indexing encountered an error." : detail,
                 identifier: "index-run-\(event.id.uuidString)"

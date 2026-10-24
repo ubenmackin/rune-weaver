@@ -56,6 +56,8 @@ public actor ServerSchedulerWorker {
     let outcomeGate: OutcomeGate
     private let schedulerConfig: SchedulerConfig
     let goalsConfig: GoalsConfig
+    /// Live per-type preferences shared with the combined notifier.
+    let notificationsBox: NotificationsConfigBox
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -74,7 +76,8 @@ public actor ServerSchedulerWorker {
                 goalRunLock: SchedulerRunLock? = nil, activeTurns: ActiveTurnTracker? = nil, triggerEpisodeStore: EpisodeStore? = nil,
                 goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(), outcomeGate: OutcomeGate? = nil,
                 proactiveConfig: ProactiveConfig = ProactiveConfig(), judgeLLM: any LLMProvider? = nil,
-                schedulerConfig: SchedulerConfig = .empty, goalsConfig: GoalsConfig = GoalsConfig())
+                schedulerConfig: SchedulerConfig = .empty, goalsConfig: GoalsConfig = GoalsConfig(),
+                notificationsBox: NotificationsConfigBox? = nil)
     {
         self.scheduler = scheduler
         self.runs = runs
@@ -97,6 +100,13 @@ public actor ServerSchedulerWorker {
         self.ideasEngine = ideasEngine
         self.goalRunLock = goalRunLock ?? SchedulerRunLock()
         self.activeTurns = activeTurns
+        if let notificationsBox {
+            self.notificationsBox = notificationsBox
+        } else if let composite = notifier as? CompositeSchedulerNotifier {
+            self.notificationsBox = composite.notificationsBox
+        } else {
+            self.notificationsBox = NotificationsConfigBox()
+        }
         // The trigger bridge shares the goals database file, so an unwired
         // episodic store falls back to one over the same path; a nil path
         // leaves the bridge inert rather than polling a phantom store.
@@ -127,6 +137,21 @@ public actor ServerSchedulerWorker {
 
     // Explicit stop() ends the background loop; actor-isolated loop state
     // cannot be touched from non-isolated deinit, so callers pair start() with stop().
+
+    /// Current per-type preferences snapshot.
+    public var currentNotifications: NotificationsConfig {
+        notificationsBox.current
+    }
+
+    /// Replaces the live per-type preferences without a restart.
+    public func updateNotifications(_ config: NotificationsConfig) {
+        notificationsBox.update(config)
+    }
+
+    /// Whether this kind interrupts under the live preferences.
+    func shouldSurfaceNotifications(_ kind: NotificationKind) -> Bool {
+        NotificationsFilter.shouldSurface(kind, config: notificationsBox.current)
+    }
 
     /// Whether the background loop is actively running.
     public var running: Bool {
@@ -322,7 +347,7 @@ public actor ServerSchedulerWorker {
         let decision = await outcomeGate.decide(
             event: ProactiveEvent(kind: .ideaProposed, title: fallbackTitle, outcome: outcomeText)
         )
-        guard decision.surface else { return }
+        guard decision.surface, shouldSurfaceNotifications(.ideaProposed) else { return }
         let frame = WSProactiveMessageFrame(
             kind: WSProactiveMessageFrame.ideaProposedKind,
             title: fallbackTitle,
@@ -330,7 +355,10 @@ public actor ServerSchedulerWorker {
             goalID: idea.goalID
         )
         await hub.broadcastProactiveMessage(frame)
-        await notifier?.notify(
+        await notifyKindAware(
+            notifier,
+            kind: .ideaProposed,
+            config: notificationsBox.current,
             title: "Rune Weaver: \(fallbackTitle)",
             body: decision.headline.isEmpty ? outcomeText : decision.headline,
             identifier: "idea-\(idea.id)"
@@ -484,15 +512,16 @@ extension ServerSchedulerWorker {
         }
         let outcomeText = response.text.isEmpty ? job.prompt : response.text
         let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: job.name, outcome: outcomeText))
-        if decision.surface {
-            if let notifier {
-                let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
-                await notifier.notify(
-                    title: title,
-                    body: short.isEmpty ? job.prompt : short,
-                    identifier: NotifyID.normalize(nil)
-                )
-            }
+        if decision.surface, shouldSurfaceNotifications(.schedulerRun) {
+            let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
+            await notifyKindAware(
+                notifier,
+                kind: .schedulerRun,
+                config: notificationsBox.current,
+                title: title,
+                body: short.isEmpty ? job.prompt : short,
+                identifier: NotifyID.normalize(nil)
+            )
             await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
         } else if eventKind == .schedulerOk {
             await conversations.setSessionArchived(id: sessionID, isArchived: true)
@@ -577,15 +606,16 @@ extension ServerSchedulerWorker {
         // error row above always records so the gate never hides a failure
         // from history.
         let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: job.name, outcome: detail))
-        if errorDecision.surface {
+        if errorDecision.surface, shouldSurfaceNotifications(.schedulerRun) {
             let errorPreview = ProactiveEvent.makePreview(detail)
-            if let notifier {
-                await notifier.notify(
-                    title: "Rune Weaver: \(job.name)",
-                    body: errorPreview.isEmpty ? job.prompt : errorPreview,
-                    identifier: NotifyID.normalize(nil)
-                )
-            }
+            await notifyKindAware(
+                notifier,
+                kind: .schedulerRun,
+                config: notificationsBox.current,
+                title: "Rune Weaver: \(job.name)",
+                body: errorPreview.isEmpty ? job.prompt : errorPreview,
+                identifier: NotifyID.normalize(nil)
+            )
             await broadcastProactive(kind: .schedulerError, title: job.name, headline: errorDecision.headline, sessionID: sessionID)
         }
 

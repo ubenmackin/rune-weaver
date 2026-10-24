@@ -469,7 +469,8 @@ extension ServeCommand {
             hub: assembly.hub,
             policyStore: policyStore,
             workspaceConfig: assembly.loaded.config.workspace,
-            persona: assembly.loaded.config.persona
+            persona: assembly.loaded.config.persona,
+            notificationsConfig: assembly.loaded.config.notifications
         )
         await attachIndexFailureNotifier(context: context)
         await registerAndVerifyTools(context: context, plugins: plugins, selected: assembly.selected, effectiveSystemPrompt: effectiveSystemPrompt)

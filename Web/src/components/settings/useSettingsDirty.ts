@@ -38,6 +38,7 @@ import {
   personaAssistantName,
   personaStyle,
   personaUserName,
+  resolveNotificationsConfig,
 } from "../../api";
 import {
   DEFAULT_MEMORY_RECALL_AUTO_LIMIT,
@@ -429,6 +430,24 @@ export function isSettingsFormDirty(form: SettingsForm): boolean {
       ? settings.proactive.judgeTimeoutSeconds
       : DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS;
   if (Number(form.proactiveJudgeTimeoutSeconds) !== storedJudgeTimeout) return true;
+
+  // Each notification switch tracks independently against the resolved
+  // snapshot so a single toggle marks the shared footer dirty; absent keys
+  // resolve to enabled on both sides.
+  const storedNotifications = resolveNotificationsConfig(
+    settings.notifications ?? undefined,
+  );
+  if (form.notificationsApprovalRequested !== storedNotifications.approvalRequested)
+    return true;
+  if (form.notificationsSchedulerRun !== storedNotifications.schedulerRun)
+    return true;
+  if (form.notificationsGoalAdvance !== storedNotifications.goalAdvance)
+    return true;
+  if (form.notificationsIdeaProposed !== storedNotifications.ideaProposed)
+    return true;
+  if (form.notificationsIndexFailed !== storedNotifications.indexFailed)
+    return true;
+  if (form.notificationsChatFailed !== storedNotifications.chatFailed) return true;
 
   const personaLoaded = form.personaLoadedRef.current ?? {};
   if (trimmed(form.personaAssistantNameDraft) !== (personaAssistantName(personaLoaded) ?? ""))

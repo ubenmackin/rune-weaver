@@ -25,7 +25,6 @@ function renderNav() {
       }
       runsBadge={0}
       approvalsBadge={0}
-      onRequestNotifications={() => {}}
     />,
   );
 }

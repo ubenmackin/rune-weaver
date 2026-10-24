@@ -259,7 +259,10 @@ private func updateRESTChatRunAndBroadcast(
     if status == "error" || status == "failed" || status == "budget_exceeded" {
         let label = status == "budget_exceeded" ? "Tool Budget Exceeded" : "Chat Run Failed"
         let detail = entry.response ?? entry.message
-        await context.notifier?.notify(
+        await notifyKindAware(
+            context.notifier,
+            kind: .chatFailed,
+            config: notificationsConfig(for: context.notifier),
             title: "Rune Weaver: \(label)",
             body: detail.isEmpty ? "Chat turn failed to complete." : detail,
             identifier: "chat-run-\(entry.id.uuidString)"

@@ -345,3 +345,81 @@ export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfigData = {
   tmpTTLDays: DEFAULT_WORKSPACE_TMP_TTL_DAYS,
 };
 
+// Per-type interruption preferences mirroring the engine `[notifications]`
+// section. Filtering suppresses interruptions only; history and inbox rows
+// still record in every mode.
+export type NotificationPreferenceKey =
+  | "approvalRequested"
+  | "schedulerRun"
+  | "goalAdvance"
+  | "ideaProposed"
+  | "indexFailed"
+  | "chatFailed";
+
+// Closed key set for the `[notifications]` section; unknown keys are rejected
+// by the engine and never round-trip through the dashboard.
+export const NOTIFICATION_PREFERENCE_KEYS = [
+  "approvalRequested",
+  "schedulerRun",
+  "goalAdvance",
+  "ideaProposed",
+  "indexFailed",
+  "chatFailed",
+] as const;
+
+// Full notification snapshot on `GET /settings`. Every key defaults true when
+// absent so an older engine omitting the section still surfaces all types.
+export interface NotificationsConfigData {
+  approvalRequested: boolean;
+  schedulerRun: boolean;
+  goalAdvance: boolean;
+  ideaProposed: boolean;
+  indexFailed: boolean;
+  chatFailed: boolean;
+}
+
+// Partial notifications patch for `PUT /settings`. Every field is optional so
+// an omitted patch preserves the stored `[notifications]` section.
+export interface NotificationsSettingsUpdate {
+  approvalRequested?: boolean;
+  schedulerRun?: boolean;
+  goalAdvance?: boolean;
+  ideaProposed?: boolean;
+  indexFailed?: boolean;
+  chatFailed?: boolean;
+}
+
+// Combined notifications default: every interruption type surfaces unless the
+// owner opts out, matching the engine boundary before the first fetch.
+export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfigData = {
+  approvalRequested: true,
+  schedulerRun: true,
+  goalAdvance: true,
+  ideaProposed: true,
+  indexFailed: true,
+  chatFailed: true,
+};
+
+// Resolves a stored notifications snapshot to the six-switch shape, degrading
+// missing or non-boolean entries to true so absent keys read as enabled.
+export function resolveNotificationsConfig(
+  value: Partial<NotificationsConfigData> | null | undefined,
+): NotificationsConfigData {
+  const source =
+    typeof value === "object" && value !== null
+      ? (value as Partial<Record<NotificationPreferenceKey, unknown>>)
+      : {};
+  const pick = (key: NotificationPreferenceKey): boolean =>
+    typeof source[key] === "boolean"
+      ? (source[key] as boolean)
+      : true;
+  return {
+    approvalRequested: pick("approvalRequested"),
+    schedulerRun: pick("schedulerRun"),
+    goalAdvance: pick("goalAdvance"),
+    ideaProposed: pick("ideaProposed"),
+    indexFailed: pick("indexFailed"),
+    chatFailed: pick("chatFailed"),
+  };
+}
+
