@@ -120,9 +120,11 @@ enum BrowserPlaywrightScriptBody: Sendable {
     /// Body source text, from `collect_refs` through `_request_timeout_ms`.
     static let part = #"""
 
+    _INTERACTIVE_SELECTOR = 'a, button, input:not([type="hidden"]), select, textarea, [role=button], [role=link], [role=textbox], [role=checkbox]'
+
     def collect_refs(page, cap=200):
         try:
-            els = page.query_selector_all("a, button, input, select, textarea, [role=button], [role=link], [role=textbox], [role=checkbox]")
+            els = page.query_selector_all(_INTERACTIVE_SELECTOR)
         except Exception:
             return []
         refs = []
@@ -502,21 +504,69 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     if wanted < 0 or wanted >= len(refs):
                         fail("Unknown ref '%s' for this snapshot" % ref)
                         return
-                    els = page.query_selector_all("a, button, input, select, textarea, [role=button], [role=link], [role=textbox], [role=checkbox]")
+                    els = page.query_selector_all(_INTERACTIVE_SELECTOR)
                     if wanted >= len(els):
                         fail("Unknown ref '%s' for this snapshot" % ref)
                         return
                     el = els[wanted]
                     if action == "click":
-                        el.click(timeout=action_timeout_ms)
+                        try:
+                            el.scroll_into_view_if_needed(timeout=2000)
+                        except Exception:
+                            pass
+                        try:
+                            el.click(timeout=action_timeout_ms)
+                        except Exception:
+                            try:
+                                el.click(force=True, timeout=3000)
+                            except Exception:
+                                page.evaluate("e => e.click()", el)
                     elif action == "fill":
                         el.fill(text or "", timeout=action_timeout_ms)
                     elif action == "select":
                         el.select_option(label=text or "", timeout=action_timeout_ms)
                     elif action == "press":
-                        el.press(text or "Enter", timeout=action_timeout_ms)
+                        raw_key = (text or "Enter").strip()
+                        key_map = {
+                            "return": "Enter",
+                            "enter": "Enter",
+                            "esc": "Escape",
+                            "escape": "Escape",
+                            "tab": "Tab",
+                            "space": "Space",
+                            "backspace": "Backspace",
+                            "delete": "Delete",
+                            "arrowup": "ArrowUp",
+                            "arrowdown": "ArrowDown",
+                            "arrowleft": "ArrowLeft",
+                            "arrowright": "ArrowRight",
+                            "up": "ArrowUp",
+                            "down": "ArrowDown",
+                            "left": "ArrowLeft",
+                            "right": "ArrowRight",
+                            "pageup": "PageUp",
+                            "pagedown": "PageDown",
+                            "home": "Home",
+                            "end": "End",
+                        }
+                        target_key = key_map.get(raw_key.lower(), raw_key)
+                        el.press(target_key, timeout=action_timeout_ms)
                     elif action == "scroll":
-                        el.scroll_into_view_if_needed(timeout=action_timeout_ms)
+                        scroll_cmd = (text or "").strip().lower()
+                        if scroll_cmd in ("down", "up", "top", "bottom") or scroll_cmd.isdigit() or (scroll_cmd.startswith("-") and scroll_cmd[1:].isdigit()):
+                            if scroll_cmd == "up":
+                                page.evaluate("window.scrollBy({ top: -Math.floor(window.innerHeight * 0.75), behavior: 'instant' })")
+                            elif scroll_cmd == "top":
+                                page.evaluate("window.scrollTo({ top: 0, behavior: 'instant' })")
+                            elif scroll_cmd == "bottom":
+                                page.evaluate("window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })")
+                            elif scroll_cmd.isdigit() or (scroll_cmd.startswith("-") and scroll_cmd[1:].isdigit()):
+                                px = int(scroll_cmd)
+                                page.evaluate(f"window.scrollBy({{ top: {px}, behavior: 'instant' }})")
+                            else:
+                                page.evaluate("window.scrollBy({ top: Math.floor(window.innerHeight * 0.75), behavior: 'instant' })")
+                        else:
+                            el.scroll_into_view_if_needed(timeout=action_timeout_ms)
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=5000)
                     except Exception:
@@ -530,12 +580,22 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     if landed_after_reason:
                         fail(landed_after_reason)
                         return
+                    post_title = ""
+                    try:
+                        post_title = page.title() or ""
+                    except Exception:
+                        pass
+                    post_text = page_text(page)
+                    post_refs = collect_refs(page)
                     save_storage_state(context)
                     sys.stdout.write(json.dumps({
                         "ok": True,
                         "url": page.url or url,
                         "action": action,
                         "ref": ref,
+                        "title": post_title,
+                        "text": post_text,
+                        "refs": post_refs,
                         "downloads": [],
                     }))
                     sys.stdout.flush()

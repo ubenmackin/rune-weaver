@@ -363,6 +363,12 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
     public let downloads: [BrowserDownloadManifest]
     /// Human-readable outcome note.
     public let note: String?
+    /// Page title after the action.
+    public let title: String?
+    /// Distilled text after the action.
+    public let text: String?
+    /// Interactive snapshot refs after the action.
+    public let refs: [BrowserElementRef]?
 
     /// Creates an act envelope.
     public init(
@@ -372,7 +378,10 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
         ok: Bool = true,
         dryRun: Bool = false,
         downloads: [BrowserDownloadManifest] = [],
-        note: String? = nil
+        note: String? = nil,
+        title: String? = nil,
+        text: String? = nil,
+        refs: [BrowserElementRef]? = nil
     ) {
         self.url = url
         self.action = action
@@ -381,6 +390,9 @@ public struct BrowserActEnvelope: Sendable, Equatable, Codable {
         self.dryRun = dryRun
         self.downloads = downloads
         self.note = note
+        self.title = title
+        self.text = text
+        self.refs = refs
     }
 }
 
@@ -616,7 +628,7 @@ public struct BrowserActTool: Tool, Sendable {
     /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
         "Runs one validated action (click/fill/select/press/scroll) on a browser.navigate ref plus URL; "
-            + "fill/select need text, approval-gated, manifest-only downloads. "
+            + "fill/select need text, press accepts key (Enter), scroll accepts direction (down/up/top/bottom or pixel count). Approval-gated. "
             + "Act URLs are SSRF-guarded like navigation: loopback, link-local, metadata, and private ranges stay denied."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
     public let inputSchema =
@@ -636,7 +648,7 @@ public struct BrowserActTool: Tool, Sendable {
                 },
                 "text": {
                   "type": "string",
-                  "description": "Value for fill/select or key for press (e.g. Enter)"
+                  "description": "Value for fill/select, key for press (e.g. Enter), or direction for scroll (down, up, top, bottom, or pixel count)"
                 },
                 "url": {
                   "type": "string",
@@ -842,7 +854,10 @@ public struct BrowserActTool: Tool, Sendable {
             ok: true,
             dryRun: false,
             downloads: result.downloads,
-            note: note
+            note: note,
+            title: result.title,
+            text: result.text,
+            refs: result.refs
         )
         return try ToolEnvelopeEncoding.encode(envelope)
     }

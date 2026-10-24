@@ -412,4 +412,54 @@ struct RunCancelRouteTests {
             #expect(await harness.runs.entry(id: childRow.id)?.status == "ok")
         }
     }
+
+    @Test
+    func `settleTurnCancelled persists partial response and tool actions to run log and conversations`() async throws {
+        try await withRunCancelApp { harness in
+            let sessionID = UUID()
+            let token = UUID()
+            let initialEntry = RunLogEntry(
+                id: UUID(),
+                sessionID: sessionID,
+                kind: "chat",
+                status: "running",
+                message: "Search for shoes"
+            )
+            await harness.runs.append(initialEntry)
+            let audit = ChatTurnAuditSnapshot(
+                partialText: "I found several options for you.",
+                partialReasoning: "Looking up running shoes",
+                toolActions: [
+                    ToolAction(
+                        toolName: "browser.navigate",
+                        callID: "call-1",
+                        argumentsJSON: "{\"url\":\"https://example.com\"}",
+                        result: ToolResult(toolCallID: "call-1", content: "ok", isError: false)
+                    )
+                ],
+                totalTokens: 1500
+            )
+
+            await settleTurnCancelled(
+                context: harness.context,
+                sessionID: sessionID,
+                token: token,
+                entry: initialEntry,
+                startTime: Date().addingTimeInterval(-2),
+                audit: audit
+            )
+
+            let settledRun = await harness.runs.entry(id: initialEntry.id)
+            #expect(settledRun?.status == "cancelled")
+            #expect(settledRun?.response == "I found several options for you.\n\n*(Turn cancelled by user)*")
+            #expect(settledRun?.toolActions.count == 1)
+            #expect(settledRun?.totalTokens == 1500)
+
+            let session = await harness.context.conversations.session(id: sessionID)
+            let lastMessage = session?.messages.last
+            #expect(lastMessage?.role == .assistant)
+            #expect(lastMessage?.content == "I found several options for you.\n\n*(Turn cancelled by user)*")
+            #expect(lastMessage?.reasoning == "Looking up running shoes")
+        }
+    }
 }

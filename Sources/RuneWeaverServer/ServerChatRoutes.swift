@@ -8,125 +8,168 @@ import Vapor
 /// - Parameter app: Application receiving the routes.
 func registerChatRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat)) { req async throws -> OrchestratorResponse in
-        let body = try req.content.decode(ChatRequest.self)
-        let text = try validatedChatText(body.text)
-        let context = req.application.runeWeaver
-        let sessionID = body.resolvedSessionID
-        let startTime = Date()
-
-        // Bound parallel turns the same way as the WebSocket path so the REST fallback cannot stack
-        // unbounded: the acquire and the registration happen in one tracker hop, so concurrent fresh
-        // sessions cannot both slip past the cap.
-        let taskBox = TurnTaskBox()
-        guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
-            throw Abort(
-                .tooManyRequests,
-                reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns. Wait for one to finish or cancel it, then retry."
-            )
-        }
-        // Publish the running row immediately so dashboards badge the session from the run log even
-        // before inference streams; every terminal path below updates this same row instead of
-        // appending a second, keeping one audit entry per turn like the WebSocket path.
-        let initialEntry = await context.runs.append(
-            kind: "chat",
-            status: "running",
-            message: text,
-            sessionID: sessionID,
-            durationMs: 0
-        )
-        await context.hub.broadcastRun(initialEntry)
-        // Accumulate partial tool/text/token progress so the error path persists the
-        // same response/toolActions/totalTokens shape as success instead of a tool-less
-        // row; success keeps using the authoritative response verbatim.
-        let auditProgress = ChatTurnAuditProgress()
-        await context.activeTurns.registerSnapshotProvider(sessionID: sessionID) {
-            let snap = auditProgress.snapshot()
-            return LiveTurnSnapshot(
-                sessionID: sessionID,
-                text: snap.partialText,
-                reasoning: snap.partialReasoning,
-                toolActions: snap.toolActions,
-                totalTokens: snap.totalTokens
-            )
-        }
-        let chatTask: Task<OrchestratorResponse, Error> = Task {
-            try await context.orchestrator.process(
-                input: UserInput(
-                    text: text,
-                    sessionID: sessionID,
-                    source: body.resolvedSource
-                ),
-                onEvent: { event in
-                    auditProgress.record(event)
-                    await forwardRESTChatEvent(event, sessionID: sessionID, context: context)
-                }
-            )
-        }
-        taskBox.set(chatTask)
-        // REST keeps one broadcast heartbeat per turn so multi-viewer dashboards
-        // stay live while prompt evaluation is silent; the helper owns the why.
-        let heartbeat = startRESTChatHeartbeat(context: context, sessionID: sessionID)
-        defer { heartbeat.cancel() }
-
-        do {
-            // Tie the inner turn to the request lifetime so a disconnect cancels the model and
-            // tools instead of leaving them running with no client, matching the WebSocket close
-            // path.
-            let response = try await withTaskCancellationHandler {
-                try await chatTask.value
-            } onCancel: {
-                chatTask.cancel()
-            }
-            // A late cancel between process return and settle takes the cancellation path so no done is emitted.
-            guard !Task.isCancelled else {
-                await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
-                throw Abort(.gone, reason: "Turn was cancelled by user")
-            }
-            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
-            // decision can transition the same session entry. The per-turn parked flag keeps a
-            // stale prior park in this session from mis-marking a fresh normal turn.
-            await broadcastParkedApprovals(for: response, context: context)
-            // The terminal response carries the content-free recall summary verbatim
-            // so REST turns surface per-tier counts plus the skip flag with no extra lookup.
-            let parkedStatus = if response.isParked {
-                "awaiting_approval"
-            } else {
-                "ok"
-            }
-            await updateRESTChatRunAndBroadcast(
-                context: context,
-                initialEntry: initialEntry,
-                startTime: startTime,
-                status: parkedStatus,
-                response: response
-            )
-            return response
-        } catch is CancellationError {
-            await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
-            throw Abort(.gone, reason: "Turn was cancelled by user")
-        } catch {
-            // A failure racing a cancel still settles as cancelled so no error overwrites it.
-            if Task.isCancelled {
-                await settleTurnCancelled(context: context, sessionID: sessionID, token: registration.token, entry: initialEntry, startTime: startTime)
-                throw Abort(.gone, reason: "Turn was cancelled by user")
-            }
-            try await handleRESTChatError(
-                error,
-                context: context,
-                turn: RESTChatErrorTurn(
-                    sessionID: sessionID,
-                    registrationToken: registration.token,
-                    initialEntry: initialEntry,
-                    startTime: startTime,
-                    audit: auditProgress.snapshot()
-                )
-            )
-        }
+        try await handleRESTChatTurn(req: req)
     }
 
     registerChatCancelRoute(app)
     registerChatToolCancelRoute(app)
+}
+
+/// Bound runtime state prepared for one REST chat turn.
+private struct InitializedRESTTurn {
+    let registration: TurnRegistration
+    let initialEntry: RunLogEntry
+    let auditProgress: ChatTurnAuditProgress
+}
+
+/// Acquires concurrency slots, records the initial run entry, and sets up live audit snapshots.
+private func initializeRESTChatTurn(
+    context: ServerContext,
+    sessionID: UUID,
+    text: String,
+    onCancel: @escaping @Sendable () -> Void
+) async throws -> InitializedRESTTurn {
+    guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: onCancel) else {
+        throw Abort(
+            .tooManyRequests,
+            reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns. Wait for one to finish or cancel it, then retry."
+        )
+    }
+    let initialEntry = await context.runs.append(
+        kind: "chat",
+        status: "running",
+        message: text,
+        sessionID: sessionID,
+        durationMs: 0
+    )
+    await context.hub.broadcastRun(initialEntry)
+    let auditProgress = ChatTurnAuditProgress()
+    await context.activeTurns.registerSnapshotProvider(sessionID: sessionID) {
+        let snap = auditProgress.snapshot()
+        return LiveTurnSnapshot(
+            sessionID: sessionID,
+            text: snap.partialText,
+            reasoning: snap.partialReasoning,
+            toolActions: snap.toolActions,
+            totalTokens: snap.totalTokens
+        )
+    }
+    return InitializedRESTTurn(registration: registration, initialEntry: initialEntry, auditProgress: auditProgress)
+}
+
+/// Executes one REST chat turn, coordinating acquisition, streaming, cancellation, and settlement.
+private func handleRESTChatTurn(req: Request) async throws -> OrchestratorResponse {
+    let body = try req.content.decode(ChatRequest.self)
+    let text = try validatedChatText(body.text)
+    let context = req.application.runeWeaver
+    let sessionID = body.resolvedSessionID
+    let startTime = Date()
+
+    let taskBox = TurnTaskBox()
+    let initialized = try await initializeRESTChatTurn(
+        context: context,
+        sessionID: sessionID,
+        text: text,
+        onCancel: { taskBox.cancel() }
+    )
+    let registration = initialized.registration
+    let initialEntry = initialized.initialEntry
+    let auditProgress = initialized.auditProgress
+    let chatTask: Task<OrchestratorResponse, Error> = Task {
+        try await context.orchestrator.process(
+            input: UserInput(
+                text: text,
+                sessionID: sessionID,
+                source: body.resolvedSource
+            ),
+            onEvent: { event in
+                auditProgress.record(event)
+                await forwardRESTChatEvent(event, sessionID: sessionID, context: context)
+            }
+        )
+    }
+    taskBox.set(chatTask)
+    // REST keeps one broadcast heartbeat per turn so multi-viewer dashboards
+    // stay live while prompt evaluation is silent; the helper owns the why.
+    let heartbeat = startRESTChatHeartbeat(context: context, sessionID: sessionID)
+    defer { heartbeat.cancel() }
+
+    do {
+        // Tie the inner turn to the request lifetime so a disconnect cancels the model and
+        // tools instead of leaving them running with no client, matching the WebSocket close
+        // path.
+        let response = try await withTaskCancellationHandler {
+            try await chatTask.value
+        } onCancel: {
+            chatTask.cancel()
+        }
+        // A late cancel between process return and settle takes the cancellation path so no done is emitted.
+        guard !Task.isCancelled else {
+            await settleTurnCancelled(
+                context: context,
+                sessionID: sessionID,
+                token: registration.token,
+                entry: initialEntry,
+                startTime: startTime,
+                audit: auditProgress.snapshot()
+            )
+            throw Abort(.gone, reason: "Turn was cancelled by user")
+        }
+        await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+        // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
+        // decision can transition the same session entry. The per-turn parked flag keeps a
+        // stale prior park in this session from mis-marking a fresh normal turn.
+        await broadcastParkedApprovals(for: response, context: context)
+        // The terminal response carries the content-free recall summary verbatim
+        // so REST turns surface per-tier counts plus the skip flag with no extra lookup.
+        let parkedStatus = if response.isParked {
+            "awaiting_approval"
+        } else {
+            "ok"
+        }
+        await updateRESTChatRunAndBroadcast(
+            context: context,
+            initialEntry: initialEntry,
+            startTime: startTime,
+            status: parkedStatus,
+            response: response
+        )
+        return response
+    } catch is CancellationError {
+        await settleTurnCancelled(
+            context: context,
+            sessionID: sessionID,
+            token: registration.token,
+            entry: initialEntry,
+            startTime: startTime,
+            audit: auditProgress.snapshot()
+        )
+        throw Abort(.gone, reason: "Turn was cancelled by user")
+    } catch {
+        // A failure racing a cancel still settles as cancelled so no error overwrites it.
+        if Task.isCancelled {
+            await settleTurnCancelled(
+                context: context,
+                sessionID: sessionID,
+                token: registration.token,
+                entry: initialEntry,
+                startTime: startTime,
+                audit: auditProgress.snapshot()
+            )
+            throw Abort(.gone, reason: "Turn was cancelled by user")
+        }
+        try await handleRESTChatError(
+            error,
+            context: context,
+            turn: RESTChatErrorTurn(
+                sessionID: sessionID,
+                registrationToken: registration.token,
+                initialEntry: initialEntry,
+                startTime: startTime,
+                audit: auditProgress.snapshot()
+            )
+        )
+    }
 }
 
 /// Inputs for handling a failed REST chat turn without growing the handler signature.

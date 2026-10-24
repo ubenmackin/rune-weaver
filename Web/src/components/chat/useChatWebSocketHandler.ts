@@ -48,6 +48,7 @@ import {
   appendDeltaToSegments,
   appendReasoningDeltaToSegments,
   appendToolStartToSegments,
+  buildCancelledMessageItem,
   buildDoneSegments,
   deduplicateToolActionsByCallID,
   flatActionsFromSegments,
@@ -723,6 +724,18 @@ export function useChatWebSocketHandler({
         activeTurnStartMsRef.current = null;
         pendingSteerRef.current = [];
         pendingNormalRef.current = null;
+        const cancelledMsg = buildCancelledMessageItem(inFlightTurnRef.current);
+        if (cancelledMsg) {
+          setMessages((prev) => {
+            const base = prev.filter((m) => {
+              if (m.role !== "assistant") return true;
+              if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+              if (!m.toolActions || m.toolActions.length === 0) return false;
+              return true;
+            });
+            return [...base, cancelledMsg].slice(-MAX_MESSAGES);
+          });
+        }
         inFlightTurnRef.current = null;
         pendingRef.current = false;
         setInFlightTurn(null);
