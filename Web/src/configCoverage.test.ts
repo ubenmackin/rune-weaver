@@ -162,6 +162,12 @@ const EXPECTED_LEAF_KEYS: readonly string[] = [
   "persona.style",
   "persona.user_name",
   "persona.avatar",
+  "notifications.approval_requested",
+  "notifications.scheduler_run",
+  "notifications.goal_advance",
+  "notifications.idea_proposed",
+  "notifications.index_failed",
+  "notifications.chat_failed",
 ];
 
 // Adding a RuneWeaverConfig leaf key rides one change across ledger, Settings

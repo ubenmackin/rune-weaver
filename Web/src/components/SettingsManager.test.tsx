@@ -3966,14 +3966,14 @@ describe("SettingsManager persona pane", () => {
     expect(putBodies[0]).toEqual({ persona: { assistantName: "Vex" } });
   });
 
-  it("lists thirteen sidebar tabs in promotion order", async () => {
+  it("lists fourteen sidebar tabs in promotion order", async () => {
     stubPersonaFetch();
     render(<SettingsManager />);
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.length).toBe(13);
+    expect(tabs.length).toBe(14);
     const labels = tabs.map((tab) => tab.textContent ?? "");
     expect(labels[0]).toMatch(/^Access$/);
     expect(labels[1]).toMatch(/LLM Providers/);
@@ -3986,10 +3986,8 @@ describe("SettingsManager persona pane", () => {
     expect(labels[8]).toMatch(/^Web/);
     expect(labels[9]).toMatch(/Email Accounts/);
     expect(labels[10]).toMatch(/^Security/);
-    expect(labels[11]).toMatch(/Network/);
-    expect(labels[12]).toMatch(/Engine and Logs/);
-    // Access absorbed the retired Policy tab: no Policy entry remains in the
-    // rail and Access leads the promotion order.
+    expect(labels.slice(11).join("|")).toMatch(/Network\|Engine and Logs\|Notifications/);
+    // Retired Policy tab stays absorbed by Access at the rail head.
     expect(labels.join("|")).not.toMatch(/Policy/);
   });
 
@@ -4023,7 +4021,7 @@ describe("SettingsManager persona pane", () => {
     expect(bashHit.textContent).toMatch(/Access/);
     // Selecting a row jumps to its tab, restores the rail, and pulses the target.
     await user.click(bashHit);
-    expect(railTabs()).toHaveLength(13);
+    expect(railTabs()).toHaveLength(14);
     expect(
       within(
         screen.getByRole("tablist", { name: "Settings categories" })
@@ -4057,7 +4055,7 @@ describe("SettingsManager persona pane", () => {
       screen.queryByRole("tablist", { name: "Settings categories" })
     ).toBeNull();
     await user.clear(finder);
-    expect(railTabs()).toHaveLength(13);
+    expect(railTabs()).toHaveLength(14);
   });
 
   it("drills from a Your Name item result and highlights the field", async () => {
@@ -4783,6 +4781,7 @@ describe("SettingsManager workspace machine control", () => {
       "Security",
       "Network",
       "Engine and Logs",
+      "Notifications",
     ]);
   });
 });

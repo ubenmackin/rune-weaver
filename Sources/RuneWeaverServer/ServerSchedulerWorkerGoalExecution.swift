@@ -84,15 +84,16 @@ extension ServerSchedulerWorker {
         // broadcast above always record so suppressed steps stay auditable.
         let outcomeText = outcome.text.isEmpty ? goal.title : outcome.text
         let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: goal.title, outcome: outcomeText))
-        if decision.surface {
-            if let notifier {
-                let title = outcome.isBudgetExceeded ? "Rune Weaver: \(goal.title) (Budget Exceeded)" : "Rune Weaver: \(goal.title)"
-                await notifier.notify(
-                    title: title,
-                    body: short.isEmpty ? goal.title : short,
-                    identifier: NotifyID.normalize(nil)
-                )
-            }
+        if decision.surface, shouldSurfaceNotifications(.goalAdvance) {
+            let title = outcome.isBudgetExceeded ? "Rune Weaver: \(goal.title) (Budget Exceeded)" : "Rune Weaver: \(goal.title)"
+            await notifyKindAware(
+                notifier,
+                kind: .goalAdvance,
+                config: notificationsBox.current,
+                title: title,
+                body: short.isEmpty ? goal.title : short,
+                identifier: NotifyID.normalize(nil)
+            )
             await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
         }
         // Suggestions born from the achievement ride their own proactive frames.
@@ -135,15 +136,16 @@ extension ServerSchedulerWorker {
         // error row above always records so the gate never hides a failure
         // from history.
         let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: goal.title, outcome: detail))
-        if errorDecision.surface {
+        if errorDecision.surface, shouldSurfaceNotifications(.goalAdvance) {
             let errorPreview = ProactiveEvent.makePreview(detail)
-            if let notifier {
-                await notifier.notify(
-                    title: "Rune Weaver: \(goal.title)",
-                    body: errorPreview.isEmpty ? goal.title : errorPreview,
-                    identifier: NotifyID.normalize(nil)
-                )
-            }
+            await notifyKindAware(
+                notifier,
+                kind: .goalAdvance,
+                config: notificationsBox.current,
+                title: "Rune Weaver: \(goal.title)",
+                body: errorPreview.isEmpty ? goal.title : errorPreview,
+                identifier: NotifyID.normalize(nil)
+            )
             await broadcastProactive(kind: .schedulerError, title: goal.title, headline: errorDecision.headline, sessionID: sessionID, goalID: goal.id)
         }
         return SchedulerRunResult(

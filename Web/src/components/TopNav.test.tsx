@@ -28,7 +28,6 @@ function renderNav(health: Record<string, unknown> | null) {
       health={health as never}
       runsBadge={0}
       approvalsBadge={0}
-      onRequestNotifications={() => {}}
     />
   );
 }
@@ -399,7 +398,6 @@ describe("TopNav profile menu", () => {
       health: HEALTH,
       runsBadge: 0,
       approvalsBadge: 0,
-      onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
     return render(<TopNav {...props} />);
@@ -510,7 +508,6 @@ describe("TopNav profile menu", () => {
         health={HEALTH as never}
         runsBadge={100}
         approvalsBadge={99}
-        onRequestNotifications={() => {}}
       />,
     );
     const badges = Array.from(document.querySelectorAll(".nav-badge"));
@@ -553,7 +550,6 @@ describe("TopNav Work group menu", () => {
       runsBadge: 0,
       approvalsBadge: 0,
       goalsBadge: 0,
-      onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
   }
@@ -752,7 +748,6 @@ describe("TopNav staged drawer trigger", () => {
       health: null,
       runsBadge: 0,
       approvalsBadge: 0,
-      onRequestNotifications: () => {},
       stagedFilesCount: 0,
       onOpenStagedDrawer: () => {},
       ...overrides,
@@ -831,7 +826,6 @@ describe("TopNav staged drawer trigger", () => {
         health={null as never}
         runsBadge={0}
         approvalsBadge={0}
-        onRequestNotifications={() => {}}
         stagedFilesCount={1}
         onOpenStagedDrawer={() => {}}
       />
@@ -879,7 +873,6 @@ describe("TopNav operator profile", () => {
       runsBadge: 0,
       approvalsBadge: 0,
       goalsBadge: 0,
-      onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
     return render(<TopNav {...props} />);

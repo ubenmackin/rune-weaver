@@ -6,6 +6,7 @@ import { EngineTab } from "./EngineTab";
 import { GoalsTab } from "./GoalsTab";
 import { MemoryTab } from "./MemoryTab";
 import { NetworkTab } from "./NetworkTab";
+import { NotificationsTab } from "./NotificationsTab";
 import { PersonaTab } from "./PersonaTab";
 import { ProvidersTab } from "./ProvidersTab";
 import { SecurityTab } from "./SecurityTab";
@@ -275,6 +276,22 @@ export function SettingsFormPanels({
           secretStatus={services.secretStatus}
           onOpenStoreSecretModal={services.handleOpenStoreSecretModal}
           validationError={save.error}
+        />
+      )}
+      {activeTab === "notifications" && (
+        <NotificationsTab
+          notificationsApprovalRequested={form.notificationsApprovalRequested}
+          setNotificationsApprovalRequested={form.setNotificationsApprovalRequested}
+          notificationsSchedulerRun={form.notificationsSchedulerRun}
+          setNotificationsSchedulerRun={form.setNotificationsSchedulerRun}
+          notificationsGoalAdvance={form.notificationsGoalAdvance}
+          setNotificationsGoalAdvance={form.setNotificationsGoalAdvance}
+          notificationsIdeaProposed={form.notificationsIdeaProposed}
+          setNotificationsIdeaProposed={form.setNotificationsIdeaProposed}
+          notificationsIndexFailed={form.notificationsIndexFailed}
+          setNotificationsIndexFailed={form.setNotificationsIndexFailed}
+          notificationsChatFailed={form.notificationsChatFailed}
+          setNotificationsChatFailed={form.setNotificationsChatFailed}
         />
       )}
       {activeTab === "network" && (

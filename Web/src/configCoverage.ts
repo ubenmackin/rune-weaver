@@ -22,6 +22,7 @@ export const SETTINGS_SURFACES = [
   "proactive-pane",
   "ideas-pane",
   "persona-pane",
+  "notifications-pane",
 ] as const;
 
 export type SettingsSurface = (typeof SETTINGS_SURFACES)[number];
@@ -178,6 +179,12 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "persona.style": "persona-pane",
   "persona.user_name": "persona-pane",
   "persona.avatar": "persona-pane",
+  "notifications.approval_requested": "notifications-pane",
+  "notifications.scheduler_run": "notifications-pane",
+  "notifications.goal_advance": "notifications-pane",
+  "notifications.idea_proposed": "notifications-pane",
+  "notifications.index_failed": "notifications-pane",
+  "notifications.chat_failed": "notifications-pane",
 };
 
 export const CONFIG_COVERAGE_EXCLUSIONS: Record<string, string> = {

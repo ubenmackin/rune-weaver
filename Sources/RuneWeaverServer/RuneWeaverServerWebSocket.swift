@@ -683,7 +683,10 @@ private func finishWebSocketFailedTurn(
         durationMs: durationMs
     ) ?? params.initialEntry
     await context.hub.broadcastTerminalRun(entry)
-    await context.notifier?.notify(
+    await notifyKindAware(
+        context.notifier,
+        kind: .chatFailed,
+        config: notificationsConfig(for: context.notifier),
         title: "Rune Weaver: Chat Run Failed",
         body: auditResponse.isEmpty ? error.localizedDescription : auditResponse,
         identifier: "chat-run-\(entry.id.uuidString)"

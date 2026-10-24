@@ -469,6 +469,18 @@ max_triggers_per_goal = 8
 # mode = "all"  # all | milestones | guarded | off
 # judge_timeout_seconds = 15  # Seconds the guarded judge may spend (1-120).
 
+[notifications]
+# Per-type interruption switches. Every key defaults true; turning a type off
+# quiets interruptions only (desktop banner, mobile push, web badge bump) while
+# run history, live run frames, and the approvals inbox still record every
+# event. Applies live with no restart; unknown keys are rejected.
+# approval_requested = true  # Tool approvals waiting for a decision.
+# scheduler_run = true  # Scheduled runs and due jobs.
+# goal_advance = true  # Goal steps and progress updates.
+# idea_proposed = true  # Proactive suggestions awaiting review.
+# index_failed = true  # Document index failures.
+# chat_failed = true  # Background chat failures.
+
 [ideas]
 # Proactive Wayfinder suggestions. Off by default so a fresh install never spends
 # background model calls brainstorming; when enabled the engine reviews recent

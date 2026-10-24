@@ -481,6 +481,7 @@ extension RuneWeaverConfig {
         try Self.decodeFanout(root, into: &config)
         try Self.decodeWorkspace(root, into: &config)
         try Self.decodePersona(root, into: &config)
+        try Self.decodeNotifications(root, into: &config)
         self = config
     }
 

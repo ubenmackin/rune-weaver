@@ -1,14 +1,25 @@
 // Rune Weaver Dashboard — Hook to manage in-app unread attention badges from WebSocket events.
 // OS-level desktop notifications are owned exclusively by the native macOS Menu Bar app.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSharedWebSocket } from "./useSharedWebSocket";
 import type {
   WSGenericFrame,
   WSIncomingFrame,
 } from "./useSharedWebSocket";
 import { normalizeSessionID } from "../approvalsSession";
-import { isGoalNeedsInputProactive, isIdeaProposedProactive } from "../api";
+import {
+  DEFAULT_NOTIFICATIONS_CONFIG,
+  getSettings,
+  isGoalNeedsInputProactive,
+  isIdeaProposedProactive,
+  notificationsConfig,
+  resolveNotificationsConfig,
+} from "../api";
+import type {
+  NotificationsConfigData,
+  SettingsResponse,
+} from "../api";
 
 // Reads the filing identity from an approval prompt so rebroadcasts for the same filing collapse to
 // one badge bump.
@@ -68,7 +79,91 @@ function trackDecidedID(store: Set<string>, id: string): void {
   }
 }
 
-export function useWebNotifications() {
+export interface UseWebNotificationsOptions {
+  settings?: SettingsResponse | null;
+  notifications?: Partial<NotificationsConfigData> | null;
+}
+
+function overridePrefsFromArg(
+  arg: UseWebNotificationsOptions | SettingsResponse | Partial<NotificationsConfigData> | null | undefined,
+): NotificationsConfigData | undefined {
+  if (!arg || typeof arg !== "object") return undefined;
+  const record = arg as Record<string, unknown>;
+  if ("settings" in record) {
+    const settings = record["settings"] as SettingsResponse | null | undefined;
+    if (settings && typeof settings === "object") return notificationsConfig(settings);
+    return undefined;
+  }
+  if ("notifications" in record) {
+    const value = record["notifications"] as Partial<NotificationsConfigData> | null | undefined;
+    if (value && typeof value === "object") return resolveNotificationsConfig(value);
+    if (value == null && "configPath" in record) {
+      return notificationsConfig(record as unknown as SettingsResponse);
+    }
+    return undefined;
+  }
+  const keys = ["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed"];
+  if (keys.some((key) => key in record)) {
+    return resolveNotificationsConfig(record as unknown as Partial<NotificationsConfigData>);
+  }
+  if ("configPath" in record) {
+    return notificationsConfig(record as unknown as SettingsResponse);
+  }
+  return undefined;
+}
+
+// Maps a run row kind to its interruption switch. Unknown kinds have no
+// dedicated switch, so they surface unless every run switch is muted.
+function runKindAllowsBadge(kind: unknown, prefs: NotificationsConfigData): boolean {
+  const normalized = typeof kind === "string" ? kind.trim().toLowerCase() : "";
+  if (normalized === "scheduler") return prefs.schedulerRun;
+  if (normalized === "goal") return prefs.goalAdvance;
+  if (normalized === "index") return prefs.indexFailed;
+  if (normalized === "chat") return prefs.chatFailed;
+  return prefs.schedulerRun || prefs.goalAdvance || prefs.indexFailed || prefs.chatFailed;
+}
+
+export function useWebNotifications(
+  options?: UseWebNotificationsOptions | SettingsResponse | Partial<NotificationsConfigData> | null,
+) {
+  const overridePrefs = useMemo(() => overridePrefsFromArg(options), [options]);
+  const hasOverride = overridePrefs !== undefined;
+  const [livePrefs, setLivePrefs] = useState<NotificationsConfigData>(() => ({
+    ...DEFAULT_NOTIFICATIONS_CONFIG,
+  }));
+  useEffect(() => {
+    if (hasOverride) return;
+    let cancelled = false;
+    const refresh = () => {
+      getSettings()
+        .then((settings) => {
+          if (cancelled) return;
+          setLivePrefs(notificationsConfig(settings));
+        })
+        .catch(() => {
+          // Unreadable settings keep the all-enabled fallback so badges still surface.
+        });
+    };
+    refresh();
+    const handleFocus = () => {
+      refresh();
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", handleFocus);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof window !== "undefined") {
+        window.removeEventListener("focus", handleFocus);
+      }
+    };
+  }, [hasOverride]);
+  const effectivePrefs = overridePrefs ?? livePrefs;
+  const prefsRef = useRef<NotificationsConfigData>(effectivePrefs);
+  useEffect(() => {
+    prefsRef.current = effectivePrefs;
+  }, [effectivePrefs]);
+
   // Unread count for runs that ended in an error or failure requiring operator
   // attention. Routine successful runs ("ok") do not badge the navbar.
   const [runsBadge, setRunsBadge] = useState(0);
@@ -100,10 +195,19 @@ export function useWebNotifications() {
       // Only runs that failed, errored, or exceeded tool budget require operator attention.
       // Routine successful runs ("ok") do not badge the navbar.
       if (status === "error" || status === "failed" || status === "budget_exceeded") {
+        if (!runKindAllowsBadge(run.kind, prefsRef.current)) return;
         setRunsBadge((prev) => prev + 1);
       }
     } else if (frameType === "approval" && frame.request && typeof frame.request === "object") {
       const request = frame.request as Record<string, unknown>;
+      // Muted approval types suppress the badge bump while run logs and inbox
+      // rows still record; the filing is marked consumed so its later decision
+      // cannot drop a different filing's count.
+      if (!prefsRef.current.approvalRequested) {
+        const mutedID = approvalRequestID(request);
+        if (mutedID !== undefined) trackDecidedID(consumedDecidedIDsRef.current, mutedID);
+        return;
+      }
       // One bump per filing: enrichment rebroadcasts share the identical id,
       // so an already-counted id never bumps again while a filing without a
       // usable id still surfaces rather than dropping silently.
@@ -177,8 +281,11 @@ export function useWebNotifications() {
       if (seenWarningsRef.current.has(message)) return;
       seenWarningsRef.current.add(message);
       setWarningsBadge((prev) => prev + 1);
-    } else if (isGoalNeedsInputProactive(frame) || isIdeaProposedProactive(frame)) {
-      // Parked goals needing input and proposed ideas share the proactive attention badge.
+    } else if (isGoalNeedsInputProactive(frame)) {
+      if (!prefsRef.current.goalAdvance) return;
+      setGoalsAttention((prev) => prev + 1);
+    } else if (isIdeaProposedProactive(frame)) {
+      if (!prefsRef.current.ideaProposed) return;
       setGoalsAttention((prev) => prev + 1);
     }
   }, []);

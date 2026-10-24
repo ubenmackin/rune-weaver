@@ -22,6 +22,8 @@ import type {
   ProactiveSettingsUpdate,
   IdeasConfigData,
   IdeasSettingsUpdate,
+  NotificationsConfigData,
+  NotificationsSettingsUpdate,
   WorkspaceConfigData,
   WorkspaceSettingsUpdate,
   DesktopConfigData,
@@ -29,9 +31,11 @@ import type {
 } from "./settings-types";
 import {
   clampToolRounds,
+  DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS,
   DEFAULT_ENGINE_MAX_TOOL_ITERATIONS,
   DEFAULT_GOALS_MAX_TOOL_ITERATIONS,
+  resolveNotificationsConfig,
 } from "./settings-types";
 import type { SchedulerJob } from "./scheduler";
 
@@ -194,6 +198,9 @@ export interface SettingsResponse {
   // Interruption policy under [proactive]; optional for back-compat with
   // older engines that predate the section.
   proactive?: ProactiveConfigData;
+  // Per-type interruption preferences under [notifications]; optional for
+  // back-compat with older engines that predate the section.
+  notifications?: NotificationsConfigData;
   // Proactive Wayfinder suggestion policy under [ideas]; optional for back-compat
   // with older engines that predate the section.
   ideas?: IdeasConfigData;
@@ -273,6 +280,9 @@ export interface UpdateSettingsInput {
   goals?: GoalsSettingsUpdate;
   // Partial proactive patch; an omitted patch preserves the stored [proactive] section.
   proactive?: ProactiveSettingsUpdate;
+  // Partial notifications patch; an omitted patch preserves the stored
+  // [notifications] section. Carried on the shared save with live apply.
+  notifications?: NotificationsSettingsUpdate;
   // Partial ideas patch; an omitted patch preserves the stored [ideas] section.
   ideas?: IdeasSettingsUpdate;
   // Partial fan-out patch; an omitted patch preserves the stored [fanout] section.
@@ -731,5 +741,16 @@ export function goalsMaxToolIterations(
     goals?.maxToolIterations ??
     DEFAULT_GOALS_MAX_TOOL_ITERATIONS;
   return clampToolRounds(raw, DEFAULT_GOALS_MAX_TOOL_ITERATIONS);
+}
+
+// Reads the live per-type interruption preferences from GET /settings,
+// degrading an absent section to all-enabled so older engines still surface
+// every type. Unknown keys never reach the form; filtering only quiets
+// interruptions while history and inbox rows keep recording.
+export function notificationsConfig(
+  settings: SettingsResponse | undefined | null,
+): NotificationsConfigData {
+  if (!settings?.notifications) return { ...DEFAULT_NOTIFICATIONS_CONFIG };
+  return resolveNotificationsConfig(settings.notifications);
 }
 

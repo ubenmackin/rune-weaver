@@ -210,4 +210,29 @@ extension RuneWeaverConfig {
             persona.strictString("avatar", field: "persona.avatar")
         )
     }
+
+    /// Decodes the additive `[notifications]` section, defaulting omitted keys.
+    static func decodeNotifications(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let notifications = root.tables["notifications"] else { return }
+        // Fail-closed on unknown keys so a typo never silently disables filtering.
+        try Self.validateNotificationsKeys(notifications)
+        if let approvalRequested = try notifications.strictBool("approval_requested", field: "notifications.approval_requested") {
+            config.notifications.approvalRequested = approvalRequested
+        }
+        if let schedulerRun = try notifications.strictBool("scheduler_run", field: "notifications.scheduler_run") {
+            config.notifications.schedulerRun = schedulerRun
+        }
+        if let goalAdvance = try notifications.strictBool("goal_advance", field: "notifications.goal_advance") {
+            config.notifications.goalAdvance = goalAdvance
+        }
+        if let ideaProposed = try notifications.strictBool("idea_proposed", field: "notifications.idea_proposed") {
+            config.notifications.ideaProposed = ideaProposed
+        }
+        if let indexFailed = try notifications.strictBool("index_failed", field: "notifications.index_failed") {
+            config.notifications.indexFailed = indexFailed
+        }
+        if let chatFailed = try notifications.strictBool("chat_failed", field: "notifications.chat_failed") {
+            config.notifications.chatFailed = chatFailed
+        }
+    }
 }

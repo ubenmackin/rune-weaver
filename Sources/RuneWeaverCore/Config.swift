@@ -1115,6 +1115,9 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// Owner-facing assistant persona woven into the prompt identity line.
     /// An absent `[persona]` table keeps the stock identity and today's prompt bytes.
     public var persona = PersonaConfig()
+    /// Per-type interruption preferences.
+    /// An absent `[notifications]` table keeps every interruption surfacing.
+    public var notifications = NotificationsConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1141,7 +1144,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         ideas: IdeasConfig = IdeasConfig(),
         fanOut: FanOutConfig = FanOutConfig(),
         workspace: WorkspaceConfig = WorkspaceConfig(),
-        persona: PersonaConfig = PersonaConfig()
+        persona: PersonaConfig = PersonaConfig(),
+        notifications: NotificationsConfig = NotificationsConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1167,6 +1171,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.fanOut = fanOut
         self.workspace = workspace
         self.persona = persona
+        self.notifications = notifications
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1265,6 +1270,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case fanOut = "fanout"
         case workspace
         case persona
+        case notifications
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
@@ -1296,9 +1302,11 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         // Absent persona keeps the stock identity so payloads written before
         // the section existed compose today's prompt byte-for-byte.
         self.persona = try container.decodeIfPresent(PersonaConfig.self, forKey: .persona) ?? PersonaConfig()
+        // Absent notifications keep every interruption surfacing.
+        self.notifications = try container.decodeIfPresent(NotificationsConfig.self, forKey: .notifications) ?? NotificationsConfig()
     }
 
-    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, idea suggestions, workspace, and persona.
+    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, idea suggestions, workspace, persona, and notifications.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1326,6 +1334,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(fanOut, forKey: .fanOut)
         try container.encode(workspace, forKey: .workspace)
         try container.encode(persona, forKey: .persona)
+        try container.encode(notifications, forKey: .notifications)
     }
 }
 

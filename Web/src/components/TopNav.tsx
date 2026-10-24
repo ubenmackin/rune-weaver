@@ -60,9 +60,6 @@ interface TopNavProps {
   warningsBadge?: number;
   stagedFilesCount?: number;
   onOpenStagedDrawer?: () => void;
-  onRequestNotifications?: () =>
-    | void
-    | Promise<NotificationPermission | "unsupported" | void>;
   onClearBadges?: () => void;
 }
 
@@ -76,7 +73,6 @@ export default function TopNav({
   warningsBadge = 0,
   stagedFilesCount = 0,
   onOpenStagedDrawer,
-  onRequestNotifications,
   onClearBadges,
 }: TopNavProps) {
   const [profileOpen, setProfileOpen] = useState(false);
@@ -214,9 +210,9 @@ export default function TopNav({
   );
   useSharedWebSocket(handleWSFrame);
 
-  // Every tap acknowledges in-app unread badges and warnings without prompting for
-  // browser OS notifications (desktop alerts live in the macOS Menu Bar app).
-  const handleBellClick = useCallback(async () => {
+  // Bell surfaces unread degraded-tool warnings plus mark-all-read acknowledgment without
+  // prompting for browser OS notifications (desktop alerts live in the macOS Menu Bar app).
+  const handleBellClick = useCallback(() => {
     const warningsCopy = (count: number) =>
       `${count} ${count === 1 ? "warning" : "warnings"} shown in chat.`;
     const count = normalizeBadgeCount(warningsBadge);
@@ -225,11 +221,6 @@ export default function TopNav({
       normalizeBadgeCount(approvalsBadge) +
       normalizeBadgeCount(goalsBadge);
 
-    try {
-      await onRequestNotifications?.();
-    } catch {
-      // Upstream callback failures never block local acknowledgment feedback.
-    }
     onClearBadges?.();
 
     if (count > 0) {
@@ -245,7 +236,6 @@ export default function TopNav({
     runsBadge,
     approvalsBadge,
     goalsBadge,
-    onRequestNotifications,
     onClearBadges,
     onSelectTab,
     pushSuccessToast,
@@ -581,8 +571,9 @@ export default function TopNav({
       </nav>
 
       <div className="top-nav-right">
-        {/* Bell surfaces unread degraded-tool warnings in amber and acknowledges
-            unread in-app badges when tapped without requesting browser OS permissions. */}
+        {/* Bell surfaces unread degraded-tool warnings in amber plus mark-all-read
+            acknowledgment when tapped without prompting for browser OS notifications
+            (desktop alerts live in the macOS Menu Bar app). */}
         <button
           type="button"
           className={`icon-button ${normalizedWarnings > 0 ? "active" : ""}`}
