@@ -87,7 +87,11 @@ extension ServerSchedulerWorker {
         if decision.surface {
             if let notifier {
                 let title = outcome.isBudgetExceeded ? "Rune Weaver: \(goal.title) (Budget Exceeded)" : "Rune Weaver: \(goal.title)"
-                await notifier.notify(title: title, body: short.isEmpty ? goal.title : short)
+                await notifier.notify(
+                    title: title,
+                    body: short.isEmpty ? goal.title : short,
+                    identifier: NotifyID.normalize(nil)
+                )
             }
             await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
         }
@@ -134,7 +138,11 @@ extension ServerSchedulerWorker {
         if errorDecision.surface {
             let errorPreview = ProactiveEvent.makePreview(detail)
             if let notifier {
-                await notifier.notify(title: "Rune Weaver: \(goal.title)", body: errorPreview.isEmpty ? goal.title : errorPreview)
+                await notifier.notify(
+                    title: "Rune Weaver: \(goal.title)",
+                    body: errorPreview.isEmpty ? goal.title : errorPreview,
+                    identifier: NotifyID.normalize(nil)
+                )
             }
             await broadcastProactive(kind: .schedulerError, title: goal.title, headline: errorDecision.headline, sessionID: sessionID, goalID: goal.id)
         }

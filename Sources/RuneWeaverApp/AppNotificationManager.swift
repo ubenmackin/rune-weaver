@@ -23,8 +23,10 @@ enum NotificationActions {
 private let approvalAttentionInboxKey = "opens_approval_inbox"
 
 /// Coordinates system notifications on macOS.
+/// MainActor serializes the dedup map plus the test sink across scheduler
+/// and approval callbacks; NSObject internals stay MainActor-confined.
 @MainActor
-public final class AppNotificationManager: NSObject, UNUserNotificationCenterDelegate, SchedulerNotifier {
+public final class AppNotificationManager: NSObject, UNUserNotificationCenterDelegate, SchedulerNotifier, @unchecked Sendable {
     /// Handler invoked when an approval-attention notification is tapped. The
     /// notification carries no decision affordance, so the tap only deep-links
     /// to the dashboard inbox where the request can be decided.
@@ -32,6 +34,14 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
 
     /// Handler invoked to open the web dashboard in the default browser.
     public var onOpenDashboard: (@MainActor @Sendable () -> Void)?
+
+    /// Injected request sink for hermetic unit testing without touching UNUserNotificationCenter.
+    var requestSink: (@MainActor @Sendable (UNNotificationRequest) async throws -> Void)?
+
+    /// Bounded FIFO tracking alerted approval IDs and their last posted severity.
+    private var alertedApprovalSeverities: [UUID: ImpactSeverity?] = [:]
+    private var alertedApprovalOrder: [UUID] = []
+    private static let maxTrackedApprovals = 500
 
     /// Creates an instance and sets up categories.
     override public init() {
@@ -73,30 +83,56 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
 
     /// Posts an informational notification for a pending approval request.
     public func postApprovalAttention(_ request: PermissionRequest) async {
-        let content = approvalAttentionContent(request)
+        let isAlreadyAlerted = alertedApprovalSeverities.keys.contains(request.id)
+        if isAlreadyAlerted {
+            let previousSeverity = alertedApprovalSeverities[request.id] ?? nil
+            if previousSeverity == request.assessment?.severity {
+                // Same severity: skip posting so we never repeat notifications.
+                return
+            }
+        }
+
+        trackApprovalAlert(id: request.id, severity: request.assessment?.severity)
+
+        let content = approvalAttentionContent(request, isUpdate: isAlreadyAlerted)
 
         let notificationRequest = UNNotificationRequest(
-            identifier: request.id.uuidString,
+            identifier: NotifyID.normalize("approval-\(request.id.uuidString)"),
             content: content,
             trigger: nil
         )
 
         do {
-            try await UNUserNotificationCenter.current().add(notificationRequest)
+            if let requestSink {
+                try await requestSink(notificationRequest)
+            } else {
+                try await UNUserNotificationCenter.current().add(notificationRequest)
+            }
         } catch {
             print("[AppNotificationManager] Failed to post approval attention notification: \(error.localizedDescription)")
         }
     }
 
+    private func trackApprovalAlert(id: UUID, severity: ImpactSeverity?) {
+        if alertedApprovalSeverities[id] == nil {
+            alertedApprovalOrder.append(id)
+            if alertedApprovalOrder.count > Self.maxTrackedApprovals {
+                let evicted = alertedApprovalOrder.removeFirst()
+                alertedApprovalSeverities.removeValue(forKey: evicted)
+            }
+        }
+        alertedApprovalSeverities[id] = severity
+    }
+
     /// Builds the informational payload for a pending approval request.
     /// Internal so the notification-surface test can pin the payload shape
     /// without touching the live notification center.
-    func approvalAttentionContent(_ request: PermissionRequest) -> UNMutableNotificationContent {
+    func approvalAttentionContent(_ request: PermissionRequest, isUpdate: Bool = false) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = "Action Requires Attention"
         content.subtitle = request.toolName
         content.body = Self.attentionBody(severity: request.assessment?.severity)
-        content.sound = .default
+        content.sound = isUpdate ? nil : .default
         // Routed, not answered: the marker carries no request content, only the
         // destination the tap opens.
         content.userInfo = [approvalAttentionInboxKey: true]
@@ -111,20 +147,31 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
 
     /// Posts a scheduler job completion notification (satisfies ``SchedulerNotifier``).
     public func notify(title: String, body: String) async {
+        await notify(title: title, body: body, identifier: nil)
+    }
+
+    /// Posts a notification with an optional stable identifier (satisfies ``SchedulerNotifier``).
+    public func notify(title: String, body: String, identifier: String? = nil) async {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         content.categoryIdentifier = NotificationCategories.schedulerRun
 
+        let finalIdentifier = NotifyID.normalize(identifier)
+
         let notificationRequest = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: finalIdentifier,
             content: content,
             trigger: nil
         )
 
         do {
-            try await UNUserNotificationCenter.current().add(notificationRequest)
+            if let requestSink {
+                try await requestSink(notificationRequest)
+            } else {
+                try await UNUserNotificationCenter.current().add(notificationRequest)
+            }
         } catch {
             print("[AppNotificationManager] Failed to post scheduler notification: \(error.localizedDescription)")
         }

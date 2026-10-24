@@ -321,6 +321,48 @@ extension ServerContext {
         return egressSupervisor
     }
 
+    private struct ToolRegistrationArgs: Sendable {
+        let services: ServerBootstrapServices
+        let configs: ToolConfigs
+        let transports: ToolTransports
+        let memoryEngine: MemoryEngine
+        let embedder: any EmbeddingsBackend?
+        let goals: GoalComponents
+        let stagedFiles: StagedFilesStore
+        let workspaceStore: WorkspaceStore
+        let fanOutEngine: FanOutEngine
+        let policyStore: PolicyStore
+        let secrets: SecretsManager?
+        let permissionGate: PermissionGate
+    }
+
+    /// Sets up egress supervision, re-evaluates plugins, and registers all builtin tools.
+    private static func registerAllTools(_ args: ToolRegistrationArgs) async throws -> OutboundEgressSupervisor {
+        let egressSupervisor = try await setupEgressAndPolicy(
+            policyStore: args.policyStore, toolConfigs: args.configs,
+            secrets: args.secrets, permissionGate: args.permissionGate
+        )
+        // Early rescan registered bridges without supervision, so refresh the
+        // evaluator and re-register before serving network-capable tools.
+        args.services.pluginStack.discovery.updateEgressEvaluator(egressSupervisor)
+        _ = await args.services.pluginStack.discovery.discoverAndSync(toolBus: args.services.bus)
+        try await registerBuiltinTools(BuiltinToolArgs(
+            bus: args.services.bus, configs: args.configs, transports: args.transports,
+            memoryEngine: args.memoryEngine, embedder: args.embedder,
+            goals: args.goals, stagedFiles: args.stagedFiles,
+            workspaceStore: args.workspaceStore,
+            supersededReviewNotifier: makeStagedSupersedeNotifier(hub: args.services.durable.hub),
+            goalUpdatedNotifier: { [hub = args.services.durable.hub] goal, steps in
+                await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+            },
+            fanOutEngine: args.fanOutEngine,
+            scheduledSendBooking: SchedulerStoreBookingAdapter(store: args.services.durable.scheduler),
+            policyStore: args.policyStore,
+            egressSupervisor: egressSupervisor
+        ))
+        return egressSupervisor
+    }
+
     /// Resolves the sovereign ledger for boot, preloading its signing key.
     /// Keeps the fresh-install versus injected choice beside boot wiring.
     private static func resolveSovereignLedger(
@@ -356,6 +398,51 @@ extension ServerContext {
             RuneWeaverLog.server.warning("ServerContext: workspace boot skipped: \(error.localizedDescription)")
         }
         return store
+    }
+
+    private struct WebPushComponents: Sendable {
+        let keys: WebPushKeys
+        let subscriptions: PushSubscriptionStore
+        let sender: WebPushSender
+        let combinedNotifier: any SchedulerNotifier
+        let combinedApprovalHandler: (@Sendable (PermissionRequest) async -> Void)?
+    }
+
+    /// Prepares VAPID keys, subscription persistence, Web Push sender, and combined alert handlers.
+    private static func prepareWebPush(
+        secrets: SecretsManager?,
+        dbPath: String,
+        notifier: any SchedulerNotifier?,
+        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
+    ) async throws -> WebPushComponents {
+        let vapidKeys = try await WebPushKeys.loadOrGenerate(secrets: secrets)
+        let pushSubscriptions = PushSubscriptionStore(dbPath: dbPath)
+        let pushTransport: any WebPushTransport = ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] == "1"
+            ? NoOpWebPushTransport()
+            : URLSessionWebPushTransport()
+        let pushSender = WebPushSender(vapidKeys: vapidKeys, subscriptions: pushSubscriptions, transport: pushTransport)
+        let combinedNotifier = CompositeSchedulerNotifier(primary: notifier, pushSender: pushSender)
+        let combinedApprovalHandler: (@Sendable (PermissionRequest) async -> Void)? = { request in
+            if let onApprovalRequested {
+                await onApprovalRequested(request)
+            }
+            let label = request.assessment?.severity.rawValue ?? "unknown"
+            await pushSender.broadcast(
+                payload: WebPushSender.PushPayload(
+                    title: "Action Requires Attention",
+                    body: "Tool \(request.toolName) Severity: \(label). Decide in Inbox.",
+                    url: "/#approvals",
+                    tag: "approval-\(request.id.uuidString)"
+                )
+            )
+        }
+        return WebPushComponents(
+            keys: vapidKeys,
+            subscriptions: pushSubscriptions,
+            sender: pushSender,
+            combinedNotifier: combinedNotifier,
+            combinedApprovalHandler: combinedApprovalHandler
+        )
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -459,40 +546,32 @@ extension ServerContext {
         // orchestrator into the fanout.run tool; engine construction is side-effect free, so the
         // earlier position changes nothing else about boot.
         let activeTurns = ActiveTurnTracker()
+        let webPush = try await prepareWebPush(
+            secrets: secrets,
+            dbPath: dbPath,
+            notifier: notifier,
+            onApprovalRequested: onApprovalRequested
+        )
         let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
             memoryEngine: memoryEngine, approvals: services.approvals,
             permissionGate: permissionGate, embedder: embedder,
             securityConfig: securityConfig, recallBudgets: recallBudgets.clamped(),
-            durable: services.durable, notifier: notifier,
+            durable: services.durable, notifier: webPush.combinedNotifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
             goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
             proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
             activeTurns: activeTurns, persona: persona
         ))
-        let egressSupervisor = try await setupEgressAndPolicy(
-            policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
+        let egressSupervisor = try await registerAllTools(ToolRegistrationArgs(
+            services: services, configs: toolConfigs, transports: transports,
+            memoryEngine: memoryEngine, embedder: embedder, goals: goalComponents,
+            stagedFiles: stagedFilesStore, workspaceStore: resolvedWorkspaceStore,
+            fanOutEngine: engines.fanOutEngine, policyStore: resolvedPolicyStore,
             secrets: secrets, permissionGate: permissionGate
-        )
-        // Early rescan registered bridges without supervision, so refresh the
-        // evaluator and re-register before serving network-capable tools.
-        services.pluginStack.discovery.updateEgressEvaluator(egressSupervisor)
-        _ = await services.pluginStack.discovery.discoverAndSync(toolBus: services.bus)
-        try await registerBuiltinTools(BuiltinToolArgs(
-            bus: services.bus, configs: toolConfigs, transports: transports,
-            memoryEngine: memoryEngine, embedder: embedder,
-            goals: goalComponents, stagedFiles: stagedFilesStore,
-            workspaceStore: resolvedWorkspaceStore,
-            supersededReviewNotifier: makeStagedSupersedeNotifier(hub: services.durable.hub),
-            goalUpdatedNotifier: { [hub = services.durable.hub] goal, steps in
-                await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
-            },
-            fanOutEngine: engines.fanOutEngine,
-            scheduledSendBooking: SchedulerStoreBookingAdapter(store: services.durable.scheduler),
-            policyStore: resolvedPolicyStore,
-            egressSupervisor: egressSupervisor
         ))
+
         let context = ServerContext(
             config: config, conversations: conversations, toolBus: services.bus, orchestrator: engines.orchestrator,
             memoryEngine: memoryEngine, embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
@@ -510,16 +589,19 @@ extension ServerContext {
             fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
             mediaConfig: toolConfigs.media, emailConfig: toolConfigs.email, llmServerURLs: toolConfigs.llmServerURLs,
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
+            notifier: webPush.combinedNotifier,
             persona: persona,
             watchdog: watchdog, sovereignLedger: resolvedSovereignLedger,
             onboarding: onboarding ?? OnboardingStore(dbPath: dbPath),
-            approvalDecisions: ApprovalDecisionLogStore(dbPath: dbPath)
+            approvalDecisions: ApprovalDecisionLogStore(dbPath: dbPath),
+            pushSubscriptions: webPush.subscriptions,
+            webPushSender: webPush.sender
         )
         // Await the verified-pulse wiring before serving so early tool calls
         // observe watchdog counts and goal/policy changes invalidate the
         // shared answer cache from the first turn.
         await context.wireVerifiedPulseAsync(goalEngine: services.goalEngine)
-        await finalizeServerContext(context, containersConfig: containersConfig, onApprovalRequested: onApprovalRequested)
+        await finalizeServerContext(context, containersConfig: containersConfig, onApprovalRequested: webPush.combinedApprovalHandler)
         return context
     }
 
@@ -692,6 +774,9 @@ private func finalizeServerContext(
         workspaceStore: context.workspaceStore,
         onApprovalRequested: onApprovalRequested
     )
+    if let onApprovalRequested {
+        await context.orchestrator.setOnApprovalRequested(onApprovalRequested)
+    }
     // System-notice filings broadcast from inside the queue's insert hop through this hook, so a
     // settle racing a filing can never strand a phantom notice card behind a late caller-side frame.
     let noticeHub = context.hub

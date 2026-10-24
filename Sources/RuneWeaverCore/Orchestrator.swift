@@ -56,6 +56,8 @@ public actor Orchestrator {
     /// Nil means the shared live registry; an injected registry keeps
     /// hermetic turns reaping the same registry execution used.
     private var strictRegistry: StrictTurnRegistry?
+    /// Handler invoked when an approval request is filed (including parked turns).
+    var approvalRequestedHandler: (@Sendable (PermissionRequest) async -> Void)?
 
     /// Creates an orchestrator.
     public init(
@@ -121,6 +123,11 @@ public actor Orchestrator {
     /// Dynamically updates the serving LLM provider without a restart.
     public func updateLanguageProvider(_ provider: any LLMProvider) {
         self.languageProvider = provider
+    }
+
+    /// Sets the handler invoked when approval requests are filed (including parked turns).
+    public func setOnApprovalRequested(_ handler: (@Sendable (PermissionRequest) async -> Void)?) {
+        self.approvalRequestedHandler = handler
     }
 
     // MARK: - Shared dependency views

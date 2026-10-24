@@ -1,4 +1,4 @@
-// Rune Weaver Dashboard — Tests for the proactive goal-notification path.
+// Rune Weaver Dashboard — Tests for silent WebSocket attention badges in useWebNotifications.
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,11 +10,11 @@ import {
   resetSharedSocket,
 } from "../test-utils/mockWebSocket";
 
-// Minimal Notification double that records every construction and lets each
-// case pin the permission the hook observes at mount.
+// Spy Notification constructor verifying zero OS-level browser notifications ever fire.
 class MockNotification {
   static permission: NotificationPermission = "granted";
   static instances: MockNotification[] = [];
+  static requestPermission = vi.fn(async () => "granted" as NotificationPermission);
 
   title: string;
   options?: NotificationOptions;
@@ -36,46 +36,22 @@ async function mountWithSocket() {
   return { hook, capture };
 }
 
-describe("useWebNotifications goals attention", () => {
+describe("useWebNotifications silent badge tracking", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+    window.localStorage.clear();
+    window.location.hash = "#dashboard";
     MockNotification.permission = "granted";
     MockNotification.instances = [];
+    MockNotification.requestPermission.mockClear();
     vi.stubGlobal("Notification", MockNotification);
   });
 
-  it("fires exactly one notification and bumps the badge when permission is granted", async () => {
+  it("bumps goalsAttention on goalNeedsInput without instantiating browser Notification", async () => {
     const { hook, capture } = await mountWithSocket();
     expect(hook.result.current.goalsAttention).toBe(0);
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "proactive_message",
-      kind: "goalNeedsInput",
-      title: "field guide",
-      headline: "Waiting on your input",
-    });
-
-    await waitFor(() => {
-      expect(hook.result.current.goalsAttention).toBe(1);
-    });
-    expect(MockNotification.instances).toHaveLength(1);
-    expect(MockNotification.instances[0].title).toBe("Rune Weaver: field guide");
-    expect(MockNotification.instances[0].options?.body).toBe(
-      "Waiting on your input",
-    );
-
-    // The badge clears on navigation acknowledgment without touching server
-    // state, mirroring the runs clear-on-open contract.
-    act(() => {
-      hook.result.current.clearGoalsAttention();
-    });
-    expect(hook.result.current.goalsAttention).toBe(0);
-  });
-
-  it("bumps the badge without notifying when permission is not granted", async () => {
-    MockNotification.permission = "denied";
-    const { hook, capture } = await mountWithSocket();
+    expect(hook.result.current.notificationsEnabled).toBe(false);
 
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "proactive_message",
@@ -88,9 +64,14 @@ describe("useWebNotifications goals attention", () => {
       expect(hook.result.current.goalsAttention).toBe(1);
     });
     expect(MockNotification.instances).toHaveLength(0);
+
+    act(() => {
+      hook.result.current.clearGoalsAttention();
+    });
+    expect(hook.result.current.goalsAttention).toBe(0);
   });
 
-  it("bumps the goals badge when a proactive idea is proposed", async () => {
+  it("bumps goalsAttention when a proactive idea is proposed without instantiating Notification", async () => {
     const { hook, capture } = await mountWithSocket();
 
     await dispatchFrameOrThrow(capture.onMessage, {
@@ -100,18 +81,13 @@ describe("useWebNotifications goals attention", () => {
       headline: "Run 2km instead of 5km.",
     });
 
-    // Ideas ride the same proactive frame as parked goals, so the shared
-    // attention badge rises without a second transport.
     await waitFor(() => {
       expect(hook.result.current.goalsAttention).toBe(1);
     });
-    expect(MockNotification.instances).toHaveLength(1);
-    expect(MockNotification.instances[0].title).toBe(
-      "Rune Weaver: Try a shorter loop",
-    );
+    expect(MockNotification.instances).toHaveLength(0);
   });
 
-  it("ignores proactive messages that are not goal needs-input nudges", async () => {
+  it("ignores proactive messages that are not goalNeedsInput or idea_proposed", async () => {
     const { hook, capture } = await mountWithSocket();
 
     await dispatchFrameOrThrow(capture.onMessage, {
@@ -125,119 +101,129 @@ describe("useWebNotifications goals attention", () => {
     expect(MockNotification.instances).toHaveLength(0);
   });
 
-  it("fires notifications with appropriate titles on run_completed for different kinds without badging normal completions", async () => {
+  it("ignores routine ok run_completed frames and never fires browser Notification", async () => {
     const { hook, capture } = await mountWithSocket();
-    expect(hook.result.current.runsBadge).toBe(0);
 
-    // Index run (successful)
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        id: "run-idx-1",
-        kind: "index",
-        status: "ok",
-        message: "Index run finished",
-        response: "Indexed 10 files",
-      },
-    });
+    for (const kind of ["index", "scheduler", "goal", "chat"]) {
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "run_completed",
+        run: {
+          id: `run-${kind}-1`,
+          kind,
+          status: "ok",
+          message: "Completed",
+        },
+      });
+    }
 
-    // Routine completion does not bump badge
     expect(hook.result.current.runsBadge).toBe(0);
-    expect(MockNotification.instances).toHaveLength(1);
-    expect(MockNotification.instances[0].title).toBe("Rune Weaver: Index Run Finished");
-    expect(MockNotification.instances[0].options?.body).toBe("Indexed 10 files");
-
-    // Scheduler run (successful)
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        id: "run-sched-1",
-        kind: "scheduler",
-        status: "ok",
-        message: "Job finished",
-      },
-    });
-    expect(hook.result.current.runsBadge).toBe(0);
-    expect(MockNotification.instances).toHaveLength(2);
-    expect(MockNotification.instances[1].title).toBe("Rune Weaver: Job Run Finished");
-
-    // Goal run (successful)
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        id: "run-goal-1",
-        kind: "goal",
-        status: "ok",
-        message: "Goal advanced",
-      },
-    });
-    expect(hook.result.current.runsBadge).toBe(0);
-    expect(MockNotification.instances).toHaveLength(3);
-    expect(MockNotification.instances[2].title).toBe("Rune Weaver: Goal Advancement Finished");
-
-    // Chat turn (successful)
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        id: "run-chat-1",
-        kind: "chat",
-        status: "ok",
-        message: "Chat completed",
-      },
-    });
-    expect(hook.result.current.runsBadge).toBe(0);
-    expect(MockNotification.instances).toHaveLength(4);
-    expect(MockNotification.instances[3].title).toBe("Rune Weaver: Chat Finished");
+    expect(MockNotification.instances).toHaveLength(0);
   });
 
-  it("only increments runsBadge when a run ends in error or failure status", async () => {
+  it("increments runsBadge on error, failed, and budget_exceeded without browser Notification", async () => {
     const { hook, capture } = await mountWithSocket();
-    expect(hook.result.current.runsBadge).toBe(0);
 
-    // Successful run does not bump badge
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
-      run: {
-        id: "run-ok-1",
-        kind: "chat",
-        status: "ok",
-        message: "Turn complete",
-      },
+      run: { id: "run-err-1", kind: "scheduler", status: "error", message: "Job failed" },
     });
-    expect(hook.result.current.runsBadge).toBe(0);
-
-    // Failed run with status: 'error' bumps badge
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
-      run: {
-        id: "run-err-1",
-        kind: "scheduler",
-        status: "error",
-        message: "Job failed",
-      },
+      run: { id: "run-err-2", kind: "index", status: "failed", message: "Indexing crashed" },
     });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: { id: "run-err-3", kind: "chat", status: "budget_exceeded", message: "Budget exceeded" },
+    });
+
     await waitFor(() => {
-      expect(hook.result.current.runsBadge).toBe(1);
+      expect(hook.result.current.runsBadge).toBe(3);
     });
+    expect(MockNotification.instances).toHaveLength(0);
 
-    // Failed run with status: 'failed' bumps badge again
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        id: "run-err-2",
-        kind: "index",
-        status: "failed",
-        message: "Indexing crashed",
-      },
-    });
-    await waitFor(() => {
-      expect(hook.result.current.runsBadge).toBe(2);
-    });
-
-    // Clear runs badge resets counter
     act(() => {
       hook.result.current.clearRunsBadge();
     });
     expect(hook.result.current.runsBadge).toBe(0);
+  });
+
+  it("deduplicates approval enrichment rebroadcasts and decrements on decision without browser Notification", async () => {
+    const { hook, capture } = await mountWithSocket();
+
+    // Initial unenriched filing
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval",
+      request: {
+        id: "req-1",
+        toolName: "bash",
+        description: "Run command",
+        input: { toolName: "bash", argumentsJSON: "{}", callID: "call-1" },
+      },
+    });
+    // Enrichment rebroadcast with identical filing ID
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval",
+      request: {
+        id: "req-1",
+        toolName: "bash",
+        description: "Run command",
+        severity: "high",
+        input: { toolName: "bash", argumentsJSON: "{}", callID: "call-1" },
+      },
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.approvalsBadge).toBe(1);
+    });
+    expect(MockNotification.instances).toHaveLength(0);
+
+    // Resolution frame decrements once even if repeated
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_decided",
+      id: "req-1",
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_decided",
+      id: "req-1",
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.approvalsBadge).toBe(0);
+    });
+    expect(MockNotification.instances).toHaveLength(0);
+  });
+
+  it("tracks deduplicated warnings when off-chat without browser Notification", async () => {
+    window.localStorage.setItem("rw_active_session_id", "session-1");
+    window.location.hash = "#approvals";
+    const { hook, capture } = await mountWithSocket();
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "warning",
+      sessionID: "session-1",
+      message: "Sandbox skipped web.fetch",
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "warning",
+      sessionID: "session-1",
+      message: "Sandbox skipped web.fetch",
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.warningsBadge).toBe(1);
+    });
+    expect(MockNotification.instances).toHaveLength(0);
+
+    act(() => {
+      hook.result.current.clearWarningsBadge();
+    });
+    expect(hook.result.current.warningsBadge).toBe(0);
+  });
+
+  it("returns unsupported from deprecated requestPermission shim without prompting browser", async () => {
+    const { hook } = await mountWithSocket();
+    const result = await hook.result.current.requestPermission();
+    expect(result).toBe("unsupported");
+    expect(MockNotification.requestPermission).not.toHaveBeenCalled();
   });
 });

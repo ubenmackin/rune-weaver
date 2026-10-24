@@ -15,6 +15,7 @@ import { MenuIcon, RefreshIcon } from "./icons";
 import { SettingsModals } from "./settings/SettingsModals";
 import SettingsSidenav from "./settings/SettingsSidenav";
 import { SettingsFormPanels } from "./settings/SettingsFormPanels";
+import { MobilePushSettingsCard } from "./settings/MobilePushSettingsCard";
 import { isToolsAdvancedError } from "./settings/ToolsTab";
 import { isVoiceAdvancedError } from "./settings/VoiceTab";
 import { isGoalsAdvancedError } from "./settings/GoalsTab";
@@ -282,6 +283,7 @@ export default function SettingsManager({
         />
 
         <div className="settings-content">
+          <MobilePushSettingsCard />
           <SettingsFormPanels
             activeTab={activeTab}
             form={form}

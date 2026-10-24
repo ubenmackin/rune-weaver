@@ -213,6 +213,15 @@ private func updateRESTChatRunAndBroadcast(
         durationMs: durationMs
     ) ?? initialEntry
     await context.hub.broadcastRun(entry)
+    if status == "error" || status == "failed" || status == "budget_exceeded" {
+        let label = status == "budget_exceeded" ? "Tool Budget Exceeded" : "Chat Run Failed"
+        let detail = entry.response ?? entry.message
+        await context.notifier?.notify(
+            title: "Rune Weaver: \(label)",
+            body: detail.isEmpty ? "Chat turn failed to complete." : detail,
+            identifier: "chat-run-\(entry.id.uuidString)"
+        )
+    }
 }
 
 /// Registers the REST cancellation endpoint sharing the same turn tracker.

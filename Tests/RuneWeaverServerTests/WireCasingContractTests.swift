@@ -265,4 +265,30 @@ struct WireCasingContractTests {
         let prune = WorkspacePruneResponse(removed: 3)
         try verifyCasing(prune, label: "WorkspacePruneResponse")
     }
+
+    @Test
+    func `Web Push DTOs encode with camelCase keys only`() throws {
+        let pubKey = VapidPublicKeyResponse(publicKey: "BP_test_key_abc")
+        try verifyCasing(pubKey, label: "VapidPublicKeyResponse")
+
+        let subPayload = PushSubscriptionPayload(
+            endpoint: "https://web.push.apple.com/test",
+            p256dh: "key123",
+            auth: "auth123",
+            userAgent: "Mozilla/5.0"
+        )
+        try verifyCasing(subPayload, label: "PushSubscriptionPayload")
+
+        let subRes = PushSubscriptionResponse(endpoint: "https://web.push.apple.com/test")
+        try verifyCasing(subRes, label: "PushSubscriptionResponse")
+
+        let unsubPayload = PushUnsubscribePayload(endpoint: "https://web.push.apple.com/test")
+        try verifyCasing(unsubPayload, label: "PushUnsubscribePayload")
+
+        let unsubRes = PushUnsubscribeResponse(removed: true)
+        try verifyCasing(unsubRes, label: "PushUnsubscribeResponse")
+
+        let testRes = PushTestResponse(delivered: 1)
+        try verifyCasing(testRes, label: "PushTestResponse")
+    }
 }

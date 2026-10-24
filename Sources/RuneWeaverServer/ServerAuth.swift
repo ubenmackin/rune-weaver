@@ -965,7 +965,7 @@ public enum ServerAuthRequest {
     }
 
     /// Whether a root-level path names a static file the bundle ships.
-    private static func isKnownStaticRootFile(_ normalizedPath: String) -> Bool {
+    package static func isKnownStaticRootFile(_ normalizedPath: String) -> Bool {
         guard !normalizedPath.contains("/") else { return false }
         if knownStaticRootFiles.contains(normalizedPath) {
             return true
@@ -979,7 +979,7 @@ public enum ServerAuthRequest {
         "favicon.ico", "favicon.svg", "favicon.png",
         "apple-touch-icon.png", "apple-touch-icon-precomposed.png",
         "site.webmanifest", "manifest.webmanifest", "manifest.json",
-        "robots.txt"
+        "robots.txt", "sw.js"
     ]
 
     /// Whether a path is the single WebSocket endpoint. The upgrade-only query fallback is

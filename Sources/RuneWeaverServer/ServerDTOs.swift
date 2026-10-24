@@ -184,6 +184,14 @@ public enum ServerPaths {
     public static let workspaceMachineStop = "stop"
     /// Machine recycle subpath under `/workspace/machine`.
     public static let workspaceMachineRecycle = "recycle"
+    /// Web Push notifications group.
+    public static let push = "push"
+    /// VAPID public key subpath under `/push`.
+    public static let vapidPublicKey = "vapid-public-key"
+    /// Subscriptions subpath under `/push`.
+    public static let subscriptions = "subscriptions"
+    /// Test push subpath under `/push`.
+    public static let test = "test"
     /// Engine API version served on `/health`.
     /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
     /// and providers cannot drift.
