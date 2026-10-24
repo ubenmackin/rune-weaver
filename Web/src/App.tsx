@@ -217,9 +217,6 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
   }
 
   const {
-    notificationsEnabled,
-    permission,
-    requestPermission,
     runsBadge,
     clearRunsBadge,
     approvalsBadge,
@@ -315,46 +312,19 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
     });
   }
 
-  // Bell wiring owns badge clearing plus the permission prompt, while the bell button itself owns
-  // the visible toast.
-  async function handleRequestNotifications(): Promise<
-    NotificationPermission | "unsupported"
-  > {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      return "unsupported";
-    }
-    // Prefer the hook-owned permission but fall back to the live global so
-    // older test doubles without the new field still resolve honestly.
-    const current =
-      typeof permission === "string"
-        ? (permission as NotificationPermission)
-        : Notification.permission;
-    // Fail-closed: a blocked choice stays blocked until site settings change;
-    // never fire a silent re-prompt and never clear unseen warnings.
-    if (current === "denied") {
-      return "denied";
-    }
-    if (current === "granted") {
-      if (warningsBadge > 0) {
-        handleSelectTab("chat");
-      }
-      return "granted";
-    }
-    try {
-      const outcome = (await requestPermission()) as
-        | NotificationPermission
-        | "unsupported"
-        | void;
-      const resolved =
-        typeof outcome === "string" ? outcome : Notification.permission;
-      if (resolved === "granted" && warningsBadge > 0) {
-        handleSelectTab("chat");
-      }
-      return resolved as NotificationPermission | "unsupported";
-    } catch {
-      return Notification.permission;
-    }
-  }
+  // Bell acknowledgment clears all advisory unread badges in-app without
+  // invoking browser OS notification permissions.
+  const handleClearBadges = useCallback(() => {
+    clearRunsBadge();
+    clearApprovalsBadge();
+    clearWarningsBadge();
+    clearGoalsAttention();
+  }, [
+    clearRunsBadge,
+    clearApprovalsBadge,
+    clearWarningsBadge,
+    clearGoalsAttention,
+  ]);
 
   if (isStandalone) {
     return (
@@ -383,8 +353,7 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
         warningsBadge={warningsBadge}
         stagedFilesCount={stagedFilesCount}
         onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
-        notificationsEnabled={notificationsEnabled}
-        onRequestNotifications={handleRequestNotifications}
+        onClearBadges={handleClearBadges}
       />
 
       {/* The drawer is a page-level overlay that renders nothing while closed,

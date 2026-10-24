@@ -13,11 +13,14 @@ public struct ServerIndexRunReporter: IndexRunReporting {
     private let runs: RunLogStore
     /// Live sockets receiving run broadcasts.
     private let hub: WSHub
+    /// Optional notification dispatcher for failed index runs.
+    private let notifier: any SchedulerNotifier?
 
     /// Creates a reporter. runs: Run audit trail to persist into.
-    public init(runs: RunLogStore, hub: WSHub) {
+    public init(runs: RunLogStore, hub: WSHub, notifier: any SchedulerNotifier? = nil) {
         self.runs = runs
         self.hub = hub
+        self.notifier = notifier
     }
 
     /// Persists and broadcasts a run start.
@@ -40,6 +43,14 @@ public struct ServerIndexRunReporter: IndexRunReporting {
     /// Persists and broadcasts a run completion. Falls back to appending the completed entry when
     /// the start row is not present, so a completion never disappears because its start was pruned.
     public func runCompleted(_ event: IndexRunEvent) async {
+        if event.status == .error {
+            let detail = event.response ?? event.message
+            await notifier?.notify(
+                title: "Rune Weaver: Index Run Failed",
+                body: detail.isEmpty ? "Indexing encountered an error." : detail,
+                identifier: "index-run-\(event.id.uuidString)"
+            )
+        }
         if let updated = await runs.update(
             id: event.id,
             status: event.status.rawValue,

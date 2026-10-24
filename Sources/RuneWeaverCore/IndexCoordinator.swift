@@ -38,7 +38,7 @@ public actor IndexCoordinator {
     /// Durable watermark and trigger state.
     private let stateStore: IndexRunStateStore
     /// Run lifecycle reporting seam.
-    private let reporter: any IndexRunReporting
+    private var reporter: any IndexRunReporting
     /// Wall-clock seam, injectable so nightly gating is deterministic under test.
     private let now: @Sendable () -> Date
     /// Hour of day (0-23) at or after which the nightly trigger may fire.
@@ -196,6 +196,11 @@ public actor IndexCoordinator {
     /// Updates the live index policy so saved `[index]` values take effect without a restart.
     public func updateConfig(_ newConfig: IndexConfig) {
         config = newConfig
+    }
+
+    /// Swaps the run reporter so boot can thread the combined notifier without rebuilding stages.
+    public func setReporter(_ newReporter: any IndexRunReporting) {
+        reporter = newReporter
     }
 
     /// Runs the nightly trigger when it is due.

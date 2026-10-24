@@ -114,6 +114,65 @@ struct AppModelApprovalSurfaceTests {
         #expect(!content.body.contains(Self.argumentsProbe))
     }
 
+    @Test
+    func `approval notifications alert with sound once and update severity silently without duplicate chime`() async {
+        let manager = AppNotificationManager()
+        var delivered: [UNNotificationRequest] = []
+        manager.requestSink = { req in
+            delivered.append(req)
+        }
+
+        let initial = PermissionRequest(
+            toolName: "bash",
+            description: "Run command",
+            input: ToolInput(toolName: "bash", argumentsJSON: "{}")
+        )
+
+        // 1. Initial unenriched filing
+        await manager.postApprovalAttention(initial)
+        #expect(delivered.count == 1)
+        #expect(delivered[0].identifier == "approval-\(initial.id.uuidString)")
+        #expect(delivered[0].content.sound != nil)
+        #expect(delivered[0].content.body.contains("unknown"))
+
+        // 2. Duplicate filing with identical severity: no second notification posted
+        await manager.postApprovalAttention(initial)
+        #expect(delivered.count == 1)
+
+        // 3. Enriched update arriving ~200ms later: updates content silently (zero second chime)
+        let enriched = PermissionRequest(
+            id: initial.id,
+            toolName: "bash",
+            description: "Run command",
+            input: ToolInput(toolName: "bash", argumentsJSON: "{}"),
+            assessment: ImpactAssessment(severity: .dangerous, outcome: "Modifies system files")
+        )
+        await manager.postApprovalAttention(enriched)
+        #expect(delivered.count == 2)
+        #expect(delivered[1].identifier == "approval-\(initial.id.uuidString)")
+        #expect(delivered[1].content.sound == nil)
+        #expect(delivered[1].content.body.contains("dangerous"))
+
+        // 4. Repeated enriched update: no third notification posted
+        await manager.postApprovalAttention(enriched)
+        #expect(delivered.count == 2)
+    }
+
+    @Test
+    func `notify uses deterministic identifier when provided`() async {
+        let manager = AppNotificationManager()
+        var delivered: [UNNotificationRequest] = []
+        manager.requestSink = { req in
+            delivered.append(req)
+        }
+
+        await manager.notify(title: "Rune Weaver: Job", body: "Ran", identifier: "test-alert")
+        #expect(delivered.count == 1)
+        #expect(delivered[0].identifier == "test-alert")
+        #expect(delivered[0].content.title == "Rune Weaver: Job")
+        #expect(delivered[0].content.body == "Ran")
+    }
+
     private func makeRequest(
         toolName: String,
         description: String,

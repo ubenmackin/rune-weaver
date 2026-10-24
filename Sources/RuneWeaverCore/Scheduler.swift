@@ -538,6 +538,16 @@ public typealias SchedulerLogHandler = @Sendable (String) async -> Void
 public protocol SchedulerNotifier: Sendable {
     /// Posts a notification, best-effort and never throwing.
     func notify(title: String, body: String) async
+
+    /// Posts a notification with an optional deterministic identifier so retries
+    /// or status updates replace rather than duplicate existing banners.
+    func notify(title: String, body: String, identifier: String?) async
+}
+
+extension SchedulerNotifier {
+    public func notify(title: String, body: String, identifier _: String?) async {
+        await notify(title: title, body: body)
+    }
 }
 
 /// Outcome of one scheduler job execution.

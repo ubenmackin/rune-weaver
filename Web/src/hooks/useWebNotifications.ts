@@ -1,4 +1,5 @@
-// Rune Weaver Dashboard — Hook to manage browser Notification API permissions and WebSocket events.
+// Rune Weaver Dashboard — Hook to manage in-app unread attention badges from WebSocket events.
+// OS-level desktop notifications are owned exclusively by the native macOS Menu Bar app.
 
 import { useCallback, useRef, useState } from "react";
 import { useSharedWebSocket } from "./useSharedWebSocket";
@@ -68,22 +69,15 @@ function trackDecidedID(store: Set<string>, id: string): void {
 }
 
 export function useWebNotifications() {
-  const [permission, setPermission] = useState<NotificationPermission>(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      return Notification.permission;
-    }
-    return "default";
-  });
-
   // Unread count for runs that ended in an error or failure requiring operator
   // attention. Routine successful runs ("ok") do not badge the navbar.
   const [runsBadge, setRunsBadge] = useState(0);
   const [approvalsBadge, setApprovalsBadge] = useState(0);
-  // Owner-attention count for goals parked awaiting input.
+  // Owner-attention count for goals parked awaiting input or proposed ideas.
   const [goalsAttention, setGoalsAttention] = useState(0);
   // Degraded-tool notices keep their own counter instead of inflating runs
-  // or approvals; the bell surfaces the count as an amber badge gated behind
-  // the same permission toggle, cleared when the chat view is shown.
+  // or approvals; the bell surfaces the count as an amber badge cleared when
+  // the chat view is shown or acknowledged.
   const [warningsBadge, setWarningsBadge] = useState(0);
   // Dedup seen warning lines so live plus terminal repeats never inflate the bell.
   const seenWarningsRef = useRef<Set<string>>(new Set());
@@ -108,25 +102,6 @@ export function useWebNotifications() {
       if (status === "error" || status === "failed" || status === "budget_exceeded") {
         setRunsBadge((prev) => prev + 1);
       }
-
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        const kind = typeof run.kind === "string" ? run.kind : undefined;
-        const response = typeof run.response === "string" ? run.response : undefined;
-        const message = typeof run.message === "string" ? run.message : undefined;
-        let label = "Chat Finished";
-        if (status === "budget_exceeded") {
-          label = "Tool Budget Exceeded";
-        } else if (kind === "scheduler") {
-          label = "Job Run Finished";
-        } else if (kind === "index") {
-          label = "Index Run Finished";
-        } else if (kind === "goal") {
-          label = "Goal Advancement Finished";
-        }
-        const title = `Rune Weaver: ${label}`;
-        const body = response ? response.slice(0, 150) : message;
-        new Notification(title, { body });
-      }
     } else if (frameType === "approval" && frame.request && typeof frame.request === "object") {
       const request = frame.request as Record<string, unknown>;
       // One bump per filing: enrichment rebroadcasts share the identical id,
@@ -143,19 +118,6 @@ export function useWebNotifications() {
         }
       } else {
         setApprovalsBadge((prev) => prev + 1);
-      }
-
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        const toolName = typeof request.toolName === "string" ? request.toolName : "unknown tool";
-        const detail =
-          typeof request.description === "string"
-            ? request.description
-            : typeof request.toolName === "string"
-              ? request.toolName
-              : "A tool needs approval";
-        new Notification("Rune Weaver: Approval Needed", {
-          body: `Tool ${toolName}: ${detail}`,
-        });
       }
     } else if (frameType !== undefined && DECIDED_FRAME_TYPES.has(frameType)) {
       // One drop per resolution across every decide surface: a seen filing leaves the pending set,
@@ -190,10 +152,16 @@ export function useWebNotifications() {
       }
       if (typeof window !== "undefined") {
         try {
-          const hash = window.location.hash.replace("#", "").toLowerCase();
-          const path = window.location.pathname.replace(/^\//, "").toLowerCase();
-          const chatVisible =
-            hash === "" || hash === "chat" || path === "" || path === "chat" || path === "/";
+          const hash = window.location.hash
+            .replace("#", "")
+            .toLowerCase()
+            .split("/")[0]
+            .split("?")[0];
+          const path = window.location.pathname
+            .replace(/^\//, "")
+            .toLowerCase()
+            .split("/")[0];
+          const chatVisible = hash.length > 0 ? hash === "chat" : path === "chat";
           // Chat stays mounted across tabs, so staying on chat shows the banner already;
           // counting again would ever-grow the bell beside an already-visible notice.
           if (chatVisible && !document.hidden) return;
@@ -209,72 +177,19 @@ export function useWebNotifications() {
       if (seenWarningsRef.current.has(message)) return;
       seenWarningsRef.current.add(message);
       setWarningsBadge((prev) => prev + 1);
-
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Rune Weaver: Tool Warning", {
-          body: message.slice(0, 150),
-        });
-      }
-    } else if (isGoalNeedsInputProactive(frame)) {
-      // A goal parked on owner input is the one proactive nudge the goals surface badges.
+    } else if (isGoalNeedsInputProactive(frame) || isIdeaProposedProactive(frame)) {
+      // Parked goals needing input and proposed ideas share the proactive attention badge.
       setGoalsAttention((prev) => prev + 1);
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        const title = typeof frame.title === "string" ? frame.title.trim() : "";
-        const headline =
-          typeof frame.headline === "string" ? frame.headline.trim() : "";
-        new Notification(
-          title ? `Rune Weaver: ${title}` : "Rune Weaver: Goal needs input",
-          { body: headline || undefined },
-        );
-      }
-    } else if (isIdeaProposedProactive(frame)) {
-      // A freshly proposed idea is the other proactive nudge the goals surface badges: it rides the
-      // same proactive frame as a parked goal, so the counter rises on the same signal the panel
-      // reads.
-      setGoalsAttention((prev) => prev + 1);
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        const title = typeof frame.title === "string" ? frame.title.trim() : "";
-        const headline =
-          typeof frame.headline === "string" ? frame.headline.trim() : "";
-        new Notification(
-          title ? `Rune Weaver: ${title}` : "Rune Weaver: New idea",
-          { body: headline || undefined },
-        );
-      }
     }
   }, []);
 
   useSharedWebSocket(handleMessage);
 
-  // Support probe kept beside permission so callers never have to sniff the
-  // global directly; an absent API is a capability gap, not a denied choice,
-  // and must surface its own guidance instead of a permission prompt.
-  const isNotificationSupported =
-    typeof window !== "undefined" && "Notification" in window;
-
-  // Permission request owned here so every bell tap shares one fail-closed path.
+  // Deprecated no-op shim preserved so existing callers remain type-compatible while
+  // desktop notifications live exclusively in the macOS Menu Bar app.
   const requestPermission = useCallback(async (): Promise<
     NotificationPermission | "unsupported"
-  > => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      return "unsupported";
-    }
-    // Fail-closed: a blocked choice stays blocked until the operator changes
-    // site settings; re-requesting would resolve without UI and look silent.
-    if (Notification.permission === "denied") {
-      setPermission("denied");
-      return "denied";
-    }
-    try {
-      const outcome = await Notification.requestPermission();
-      setPermission(outcome);
-      return outcome;
-    } catch {
-      // A throwing prompt leaves no new grant behind; report the live state
-      // so the bell falls back to guidance instead of claiming success.
-      return Notification.permission;
-    }
-  }, []);
+  > => "unsupported", []);
 
   const clearRunsBadge = useCallback(() => {
     setRunsBadge(0);
@@ -299,9 +214,9 @@ export function useWebNotifications() {
   }, []);
 
   return {
-    notificationsEnabled: permission === "granted",
-    permission,
-    isNotificationSupported,
+    notificationsEnabled: false,
+    permission: "default" as NotificationPermission,
+    isNotificationSupported: false,
     requestPermission,
     runsBadge,
     clearRunsBadge,

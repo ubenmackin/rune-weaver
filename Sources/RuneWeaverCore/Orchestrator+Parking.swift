@@ -815,6 +815,7 @@ extension Orchestrator {
             return resumeRequest
         } else if let tool = toolsByName[call.toolName] {
             let intent = context.narratedText.isEmpty ? nil : context.narratedText
+            let handler = approvalRequestedHandler
             return await queue.fileRequest(
                 tool: tool,
                 call: call,
@@ -822,6 +823,9 @@ extension Orchestrator {
                 intent: intent,
                 onEnriched: { updated in
                     await parkOnEvent?(.approval(updated))
+                    if let handler {
+                        await handler(updated)
+                    }
                 },
                 bashConfig: context.bashConfig,
                 workspaceRoot: context.workspaceRoot
@@ -877,6 +881,9 @@ extension Orchestrator {
                 )
                 storeParkedNarratedApproval(parkedApproval, id: request.id)
                 await context.onEvent?(.approval(request))
+                if let approvalRequestedHandler {
+                    await approvalRequestedHandler(request)
+                }
             }
         }
         let waiting = OrchestratorToolLoop.waitingOnApprovalMessage(for: context.gated)

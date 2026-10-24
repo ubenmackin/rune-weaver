@@ -330,6 +330,11 @@ public actor ServerSchedulerWorker {
             goalID: idea.goalID
         )
         await hub.broadcastProactiveMessage(frame)
+        await notifier?.notify(
+            title: "Rune Weaver: \(fallbackTitle)",
+            body: decision.headline.isEmpty ? outcomeText : decision.headline,
+            identifier: "idea-\(idea.id)"
+        )
     }
 }
 
@@ -482,7 +487,11 @@ extension ServerSchedulerWorker {
         if decision.surface {
             if let notifier {
                 let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
-                await notifier.notify(title: title, body: short.isEmpty ? job.prompt : short)
+                await notifier.notify(
+                    title: title,
+                    body: short.isEmpty ? job.prompt : short,
+                    identifier: NotifyID.normalize(nil)
+                )
             }
             await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
         } else if eventKind == .schedulerOk {
@@ -571,7 +580,11 @@ extension ServerSchedulerWorker {
         if errorDecision.surface {
             let errorPreview = ProactiveEvent.makePreview(detail)
             if let notifier {
-                await notifier.notify(title: "Rune Weaver: \(job.name)", body: errorPreview.isEmpty ? job.prompt : errorPreview)
+                await notifier.notify(
+                    title: "Rune Weaver: \(job.name)",
+                    body: errorPreview.isEmpty ? job.prompt : errorPreview,
+                    identifier: NotifyID.normalize(nil)
+                )
             }
             await broadcastProactive(kind: .schedulerError, title: job.name, headline: errorDecision.headline, sessionID: sessionID)
         }

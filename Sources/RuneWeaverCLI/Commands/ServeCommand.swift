@@ -382,96 +382,106 @@ extension ServeCommand {
             hub: hub,
             embedder: embedder
         )
+        let assembly = ServingAssembly(
+            loaded: loaded,
+            selected: selected,
+            serverConfig: serverConfig,
+            auth: auth,
+            conversations: conversations,
+            memoryEngine: memoryEngine,
+            permissionGate: permissionGate,
+            embedder: embedder,
+            runs: runs,
+            hub: hub,
+            indexComponents: indexComponents,
+            mediaConfig: mediaConfig
+        )
+        return try await assembleServingContext(assembly)
+    }
+
+    private func assembleServingContext(
+        _ assembly: ServingAssembly
+    ) async throws -> (context: ServerContext, permissionGate: PermissionGate) {
         // Resolve the media section once so the preview registry, the prompt
         // snapshot, and the served context register the same media tools.
-        let resolvedMediaConfig = mediaConfig ?? loaded.config.media
+        let resolvedMediaConfig = assembly.mediaConfig ?? assembly.loaded.config.media
         // One shared secrets instance per serve invocation so the preview bus,
-        // the plugin snapshot, and the served context observe one fallback
-        // store instead of minting per-tool instances that diverge.
+        // the plugin snapshot, and the served context observe one fallback store.
         let sharedSecrets = SecretsManager()
-        // One security policy store per serve process: the preview bus, the served registry, and
-        // the settings policy routes read this same instance, so an HTTP policy write is visible to
-        // the egress supervisor without a restart.
-        let policyStore = await PolicyStore.makeLoaded(
-            injected: nil
-        )
-        let goalStack = makeGoalStack(
-            memoryConfig: loaded.config.memory,
-            goalsConfig: loaded.config.goals,
-            selected: selected
-        )
+        // One policy store per serve process so HTTP policy writes stay visible
+        // to the egress supervisor without a restart.
+        let policyStore = await PolicyStore.makeLoaded(injected: nil)
+        let goalStack = makeGoalStack(memoryConfig: assembly.loaded.config.memory, goalsConfig: assembly.loaded.config.goals, selected: assembly.selected)
         let deps = ToolBootstrapDependencies(
-            memoryEngine: memoryEngine,
-            embedder: embedder,
+            memoryEngine: assembly.memoryEngine,
+            embedder: assembly.embedder,
             goalStore: goalStack.store,
             goalEngine: goalStack.engine,
             recipientAliasStore: goalStack.recipientAliasStore,
-            conversations: conversations
+            conversations: assembly.conversations
         )
         // One seed shared by the prompt preview and the served registry so both
         // builds observe the same media policy, secrets, and policy store.
-        let seed = ToolBuildSeed(
-            mediaConfig: resolvedMediaConfig,
-            secrets: sharedSecrets,
-            policyStore: policyStore
-        )
+        let seed = ToolBuildSeed(mediaConfig: resolvedMediaConfig, secrets: sharedSecrets, policyStore: policyStore)
         // Compose the default system prompt from the live registry so the
-        // served model sees every registered tool; an explicit
-        // --system-prompt still overrides it verbatim.
-        let plugins = try await makePlugins(loaded: loaded, deps: deps, seed: seed)
+        // served model sees every registered tool; an explicit flag still wins.
+        let plugins = try await makePlugins(loaded: assembly.loaded, deps: deps, seed: seed)
         // Snapshot discovered runes before the service owns the registry so
-        // external tools reach the served prompt; the service syncs the same
-        // directory again on boot, keeping both views consistent.
+        // external tools reach the served prompt on first boot.
         let effectiveSystemPrompt = try await resolveEffectiveSystemPrompt(
-            loaded: loaded,
-            selected: selected,
-            permissionGate: permissionGate,
+            loaded: assembly.loaded,
+            selected: assembly.selected,
+            permissionGate: assembly.permissionGate,
             deps: deps,
             seed: seed
         )
         let context = try await ServerContext.make(
-            config: serverConfig,
-            conversations: conversations,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            permissionGate: permissionGate,
-            llm: selected,
+            config: assembly.serverConfig,
+            conversations: assembly.conversations,
+            memoryEngine: assembly.memoryEngine,
+            embedder: assembly.embedder,
+            permissionGate: assembly.permissionGate,
+            llm: assembly.selected,
             systemPrompt: effectiveSystemPrompt,
-            schedulerConfig: loaded.config.scheduler,
-            episodesDBPath: loaded.config.memory.episodesDBPath,
-            pluginConfig: loaded.config.plugins,
-            containersConfig: loaded.config.containers,
-            browserConfig: loaded.config.browser,
-            indexCoordinator: indexComponents?.coordinator,
-            indexStore: indexComponents?.store,
-            llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm),
-            engineConfig: loaded.config.engine,
-            emailConfig: loaded.config.email,
-            filesConfig: loaded.config.files,
-            bashConfig: loaded.config.bash,
+            schedulerConfig: assembly.loaded.config.scheduler,
+            episodesDBPath: assembly.loaded.config.memory.episodesDBPath,
+            pluginConfig: assembly.loaded.config.plugins,
+            containersConfig: assembly.loaded.config.containers,
+            browserConfig: assembly.loaded.config.browser,
+            indexCoordinator: assembly.indexComponents?.coordinator,
+            indexStore: assembly.indexComponents?.store,
+            llmServerURLs: CLIShared.llmServerURLs(from: assembly.loaded.config.llm),
+            engineConfig: assembly.loaded.config.engine,
+            emailConfig: assembly.loaded.config.email,
+            filesConfig: assembly.loaded.config.files,
+            bashConfig: assembly.loaded.config.bash,
             mediaConfig: resolvedMediaConfig,
-            desktopConfig: loaded.config.desktop,
-            securityConfig: loaded.config.security,
-            recallBudgets: loaded.config.memory.recallBudgets,
-            goalsConfig: loaded.config.goals,
-            ideasConfig: loaded.config.ideas,
-            proactiveConfig: loaded.config.proactive,
-            auth: auth,
+            desktopConfig: assembly.loaded.config.desktop,
+            securityConfig: assembly.loaded.config.security,
+            recallBudgets: assembly.loaded.config.memory.recallBudgets,
+            goalsConfig: assembly.loaded.config.goals,
+            ideasConfig: assembly.loaded.config.ideas,
+            proactiveConfig: assembly.loaded.config.proactive,
+            auth: assembly.auth,
             mediaSecrets: sharedSecrets,
             secrets: sharedSecrets,
-            runs: runs,
-            hub: hub,
+            runs: assembly.runs,
+            hub: assembly.hub,
             policyStore: policyStore,
-            workspaceConfig: loaded.config.workspace,
-            persona: loaded.config.persona
+            workspaceConfig: assembly.loaded.config.workspace,
+            persona: assembly.loaded.config.persona
         )
-        await registerAndVerifyTools(
-            context: context,
-            plugins: plugins,
-            selected: selected,
-            effectiveSystemPrompt: effectiveSystemPrompt
-        )
-        return (context, permissionGate)
+        await attachIndexFailureNotifier(context: context)
+        await registerAndVerifyTools(context: context, plugins: plugins, selected: assembly.selected, effectiveSystemPrompt: effectiveSystemPrompt)
+        return (context, assembly.permissionGate)
+    }
+
+    private func attachIndexFailureNotifier(context: ServerContext) async {
+        guard context.indexCoordinator != nil else { return }
+        // The pre-boot reporter has no notifier; swap in the combined notifier so
+        // index failures push while keeping one coordinator for worker and routes.
+        let reporter = ServerIndexBoot.makeReporterWithNotifier(runs: context.runs, hub: context.hub, notifier: context.notifier)
+        await context.indexCoordinator?.setReporter(reporter)
     }
 
     private func makeIndexComponents(
@@ -618,4 +628,32 @@ private struct ResolvedServeConfiguration {
     let auth: ServerAuth?
     /// Bind policy validated against the resolved auth posture.
     let serverConfig: ServerConfig
+}
+
+/// Grouped inputs for the served-engine assembly path.
+private struct ServingAssembly {
+    /// Loaded config backing every derived section.
+    let loaded: CLIConfigLoader.LoadedConfig
+    /// Provider selected for served turns.
+    let selected: any LLMProvider
+    /// Bind policy validated against the resolved auth posture.
+    let serverConfig: ServerConfig
+    /// Owner verifier, or nil for the no-auth loopback posture.
+    let auth: ServerAuth?
+    /// Conversation history shared with served turns.
+    let conversations: ConversationManager
+    /// Recall engine shared with served turns.
+    let memoryEngine: MemoryEngine
+    /// Permission gate shared with served turns.
+    let permissionGate: PermissionGate
+    /// Embeddings backend, or nil for keyword-only recall.
+    let embedder: any EmbeddingsBackend?
+    /// Run log backing lifecycle broadcasts.
+    let runs: RunLogStore
+    /// Hub carrying run lifecycle frames.
+    let hub: WSHub
+    /// Index collaborators, or nil when indexing is disabled.
+    let indexComponents: ServerIndexComponents?
+    /// Media policy override, or nil to use the loaded config.
+    let mediaConfig: MediaConfig?
 }

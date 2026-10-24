@@ -60,13 +60,10 @@ interface TopNavProps {
   warningsBadge?: number;
   stagedFilesCount?: number;
   onOpenStagedDrawer?: () => void;
-  notificationsEnabled: boolean;
-  // Wiring owned upstream (badge clearing plus permission prompt); the bell
-  // awaits it for the resolved outcome but toasts and navigates locally so an
-  // isolated no-op double still shows honest feedback from live globals.
-  onRequestNotifications: () =>
+  onRequestNotifications?: () =>
     | void
     | Promise<NotificationPermission | "unsupported" | void>;
+  onClearBadges?: () => void;
 }
 
 export default function TopNav({
@@ -79,8 +76,8 @@ export default function TopNav({
   warningsBadge = 0,
   stagedFilesCount = 0,
   onOpenStagedDrawer,
-  notificationsEnabled,
   onRequestNotifications,
+  onClearBadges,
 }: TopNavProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
@@ -217,101 +214,41 @@ export default function TopNav({
   );
   useSharedWebSocket(handleWSFrame);
 
-  // Every tap acknowledges with a toast, even when the Notification API is missing or blocked.
+  // Every tap acknowledges in-app unread badges and warnings without prompting for
+  // browser OS notifications (desktop alerts live in the macOS Menu Bar app).
   const handleBellClick = useCallback(async () => {
-    const unsupportedCopy = "Notifications not supported in this browser.";
-    const blockedCopy =
-      "Notifications blocked. Enable in browser site settings.";
-    const enabledCopy = "Notifications on. Zero unread warnings.";
     const warningsCopy = (count: number) =>
       `${count} ${count === 1 ? "warning" : "warnings"} shown in chat.`;
+    const count = normalizeBadgeCount(warningsBadge);
+    const otherUnread =
+      normalizeBadgeCount(runsBadge) +
+      normalizeBadgeCount(approvalsBadge) +
+      normalizeBadgeCount(goalsBadge);
 
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      pushErrorToast(unsupportedCopy);
-      try {
-        await onRequestNotifications();
-      } catch {
-        // Wiring failures never swallow the acknowledgment toast above.
-      }
-      return;
-    }
-
-    const prePermission: NotificationPermission = Notification.permission;
-    if (prePermission === "denied") {
-      pushErrorToast(blockedCopy);
-      try {
-        await onRequestNotifications();
-      } catch {
-        // Denied stays fail-closed; the toast already explained the fix.
-      }
-      return;
-    }
-
-    if (prePermission === "granted") {
-      try {
-        await onRequestNotifications();
-      } catch {
-        // Upstream clearing failures must not block local feedback.
-      }
-      const count = normalizeBadgeCount(warningsBadge);
-      if (count > 0) {
-        onSelectTab("chat");
-        pushSuccessToast(warningsCopy(count));
-      } else {
-        pushSuccessToast(enabledCopy);
-      }
-      return;
-    }
-
-    // Default: delegate the prompt to the owner wiring, then toast the resolved outcome.
-    let outcome: unknown;
     try {
-      outcome = await onRequestNotifications();
+      await onRequestNotifications?.();
     } catch {
-      outcome = undefined;
+      // Upstream callback failures never block local acknowledgment feedback.
     }
-    const post =
-      typeof outcome === "string" ? outcome : Notification.permission;
-    if (post === "granted") {
-      const count = normalizeBadgeCount(warningsBadge);
-      if (count > 0) {
-        onSelectTab("chat");
-        pushSuccessToast(warningsCopy(count));
-      } else {
-        pushSuccessToast(enabledCopy);
-      }
-    } else if (post === "unsupported") {
-      pushErrorToast(unsupportedCopy);
-    } else if (post === "denied") {
-      pushErrorToast(blockedCopy);
+    onClearBadges?.();
+
+    if (count > 0) {
+      onSelectTab("chat");
+      pushSuccessToast(warningsCopy(count));
+    } else if (otherUnread > 0) {
+      pushSuccessToast("Unread badges cleared.");
     } else {
-      // Covers dismissed prompts that leave permission at default: guidance,
-      // never a silent retry loop.
-      if (Notification.permission === "default" && typeof outcome === "undefined") {
-        try {
-          const direct = await Notification.requestPermission();
-          if (direct === "granted") {
-            const count = normalizeBadgeCount(warningsBadge);
-            if (count > 0) {
-              onSelectTab("chat");
-              pushSuccessToast(warningsCopy(count));
-            } else {
-              pushSuccessToast(enabledCopy);
-            }
-            return;
-          }
-        } catch {
-          // A throwing fallback still lands on guidance below.
-        }
-      }
-      pushErrorToast(blockedCopy);
+      pushSuccessToast("Zero unread warnings.");
     }
   }, [
     warningsBadge,
+    runsBadge,
+    approvalsBadge,
+    goalsBadge,
     onRequestNotifications,
+    onClearBadges,
     onSelectTab,
     pushSuccessToast,
-    pushErrorToast,
   ]);
 
   useEffect(() => {
@@ -644,26 +581,22 @@ export default function TopNav({
       </nav>
 
       <div className="top-nav-right">
-        {/* Bell doubles as the warnings badge: degraded-tool skips have no tab,
-            so the unread count sits on the notification toggle in amber and
-            clears when the chat view is shown. The click always toasts (even
-            when unsupported or blocked) through the shared stack beside this
-            button; badge counting itself stays upstream so this handler only
-            reads the normalized count. */}
+        {/* Bell surfaces unread degraded-tool warnings in amber and acknowledges
+            unread in-app badges when tapped without requesting browser OS permissions. */}
         <button
           type="button"
-          className={`icon-button ${notificationsEnabled ? "active" : ""}`}
+          className={`icon-button ${normalizedWarnings > 0 ? "active" : ""}`}
           style={{ position: "relative" }}
           title={
-            notificationsEnabled
-              ? "Web notifications enabled"
-              : "Enable browser notifications"
+            normalizedWarnings > 0
+              ? `${normalizedWarnings} unread ${normalizedWarnings === 1 ? "warning" : "warnings"}`
+              : "Alerts"
           }
           onClick={() => void handleBellClick()}
           aria-label={
             normalizedWarnings > 0
-              ? `Browser notifications, ${normalizedWarnings} unread warnings`
-              : "Browser notifications"
+              ? `Alerts, ${normalizedWarnings} unread warnings`
+              : "Alerts"
           }
         >
           <BellIcon size={16} />

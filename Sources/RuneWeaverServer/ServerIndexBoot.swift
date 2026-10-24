@@ -23,6 +23,15 @@ public struct ServerIndexComponents: Sendable {
 
 /// Single-sourced `[index]` boot construction for serve and the menu-bar app.
 public enum ServerIndexBoot {
+    /// Builds the failure-notifying reporter sharing one run store, hub, and combined notifier.
+    public static func makeReporterWithNotifier(
+        runs: RunLogStore,
+        hub: WSHub,
+        notifier: any SchedulerNotifier?
+    ) -> ServerIndexRunReporter {
+        ServerIndexRunReporter(runs: runs, hub: hub, notifier: notifier)
+    }
+
     /// Builds the document store plus the coordinator for an enabled `[index]`. - embedder:
     /// Embeddings backend shared with recall, or nil for keyword-only.
     public static func makeComponents(
@@ -30,7 +39,8 @@ public enum ServerIndexBoot {
         runs: RunLogStore,
         hub: WSHub,
         embedder: any EmbeddingsBackend?,
-        makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil
+        makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil,
+        notifier: any SchedulerNotifier? = nil
     ) -> ServerIndexComponents? {
         guard config.index.enabled else { return nil }
         let indexConfig = config.index
@@ -69,7 +79,7 @@ public enum ServerIndexBoot {
             config: indexConfig,
             stages: stages,
             store: store,
-            reporter: ServerIndexRunReporter(runs: runs, hub: hub)
+            reporter: makeReporterWithNotifier(runs: runs, hub: hub, notifier: notifier)
         )
         return ServerIndexComponents(store: store, coordinator: coordinator, docIndexDBPath: dbPath)
     }

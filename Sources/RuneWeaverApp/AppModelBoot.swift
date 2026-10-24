@@ -167,7 +167,8 @@ extension AppModel {
             runs: runs,
             hub: hub,
             embedder: embedder,
-            makeEmbeddingsBackend: makeEmbeddingsBackend
+            makeEmbeddingsBackend: makeEmbeddingsBackend,
+            notifier: notificationManager
         )
         let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)
@@ -231,7 +232,7 @@ extension AppModel {
     /// Constructs the live ServerContext from the assembled boot pipeline.
     func makeBootServerContext(pipeline: BootPipeline) async throws -> ServerContext {
         let appLLMOrigins = LLMOrigins.serverURLs(from: pipeline.config.llm)
-        return try await ServerContext.make(
+        let context = try await ServerContext.make(
             config: pipeline.bindConfig,
             conversations: pipeline.conversations,
             memoryEngine: pipeline.memoryEngine,
@@ -271,6 +272,13 @@ extension AppModel {
             workspaceConfig: pipeline.config.workspace,
             persona: pipeline.config.persona
         )
+        // The boot pipeline reporter carries desktop-only alerts; swap in the combined
+        // notifier so index failures push too while keeping one coordinator for worker and routes.
+        if context.indexCoordinator != nil {
+            let reporter = ServerIndexBoot.makeReporterWithNotifier(runs: context.runs, hub: context.hub, notifier: context.notifier)
+            await context.indexCoordinator?.setReporter(reporter)
+        }
+        return context
     }
 
     /// Registers the builtin plugin tools and restores persisted states on the context.

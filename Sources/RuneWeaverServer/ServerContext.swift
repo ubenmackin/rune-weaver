@@ -96,6 +96,12 @@ public final class ServerContext: Sendable {
     public let approvals: ApprovalQueue
     /// Resolved decision audit trail shared by every decision surface.
     public let approvalDecisions: any ApprovalDecisionRecording
+    /// Optional notification dispatcher for desktop and system notifications.
+    public let notifier: any SchedulerNotifier?
+    /// Subscribed Web Push device endpoints for standalone PWA notifications.
+    public let pushSubscriptions: PushSubscriptionStore
+    /// RFC 8291/8292 outbound Web Push sender, or nil when VAPID is unconfigured.
+    public let webPushSender: WebPushSender?
     /// Scheduler job registry.
     public let scheduler: SchedulerStore
     /// Run audit trail for chat turns and scheduler firings.
@@ -323,11 +329,14 @@ public final class ServerContext: Sendable {
         policyWriteLock: PolicyWriteLock = PolicyWriteLock(),
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil,
+        notifier: any SchedulerNotifier? = nil,
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil,
         onboarding: any OnboardingStoring? = nil,
-        approvalDecisions: any ApprovalDecisionRecording? = nil
+        approvalDecisions: any ApprovalDecisionRecording? = nil,
+        pushSubscriptions: PushSubscriptionStore? = nil,
+        webPushSender: WebPushSender? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -338,6 +347,7 @@ public final class ServerContext: Sendable {
         self.permissionGate = permissionGate
         self.approvals = approvals
         self.approvalDecisions = approvalDecisions ?? InMemoryApprovalDecisionLog()
+        self.notifier = notifier
         self.scheduler = scheduler
         self.runs = runs
         self.hub = hub
@@ -350,6 +360,10 @@ public final class ServerContext: Sendable {
         // carry them; an explicit worker still wins untouched for tests that
         // hand-build one without goals.
         let resolvedGoals = goals ?? GoalStore(dbPath: defaultDBPath)
+        let resolvedPushSubscriptions = pushSubscriptions ?? PushSubscriptionStore(dbPath: resolvedGoals.dbPath)
+        self.pushSubscriptions = resolvedPushSubscriptions
+        // Nil stays unconfigured; push routes fail closed rather than serving an ephemeral key.
+        self.webPushSender = webPushSender
         // Ideas default over the same `episodes.db` as goals so one database carries both; an
         // explicit store wins untouched.
         let resolvedIdeas = ideas ?? IdeasStore(dbPath: resolvedGoals.dbPath)

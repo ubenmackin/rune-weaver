@@ -14,3 +14,4 @@ export * from "./api/indexing-types";
 export * from "./api/settings";
 export * from "./api/indexing";
 export * from "./api/tools";
+export * from "./api/push";

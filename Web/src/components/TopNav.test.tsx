@@ -28,7 +28,6 @@ function renderNav(health: Record<string, unknown> | null) {
       health={health as never}
       runsBadge={0}
       approvalsBadge={0}
-      notificationsEnabled={false}
       onRequestNotifications={() => {}}
     />
   );
@@ -400,7 +399,6 @@ describe("TopNav profile menu", () => {
       health: HEALTH,
       runsBadge: 0,
       approvalsBadge: 0,
-      notificationsEnabled: false,
       onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
@@ -512,7 +510,6 @@ describe("TopNav profile menu", () => {
         health={HEALTH as never}
         runsBadge={100}
         approvalsBadge={99}
-        notificationsEnabled={false}
         onRequestNotifications={() => {}}
       />,
     );
@@ -538,7 +535,7 @@ describe("TopNav profile menu", () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     renderProfileNav({ warningsBadge: 3 });
     const bell = screen.getByRole("button", {
-      name: "Browser notifications, 3 unread warnings",
+      name: "Alerts, 3 unread warnings",
     });
     expect(bell).toBeInTheDocument();
     const pill = bell.querySelector(".nav-badge");
@@ -556,7 +553,6 @@ describe("TopNav Work group menu", () => {
       runsBadge: 0,
       approvalsBadge: 0,
       goalsBadge: 0,
-      notificationsEnabled: false,
       onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
@@ -756,7 +752,6 @@ describe("TopNav staged drawer trigger", () => {
       health: null,
       runsBadge: 0,
       approvalsBadge: 0,
-      notificationsEnabled: false,
       onRequestNotifications: () => {},
       stagedFilesCount: 0,
       onOpenStagedDrawer: () => {},
@@ -836,7 +831,6 @@ describe("TopNav staged drawer trigger", () => {
         health={null as never}
         runsBadge={0}
         approvalsBadge={0}
-        notificationsEnabled={false}
         onRequestNotifications={() => {}}
         stagedFilesCount={1}
         onOpenStagedDrawer={() => {}}
@@ -885,7 +879,6 @@ describe("TopNav operator profile", () => {
       runsBadge: 0,
       approvalsBadge: 0,
       goalsBadge: 0,
-      notificationsEnabled: false,
       onRequestNotifications: () => {},
       ...overrides,
     } as unknown as ComponentProps<typeof TopNav>;
