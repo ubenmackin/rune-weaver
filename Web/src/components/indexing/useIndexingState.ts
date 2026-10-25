@@ -4,7 +4,6 @@ import {
   ApiError,
   DEFAULT_INDEX_EFFORT,
   cancelIndex,
-  describeIndexRun,
   formatIndexCount,
   formatToolProgressElapsedMs,
   getIndexStatus,
@@ -353,18 +352,10 @@ export function useIndexingState() {
           if (frameType === "run_completed" && isIndexKind) {
             runActiveRef.current = false;
             setRunActive(false);
-            const wasCancelling = cancellingRef.current;
             cancellingRef.current = false;
             setCancelling(false);
-            void loadStatus().then((fresh) => {
-              if (fresh?.lastRun) {
-                setNotice(describeIndexRun(fresh.lastRun));
-              } else if (wasCancelling) {
-                setNotice(
-                  "Last run cancelled · Committed work is kept and the next run resumes from there.",
-                );
-              }
-            });
+            setNotice(null);
+            void loadStatus();
             return;
           }
           // A run_started frame refreshes the live snapshot while storage byte
@@ -424,15 +415,7 @@ export function useIndexingState() {
         setRunActive(false);
       }
       if (!cancellingRef.current) return;
-      if (!wasLocalRun) {
-        if (status?.lastRun) {
-          setNotice(describeIndexRun(status.lastRun));
-        } else {
-          setNotice(
-            "Last run cancelled · Committed work is kept and the next run resumes from there.",
-          );
-        }
-      }
+      setNotice(null);
       cancellingRef.current = false;
       setCancelling(false);
     }, [status?.running, status?.lastRun]);
