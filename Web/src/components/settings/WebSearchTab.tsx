@@ -257,7 +257,7 @@ export function WebSearchTab({
       </p>
 
       {/* Browser automation section */}
-      <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+      <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color)" }}>
         <div className="settings-section-header">
           <div className="settings-section-title-group">
             <h4 style={{ margin: "0 0 4px 0" }}>Browser automation</h4>

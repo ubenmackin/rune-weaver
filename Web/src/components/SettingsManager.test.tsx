@@ -619,7 +619,7 @@ describe("SettingsManager", () => {
       screen.queryByRole("switch", { name: "Enable email.read" })
     ).toBeNull();
     // Track/knob mirrors persisted state.
-    const tracks = document.querySelectorAll(".tool-switch-track");
+    const tracks = document.querySelectorAll(".builtin-tool-card .tool-switch-track");
     expect(tracks.length).toBe(2);
     tracks.forEach((track) => {
       expect(track.getAttribute("data-on")).toBe("true");
@@ -668,7 +668,7 @@ describe("SettingsManager", () => {
     expect((refreshedAttachment as HTMLInputElement).checked).toBe(true);
     expect(screen.getAllByText("Disabled").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
-    const refreshedTracks = document.querySelectorAll(".tool-switch-track");
+    const refreshedTracks = document.querySelectorAll(".builtin-tool-card .tool-switch-track");
     const readRow = refreshedRead.closest("label");
     expect(readRow?.querySelector(".tool-switch-track")?.getAttribute("data-on")).toBe(
       "false"

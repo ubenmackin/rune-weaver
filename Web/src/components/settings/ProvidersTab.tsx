@@ -5,6 +5,7 @@ import type { ProviderConfigData } from "../../api";
 import { KNOWN_PROVIDER_TYPES } from "../../api/settings-types";
 import { CheckIcon, KeyIcon, PlusIcon, TrashIcon } from "../icons";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { SwitchControl } from "./SwitchControl";
 import type { ProviderEntry } from "./settingsTypes";
 
 export interface ProvidersTabProps {
@@ -167,20 +168,18 @@ export function ProvidersTab({
                   />
                 </div>
                 <div className="provider-header-actions">
-                  <label className="toggle-label">
-                    <input
-                      type="checkbox"
-                      checked={entry.enabled}
-                      onChange={(e) =>
-                        handleProviderFieldChange(
-                          item.id,
-                          "enabled",
-                          e.target.checked
-                        )
-                      }
-                    />
-                    <span>Enabled</span>
-                  </label>
+                  <SwitchControl
+                    checked={entry.enabled}
+                    onChange={(e) =>
+                      handleProviderFieldChange(
+                        item.id,
+                        "enabled",
+                        e.target.checked
+                      )
+                    }
+                    label={`Enable provider ${item.name}`}
+                    hint="Enabled"
+                  />
                   <button
                     type="button"
                     className="icon-button danger"

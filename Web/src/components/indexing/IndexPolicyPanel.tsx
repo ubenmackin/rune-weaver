@@ -36,6 +36,7 @@ import {
 import IndexPolicySourcesFieldset from "./IndexPolicySourcesFieldset";
 import IndexPolicyEffortFieldset from "./IndexPolicyEffortFieldset";
 import IndexPolicyAdvancedFields from "./IndexPolicyAdvancedFields";
+import { SwitchControl } from "../settings/SwitchControl";
 import {
   INDEX_ADVANCED_ERROR_KEYWORDS,
   useIndexPolicySave,
@@ -431,14 +432,12 @@ export function IndexPolicyPanel() {
       <div className="index-policy-section">
         <h3>Policy</h3>
 
-        <label className="toggle-label">
-          <input
-            type="checkbox"
-            checked={config.enabled}
-            onChange={(event) => updateConfig({ enabled: event.target.checked })}
-          />
-          <span>Enable background indexing</span>
-        </label>
+        <SwitchControl
+          checked={config.enabled}
+          onChange={(event) => updateConfig({ enabled: event.target.checked })}
+          label="Enable background indexing"
+          hint="Enable background indexing"
+        />
 
         <IndexPolicySourcesFieldset config={config} updateConfig={updateConfig} />
 

@@ -9,6 +9,7 @@ import {
   DEFAULT_TOOLS_PLUGINS_DIR,
 } from "./settingsAdvancedCounts";
 import PluginsListSection from "./PluginsListSection";
+import { SwitchControl } from "./SwitchControl";
 import {
   getCategoryConfigKey,
   getToolCategory,
@@ -190,28 +191,26 @@ export function ToolsTab({
 
       {/* Metrics cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "12px", margin: "16px 0" }}>
-        <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>Active Tools</div>
-          <div style={{ fontSize: "1.4rem", fontWeight: 700, color: "#48bb78", marginTop: "4px" }}>
+        <div className="settings-stat-card">
+          <div className="settings-stat-card-label">Active Tools</div>
+          <div className="settings-stat-card-value" style={{ color: "var(--status-green)" }}>
             {safeTools.filter((t) => t.isEnabled).length}
           </div>
         </div>
-        <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>External Runes</div>
-          <div style={{ fontSize: "1.4rem", fontWeight: 700, marginTop: "4px" }}>
-            {pluginsList.length}
-          </div>
+        <div className="settings-stat-card">
+          <div className="settings-stat-card-label">External Runes</div>
+          <div className="settings-stat-card-value">{pluginsList.length}</div>
         </div>
-        <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>Pending Review</div>
-          <div style={{ fontSize: "1.4rem", fontWeight: 700, color: pendingCount > 0 ? "#ed8936" : "inherit", marginTop: "4px" }}>
+        <div className="settings-stat-card">
+          <div className="settings-stat-card-label">Pending Review</div>
+          <div className="settings-stat-card-value" style={{ color: pendingCount > 0 ? "var(--status-amber)" : "inherit" }}>
             {pendingCount}
           </div>
         </div>
         {tamperedCount > 0 && (
-          <div style={{ padding: "12px", background: "rgba(245, 101, 101, 0.1)", borderRadius: "8px", border: "1px solid rgba(245, 101, 101, 0.3)" }}>
-            <div style={{ fontSize: "0.75rem", color: "#f56565", textTransform: "uppercase", fontWeight: 600 }}>Tampered</div>
-            <div style={{ fontSize: "1.4rem", fontWeight: 700, color: "#f56565", marginTop: "4px" }}>
+          <div className="settings-stat-card alarm">
+            <div className="settings-stat-card-label">Tampered</div>
+            <div className="settings-stat-card-value" style={{ color: "var(--status-red)" }}>
               {tamperedCount}
             </div>
           </div>
@@ -230,13 +229,13 @@ export function ToolsTab({
             display: "flex",
             alignItems: "flex-start",
             gap: "12px",
-            color: "#ed8936",
+            color: "var(--status-amber)",
           }}
         >
           <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
           <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
             <strong>{pendingCount} newly discovered rune(s) awaiting review.</strong>
-            <div style={{ marginTop: "2px", color: "var(--text-primary, #e2e8f0)" }}>
+            <div style={{ marginTop: "2px", color: "var(--text-main)" }}>
               In accordance with security policy, new tools start disabled by default. Review their code and permissions below before enabling.
             </div>
           </div>
@@ -254,13 +253,13 @@ export function ToolsTab({
             display: "flex",
             alignItems: "flex-start",
             gap: "12px",
-            color: "#f56565",
+            color: "var(--status-red)",
           }}
         >
           <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
           <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
             <strong>Security Alert: {tamperedCount} plugin(s) have been modified on disk since approval!</strong>
-            <div style={{ marginTop: "2px", color: "var(--text-primary, #e2e8f0)" }}>
+            <div style={{ marginTop: "2px", color: "var(--text-main)" }}>
               Cryptographic tree hash does not match the approved signature. They have been quarantined and disabled.
             </div>
           </div>
@@ -515,15 +514,13 @@ export function ToolsTab({
         </div>
         <div className="form-row" style={{ marginTop: "12px" }}>
           <div className="form-group checkbox-group">
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-              <input
-                id="plugins-autorescan"
-                type="checkbox"
-                checked={pluginsAutoRescan}
-                onChange={(e) => setPluginsAutoRescan(e.target.checked)}
-              />
-              <span>Automatically scan plugins directory on startup</span>
-            </label>
+            <SwitchControl
+              testId="plugins-autorescan"
+              checked={pluginsAutoRescan}
+              onChange={(e) => setPluginsAutoRescan(e.target.checked)}
+              label="Automatically scan plugins directory on startup"
+              hint="Automatically scan plugins directory on startup"
+            />
           </div>
         </div>
         <WorkspaceStorageSection

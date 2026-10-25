@@ -4,6 +4,7 @@ import React from "react";
 import { DEFAULT_MEDIA_TIMEOUT_SECONDS } from "../../api";
 import { AlertTriangleIcon, CheckIcon, CloseIcon, KeyIcon } from "../icons";
 import Modal from "../Modal";
+import { SwitchControl } from "./SwitchControl";
 
 export interface MediaConfigModalProps {
   isOpen: boolean;
@@ -139,22 +140,12 @@ export function MediaConfigModal({
             <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
               <span>Sonarr (TV Shows)</span>
             </h4>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={sonarrEnabled}
-                onChange={(e) => setSonarrEnabled(e.target.checked)}
-              />
-              <span>Enabled</span>
-            </label>
+            <SwitchControl
+              checked={sonarrEnabled}
+              onChange={(e) => setSonarrEnabled(e.target.checked)}
+              label="Enable Sonarr"
+              hint="Enabled"
+            />
           </div>
 
           <div className="form-group" style={{ marginBottom: "10px" }}>
@@ -279,22 +270,12 @@ export function MediaConfigModal({
             <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
               <span>Radarr (Movies)</span>
             </h4>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={radarrEnabled}
-                onChange={(e) => setRadarrEnabled(e.target.checked)}
-              />
-              <span>Enabled</span>
-            </label>
+            <SwitchControl
+              checked={radarrEnabled}
+              onChange={(e) => setRadarrEnabled(e.target.checked)}
+              label="Enable Radarr"
+              hint="Enabled"
+            />
           </div>
 
           <div className="form-group" style={{ marginBottom: "10px" }}>
