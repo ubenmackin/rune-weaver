@@ -767,7 +767,7 @@ export default function SchedulerManager() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               Delete schedule &quot;{pendingDelete.name}&quot;? This cannot be
               undone.
             </p>

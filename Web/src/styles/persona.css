@@ -65,7 +65,7 @@
   justify-content: center;
   padding: 6px;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--bg-subtle);
   cursor: pointer;
   transition: all 0.15s ease;
@@ -119,35 +119,36 @@
   }
 }
 
-/* Responsive Breakpoints */
-@media (max-width: 900px) {
-  .dashboard-main-grid {
-    grid-template-columns: 1fr;
-  }
+.persona-avatar-blink {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  vertical-align: middle;
 }
 
-@media (max-width: 640px) {
-  .dashboard-root {
-    padding: 16px 16px 96px;
-    gap: 20px;
-  }
+.persona-avatar-blink-lid {
+  position: absolute;
+  left: 30%;
+  right: 30%;
+  top: 37%;
+  height: 11%;
+  border-radius: var(--radius-pill);
+}
 
-  .dashboard-greeting-title {
-    font-size: 20px;
-  }
+/* Blink lid per colorway; colors resolve through lid tokens. */
+.persona-avatar-blink-lid--violet {
+  background: var(--avatar-lid-violet);
+}
 
-  .dashboard-prompt-bar-wrap {
-    padding: 12px 14px;
-  }
+.persona-avatar-blink-lid--cyan {
+  background: var(--avatar-lid-cyan);
+}
 
-  .dashboard-recommendations-list {
-    grid-template-columns: 1fr;
-  }
+.persona-avatar-blink-lid--emerald {
+  background: var(--avatar-lid-emerald);
+}
 
-  .action-card-buttons .btn {
-    min-height: 40px;
-    flex: 1;
-    justify-content: center;
-  }
+.persona-avatar-blink-lid--rose {
+  background: var(--avatar-lid-rose);
 }
 

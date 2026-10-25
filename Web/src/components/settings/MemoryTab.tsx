@@ -103,25 +103,25 @@ export function MemoryTab({
       </div>
 
       {memoryEmbeddingBackend === "local" && (
-        <div className="card" style={{ marginTop: "1rem", padding: "1rem", background: "var(--card-bg-subtle, rgba(255,255,255,0.03))" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <span style={{ fontWeight: 600 }}>Local Embedding Engine</span>
+        <div className="card memory-embeddings-card">
+          <div className="row memory-embeddings-head">
+            <div className="row">
+              <span className="memory-embeddings-title">Local Embedding Engine</span>
               {embeddingsStatus?.status === "ready" ? (
-                <span className="badge badge-success" data-testid="embeddings-status-ready">Ready (Metal GPU)</span>
+                <span className="badge badge-green" data-testid="embeddings-status-ready">Ready (Metal GPU)</span>
               ) : embeddingsStatus?.status === "downloading_binary" || embeddingsStatus?.status === "downloading_model" ? (
-                <span className="badge badge-warning" data-testid="embeddings-status-downloading">
+                <span className="badge badge-amber" data-testid="embeddings-status-downloading">
                   {embeddingsStatus.stage ?? "Downloading Assets…"}
                 </span>
               ) : embeddingsStatus?.status === "starting" ? (
-                <span className="badge badge-warning" data-testid="embeddings-status-starting">Starting…</span>
+                <span className="badge badge-amber" data-testid="embeddings-status-starting">Starting…</span>
               ) : embeddingsStatus?.status === "error" ? (
-                <span className="badge badge-error" data-testid="embeddings-status-error">Error</span>
+                <span className="badge badge-red" data-testid="embeddings-status-error">Error</span>
               ) : (
                 <span className="badge badge-muted" data-testid="embeddings-status-stopped">Stopped</span>
               )}
             </div>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
+            <div className="row">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
@@ -146,18 +146,18 @@ export function MemoryTab({
           </div>
 
           {embeddingsStatus?.error && (
-            <p className="text-danger text-xs" style={{ margin: "0.5rem 0" }} data-testid="embeddings-error-msg">
+            <p className="text-xs memory-embeddings-error" data-testid="embeddings-error-msg">
               {embeddingsStatus.error}
             </p>
           )}
 
-          <div className="text-xs muted" style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.25rem 1rem", marginTop: "0.5rem" }}>
+          <div className="text-xs muted memory-embeddings-facts">
             <span>Model:</span>
-            <span style={{ fontFamily: "monospace" }}>{embeddingsStatus?.model ?? "embeddinggemma-2-Q8_0.gguf"} (768 dimensions)</span>
+            <span className="font-mono">{embeddingsStatus?.model ?? "embeddinggemma-2-Q8_0.gguf"} (768 dimensions)</span>
             <span>Acceleration:</span>
             <span>{embeddingsStatus?.acceleration ?? "Apple Silicon Metal GPU"}</span>
             <span>Endpoint:</span>
-            <span style={{ fontFamily: "monospace" }}>{embeddingsStatus?.endpoint ?? "~/.runeweaver/run/embedding.sock"}</span>
+            <span className="font-mono">{embeddingsStatus?.endpoint ?? "~/.runeweaver/run/embedding.sock"}</span>
           </div>
         </div>
       )}
@@ -211,7 +211,7 @@ export function MemoryTab({
             Maximum hits injected as system context per turn ({String(memoryRecallAutoLimit)}). Recall depth lives here with the other recall knobs.
           </span>
         </div>
-        <div className="form-row" style={{ marginTop: "1rem" }}>
+        <div className="form-row settings-stack-gap">
           <div className="form-group flex-1">
             <label htmlFor="recall-doc-pool">Document Pool Multiplier</label>
             <input

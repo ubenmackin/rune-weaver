@@ -28,7 +28,7 @@ export function FilesDenyPatternsField({
     <>
       <div className="settings-subsection-header">
         <div className="settings-section-title-group">
-          <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
+          <h4 className="access-subsection-heading">Blocked Paths</h4>
           <p className="settings-section-hint">
             One glob per line. Denied paths escalate or fail per the approval toggle in Simple.
           </p>
@@ -41,7 +41,7 @@ export function FilesDenyPatternsField({
         </div>
       </div>
 
-      <div className="form-group" style={{ marginTop: "8px" }}>
+      <div className="form-group mt-2">
         <label htmlFor="deny-patterns-textarea">
           Deny patterns{" "}
           <span className="muted text-sm">
@@ -92,9 +92,9 @@ export function FilesAdvancedFields({
   const atBound = rules.length >= FILES_WRITE_PATH_RULE_MAX_COUNT;
   return (
     <>
-      <div className="settings-subsection-header" style={{ marginTop: "16px" }}>
+      <div className="settings-subsection-header access-subsection-spaced-md">
         <div className="settings-section-title-group">
-          <h4 style={{ margin: "0 0 4px 0" }}>Write Path Rules</h4>
+          <h4 className="access-subsection-heading">Write Path Rules</h4>
           <p className="settings-section-hint">
             One path per row. The longest matching rule wins; a path outside
             every allow root asks.
@@ -124,7 +124,7 @@ export function FilesAdvancedFields({
           <li><strong>Live</strong>: Writes directly to disk with an automatic rollback backup.</li>
           <li><strong>Deny</strong>: Refuses writes outright. Deny rules are locked for safety.</li>
         </ul>
-        <p className="muted text-sm" style={{ marginBottom: 0 }}>
+        <p className="muted text-sm m-0">
           Deny outranks every other posture and persists until the rule is removed.
         </p>
       </div>
@@ -138,7 +138,7 @@ export function FilesAdvancedFields({
       </span>
 
       {rules.length === 0 ? (
-        <p className="muted text-sm" style={{ marginTop: "12px" }}>
+        <p className="muted text-sm mt-3">
           No write-path rules. Every write falls through to the mode above,
           and anything outside the allowed roots asks.
         </p>
@@ -146,17 +146,16 @@ export function FilesAdvancedFields({
 
       {rules.length > 0 ? (
         <div
-          className="files-write-table-wrapper"
+          className="files-write-table-wrapper access-files-table-compact"
           data-testid={`${idPrefix}-write-table-scroll`}
-          style={{ maxHeight: "320px", overflowY: "auto" }}
         >
           <table className="files-write-table" data-testid={`${idPrefix}-write-rules-table`}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+            <thead className="access-files-thead">
               <tr>
-                <th style={{ width: "35%", position: "sticky", top: 0 }}>Path</th>
-                <th style={{ width: "160px", position: "sticky", top: 0 }}>Posture</th>
-                <th style={{ position: "sticky", top: 0 }}>Consequence</th>
-                <th style={{ width: "50px", textAlign: "center", position: "sticky", top: 0 }}>Actions</th>
+                <th className="access-files-col-path">Path</th>
+                <th className="access-files-col-posture">Posture</th>
+                <th className="access-files-col-consequence">Consequence</th>
+                <th className="access-files-col-actions">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -174,23 +173,21 @@ export function FilesAdvancedFields({
                       <input
                         id={pathId}
                         aria-label={`Rule ${ruleNumber} path`}
-                        className="input-field"
+                        className="input-field m-0 w-full"
                         value={rule.path}
                         onChange={(event) => onRulePathChange(index, event.target.value)}
                         placeholder="~/Documents/Secrets"
-                        style={{ margin: 0, width: "100%" }}
                       />
                     </td>
                     <td>
                       <select
                         id={postureId}
                         aria-label={`Rule ${ruleNumber} posture`}
-                        className="input-field"
+                        className="input-field m-0 w-full"
                         value={rule.posture}
                         onChange={(event) => onRulePostureChange(index, event.target.value)}
                         disabled={locked}
                         title={locked ? "A deny rule cannot be softened here" : undefined}
-                        style={{ margin: 0, width: "100%" }}
                       >
                         {FILES_WRITE_POSTURE_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
@@ -201,9 +198,8 @@ export function FilesAdvancedFields({
                     </td>
                     <td>
                       <span
-                        className="form-group-hint"
+                        className="form-group-hint access-files-consequence"
                         data-testid={`${idPrefix}-write-rule-${index}-consequence`}
-                        style={{ margin: 0, display: "inline-block" }}
                       >
                         {writePostureConsequence(rule.posture)}
                         {locked ? (
@@ -215,7 +211,7 @@ export function FilesAdvancedFields({
                         ) : null}
                       </span>
                     </td>
-                    <td style={{ textAlign: "center" }}>
+                    <td className="access-files-cell-center">
                       <button
                         type="button"
                         className="icon-button"

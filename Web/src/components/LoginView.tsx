@@ -50,45 +50,14 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
   }
 
   return (
-    <div
-      className="login-screen"
-      style={{
-        minHeight: "100vh",
-        display: "grid",
-        placeItems: "center",
-        padding: "24px",
-        boxSizing: "border-box",
-      }}
-    >
-      <main
-        aria-label="Sign in"
-        style={{
-          width: "min(360px, 90vw)",
-          padding: "32px",
-          borderRadius: "14px",
-          background: "var(--bg-card, #181c26)",
-          boxShadow: "0 18px 50px rgba(0, 0, 0, 0.45)",
-        }}
-      >
-        <h1 style={{ margin: "0 0 4px", fontSize: "20px" }}>Rune Weaver</h1>
-        <p
-          style={{
-            margin: "0 0 20px",
-            color: "var(--text-secondary, #98a0b3)",
-          }}
-        >
+    <div className="login-screen">
+      <main aria-label="Sign in" className="login-card">
+        <h1 className="login-title">Rune Weaver</h1>
+        <p className="login-subtitle">
           Enter your owner access token to continue.
         </p>
         <form onSubmit={handleSubmit} method="post">
-          <label
-            htmlFor="owner-username"
-            style={{
-              display: "block",
-              marginBottom: "6px",
-              fontSize: "13px",
-              color: "var(--text-secondary, #b7bdcb)",
-            }}
-          >
+          <label htmlFor="owner-username" className="login-label">
             Username
           </label>
           <input
@@ -96,24 +65,11 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
             name="username"
             type="text"
             autoComplete="username"
-            className="input-field"
+            className="input-field mb-3"
             value={username}
             readOnly
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              marginBottom: "12px",
-            }}
           />
-          <label
-            htmlFor="owner-password"
-            style={{
-              display: "block",
-              marginBottom: "6px",
-              fontSize: "13px",
-              color: "var(--text-secondary, #b7bdcb)",
-            }}
-          >
+          <label htmlFor="owner-password" className="login-label">
             Access token
           </label>
           <input
@@ -126,37 +82,20 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
             onChange={(event) => setToken(event.target.value)}
             required
             disabled={checking}
-            style={{ width: "100%", boxSizing: "border-box" }}
           />
           <button
             type="submit"
-            className="primary"
+            className="primary login-submit"
             disabled={!canSubmit}
-            style={{ marginTop: "14px", width: "100%" }}
           >
             {checking ? "Signing in…" : "Sign in"}
           </button>
         </form>
-        <p
-          style={{
-            margin: "12px 0 0",
-            fontSize: "12px",
-            color: "var(--text-secondary, #98a0b3)",
-          }}
-        >
+        <p className="login-hint">
           Your browser will offer to remember this sign-in so you don&apos;t
           have to re-enter the token each time.
         </p>
-        <p
-          role="status"
-          aria-live="polite"
-          style={{
-            margin: "14px 0 0",
-            minHeight: "1.2em",
-            fontSize: "13px",
-            color: "#f0a35e",
-          }}
-        >
+        <p role="status" aria-live="polite" className="login-error">
           {error}
         </p>
       </main>

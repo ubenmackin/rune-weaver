@@ -260,14 +260,14 @@ export function ProvidersTab({
                 </div>
 
                 <div className="form-group">
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
+                  <div className="provider-key-row">
                     <label htmlFor={`keyenv-${item.id}`}>API Key Env Var</label>
                     {(() => {
                       const keyEnv = (entry.apiKeyEnv || "").trim();
                       if (!keyEnv) return null;
                       const isStored = !!secretStatus[keyEnv];
                       return (
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <div className="row">
                           {isStored ? (
                             <span className="keychain-status-badge stored">
                               <CheckIcon size={12} /> Stored in Keychain

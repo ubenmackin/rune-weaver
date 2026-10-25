@@ -21,7 +21,7 @@ function renderAddModal(onSave = vi.fn()) {
 function progressWidth(modal: HTMLElement): string {
   const bar = within(modal)
     .getByTestId("wizard-progress")
-    .querySelector(".wizard-progress-bar") as HTMLElement | null;
+    .querySelector(".progress-fill") as HTMLElement | null;
   return bar?.style.width ?? "";
 }
 

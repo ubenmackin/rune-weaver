@@ -662,17 +662,9 @@ export function NetworkEgressEditors({
       {shadowWarnings.length > 0 ? (
         <div
           data-testid="egress-shadow-warning"
-          style={{
-            padding: "8px 12px",
-            borderRadius: "6px",
-            backgroundColor: "rgba(245, 158, 11, 0.12)",
-            border: "1px solid rgba(245, 158, 11, 0.35)",
-            color: "var(--warning-color, #b45309)",
-            fontSize: "0.85rem",
-            marginTop: "8px",
-          }}
+          className="policy-egress-shadow-warning"
         >
-          <ul style={{ margin: 0, paddingLeft: "18px" }}>
+          <ul className="policy-list-indent">
             {shadowWarnings.map((entry, index) => (
               <li key={index}>{entry}</li>
             ))}
@@ -1222,46 +1214,25 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
       {loading ? <p className="muted text-sm">Loading policy…</p> : null}
 
       {!loading ? (
-        <div style={{ marginTop: "12px", marginBottom: "14px" }} data-testid="policy-invariants">
+        <div className="policy-invariants" data-testid="policy-invariants">
           {violations.length === 0 ? (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                padding: "8px 12px",
-                borderRadius: "6px",
-                backgroundColor: "rgba(16, 185, 129, 0.1)",
-                border: "1px solid rgba(16, 185, 129, 0.25)",
-                color: "var(--success-color, #10b981)",
-                fontSize: "0.85rem",
-              }}
-            >
+            <div className="policy-invariants-ok">
               <span>
                 <strong>All 3 Formal Security Invariants Verified:</strong> Credential Binding
                 Confinement, Rule Shadow Prevention, and Local Exemption Safety hold.
               </span>
             </div>
           ) : (
-            <div
-              style={{
-                padding: "10px 14px",
-                borderRadius: "6px",
-                backgroundColor: "rgba(239, 68, 68, 0.1)",
-                border: "1px solid rgba(239, 68, 68, 0.3)",
-                color: "var(--danger-color, #ef4444)",
-                fontSize: "0.85rem",
-              }}
-            >
-              <div style={{ fontWeight: "bold", marginBottom: "4px" }}>
+            <div className="policy-invariants-violation">
+              <div className="policy-invariants-title">
                 <span>
                   {violations.length} Invariant Violation(s) Detected (Policy will fall back to safe
                   default):
                 </span>
               </div>
-              <ul style={{ margin: "4px 0 0 20px", padding: 0 }}>
+              <ul className="policy-invariants-list">
                 {violations.map((entry, index) => (
-                  <li key={index} style={{ marginBottom: "2px" }}>
+                  <li key={index} className="policy-invariants-item">
                     {entry}
                   </li>
                 ))}
@@ -1274,14 +1245,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
       {saved ? (
         <div
           data-testid="policy-saved"
-          style={{
-            padding: "8px 12px",
-            borderRadius: "6px",
-            backgroundColor: "rgba(16, 185, 129, 0.15)",
-            color: "#10b981",
-            fontSize: "0.85rem",
-            marginBottom: "12px",
-          }}
+          className="settings-save-success"
         >
           Policy saved. Changes apply immediately with no restart.
           {localGranted.length > 0 ? (
@@ -1302,15 +1266,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
       {saved && neverDialableHosts.length > 0 ? (
         <div
           data-testid="policy-local-never-dialable"
-          style={{
-            padding: "8px 12px",
-            borderRadius: "6px",
-            backgroundColor: "rgba(245, 158, 11, 0.12)",
-            border: "1px solid rgba(245, 158, 11, 0.35)",
-            color: "var(--warning-color, #b45309)",
-            fontSize: "0.85rem",
-            marginBottom: "12px",
-          }}
+          className="policy-never-dialable"
         >
           Local network access not granted for never-dialable hosts:{" "}
           {neverDialableHosts.join(", ")}. These entries persist name-only with no grant.
@@ -1318,14 +1274,14 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
       ) : null}
 
       {error ? (
-        <div className="error-banner" data-testid="policy-error" style={{ marginBottom: "12px" }}>
+        <div className="error-banner" data-testid="policy-error">
           {error}
         </div>
       ) : null}
 
       {fieldErrors.length > 0 && draft ? (
-        <div className="error-banner" data-testid="policy-field-errors" style={{ marginBottom: "12px" }}>
-          <ul style={{ margin: 0, paddingLeft: "18px" }}>
+        <div className="error-banner" data-testid="policy-field-errors">
+          <ul className="policy-list-indent">
             {fieldErrors.map((entry, index) => (
               <li key={index}>{entry}</li>
             ))}
@@ -1449,29 +1405,29 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
                 </button>
               </div>
               <div className="modal-body">
-                <p className="muted text-sm" style={{ margin: "0 0 8px 0" }}>
+                <p className="muted text-sm m-0 mb-2">
                   Preview of the local-access grants this draft would create. Apply grants
                   re-classifies every exact host server-side and persists the result.
                 </p>
-                <div data-testid="policy-recheck-added" style={{ marginBottom: "8px" }}>
+                <div data-testid="policy-recheck-added" className="mb-2">
                   <strong>Added ({recheckPreview.added.length}):</strong>{" "}
                   {recheckPreview.added.length > 0 ? recheckPreview.added.join(", ") : "none"}
                 </div>
-                <div data-testid="policy-recheck-removed" style={{ marginBottom: "8px" }}>
+                <div data-testid="policy-recheck-removed" className="mb-2">
                   <strong>Removed ({recheckPreview.removed.length}):</strong>{" "}
                   {recheckPreview.removed.length > 0 ? recheckPreview.removed.join(", ") : "none"}
                 </div>
-                <div data-testid="policy-recheck-unchanged" style={{ marginBottom: "8px" }}>
+                <div data-testid="policy-recheck-unchanged" className="mb-2">
                   <strong>Unchanged ({recheckPreview.unchanged.length}):</strong>{" "}
                   {recheckPreview.unchanged.length > 0
                     ? recheckPreview.unchanged.join(", ")
                     : "none"}
                 </div>
                 {recheckPreview.unresolved.length > 0 ? (
-                  <div data-testid="policy-recheck-unresolved" style={{ marginBottom: "8px" }}>
+                  <div data-testid="policy-recheck-unresolved" className="mb-2">
                     <strong>Unresolved ({recheckPreview.unresolved.length}):</strong>{" "}
                     {recheckPreview.unresolved.join(", ")}
-                    <p className="muted text-sm" style={{ margin: "4px 0 0 0" }}>
+                    <p className="muted text-sm m-0 mt-1">
                       Cannot apply while {recheckPreview.unresolved.length}{" "}
                       {recheckPreview.unresolved.length === 1 ? "host remains" : "hosts remain"}{" "}
                       unresolved. Resolve or remove these hosts before applying.
@@ -1480,9 +1436,8 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
                 ) : null}
                 {recheckError ? (
                   <div
-                    className="error-banner"
+                    className="error-banner mt-2"
                     data-testid="policy-recheck-error"
-                    style={{ marginTop: "8px" }}
                   >
                     {recheckError}
                   </div>
@@ -1527,7 +1482,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
-          <p className="muted text-sm" style={{ marginTop: "12px" }}>
+          <p className="muted text-sm mt-3">
             Prefer the terminal? Run <code>rune-weaver policy show</code> to inspect this file;
             dashboard edits here are the supported path and apply without leaving this pane.
           </p>

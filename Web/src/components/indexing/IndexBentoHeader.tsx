@@ -136,9 +136,8 @@ export default function IndexBentoHeader({
             transient notice. */}
         {reclaimSummary ? (
           <p
-            className="muted text-sm"
+            className="muted text-sm mt-2"
             data-testid="index-reclaim-result"
-            style={{ marginTop: 8 }}
           >
             {reclaimSummary}
           </p>
@@ -235,9 +234,9 @@ export default function IndexBentoHeader({
                         {laneRate ? ` · ${laneRate}` : ""}
                       </span>
                     </div>
-                    <div className="index-queue-lane-track">
+                    <div className="progress-track">
                       <div
-                        className="index-queue-lane-fill"
+                        className="progress-fill"
                         style={{ width: `${pct}%` }}
                       />
                     </div>

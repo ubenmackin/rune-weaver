@@ -1,0 +1,37 @@
+/* Rune Weaver Dashboard — shared progress-bar track and fill contract. */
+
+.progress-track {
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  width: 100%;
+}
+
+/* Width arrives via inline style so one fill element serves every percentage. */
+.progress-fill {
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--accent-purple), var(--accent-purple-light));
+  transition: width 0.3s ease;
+}
+
+/* Thin aliases to the canonical contract above — values must stay identical. */
+.wizard-progress-track,
+.progress-bar-track,
+.goal-drawer-progress {
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  width: 100%;
+}
+
+.wizard-progress-bar,
+.progress-bar-fill,
+.goal-drawer-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--accent-purple), var(--accent-purple-light));
+  transition: width 0.3s ease;
+}

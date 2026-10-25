@@ -76,8 +76,8 @@ describe("TopNav SearXNG row", () => {
     expect(screen.getByTestId("searxng-status-text").textContent).toBe(
       "Reachable"
     );
-    // Green dot for the reachable state.
-    expect(dot.style.backgroundColor).toContain("52, 211, 153");
+    // Green dot for the reachable state via the shared status-dot class.
+    expect(dot).toHaveClass("searxng-dot-reachable");
     expect(screen.getByText("SearXNG")).toBeInTheDocument();
     expect(dot.getAttribute("title")).toContain(ENGINE_SEARCH_URL);
   });
@@ -101,8 +101,8 @@ describe("TopNav SearXNG row", () => {
     expect(screen.getByTestId("searxng-status-text").textContent).toBe(
       "Stopped"
     );
-    // Red dot for the stopped state.
-    expect(dot.style.backgroundColor).toContain("245, 101, 101");
+    // Red dot for the stopped state via the shared status-dot class.
+    expect(dot).toHaveClass("searxng-dot-stopped");
   });
 
   it("falls back to unknown with the default URL when health lacks search fields", async () => {

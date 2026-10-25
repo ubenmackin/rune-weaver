@@ -576,8 +576,7 @@ export default function TopNav({
             (desktop alerts live in the macOS Menu Bar app). */}
         <button
           type="button"
-          className={`icon-button ${normalizedWarnings > 0 ? "active" : ""}`}
-          style={{ position: "relative" }}
+          className={`icon-button top-nav-bell ${normalizedWarnings > 0 ? "active" : ""}`}
           title={
             normalizedWarnings > 0
               ? `${normalizedWarnings} unread ${normalizedWarnings === 1 ? "warning" : "warnings"}`
@@ -593,14 +592,8 @@ export default function TopNav({
           <BellIcon size={16} />
           {warningsDisplay ? (
             <span
-              className="nav-badge"
+              className="nav-badge nav-badge-warning-overlay"
               aria-hidden="true"
-              style={{
-                position: "absolute",
-                top: "-8px",
-                right: "-8px",
-                background: "#f59e0b",
-              }}
             >
               {warningsDisplay}
             </span>
@@ -623,12 +616,7 @@ export default function TopNav({
           <FileDiffIcon size={16} />
           <span>Files</span>
           <span
-            className="top-nav-staged-badge"
-            style={
-              normalizedStagedCount === 0
-                ? { background: "rgba(148, 163, 184, 0.25)", color: "#94a3b8" }
-                : undefined
-            }
+            className={`top-nav-staged-badge ${normalizedStagedCount === 0 ? "is-zero" : ""}`}
           >
             {normalizedStagedCount}
           </span>
@@ -712,14 +700,7 @@ export default function TopNav({
                   title={`SearXNG at ${searchURL} (${searchKnown ? (searchRunning ? "reachable" : "stopped") : "unknown"})`}
                 >
                   <span className="info-label">SearXNG</span>
-                  <span
-                    className="info-value"
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "6px",
-                    }}
-                  >
+                  <span className="info-value icon-text-btn">
                     <span
                       data-testid="searxng-status-dot"
                       aria-label={
@@ -730,19 +711,13 @@ export default function TopNav({
                             : "SearXNG stopped"
                       }
                       title={`SearXNG at ${searchURL}`}
-                      className="status-dot-sm"
-                      style={{
-                        backgroundColor: !searchKnown
-                          ? "#a0aec0"
+                      className={`status-dot-sm ${
+                        !searchKnown
+                          ? "searxng-dot-unknown"
                           : searchRunning
-                            ? "#34d399"
-                            : "#f56565",
-                        boxShadow: !searchKnown
-                          ? "0 0 5px rgba(160, 174, 192, 0.6)"
-                          : searchRunning
-                            ? "0 0 5px rgba(52, 211, 153, 0.6)"
-                            : "0 0 5px rgba(245, 101, 101, 0.6)",
-                      }}
+                            ? "searxng-dot-reachable"
+                            : "searxng-dot-stopped"
+                      }`}
                     />
                     {/* Status text stays mounted during Start so consumers keep a stable id;
                         the Starting pill plus stage and elapsed render additively beside it. */}
@@ -750,13 +725,7 @@ export default function TopNav({
                       {!searchKnown ? "Unknown" : searchRunning ? "Reachable" : "Stopped"}
                     </span>
                     {searchBusyAction === "start" ? (
-                      <span
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "6px",
-                        }}
-                      >
+                      <span className="icon-text-btn">
                         <span
                           data-testid="searxng-starting-pill"
                           className="status-pill running"
@@ -765,13 +734,13 @@ export default function TopNav({
                         </span>
                         <span
                           data-testid="searxng-start-stage"
-                          style={{ fontSize: "11px", opacity: 0.85 }}
+                          className="searxng-start-stage"
                         >
                           {searchStageCopy(searchStage)}
                         </span>
                         <span
                           data-testid="searxng-start-elapsed"
-                          style={{ fontSize: "11px", opacity: 0.65 }}
+                          className="searxng-start-elapsed"
                         >
                           {searchStartElapsed}s
                         </span>
@@ -780,8 +749,7 @@ export default function TopNav({
                     <button
                       type="button"
                       data-testid="searxng-toggle"
-                      className="ghost icon-text-btn"
-                      style={{ padding: "2px 8px", fontSize: "11px" }}
+                      className="ghost icon-text-btn searxng-toggle"
                       title={
                         searchRunning
                           ? `Stop SearXNG at ${searchURL}`

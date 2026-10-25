@@ -1,0 +1,54 @@
+/* Rune Weaver Dashboard — login shell: logged-out sign-in layout and card. */
+
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.login-card {
+  width: min(360px, 90vw);
+  padding: 32px;
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+}
+
+.login-title {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.login-subtitle {
+  margin: 0 0 20px;
+  color: var(--text-muted);
+}
+
+.login-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.login-submit {
+  margin-top: 14px;
+  width: 100%;
+}
+
+.login-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Error line reserves one row so failed sign-ins never shift the card. */
+.login-error {
+  margin: 14px 0 0;
+  min-height: 1.2em;
+  font-size: 13px;
+  color: var(--status-orange);
+}

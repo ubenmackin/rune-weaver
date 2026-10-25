@@ -1017,7 +1017,7 @@ export default function ToolActionRow({
       ) : null}
 
       {action.toolName === "files.write" && result && !result.isError ? (
-        <div style={{ marginTop: 8 }}>
+        <div className="mt-2">
           <DiffCard
             action={action}
             result={result}

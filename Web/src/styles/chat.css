@@ -4,7 +4,7 @@
   flex: 1;
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -35,7 +35,7 @@
   color: var(--text-muted);
   font-size: 11px;
   padding: 3px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -44,7 +44,7 @@
   color: var(--text-muted);
   background: var(--bg-card);
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
 }
 
@@ -70,7 +70,7 @@
 .message {
   max-width: 82%;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   line-height: 1.5;
   word-break: break-word;
 }
@@ -78,7 +78,7 @@
 .message.user {
   background: #272738;
   align-self: flex-end;
-  border-bottom-right-radius: 2px;
+  border-bottom-right-radius: var(--radius-sm);
   white-space: pre-wrap;
 }
 
@@ -86,7 +86,7 @@
   background: #1c1c24;
   border: 1px solid var(--border-color);
   align-self: flex-start;
-  border-bottom-left-radius: 2px;
+  border-bottom-left-radius: var(--radius-sm);
   white-space: normal;
 }
 
@@ -112,7 +112,7 @@
 
 .message-completed-footer {
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
   user-select: none;
 }
 
@@ -122,8 +122,8 @@
   gap: 4px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
-  color: var(--text-muted, #8e8e9f);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
   padding: 2px 6px;
   font-size: 11px;
   cursor: pointer;
@@ -140,7 +140,7 @@
 
 .message-copy-btn:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: var(--text-main, #ffffff);
+  color: var(--text-main);
   border-color: rgba(255, 255, 255, 0.15);
 }
 
@@ -214,7 +214,7 @@
   margin-bottom: 10px;
   background: rgba(147, 51, 234, 0.05);
   border: 1px solid rgba(147, 51, 234, 0.2);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   font-size: 13px;
   transition: border-color 0.15s ease;
@@ -276,7 +276,7 @@
 .recall-chip {
   margin-bottom: 8px;
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
 }
 
 .recall-chip-summary {
@@ -319,7 +319,7 @@
   margin-bottom: 10px;
   background: #14141a;
   border: 1px solid #282833;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 10px;
 }
 
@@ -342,7 +342,7 @@
 }
 
 .chat-tool-pill {
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: #1c1c25;
   border: 1px solid #2c2c38;
 }
@@ -402,7 +402,7 @@
 .chat-tool-status {
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .chat-tool-status.ok {
@@ -496,8 +496,8 @@
  * chat rows and the index strip; the highlight slides with transform only. */
 .tool-progress-shimmer {
   height: 4px;
-  border-radius: 2px;
-  background: var(--tool-progress-track, var(--border-color));
+  border-radius: var(--radius-sm);
+  background: var(--tool-progress-track);
   overflow: hidden;
   position: relative;
 }
@@ -558,7 +558,7 @@
   padding: 10px 14px;
   background: #1a1a24;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-main);
   font-size: 14px;
   line-height: 1.5;
@@ -596,7 +596,7 @@
   background: rgba(239, 68, 68, 0.15);
   border: 1px solid rgba(239, 68, 68, 0.4);
   color: #fca5a5;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-weight: 500;
   font-size: 13px;
   cursor: pointer;
@@ -666,10 +666,10 @@
   gap: 6px;
   max-width: 240px;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   background: var(--bg-card);
-  color: var(--text-primary, #ffffff);
+  color: var(--text-main);
   font-size: 12px;
   cursor: pointer;
 }
@@ -757,19 +757,9 @@
   white-space: nowrap;
 }
 
-.goal-drawer-progress {
-  height: 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-  margin: 0 16px 8px;
-}
-
-.goal-drawer-progress-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent-purple, #8b5cf6);
-}
+/* Progress geometry lives in progress.css (.progress-track/.progress-fill plus
+ * .goal-drawer-progress/.goal-drawer-progress-fill aliases); this file owns
+ * no progress definitions. */
 
 .goal-drawer-body {
   flex: 1;
@@ -841,5 +831,111 @@
     z-index: 70;
     border-left: none;
   }
+}
+
+/* Scoped inline decision rules so later migrations bind by class. */
+.inline-question-card {
+  border-color: color-mix(in srgb, var(--accent-blue) 35%, transparent);
+}
+.inline-question-badge {
+  background: var(--accent-blue);
+  color: var(--text-main);
+  border-radius: var(--radius-sm);
+}
+.inline-question-title {
+  font-weight: 600;
+}
+.inline-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+.inline-question-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--accent-blue) 4%, transparent);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.inline-question-option-selected {
+  border-color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.inline-question-other-input {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  color: inherit;
+}
+.inline-question-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.inline-question-other-label {
+  white-space: nowrap;
+}
+.inline-question-deciding {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.inline-approval-badge {
+  background: color-mix(in srgb, var(--accent-blue) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 35%, transparent);
+  color: var(--accent-blue);
+  border-radius: var(--radius-sm);
+}
+.inline-approval-badge-muted {
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.chat-turn-error-card {
+  margin-top: 8px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-card);
+  color: var(--status-red);
+  font-size: 0.875rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.chat-turn-error-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Drawer progress uses the shared track contract with drawer gutters. */
+.goal-drawer .progress-track {
+  margin: 0 16px 8px;
+}
+
+/* Plan notice keeps readable padding while the tone comes from tokens. */
+.goal-plan-notice-planning {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 20%, transparent);
+  color: var(--accent-blue);
+}
+
+.goal-plan-notice-empty {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-main) 4%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--text-main) 15%, transparent);
+}
+
+.goal-plan-step-title {
+  text-decoration: none;
 }
 

@@ -1014,7 +1014,7 @@ function SessionSidebarView({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete this conversation and its message history. This cannot be undone.
             </p>
           </div>

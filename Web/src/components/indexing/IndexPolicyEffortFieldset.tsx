@@ -26,9 +26,8 @@ export default function IndexPolicyEffortFieldset({
     <fieldset id="index-effort-fieldset" className="index-effort-fieldset">
       <legend>Effort</legend>
       <p
-        className="muted text-sm"
+        className="muted text-sm m-0"
         data-testid="index-effort-reality"
-        style={{ marginTop: 0 }}
       >
         {effortReality}
       </p>
@@ -47,7 +46,7 @@ export default function IndexPolicyEffortFieldset({
         ))}
       </div>
       {effortPreset === "custom" ? (
-        <div className="form-group" style={{ marginTop: 8 }}>
+        <div className="form-group mt-2">
           <label htmlFor="index-custom-workers">Custom workers</label>
           <div className="row index-stepper">
             <button

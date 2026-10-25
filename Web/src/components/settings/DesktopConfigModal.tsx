@@ -56,45 +56,28 @@ export function DesktopConfigModal({
           <CloseIcon size={16} />
         </button>
       </div>
-      <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+      <div className="modal-body desktop-config-body">
         {desktopModalError && (
-          <div
-            className="error-banner"
-            style={{
-              marginBottom: "14px",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="error-banner desktop-config-error">
             <AlertTriangleIcon size={16} />
             <span>{desktopModalError}</span>
           </div>
         )}
 
-        <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+        <p className="muted text-sm desktop-config-intro">
           Configure screen capture resolution, vision downscaling, and application safety blocklists for desktop control.
         </p>
 
         {/* Section 1: Screen Capture & Vision */}
-        <div style={{ marginBottom: "20px" }}>
-          <h4
-            style={{
-              fontSize: "0.9rem",
-              margin: "0 0 10px 0",
-              color: "var(--text-primary, #ffffff)",
-            }}
-          >
+        <div className="desktop-config-section">
+          <h4 className="desktop-config-heading">
             Screen Capture & Vision
           </h4>
-          <div
-            className="form-row"
-            style={{ display: "flex", gap: "10px", marginBottom: "4px" }}
-          >
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+          <div className="form-row desktop-config-form-row">
+            <div className="form-group desktop-config-field">
               <label
                 htmlFor="desktop-max-dimension"
-                style={{ fontSize: "0.82rem" }}
+                className="text-sm"
               >
                 Max Image Dimension (px)
               </label>
@@ -117,10 +100,10 @@ export function DesktopConfigModal({
                 Longest edge of the downscaled screenshot (256-3840).
               </span>
             </div>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+            <div className="form-group desktop-config-field">
               <label
                 htmlFor="desktop-jpeg-quality"
-                style={{ fontSize: "0.82rem" }}
+                className="text-sm"
               >
                 JPEG Quality (0.1-1.0)
               </label>
@@ -147,30 +130,14 @@ export function DesktopConfigModal({
         </div>
 
         {/* Section 2: Control & Safety Blocklist */}
-        <div
-          style={{
-            paddingTop: "14px",
-            borderTop: "1px solid var(--border-color, #2d3748)",
-          }}
-        >
-          <h4
-            style={{
-              fontSize: "0.9rem",
-              margin: "0 0 10px 0",
-              color: "var(--text-primary, #ffffff)",
-            }}
-          >
+        <div className="desktop-config-blocklist">
+          <h4 className="desktop-config-heading">
             Control & Security Blocklist
           </h4>
-          <div className="form-group" style={{ marginBottom: "10px" }}>
+          <div className="form-group desktop-config-blocklist-field">
             <label
               htmlFor="desktop-blocked-apps-textarea"
-              style={{
-                fontSize: "0.85rem",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
+              className="text-sm desktop-config-blocked-label"
             >
               <span>
                 Blocked Apps{" "}
@@ -190,20 +157,14 @@ export function DesktopConfigModal({
               onChange={(e) => setDesktopBlockedAppsText(e.target.value)}
               placeholder={"Terminal\nKeychain Access\n1Password"}
             />
-            <span
-              className="form-group-hint"
-              style={{ marginTop: "4px", display: "block" }}
-            >
+            <span className="form-group-hint desktop-config-hint-block">
               One application name per line. Blocked targets refuse automated
               input before dispatch. Blank lines are ignored.
             </span>
           </div>
         </div>
       </div>
-      <div
-        className="modal-footer"
-        style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
-      >
+      <div className="modal-footer">
         <button
           type="button"
           className="ghost"

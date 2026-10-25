@@ -95,7 +95,7 @@
   color: var(--accent-purple);
   background: var(--bg-subtle);
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   padding: 3px 12px;
   cursor: pointer;
   white-space: nowrap;
@@ -138,7 +138,7 @@
   gap: 10px;
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 14px 18px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -182,7 +182,7 @@
   background: var(--accent-purple);
   color: #ffffff;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 7px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -222,7 +222,7 @@
   background: var(--bg-subtle);
   border: 1px solid var(--border-color);
   color: var(--text-muted);
-  border-radius: 14px;
+  border-radius: var(--radius-card);
   padding: 3px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -239,7 +239,7 @@
 .dashboard-recommendations-section {
   background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(23, 23, 29, 0.95) 100%);
   border: 1px solid rgba(139, 92, 246, 0.3);
-  border-radius: 14px;
+  border-radius: var(--radius-card);
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -256,7 +256,7 @@
 .dashboard-recommendation-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -276,7 +276,7 @@
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .recommendation-status-pill {
@@ -313,7 +313,7 @@
   gap: 6px;
   font-size: 12px;
   padding: 6px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   font-weight: 500;
@@ -367,7 +367,7 @@
 .dashboard-section {
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 18px 20px;
   display: flex;
   flex-direction: column;
@@ -408,7 +408,7 @@
   font-size: 11px;
   font-weight: 700;
   padding: 1px 7px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
 }
 
@@ -451,7 +451,7 @@
   text-align: center;
   background: var(--bg-card);
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
 }
 
 .all-clear-card {
@@ -490,12 +490,13 @@
   cursor: pointer;
   padding: 0;
   font-size: 12px;
-  color: var(--accent-purple, #a855f7);
+  color: var(--accent-purple);
   transition: color 0.15s ease, opacity 0.15s ease;
 }
 
 .btn-link:hover {
-  color: var(--accent-purple-hover, #c084fc);
+  color: var(--accent-purple);
+  filter: brightness(1.1);
   text-decoration: underline;
 }
 
@@ -504,7 +505,7 @@
 }
 
 .btn-link.inspect-report-link {
-  color: var(--accent-purple, #a855f7);
+  color: var(--accent-purple);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -512,7 +513,8 @@
 }
 
 .btn-link.inspect-report-link:hover {
-  color: var(--accent-purple-hover, #c084fc);
+  color: var(--accent-purple);
+  filter: brightness(1.1);
   text-decoration: underline;
 }
 
@@ -556,7 +558,7 @@
 .action-card-once-note {
   margin: 8px 0 0;
   font-size: 11px;
-  color: var(--text-muted, #94a3b8);
+  color: var(--text-muted);
   line-height: 1.4;
 }
 
@@ -599,31 +601,58 @@
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .new-goal-btn,
 .new-schedule-btn {
-  background: var(--bg-surface-elevated, #1e222b);
-  color: var(--text-main, #f3f4f6);
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  background: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
 }
 
 .new-goal-btn:hover,
 .new-schedule-btn:hover {
-  background: var(--bg-hover, #282e3a);
-  border-color: var(--border-focus, rgba(255, 255, 255, 0.25));
+  background: var(--bg-subtle);
+  border-color: var(--border-focus);
 }
 
 .open-goal-btn {
-  background: var(--accent-blue, #3b82f6);
+  background: var(--accent-blue);
   color: #ffffff;
   border: 1px solid transparent;
 }
 
 .open-goal-btn:hover {
-  background: var(--accent-blue-hover, #2563eb);
+  background: var(--accent-blue);
+  filter: brightness(1.1);
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 900px) {
+  .dashboard-main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-root {
+    padding: 16px 16px 96px;
+    gap: 20px;
+  }
+
+  .dashboard-greeting-title {
+    font-size: 20px;
+  }
+
+  .dashboard-prompt-bar-wrap {
+    padding: 12px 14px;
+  }
+
+  .dashboard-recommendations-list {
+    grid-template-columns: 1fr;
+  }
 }
 

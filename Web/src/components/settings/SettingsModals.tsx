@@ -121,7 +121,7 @@ export function SettingsModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This deletes expired entries under workspace/tmp/. This cannot be undone.
             </p>
           </div>
@@ -170,7 +170,7 @@ export function SettingsModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently uninstall and remove &lsquo;
               {pendingUninstallPlugin.name}&rsquo;. This cannot be undone.
             </p>
@@ -223,7 +223,7 @@ export function SettingsModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               Rotating the owner token invalidates the current token immediately
               and signs out every other device. This device adopts the new token.
             </p>
@@ -274,7 +274,7 @@ export function SettingsModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This is the final confirmation. The new token is shown once and
               cannot be retrieved again from the dashboard. Save it before
               dismissing; if you lose it, re-mint one on the Mac Studio with
@@ -319,21 +319,14 @@ export function SettingsModals({
             <h3>Save your new token</h3>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ marginTop: 0 }}>
+            <p className="muted m-0">
               This is the only time the new token is shown. Store it somewhere
               safe now; every other device has already been signed out.
             </p>
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <div className="row">
               <code
                 data-testid="new-token"
-                style={{
-                  flex: 1,
-                  wordBreak: "break-all",
-                  padding: "8px 10px",
-                  borderRadius: "6px",
-                  background: "var(--bg-secondary, #10131a)",
-                  border: "1px solid var(--border-color, #2d3748)",
-                }}
+                className="settings-token-code"
               >
                 {newToken}
               </code>
@@ -352,7 +345,7 @@ export function SettingsModals({
                 </span>
               </button>
             </div>
-            <div style={{ marginTop: "14px", display: "flex", alignItems: "center" }}>
+            <div className="settings-token-ack">
               <SwitchControl
                 checked={tokenSavedAck}
                 onChange={(event) => setTokenSavedAck(event.target.checked)}
@@ -397,7 +390,7 @@ export function SettingsModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               If you continue, in progress chats will be cancelled. Do you want to continue?
             </p>
           </div>

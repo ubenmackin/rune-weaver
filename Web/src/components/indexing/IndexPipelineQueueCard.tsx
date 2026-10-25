@@ -5,8 +5,6 @@ import {
   type IndexStorageResponse,
 } from "../../api";
 import {
-  CHART_TRACK_COLOR,
-  CHART_VECTOR_COLOR,
   formatIndexBytes,
   formatIndexCount,
   indexAccessDeniedGuidance,
@@ -47,8 +45,7 @@ export default function IndexPipelineQueueCard({
       </div>
       {status.sources && status.sources.length > 0 ? (
         <div
-          className="index-source-pills"
-          style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}
+          className="index-source-pills index-source-pills-bar"
         >
           {status.sources.map((source) => {
             const tone = indexSourcePillTone(source);
@@ -65,19 +62,17 @@ export default function IndexPipelineQueueCard({
                 {showGrant ? (
                   <button
                     type="button"
-                    className="ghost"
+                    className="ghost ml-2"
                     aria-label={`Grant ${sourceLabel(source.kind)} access`}
                     disabled={!!accessBusy[source.kind]}
                     onClick={() => onRequestAccess(source.kind)}
-                    style={{ marginLeft: 8 }}
                   >
                     {accessBusy[source.kind] ? "Requesting…" : "Grant"}
                   </button>
                 ) : null}
                 {showDenied ? (
                   <span
-                    className="muted text-xs"
-                    style={{ marginLeft: 8 }}
+                    className="muted text-xs ml-2"
                   >
                     {indexAccessDeniedGuidance(source.kind)}
                   </span>
@@ -90,13 +85,9 @@ export default function IndexPipelineQueueCard({
 
       <div
         data-testid="index-source-bars"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-        }}
+        className="index-share-bars"
       >
-        <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+        <h4 className="text-xs muted index-chart-heading">
           Documents by source (share of index)
         </h4>
         {sourceContent.map((source) => {
@@ -116,24 +107,18 @@ export default function IndexPipelineQueueCard({
           return (
             <div
               key={source.kind}
-              style={{ display: "flex", flexDirection: "column", gap: 4 }}
+              className="index-share-row"
             >
               <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "baseline",
-                  gap: 8,
-                }}
+                className="index-share-row-head"
               >
                 <span className="text-xs muted">
                   {sourceLabel(source.kind)}
                 </span>
                 {isEmpty ? null : (
                   <span
-                    className="text-xs muted"
+                    className="text-xs muted index-bar-pct"
                     data-testid={`index-bar-pct-${source.kind}`}
-                    style={{ textAlign: "right" }}
                   >
                     {barLabel}
                   </span>
@@ -148,23 +133,14 @@ export default function IndexPipelineQueueCard({
                 </span>
               ) : (
                 <div
-                  style={{
-                    width: "100%",
-                    height: 10,
-                    borderRadius: 5,
-                    background: CHART_TRACK_COLOR,
-                    overflow: "hidden",
-                  }}
+                  className="progress-track"
                 >
                   <div
                     data-testid={`index-bar-${source.kind}`}
                     aria-label={`${sourceLabel(source.kind)} ${formatIndexCount(source.documents)} documents`}
+                    className="progress-fill"
                     style={{
                       width: barWidth,
-                      height: "100%",
-                      borderRadius: 5,
-                      background: CHART_VECTOR_COLOR,
-                      transition: "width 240ms ease",
                     }}
                   />
                 </div>

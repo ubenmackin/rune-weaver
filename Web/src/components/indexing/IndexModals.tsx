@@ -43,12 +43,12 @@ export default function IndexModals({
             <h3>Prune the index?</h3>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This removes documents indexed before the cutoff date you choose.
               Stored chunks for those documents are deleted and cannot be
               recovered. Intact documents are untouched.
             </p>
-            <div className="form-group" style={{ marginTop: 12 }}>
+            <div className="form-group mt-3">
               <label htmlFor="index-prune-before">Cutoff date</label>
               <input
                 id="index-prune-before"
@@ -91,7 +91,7 @@ export default function IndexModals({
                   <h3>Reset the index?</h3>
                 </div>
                 <div className="modal-body">
-                  <p className="muted" style={{ margin: 0 }}>
+                  <p className="muted m-0">
                     This clears every indexed document and chunk. The next run rebuilds
                     the index from scratch. This cannot be undone.
                   </p>

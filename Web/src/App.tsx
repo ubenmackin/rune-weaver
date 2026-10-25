@@ -373,8 +373,7 @@ function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
         <div className="app-container">
           {/* Chat tab is kept mounted so ongoing conversation and session state are preserved across navigation */}
           <div
-            className="tab-panel-wrapper"
-            style={{ display: tab === "chat" ? "block" : "none", height: tab === "chat" ? "100%" : undefined }}
+            className={tab === "chat" ? "tab-panel-wrapper" : "tab-panel-wrapper chat-pane-hidden"}
             aria-hidden={tab !== "chat"}
           >
             {/* The boundary lives inside the display-toggled wrapper so the

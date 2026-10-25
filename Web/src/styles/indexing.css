@@ -4,7 +4,7 @@
 .index-live-progress {
   margin-top: 12px;
   padding: 14px 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   display: flex;
@@ -30,7 +30,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: rgba(15, 23, 42, 0.35);
   border: 1px solid var(--border-color);
 }
@@ -54,7 +54,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(148, 163, 184, 0.06);
   border: 1px solid var(--border-color);
   font-size: 12px;
@@ -73,7 +73,7 @@
 .index-pipeline-node {
   width: 8px;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(148, 163, 184, 0.45);
   flex-shrink: 0;
 }
@@ -108,8 +108,8 @@
   background: linear-gradient(
     90deg,
     rgba(16, 185, 129, 0.25) 0%,
-    #10b981 35%,
-    #6366f1 65%,
+    var(--status-green) 35%,
+    var(--accent-indigo) 65%,
     rgba(99, 102, 241, 0.25) 100%
   );
   background-size: 200% 100%;
@@ -137,7 +137,7 @@
 }
 
 .index-pipeline-step.done .index-pipeline-node {
-  background: var(--status-green, #10b981);
+  background: var(--status-green);
 }
 
 .index-pipeline-step.active {
@@ -148,7 +148,7 @@
 }
 
 .index-pipeline-step.active .index-pipeline-node {
-  background: #6366f1;
+  background: var(--accent-indigo);
   box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.22);
   animation: indexPipelinePulse 1.6s ease-in-out infinite;
 }
@@ -189,8 +189,8 @@
     background: linear-gradient(
       180deg,
       rgba(16, 185, 129, 0.25) 0%,
-      #10b981 35%,
-      #6366f1 65%,
+      var(--status-green) 35%,
+      var(--accent-indigo) 65%,
       rgba(99, 102, 241, 0.25) 100%
     );
     background-size: 100% 200%;
@@ -236,7 +236,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: rgba(15, 23, 42, 0.28);
   border: 1px solid var(--border-color);
 }
@@ -266,21 +266,6 @@
   flex-shrink: 0;
 }
 
-.index-queue-lane-track {
-  width: 100%;
-  height: 5px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.2);
-  overflow: hidden;
-}
-
-.index-queue-lane-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #6366f1, #14b8a6);
-  transition: width 220ms ease;
-}
-
 .index-live-sources-strip {
   display: flex;
   flex-wrap: wrap;
@@ -292,7 +277,7 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   background: rgba(148, 163, 184, 0.08);
   border: 1px solid var(--border-color);
@@ -311,16 +296,16 @@
 .index-live-source-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(148, 163, 184, 0.6);
 }
 
 .index-live-source-chip.running .index-live-source-dot {
-  background: #6366f1;
+  background: var(--accent-indigo);
 }
 
 .index-live-source-chip.completed .index-live-source-dot {
-  background: var(--status-green, #10b981);
+  background: var(--status-green);
 }
 
 .index-live-source-name {
@@ -341,7 +326,7 @@
 /* Bento dashboard layout for Index Status */
 .index-bento-header {
   padding: 14px 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--bg-card);
   border: 1px solid var(--border-color);
 }
@@ -365,7 +350,7 @@
   justify-content: space-between;
   gap: 10px;
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--bg-card);
   border: 1px solid var(--border-color);
 }
@@ -384,7 +369,7 @@
 .index-effort-badge {
   margin: 0;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: rgba(148, 163, 184, 0.1);
   border: 1px solid var(--border-color);
 }
@@ -411,7 +396,7 @@
 .index-stat-card {
   padding: 14px;
   margin-bottom: 0;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -435,7 +420,7 @@
   align-self: flex-start;
   margin-top: 2px;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
   color: #818cf8;
   background: rgba(99, 102, 241, 0.14);
@@ -443,36 +428,7 @@
 }
 
 .index-watermark-card {
-  border-left: 3px solid #6366f1;
-}
-
-.index-storage-meter,
-.index-chunks-meter {
-  display: flex;
-  width: 100%;
-  height: 5px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(148, 163, 184, 0.2);
-  margin-top: 4px;
-}
-
-.index-storage-seg.text {
-  background: #38bdf8;
-}
-
-.index-storage-seg.vector,
-.index-chunks-seg.vector {
-  background: #6366f1;
-}
-
-.index-storage-seg.fts,
-.index-chunks-seg.keyword {
-  background: #14b8a6;
-}
-
-.index-storage-seg.free {
-  background: rgba(148, 163, 184, 0.45);
+  border-left: 3px solid var(--accent-indigo);
 }
 
 .index-charts-section {
@@ -496,7 +452,7 @@
 .index-bento-card {
   padding: 16px;
   margin-bottom: 0;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   display: flex;
   flex-direction: column;
 }
@@ -520,7 +476,7 @@
   align-items: center;
   gap: 16px;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: rgba(15, 23, 42, 0.24);
   border: 1px solid var(--border-color);
 }
@@ -572,7 +528,7 @@
   overflow-y: auto;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   min-width: 0;
 }
@@ -619,7 +575,7 @@
   padding: 2px 6px;
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.35);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: #fca5a5;
   font-size: 10px;
   cursor: pointer;
@@ -652,7 +608,7 @@
   padding: 10px;
   background: #1c1c25;
   border: 1px solid #2c2c38;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
 }
 
@@ -667,7 +623,7 @@
   padding: 5px 7px;
   background: #0f0f14;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-main);
   font-size: 12px;
   font-family: inherit;
@@ -688,7 +644,7 @@
   padding: 3px 8px;
   background: rgba(239, 68, 68, 0.2);
   border: 1px solid rgba(239, 68, 68, 0.45);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: #fca5a5;
   font-size: 11px;
   cursor: pointer;
@@ -723,7 +679,7 @@
   margin: 4px 0 0 0;
   padding: 6px;
   background: #0f0f14;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, monospace;
@@ -761,4 +717,126 @@
 .index-stepper .index-stepper-input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+/* Panel banners keep a consistent rhythm below the header. */
+.index-panel-banner {
+  margin-bottom: 16px;
+}
+
+/* Shared chart-row contract: stacked label line, full-width track, stats
+ * line. Tracks reuse the shared progress-track geometry with an index
+ * height; fills keep only the width inline for every share. */
+.index-source-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.index-source-pills-bar {
+  margin-bottom: 14px;
+}
+
+.index-source-pills-skeleton {
+  margin-top: 12px;
+}
+
+.index-source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.index-share-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.index-extract-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.index-chart-heading {
+  margin: 0;
+  font-weight: 600;
+}
+
+.index-share-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.index-share-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.index-bar-pct {
+  text-align: right;
+}
+
+/* Donut legend rows pair a token swatch with counts; the ring segments
+ * read stroke color from tokens so no chart hex lives in components. */
+.index-donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.index-donut-legend-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.index-donut-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-sm);
+  display: inline-block;
+}
+
+.index-donut-swatch-vector {
+  background: var(--accent-purple);
+}
+
+.index-donut-swatch-keyword {
+  background: var(--accent-blue);
+}
+
+.index-donut-track {
+  stroke: var(--border-color);
+}
+
+.index-donut-vector {
+  stroke: var(--accent-purple);
+}
+
+.index-donut-keyword {
+  stroke: var(--accent-blue);
+}
+
+/* Stat card sub-lines sit tight under the value without a utility for 2px. */
+.index-stat-sub {
+  margin-top: 2px;
+}
+
+.index-size-sizing {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+}
+
+/* Guided steps keep the indented list shape beside the shared spacing. */
+.index-fda-steps {
+  padding-left: 20px;
+  margin-bottom: 0;
 }

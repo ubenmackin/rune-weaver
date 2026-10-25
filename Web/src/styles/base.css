@@ -35,6 +35,11 @@
   filter: drop-shadow(0 0 6px var(--accent-purple-glow));
 }
 
+/* Glyph core uses the sky token so the accent stays themable. */
+.rune-glyph-fill {
+  fill: var(--accent-sky);
+}
+
 .app-brand-title {
   font-size: 16px;
   font-weight: 700;
@@ -112,7 +117,7 @@
   font-size: 10px;
   font-weight: 700;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
 }
 
 .top-nav-right {
@@ -128,7 +133,7 @@
   padding: 4px 10px;
   background: #1e1e27;
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -148,10 +153,10 @@
   padding: 5px 12px;
   background: #181822;
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--text-main);
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -196,7 +201,7 @@
   max-width: min(500px, calc(100vw - 32px));
   background: #14141d;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
   padding: 8px;
   z-index: 1000;
@@ -283,7 +288,7 @@
   flex-direction: column;
   gap: 6px;
   background: rgba(255, 255, 255, 0.02);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .profile-info-row {
@@ -323,7 +328,7 @@
   color: #d1d5db;
   font-size: 13px;
   font-weight: 500;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
@@ -363,7 +368,7 @@
   font-size: 10px;
   font-weight: 700;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   margin-left: auto;
   white-space: nowrap;
 }
@@ -387,7 +392,7 @@
   background: transparent;
   border: 1px solid var(--border-color);
   color: var(--text-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 6px 8px;
   display: inline-flex;
   align-items: center;
@@ -434,7 +439,7 @@
 
 .panel {
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   padding: 20px;
   background: var(--bg-panel);
   box-sizing: border-box;
@@ -463,7 +468,7 @@
 .card {
   background: #181822;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   padding: 16px;
   box-sizing: border-box;
   margin-bottom: 12px;
@@ -479,7 +484,7 @@
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.4;
@@ -490,7 +495,7 @@
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -515,10 +520,10 @@
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 500;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: #1e1e28;
   border: 1px solid #333344;
-  color: var(--text-main, #ffffff);
+  color: var(--text-main);
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -526,7 +531,7 @@
 .keychain-action-btn:hover {
   background: #2a2a38;
   border-color: #4a4a60;
-  color: #38bdf8;
+  color: var(--accent-sky);
 }
 
 .store-secret-modal {
@@ -627,7 +632,7 @@
   font-weight: 700;
   line-height: 1;
   padding: 2px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   pointer-events: none;
 }
@@ -680,7 +685,7 @@
   max-width: calc(100vw - 24px);
   background: #14141d;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
   padding: 6px;
   z-index: 45;
@@ -732,7 +737,7 @@
   padding: 8px 12px;
   background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
@@ -775,7 +780,7 @@
   font-weight: 700;
   line-height: 1;
   padding: 2px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
 }
 
@@ -846,5 +851,84 @@
   .app-main-content {
     padding: 8px 8px calc(80px + env(safe-area-inset-bottom, 0px));
   }
+}
+
+.badge-green {
+  background: rgba(16, 185, 129, 0.16);
+  color: var(--status-green);
+}
+
+.badge-amber {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--status-amber);
+}
+
+.badge-red {
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--status-red);
+}
+
+.badge-blue {
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--accent-blue);
+}
+
+.badge-sky {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent-sky);
+}
+
+/* Chat tab stays mounted across navigation; the hidden variant removes it
+ * from layout while the visible default keeps full height. */
+.tab-panel-wrapper {
+  height: 100%;
+}
+
+.tab-panel-wrapper.chat-pane-hidden {
+  display: none;
+}
+
+/* Bell trigger anchors the absolutely positioned warning count. */
+.top-nav-bell {
+  position: relative;
+}
+
+.nav-badge-warning-overlay {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: var(--status-amber);
+}
+
+/* SearXNG tri-state dot keeps unknown gray so older engines without search
+ * fields never read as stopped. */
+.searxng-dot-unknown {
+  background-color: var(--text-secondary);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--text-secondary) 60%, transparent);
+}
+
+.searxng-dot-reachable {
+  background-color: var(--status-green);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--status-green) 60%, transparent);
+}
+
+.searxng-dot-stopped {
+  background-color: var(--status-red);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--status-red) 60%, transparent);
+}
+
+.searxng-start-stage {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.searxng-start-elapsed {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.searxng-toggle {
+  padding: 2px 8px;
+  font-size: 11px;
 }
 

@@ -39,7 +39,7 @@
   padding: 6px 12px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   color: var(--text-muted);
   width: fit-content;
@@ -89,9 +89,9 @@
 input.settings-nav-search-input[type="search"] {
   width: 100%;
   padding: 8px 12px 8px 32px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-sizing: border-box;
-  background-color: var(--bg-card, #1e2533);
+  background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   color: var(--text-main);
   font-size: 0.88rem;
@@ -100,7 +100,7 @@ input.settings-nav-search-input[type="search"] {
 }
 
 .settings-nav-search-input:focus {
-  border-color: var(--accent-purple, #9f7aea);
+  border-color: var(--accent-purple);
 }
 
 /* Sits inside the sidenav card so a starved query reads as part of the list
@@ -118,7 +118,7 @@ input.settings-nav-search-input[type="search"] {
   padding: 6px;
   background: #111118;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .settings-tab-btn {
@@ -131,7 +131,7 @@ input.settings-nav-search-input[type="search"] {
   padding: 10px 14px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 500;
@@ -161,9 +161,9 @@ input.settings-nav-search-input[type="search"] {
 .settings-tab-badge {
   font-size: 11px;
   background: rgba(168, 85, 247, 0.2);
-  color: #c084fc;
+  color: #c4b5fd;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
   margin-left: auto;
 }
@@ -211,7 +211,7 @@ input.settings-nav-search-input[type="search"] {
   flex-shrink: 0;
   background: transparent;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s ease;
@@ -347,7 +347,7 @@ input.settings-nav-search-input[type="search"] {
   padding: 20px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
 }
 
 .settings-section-header {
@@ -419,27 +419,6 @@ input.settings-nav-search-input[type="search"] {
   flex-wrap: wrap;
 }
 
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.form-group label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: default;
-}
-
-.form-group-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
 /* Network egress editors keep a single 16px rhythm between the heading, hint
    paragraphs, and field groups; zeroing the inner margins keeps the gap from doubling. */
 .policy-network-section {
@@ -468,7 +447,7 @@ input.settings-nav-search-input[type="search"] {
 .provider-card {
   background: #111116;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -499,7 +478,7 @@ input.settings-nav-search-input[type="search"] {
 .provider-name-input {
   background: transparent;
   border: 1px dashed transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: #f3f4f6;
   font-size: 15px;
   font-weight: 600;
@@ -546,7 +525,7 @@ input.settings-nav-search-input[type="search"] {
 .email-account-card {
   background: #111116;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -582,7 +561,7 @@ input.settings-nav-search-input[type="search"] {
   padding: 2px 8px;
   background: rgba(168, 85, 247, 0.15);
   color: #c084fc;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   text-transform: uppercase;
   font-weight: 600;
 }
@@ -601,7 +580,7 @@ input.settings-nav-search-input[type="search"] {
   color: var(--text-muted);
   background: rgba(255, 255, 255, 0.02);
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px dashed var(--border-color);
 }
 
@@ -632,11 +611,10 @@ section[data-testid="policy-pane"] .settings-footer {
   gap: 8px;
 }
 
-/* Shared Save presentation for Settings footers: both footers consume these
- * classes so enabled Saves stay solid theme blue in one place. `.save-button`
- * keeps padding and typography while `.primary-button` owns the blue fill. */
+/* Shared Save presentation for Settings footers: `.save-button` keeps padding
+ * and typography while `.primary-button` owns the canonical --accent-purple fill. */
 .primary-button {
-  background: var(--accent-blue);
+  background: var(--accent-purple);
   border: 0;
   color: white;
   cursor: pointer;
@@ -662,7 +640,7 @@ section[data-testid="policy-pane"] .settings-footer {
   background: rgba(34, 197, 94, 0.15);
   border: 1px solid rgba(34, 197, 94, 0.3);
   color: #86efac;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   margin-bottom: 12px;
 }
@@ -674,7 +652,7 @@ section[data-testid="policy-pane"] .settings-footer {
   background: var(--bg-subtle);
   border: 1px solid var(--border-color);
   color: var(--text-main);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   line-height: 1.4;
 }
@@ -706,9 +684,9 @@ section[data-testid="policy-pane"] .settings-footer {
 
 /* Outline-only pulse so the 2400ms highlight never moves surrounding layout. */
 .settings-search-highlight {
-  outline: 2px solid var(--accent-purple, #9f7aea);
+  outline: 2px solid var(--accent-purple);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   animation: settings-search-pulse 2.4s ease-out;
 }
 
@@ -727,7 +705,7 @@ section[data-testid="policy-pane"] .settings-footer {
   padding: 12px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
 }
 
 /* Alarm variant tints the tampered-runes shell from --status-red's own RGB so
@@ -753,4 +731,240 @@ section[data-testid="policy-pane"] .settings-footer {
   font-weight: 700;
   margin-top: 4px;
 }
+
+/* Settings -> Access cluster: shared save confirmation. */
+.settings-save-success { padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(16, 185, 129, 0.15); color: var(--status-green); font-size: 0.85rem; margin-bottom: 12px; }
+
+/* Policy invariants wrapper keeps the 12px top / 14px bottom rhythm. */
+.policy-invariants { margin-top: 12px; margin-bottom: 14px; }
+
+.policy-invariants-ok { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25); color: var(--status-green); font-size: 0.85rem; }
+
+.policy-invariants-violation { padding: 10px 14px; border-radius: var(--radius-sm); background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--status-red); font-size: 0.85rem; }
+
+.policy-invariants-title { font-weight: 700; margin-bottom: 4px; }
+
+.policy-invariants-list { margin: 4px 0 0 20px; padding: 0; }
+
+.policy-invariants-item { margin-bottom: 2px; }
+
+.policy-list-indent { margin: 0; padding-left: 18px; }
+
+.policy-egress-shadow-warning { padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: var(--status-amber); font-size: 0.85rem; margin-top: 8px; }
+
+.policy-never-dialable { padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: var(--status-amber); font-size: 0.85rem; margin-bottom: 12px; }
+
+/* Access files section spacing. */
+.access-files-card-spaced { margin-bottom: 20px; }
+.access-subsection-spaced { margin-top: 20px; }
+.access-subsection-spaced-md { margin-top: 16px; }
+.access-subsection-heading { margin: 0 0 4px 0; }
+.access-precedence-note { margin-bottom: 16px; }
+
+/* Write-path table scroll keeps the 320px viewport; the base wrapper owns
+ * border and padding while this compact modifier only clamps height. */
+.access-files-table-compact { max-height: 320px; overflow-y: auto; }
+.access-files-thead { position: sticky; top: 0; z-index: 1; }
+.access-files-col-path { width: 35%; position: sticky; top: 0; }
+.access-files-col-posture { width: 160px; position: sticky; top: 0; }
+.access-files-col-consequence { position: sticky; top: 0; }
+.access-files-col-actions { width: 50px; text-align: center; position: sticky; top: 0; }
+.access-files-cell-center { text-align: center; }
+.access-files-consequence { margin: 0; display: inline-block; }
+.access-files-mode-option { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; cursor: pointer; }
+.access-files-mode-text { display: flex; flex-direction: column; gap: 2px; }
+
+/* Credentials list chrome. */
+.credentials-list-header-wrap { flex-wrap: wrap; }
+.credentials-spacer { flex: 1; }
+.credentials-empty-box { padding: 12px; border-radius: var(--radius-sm); border: 1px dashed var(--border-color); font-size: 0.85rem; }
+.credentials-search-input { max-width: 220px; }
+.credentials-attention-label { font-size: 0.82rem; }
+.credentials-no-match { padding: 8px 0; }
+.credentials-plain-list { list-style: none; margin: 0; padding: 0; }
+.credential-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border-color); }
+.credential-row-button { flex: 1; display: flex; gap: 8px; align-items: center; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font-size: 0.82rem; min-width: 0; }
+.credential-attention-dot { color: var(--status-amber); font-size: 0.7rem; flex-shrink: 0; }
+.credential-key-code { font-family: monospace; flex-shrink: 0; }
+.credential-keychain-badge { font-size: 0.72rem; padding: 1px 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); flex-shrink: 0; }
+.credential-hosts-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.credential-scope-summary { flex-shrink: 0; }
+.credential-attention-reason { font-size: 0.75rem; line-height: 1.35; padding-left: 16px; }
+.unlinked-secret-row { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-color); }
+.unlinked-secret-key { font-family: monospace; flex: 1; }
+.credentials-delete-option { margin-top: 8px; font-size: 0.85rem; }
+.credentials-section-spaced { margin-top: 16px; }
+
+/* Rules modal groups keep the 16px stacked rhythm. */
+.access-modal-group { margin-bottom: 16px; }
+.access-modal-label { font-size: 0.85rem; font-weight: 600; display: block; margin-bottom: 6px; }
+.access-modal-label-tight { font-size: 0.85rem; font-weight: 600; display: block; margin-bottom: 4px; }
+.access-modal-sublabel { font-size: 0.82rem; display: block; margin-top: 8px; margin-bottom: 4px; }
+.access-target-label { font-size: 0.82rem; display: block; margin-bottom: 4px; }
+.access-target-hint { display: block; margin-bottom: 6px; }
+.access-effect-group { display: flex; gap: 8px; flex-wrap: wrap; }
+.access-scope-group { display: flex; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+.access-radio-label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.access-duration-group { display: flex; gap: 12px; flex-wrap: wrap; }
+.access-duration-option { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.access-deny-note { margin-bottom: 16px; }
+.access-rule-reason-label { opacity: 0.75; }
+.access-rule-effect-pill { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-muted); font-weight: 500; cursor: pointer; }
+.access-rule-effect-pill.active { border-color: var(--accent-purple); background: rgba(147, 51, 234, 0.15); color: var(--text-main); font-weight: 600; }
+.access-wildcard-hint { font-size: 0.78rem; color: var(--text-muted); background: var(--bg-subtle); padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); }
+
+/* Sidenav count badges keep the solid status fill with light text. */
+.settings-tab-badge--amber { background: var(--status-amber); color: white; }
+.settings-tab-badge--red { background: var(--status-red); color: white; }
+
+/* Installed runes list keeps its heading, meta, and status tones in one place. */
+.plugins-section-heading { display: flex; align-items: center; gap: 8px; margin: 20px 0 12px; }
+.plugins-empty-box { padding: 28px; }
+.plugins-meta-line { color: var(--text-secondary); }
+.plugins-desc { color: var(--text-muted); }
+.plugins-pending { color: var(--status-amber); }
+.plugins-tampered { color: var(--status-red); }
+.plugins-hash-row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.plugins-hash-mismatch { color: var(--status-red); }
+.plugins-hash-verified { color: var(--status-green); }
+.plugins-permission-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.plugins-permission-label { color: var(--text-secondary); }
+.plugins-tool-switch { display: flex; align-items: center; gap: 8px; flex-shrink: 0; cursor: pointer; }
+.plugins-tool-switch.is-busy { cursor: wait; }
+
+/* Amber restart banner reuses the status token so the saved-vs-live notice
+ * never drifts from the pulse palette. */
+.network-restart-banner { background: color-mix(in srgb, var(--status-amber) 15%, transparent); border: 1px solid color-mix(in srgb, var(--status-amber) 40%, transparent); color: var(--status-amber); }
+.network-pending-banner { padding: 10px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-bottom: 12px; }
+.network-lan-hint { padding: 10px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin: 12px 0; }
+.network-subsection-spaced { margin-top: 20px; }
+.network-hosts-error { color: var(--status-red); }
+
+/* Fan-out modal keeps its scroll bound plus the compact two-field row. */
+.fanout-modal-body { max-height: 70vh; }
+.fanout-modal-error { margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.fanout-modal-intro { margin-bottom: 16px; }
+.fanout-form-row { display: flex; gap: 10px; margin-bottom: 4px; }
+
+/* Cadence presets wrap under the input without inline flex. */
+.goals-cadence-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+/* Workspace storage quota plus machine status: token-bound panels replacing
+ * inline backgrounds, borders, and progress colors. */
+.workspace-storage-section { margin: 8px 0 16px; padding: 16px; border-radius: var(--radius-card); background: var(--bg-card); border: 1px solid var(--border-color); }
+.workspace-storage-head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.workspace-storage-hint { margin: 4px 0 0 0; }
+.workspace-usage-stack { display: flex; flex-direction: column; gap: 10px; }
+.workspace-usage-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.workspace-quota-fill.is-critical { background: var(--status-red); }
+.workspace-quota-fill.is-warning { background: var(--status-amber); }
+.workspace-quota-fill.is-ok { background: var(--status-green); }
+.workspace-truncated-note { color: var(--text-secondary); }
+.workspace-machine-panel { margin-top: 14px; padding: 12px; border-radius: var(--radius-card); background: var(--bg-subtle); border: 1px solid var(--border-color); }
+.workspace-machine-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.workspace-machine-title { font-size: 0.85rem; font-weight: 600; }
+.workspace-machine-status { color: var(--text-secondary); margin-top: 4px; }
+.workspace-quota-row { margin-top: 14px; gap: 10px; }
+.workspace-quota-field { flex: 1 1 140px; }
+
+/* Token reveal code box plus ack row spacing inside settings modals. */
+.settings-token-code { flex: 1; word-break: break-all; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-subtle); border: 1px solid var(--border-color); }
+.settings-token-ack { margin-top: 14px; display: flex; align-items: center; }
+
+/* Mobile push card rows and hints. */
+.mobile-push-row { align-items: center; justify-content: space-between; }
+.mobile-push-label { display: block; font-weight: 600; }
+.mobile-push-hint { opacity: 0.8; }
+.mobile-push-result { align-self: center; opacity: 0.9; }
+
+/* Advanced disclosure trigger cursor plus error link color. */
+.advanced-disclosure-trigger { cursor: pointer; font-weight: 600; }
+.advanced-error { color: var(--status-red); }
+
+/* Memory embeddings card: subtle overlay, header, facts grid, error line. */
+.memory-embeddings-card { margin-top: 1rem; padding: 1rem; background: color-mix(in srgb, var(--text-main) 3%, transparent); }
+.memory-embeddings-head { justify-content: space-between; margin-bottom: 0.5rem; }
+.memory-embeddings-title { font-weight: 600; }
+.memory-embeddings-error { margin: 0.5rem 0; color: var(--status-red); }
+.memory-embeddings-facts { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; margin-top: 0.5rem; }
+.badge-muted { background: var(--bg-subtle); color: var(--text-muted); border: 1px solid var(--border-color); }
+
+/* Provider key-env row keeps label and badge on one wrapped line. */
+.provider-key-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 6px; }
+
+/* Email env hint spread across the card width. */
+.email-env-hint-spread { justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+
+/* Desktop config modal sections and fields. */
+.desktop-config-body { max-height: 70vh; overflow-y: auto; }
+.desktop-config-error { margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.desktop-config-intro { margin-bottom: 16px; }
+.desktop-config-section { margin-bottom: 20px; }
+.desktop-config-heading { font-size: 0.9rem; margin: 0 0 10px 0; color: var(--text-main); }
+.desktop-config-form-row { gap: 10px; margin-bottom: 4px; }
+.desktop-config-field { flex: 1; margin-bottom: 0; }
+.desktop-config-blocklist { padding-top: 14px; border-top: 1px solid var(--border-color); }
+.desktop-config-blocklist-field { margin-bottom: 10px; }
+.desktop-config-blocked-label { display: flex; justify-content: space-between; align-items: center; }
+.desktop-config-hint-block { display: block; margin-top: 4px; }
+
+/* Web search tab dividers, diagnostics, and troubleshooting details. */
+.web-section-divider { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-color); }
+.web-diagnostics-pre { white-space: pre-wrap; margin: 8px 0 0 0; }
+.web-troubleshooting-toggle { cursor: pointer; user-select: none; }
+.web-troubleshooting-body { margin-top: 8px; padding-left: 4px; }
+.web-manual-fallback-code { font-size: 11px; word-break: break-all; }
+
+/* Engine tab layout replacing inline margins and flex. */
+.engine-proactive-pane { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-color); }
+.engine-compaction-row { display: flex; align-items: center; gap: 1rem; }
+.engine-compaction-slider { flex: 1; }
+.engine-compaction-value { min-width: 3rem; font-weight: bold; }
+
+/* Tools tab metrics, banners, and headers replacing inline grid and colors. */
+.tools-metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin: 16px 0; }
+.tools-stat-ok { color: var(--status-green); }
+.tools-stat-warn { color: var(--status-amber); }
+.tools-stat-alert { color: var(--status-red); }
+.tools-warning-banner { padding: 12px 16px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--status-amber) 15%, transparent); border: 1px solid color-mix(in srgb, var(--status-amber) 40%, transparent); margin-bottom: 16px; display: flex; align-items: flex-start; gap: 12px; color: var(--status-amber); }
+.tools-critical-banner { padding: 12px 16px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--status-red) 15%, transparent); border: 1px solid color-mix(in srgb, var(--status-red) 40%, transparent); margin-bottom: 16px; display: flex; align-items: flex-start; gap: 12px; color: var(--status-red); }
+.tools-banner-icon { flex-shrink: 0; margin-top: 2px; }
+.tools-banner-body { font-size: 0.88rem; line-height: 1.4; }
+.tools-banner-detail { margin-top: 2px; color: var(--text-main); }
+.tools-builtin-header { display: flex; align-items: center; justify-content: space-between; margin: 28px 0 8px 0; flex-wrap: wrap; gap: 10px; }
+.tools-builtin-title { margin: 0; display: flex; align-items: center; gap: 8px; }
+.tools-empty-filter-text { margin: 8px 0 4px 0; }
+.tools-reset-btn { margin-top: 8px; font-size: 0.82rem; }
+.tools-category-config-btn { padding: 4px 8px; font-size: 0.78rem; }
+.tools-toggle-label { display: flex; align-items: center; gap: 8px; flex-shrink: 0; cursor: pointer; }
+.tools-toggle-label.is-busy { cursor: wait; }
+.tools-plugin-heading { margin: 0 0 4px 0; }
+
+/* Browser config modal replacing inline card and flex styles. */
+.browser-config-body { max-height: calc(85vh - 130px); overflow-y: auto; }
+.browser-config-error { margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.browser-config-intro { margin-bottom: 16px; }
+.browser-config-card { padding: 14px; border-radius: var(--radius-card); border: 1px solid var(--border-color); margin-bottom: 16px; background: var(--bg-subtle); }
+.browser-config-heading { margin: 0 0 12px 0; font-size: 0.88rem; }
+.browser-config-hint-block { display: block; margin-top: 4px; }
+.browser-policy-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.browser-policy-heading { margin: 0 0 6px 0; font-size: 0.88rem; }
+.browser-policy-action { white-space: nowrap; font-size: 0.8rem; padding: 6px 10px; }
+
+/* Media config modal replacing inline card and flex styles. */
+.media-config-body { max-height: 70vh; overflow-y: auto; }
+.media-config-error { margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.media-config-intro { margin-bottom: 16px; }
+.media-config-card { padding: 14px; border-radius: var(--radius-card); border: 1px solid var(--border-color); margin-bottom: 16px; background: var(--bg-subtle); }
+.media-config-card-last { padding: 14px; border-radius: var(--radius-card); border: 1px solid var(--border-color); background: var(--bg-subtle); }
+.media-config-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.media-config-card-title { margin: 0; display: flex; align-items: center; gap: 8px; }
+.media-config-field { margin-bottom: 10px; }
+.media-config-form-row { display: flex; gap: 10px; }
+.media-config-form-field { flex: 1; margin-bottom: 0; }
+.media-timeout-card { padding: 14px; border-radius: var(--radius-card); border: 1px solid var(--border-color); margin-top: 16px; background: var(--bg-subtle); }
+.media-config-hint-block { display: block; margin-top: 4px; }
+
+/* Bash section spacing replacing inline margins. */
+.bash-intro-note { margin-bottom: 16px; }
 

@@ -935,7 +935,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
                     </button>
                   </div>
 
-                  <div className="row" style={{ marginTop: 12 }}>
+                  <div className="row mt-3">
                     <input
                       type="text"
                       aria-label="Search facts"
@@ -1019,7 +1019,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
                   </div>
 
                   {factsHasMore ? (
-                    <div className="row" style={{ marginTop: 12 }}>
+                    <div className="row mt-3">
                       <button
                         type="button"
                         className="ghost"
@@ -1269,15 +1269,12 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete this stored fact. This cannot be undone.
             </p>
             {/* Bounded preview keeps the dialog compact for long facts while
                 still showing enough to confirm the right row is targeted. */}
-            <p
-              className="muted text-sm"
-              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
-            >
+            <p className="muted text-sm memory-delete-preview">
               &ldquo;
               {pendingDeleteFact.content.length > 120
                 ? `${pendingDeleteFact.content.slice(0, 120)}…`
@@ -1331,13 +1328,10 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete this episodic turn. This cannot be undone.
             </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
-            >
+            <p className="muted text-sm memory-delete-preview">
               &ldquo;
               {pendingSearchEpisodic.content.length > 120
                 ? `${pendingSearchEpisodic.content.slice(0, 120)}…`
@@ -1391,13 +1385,10 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete this episodic turn. This cannot be undone.
             </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
-            >
+            <p className="muted text-sm memory-delete-preview">
               &ldquo;
               {pendingEpisodeRow.content.length > 120
                 ? `${pendingEpisodeRow.content.slice(0, 120)}…`
@@ -1451,7 +1442,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete all {resolvedEpisodeCount} episodic turns.
               Semantic facts and preferences are kept. This cannot be undone.
             </p>
@@ -1503,7 +1494,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will permanently delete {finderResults.length} episodic turns
               shown. Semantic facts and preferences are kept. This cannot be
               undone.

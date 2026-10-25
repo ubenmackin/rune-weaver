@@ -245,7 +245,7 @@ export default function InlineApprovalBanner({
         data-testid={`inline-approval-${request.id}`}
       >
         <div className="inline-approval-header">
-          <span className="badge approval-tool-badge" style={{ backgroundColor: "#eab308", color: "#000" }}>Desktop Paused</span>
+          <span className="badge approval-tool-badge badge-amber">Desktop Paused</span>
           <span className="approval-desc">
             {request.description || "Desktop automation paused because you moved the mouse. Resume agent control to capture a fresh screenshot and continue."}
           </span>
@@ -327,20 +327,12 @@ export default function InlineApprovalBanner({
       </div>
 
       {isEgress ? (
-        <div className="approval-narrative" style={{ color: "var(--text-muted)" }}>
+        <div className="approval-narrative approval-narrative-muted">
           <span className="approval-section-label">Target host:</span>{" "}
-          <code style={{ color: "var(--accent-purple, #a78bfa)" }}>{egressHost}</code>{" "}
+          <code className="approval-scope-target">{egressHost}</code>{" "}
           {egressBlocked ? "is blocked by policy." : "is not in allowlist."}
           {widenableBase ? (
-            <label
-              className="approval-scope-option"
-              style={{
-                marginLeft: "0.75rem",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.35rem",
-              }}
-            >
+            <label className="approval-scope-option approval-scope-option-spaced">
               <input
                 type="checkbox"
                 aria-label={`Include subdomains (*.${widenableBase})`}

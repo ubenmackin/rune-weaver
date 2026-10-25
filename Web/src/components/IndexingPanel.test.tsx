@@ -1,5 +1,4 @@
-// Rune Weaver Dashboard — Component tests for the IndexingPanel status
-// dashboard (layout, charts, no-refresh updates, destructive modals) and the
+// Rune Weaver Dashboard — IndexingPanel status, layout, charts and updates.
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -72,13 +71,11 @@ import indexingStyles from "../styles/indexing.css?raw";
 const sharedStyles =
   rootStyles + "\n" + formsStyles + "\n" + settingsStyles + "\n" + indexingStyles;
 
-// Plain stylesheet imports resolve to empty under the test transform, so the
-// raw text import keeps the regression pinned to the modular stylesheet owners
+// Raw text import keeps the regression pinned to stylesheet owners
 // while staying inside the bundler module graph with no runtime file access.
 
-// Isolates the module-scoped index status cache between tests. Ownership: test
-// isolation only; every test starts with a null cache so a prior successful
-// load never leaks into the next cold-boot assertion.
+// Isolates the module-scoped index status cache between tests so a prior
+// successful load never leaks into the next cold-boot assertion.
 beforeEach(() => {
   clearCachedIndexStatusForTesting();
 });
@@ -130,15 +127,13 @@ const statusPayload = {
   },
 };
 
-// Structural order check: true when b renders after a in document order, so
-// the dashboard's run-cards-charts stacking stays pinned by the tests.
+// Structural order check: true when b renders after a so stacking stays pinned.
 function appearsBefore(a: Element, b: Element): boolean {
   return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
 }
 
 /// Stubs fetch for index status, storage, run, and settings routes.
-/// Ownership: test-only fetch double; every test starts from statusPayload plus empty storage.
-/// Edge cases: storage defaults to an empty no-op merge so fast paint stays honest; storageError forces a slow-phase rejection without touching phase-1 state.
+/// Storage defaults to an empty no-op merge; storageError forces rejection without touching phase-1 state.
 function stubFetch(
   overrides: {
     status?: unknown;
@@ -171,16 +166,13 @@ function stubFetch(
       return jsonResponse(overrides.status ?? statusPayload);
     }
     if (url === "/index/storage") {
-      // Slow phase defaults to an empty no-op merge so existing fast-only
-      // fixtures keep their honest sizing state without clearing counts.
+      // Slow phase defaults to an empty merge so fast-only fixtures keep counts.
       if (overrides.storageError) throw new Error("storage boom");
       if (overrides.storage !== undefined) return jsonResponse(overrides.storage);
       return jsonResponse({});
     }
     if (url === "/index/run") {
-      // The run route answers in-flight (`running`) or `skipped` only; the
-      // terminal summary settles through the status probe and broadcasts, so
-      // the stub mirrors the started response the engine emits.
+      // Run route answers in-flight or skipped; terminal summary settles via status probe.
       return jsonResponse({
         sessionID: "s1",
         trigger: "onDemand",
@@ -264,8 +256,7 @@ describe("IndexingPanel helpers", () => {
   it("describes the watermark age honestly for a fresh or just-built store", () => {
     expect(formatIndexAge(null)).toBe("Never indexed");
     expect(formatIndexAge(0)).toBe("Never indexed");
-    // Seconds-since-epoch now is always sub-second old, so the relative ladder
-    // collapses to "just now" instead of a misleading "0s ago".
+    // Fresh epoch collapses to "just now" instead of a misleading "0s ago".
     expect(formatIndexAge(Math.floor(Date.now() / 1000))).toBe("just now");
   });
 
@@ -1243,7 +1234,7 @@ describe("IndexingPanel", () => {
     // stylesheet fill so an enabled Save stays solid theme blue even as forms
     // evolve, with hover brightening and disabled dimming pinned alongside.
     expect(sharedStyles).toMatch(
-      /\.primary-button\s*\{[^}]*background:\s*var\(--accent-blue\)/,
+      /\.primary-button\s*\{[^}]*background:\s*var\(--accent-purple\)/,
     );
     expect(sharedStyles).toMatch(/\.primary-button\s*\{[^}]*color:\s*white/);
     expect(sharedStyles).toMatch(
@@ -3018,7 +3009,7 @@ describe("IndexingPanel last errors card", () => {
       /\.index-errors-scroll\s*\{[^}]*border:\s*1px solid var\(--border-color\)/,
     );
     expect(sharedStyles).toMatch(
-      /\.index-errors-scroll\s*\{[^}]*border-radius:\s*8px/,
+      /\.index-errors-scroll\s*\{[^}]*border-radius:\s*var\(--radius-md\)/,
     );
     expect(sharedStyles).toMatch(
       /\.index-error-row\s*\{[^}]*display:\s*flex/,
@@ -3845,12 +3836,19 @@ describe("IndexingPanel vertical chart rows", () => {
     expect(appearsBefore(bar, stats)).toBe(true);
     // The stacked row owns the column while the label line owns the
     // space-between, so the percent hugs the right edge above the track.
-    const row = bar.parentElement?.parentElement as HTMLElement | null;
+    // Shared progress-track contract: the row is a block wrapper carrying
+    // the index-share-row class with a full-width progress-track below the
+    // label line, and the fill carries the share as its inline width.
+    const row = bar.closest(".index-share-row") as HTMLElement | null;
     expect(row).not.toBeNull();
-    expect(row).toHaveStyle({ display: "flex", flexDirection: "column" });
+    expect(row).toHaveClass("index-share-row");
+    const track = bar.parentElement as HTMLElement | null;
+    expect(track).not.toBeNull();
+    expect(track).toHaveClass("progress-track");
+    expect(bar).toHaveClass("progress-fill");
     const labelLine = label.parentElement as HTMLElement | null;
     expect(labelLine).not.toBeNull();
-    expect(labelLine).toHaveStyle({ justifyContent: "space-between" });
+    expect(labelLine).toHaveClass("index-share-row-head");
   });
 
   it("mirrors the stacked order on extraction outcomes", async () => {
@@ -3884,9 +3882,15 @@ describe("IndexingPanel vertical chart rows", () => {
     expect(appearsBefore(label, pct)).toBe(true);
     expect(appearsBefore(pct, bar)).toBe(true);
     expect(appearsBefore(bar, stats)).toBe(true);
-    const row = bar.parentElement?.parentElement as HTMLElement | null;
+    // Shared progress-track contract: block wrapper with a full-width
+    // progress-track carrying the fill, mirrored from the source rows.
+    const row = bar.closest(".index-share-row") as HTMLElement | null;
     expect(row).not.toBeNull();
-    expect(row).toHaveStyle({ display: "flex", flexDirection: "column" });
+    expect(row).toHaveClass("index-share-row");
+    const track = bar.parentElement as HTMLElement | null;
+    expect(track).not.toBeNull();
+    expect(track).toHaveClass("progress-track");
+    expect(bar).toHaveClass("progress-fill");
   });
 
   it("shares one full-width track width regardless of label length", async () => {
@@ -3912,7 +3916,9 @@ describe("IndexingPanel vertical chart rows", () => {
     });
     // Every track spans its row edge to edge on its own line, so a short
     // Files label and a longer outcome label still start paint at the same x
-    // and share one width while counts sit below the paint.
+    // and share one width while counts sit below the paint. The full width
+    // lives in the shared progress-track stylesheet, so the track owns the
+    // progress-track class while each fill carries its share inline.
     for (const testId of [
       "index-bar-files",
       "index-bar-mail",
@@ -3922,11 +3928,8 @@ describe("IndexingPanel vertical chart rows", () => {
       const fill = screen.getByTestId(testId);
       const track = fill.parentElement as HTMLElement | null;
       expect(track).not.toBeNull();
-      expect(track).toHaveStyle({ width: "100%" });
-      // Track geometry stays put: the same height and corner radius the bars
-      // always carried, with the fill rounding to match.
-      expect(track).toHaveStyle({ height: "10px", borderRadius: "5px" });
-      expect(fill).toHaveStyle({ height: "100%", borderRadius: "5px" });
+      expect(track).toHaveClass("progress-track");
+      expect(fill).toHaveClass("progress-fill");
     }
     expect(screen.getByTestId("index-bar-files")).toHaveStyle({ width: "67%" });
     expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "33%" });

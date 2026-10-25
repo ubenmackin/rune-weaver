@@ -69,7 +69,7 @@ export function PersonaTab({
           Assistant name, tone, style guidance, and avatar accent. Applies live with no restart.
         </p>
       </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="persona-assistant-name">Assistant Name</label>
           <input
@@ -108,7 +108,7 @@ export function PersonaTab({
           </span>
         </div>
       </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="persona-user-name">Your Name</label>
           <input
@@ -132,7 +132,7 @@ export function PersonaTab({
         validationError={advancedError}
         onReset={handleResetAdvanced}
       >
-        <div className="form-group" style={{ marginTop: "1rem" }}>
+        <div className="form-group settings-stack-gap">
           <label htmlFor="persona-style">Style Guidance</label>
           <textarea
             id="persona-style"
@@ -150,7 +150,7 @@ export function PersonaTab({
             {personaStyleDraft.length} / {MAX_PERSONA_STYLE_LENGTH} characters
           </p>
         </div>
-        <div className="form-group" style={{ marginTop: "1rem" }}>
+        <div className="form-group settings-stack-gap">
           <p className="settings-field-hint">
             Avatar accent: A client-side colorway for the assistant sprite. It never reaches the prompt.
           </p>

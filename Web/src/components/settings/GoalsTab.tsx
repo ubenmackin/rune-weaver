@@ -130,7 +130,7 @@ export function GoalsTab({
           Off by default. When enabled, the agent proposes next moves it thinks you would value; each suggestion waits for Accept or Dismiss before anything changes.
         </span>
       </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="goals-step-interval">Default Cadence (minutes)</label>
           <input
@@ -146,7 +146,7 @@ export function GoalsTab({
           <div
             role="group"
             aria-label="Cadence presets"
-            style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px" }}
+            className="goals-cadence-presets"
           >
             {GOAL_CADENCE_OPTIONS.map((option) => (
               <button
@@ -168,7 +168,7 @@ export function GoalsTab({
       <p className="settings-field-hint">
         Goal runs use {goalsMaxToolIterations(goalsConfig)} consecutive tool rounds per turn (range {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}, set via [goals] max_tool_iterations in config.toml). When a goal run reaches its budget it synthesizes a summary and records budget_exceeded instead of parking for approval.
       </p>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="ideas-max-per-cycle">Max Ideas Per Cycle</label>
           <input
@@ -229,7 +229,7 @@ export function GoalsTab({
             </p>
           </div>
         </div>
-        <div className="form-row" style={{ marginTop: "1rem" }}>
+        <div className="form-row settings-stack-gap">
           <div className="form-group flex-1">
             <label htmlFor="goals-max-steps">Max Steps Per Goal</label>
             <input

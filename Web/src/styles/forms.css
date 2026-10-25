@@ -14,6 +14,33 @@
   gap: 8px;
 }
 
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: default;
+}
+
+.form-group-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 input[type="text"],
 input[type="number"],
 input[type="email"],
@@ -26,7 +53,7 @@ select {
   height: 42px;
   min-height: 42px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
   background: #0f0f13;
   color: inherit;
@@ -57,7 +84,7 @@ textarea.input-field {
   width: 100%;
   box-sizing: border-box;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
   background: #0f0f13;
   color: inherit;
@@ -85,7 +112,7 @@ select:focus {
 
 button.primary {
   padding: 9px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 0;
   background: var(--accent-purple);
   color: white;
@@ -103,7 +130,7 @@ button.primary:hover:not(:disabled) {
  * and Disabled inherits the global button:disabled dimming above. */
 button.secondary {
   padding: 9px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid rgba(96, 165, 250, 0.45);
   background: rgba(59, 130, 246, 0.15);
   color: #bfdbfe;
@@ -125,7 +152,7 @@ button.secondary:focus-visible {
 
 button.ghost {
   padding: 7px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
   background: transparent;
   color: inherit;
@@ -143,7 +170,7 @@ button.ghost:hover:not(:disabled) {
  * variant; the dashboard ships a dark theme only. */
 button.accent-ghost {
   padding: 7px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--accent-blue);
   background: transparent;
   color: var(--accent-blue);
@@ -155,6 +182,23 @@ button.accent-ghost:hover:not(:disabled) {
   background: var(--accent-blue);
   border-color: var(--accent-blue);
   color: #fff;
+}
+
+button.danger {
+  padding: 9px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
 }
 
 button:disabled {
@@ -200,7 +244,7 @@ button:disabled {
   text-align: center;
   background: #111116;
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin: 12px 0;
   color: var(--text-muted);
   display: flex;
@@ -214,7 +258,7 @@ button:disabled {
   background: rgba(139, 92, 246, 0.15);
   border: 1px solid rgba(139, 92, 246, 0.3);
   color: #c4b5fd;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   margin-bottom: 12px;
 }
@@ -224,7 +268,7 @@ button:disabled {
   background: rgba(239, 68, 68, 0.15);
   border: 1px solid rgba(239, 68, 68, 0.3);
   color: #fca5a5;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   margin-bottom: 12px;
 }
@@ -251,4 +295,27 @@ button:disabled {
     line-height: 24px;
   }
 }
+
+/* Word-break utility for long identifiers that must wrap anywhere. */
+.break-all { overflow-wrap: break-word; word-break: break-word; }
+
+/* Spacing utilities */
+.m-0 { margin: 0; }
+.mb-1 { margin-bottom: 4px; }
+.mb-2 { margin-bottom: 8px; }
+.mb-3 { margin-bottom: 12px; }
+.mt-1 { margin-top: 4px; }
+.mt-2 { margin-top: 8px; }
+.ml-1 { margin-left: 4px; }
+.ml-2 { margin-left: 8px; }
+.ml-auto { margin-left: auto; }
+.mr-1 { margin-right: 4px; }
+.mr-2 { margin-right: 8px; }
+.gap-4 { gap: 4px; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.w-full { width: 100%; }
+.flex-1 { flex: 1; }
+.justify-between { justify-content: space-between; }
+.items-center { align-items: center; }
 

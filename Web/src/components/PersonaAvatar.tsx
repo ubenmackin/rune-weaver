@@ -29,14 +29,6 @@ export const AVATAR_SLEEP_MS = 10 * 60 * 1000;
 export const BLINK_INTERVAL_MS = 4000;
 export const BLINK_CLOSED_MS = 150;
 
-// Body-mid gradient stop per colorway, mirroring the generator's fixed palette.
-const BLINK_LID_COLORS: Record<string, string> = {
-  violet: "#8b5cf6",
-  cyan: "#22d3ee",
-  emerald: "#34d399",
-  rose: "#fb7185",
-};
-
 // The three raster sizes the generator emits per colorway-state pair. The srcSet
 // ships all three so a 16px trigger reads the 32px sheet and a 64px picker cell
 // reads 1:1 instead of being downsampled from 256 by the browser.
@@ -491,30 +483,11 @@ export function PersonaAvatar({
   if (!isBlinking) return img;
   // Closed-eyes lid for the 150 ms blink window.
   return (
-    <span
-      className="persona-avatar-blink"
-      style={{
-        position: "relative",
-        display: "inline-block",
-        width: size,
-        height: size,
-        lineHeight: 0,
-        verticalAlign: "middle",
-      }}
-    >
+    <span className="persona-avatar-blink">
       {img}
       <span
         aria-hidden="true"
-        className="persona-avatar-blink-lid"
-        style={{
-          position: "absolute",
-          left: "30%",
-          right: "30%",
-          top: "37%",
-          height: "11%",
-          background: BLINK_LID_COLORS[avatarColor] ?? BLINK_LID_COLORS.violet,
-          borderRadius: "9999px",
-        }}
+        className={`persona-avatar-blink-lid persona-avatar-blink-lid--${avatarColor}`}
       />
     </span>
   );

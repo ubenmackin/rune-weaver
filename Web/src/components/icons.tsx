@@ -26,7 +26,7 @@ export function RuneGlyph({ size = 24, className = "", ...props }: IconProps) {
       <line x1="12" y1="1" x2="12" y2="23" />
       <line x1="5" y1="5" x2="19" y2="19" />
       <line x1="5" y1="19" x2="19" y2="5" />
-      <circle cx="12" cy="12" r="1.8" fill="#38bdf8" stroke="none" />
+      <circle cx="12" cy="12" r="1.8" className="rune-glyph-fill" stroke="none" />
     </svg>
   );
 }

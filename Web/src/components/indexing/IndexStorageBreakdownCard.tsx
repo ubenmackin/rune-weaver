@@ -3,10 +3,6 @@ import type {
   IndexExtractStatusCounts,
 } from "../../api";
 import {
-  CHART_EXTRACT_COLOR,
-  CHART_KEYWORD_COLOR,
-  CHART_TRACK_COLOR,
-  CHART_VECTOR_COLOR,
   DONUT_RADIUS,
   DONUT_SIZE,
   DONUT_STROKE,
@@ -54,7 +50,7 @@ export default function IndexStorageBreakdownCard({
                         cy={DONUT_SIZE / 2}
                         r={DONUT_RADIUS}
                         fill="none"
-                        stroke={CHART_TRACK_COLOR}
+                        className="index-donut-track"
                         strokeWidth={DONUT_STROKE}
                       />
                       <circle
@@ -62,7 +58,7 @@ export default function IndexStorageBreakdownCard({
                         cy={DONUT_SIZE / 2}
                         r={DONUT_RADIUS}
                         fill="none"
-                        stroke={CHART_VECTOR_COLOR}
+                        className="index-donut-vector"
                         strokeWidth={DONUT_STROKE}
                         strokeDasharray={`${donut.vectorDash} ${donut.circumference - donut.vectorDash}`}
                         transform={`rotate(-90 ${DONUT_SIZE / 2} ${DONUT_SIZE / 2})`}
@@ -72,7 +68,7 @@ export default function IndexStorageBreakdownCard({
                         cy={DONUT_SIZE / 2}
                         r={DONUT_RADIUS}
                         fill="none"
-                        stroke={CHART_KEYWORD_COLOR}
+                        className="index-donut-keyword"
                         strokeWidth={DONUT_STROKE}
                         strokeDasharray={`${donut.keywordDash} ${donut.circumference - donut.keywordDash}`}
                         strokeDashoffset={-donut.vectorDash}
@@ -80,30 +76,17 @@ export default function IndexStorageBreakdownCard({
                       />
                     </svg>
                     <div
-                      style={{ display: "flex", flexDirection: "column", gap: 6 }}
-                      className="text-sm"
+                      className="text-sm index-donut-legend"
                     >
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span className="index-donut-legend-row">
                         <span
-                          style={{
-                            width: 10,
-                            height: 10,
-                            borderRadius: 2,
-                            display: "inline-block",
-                            background: CHART_VECTOR_COLOR,
-                          }}
+                          className="index-donut-swatch index-donut-swatch-vector"
                         />
                         Vector <strong>{formatIndexCount(vectorChunks)}</strong>
                       </span>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span className="index-donut-legend-row">
                         <span
-                          style={{
-                            width: 10,
-                            height: 10,
-                            borderRadius: 2,
-                            display: "inline-block",
-                            background: CHART_KEYWORD_COLOR,
-                          }}
+                          className="index-donut-swatch index-donut-swatch-keyword"
                         />
                         Keyword <strong>{formatIndexCount(keywordChunks)}</strong>
                       </span>
@@ -112,14 +95,9 @@ export default function IndexStorageBreakdownCard({
     
                   <div
                     data-testid="index-extract-bars"
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 10,
-                      marginTop: 14,
-                    }}
+                    className="index-extract-bars"
                   >
-                    <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+                    <h4 className="text-xs muted index-chart-heading">
                       Extraction outcomes (share of index)
                     </h4>
                     {extractRows.length > 0 ? (
@@ -136,24 +114,18 @@ export default function IndexStorageBreakdownCard({
                         return (
                           <div
                             key={row.status}
-                            style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                            className="index-share-row"
                           >
                             <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "baseline",
-                                gap: 8,
-                              }}
+                              className="index-share-row-head"
                             >
                               <span className="text-xs muted">
                                 {extractStatusLabel(row.status)}
                               </span>
                               {isEmpty ? null : (
                                 <span
-                                  className="text-xs muted"
+                                  className="text-xs muted index-bar-pct"
                                   data-testid={`index-extract-pct-${row.status}`}
-                                  style={{ textAlign: "right" }}
                                 >
                                   {barLabel}
                                 </span>
@@ -168,22 +140,14 @@ export default function IndexStorageBreakdownCard({
                               </span>
                             ) : (
                               <div
-                                style={{
-                                  width: "100%",
-                                  height: 10,
-                                  borderRadius: 5,
-                                  background: CHART_TRACK_COLOR,
-                                  overflow: "hidden",
-                                }}
+                                className="progress-track"
                               >
                                 <div
                                   data-testid={`index-extract-bar-${row.status}`}
                                   aria-label={`${extractStatusLabel(row.status)} ${formatIndexCount(row.documents)} documents`}
+                                  className="progress-fill"
                                   style={{
                                     width: barWidth,
-                                    height: "100%",
-                                    borderRadius: 5,
-                                    background: CHART_EXTRACT_COLOR,
                                   }}
                                 />
                               </div>

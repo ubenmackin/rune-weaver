@@ -689,9 +689,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
           </button>
         </div>
 
-        <div className="wizard-progress-track" data-testid="wizard-progress">
+        <div className="progress-track" data-testid="wizard-progress">
           <div
-            className="wizard-progress-bar"
+            className="progress-fill"
             style={{ width: `${(step / 4) * 100}%` }}
           />
         </div>
@@ -752,7 +752,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   {keyError}
                 </div>
               ) : null}
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "6px" }}>
+              <div className="policy-binding-keychain-row">
                 <span
                   data-testid="keychain-badge"
                   className={keyInKeychain ? "status-pill keychain-pill-stored" : "status-pill keychain-pill-missing"}
@@ -797,7 +797,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               </div>
               {hostLineErrors.length > 0 ? (
                 <div data-testid="hosts-errors" className="error-banner">
-                  <ul style={{ margin: 0, paddingLeft: "18px" }}>
+                  <ul className="policy-binding-error-list">
                     {hostLineErrors.map((problem) => (
                       <li key={`${problem.line}-${problem.entry}`}>
                         Line {problem.line} ({problem.entry}): {problem.error}
@@ -812,7 +812,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 </div>
               ) : null}
                 </section>
-                <div data-testid="network-coverage" className="muted text-sm" style={{ marginTop: "8px" }}>
+                <div data-testid="network-coverage" className="muted text-sm policy-binding-network-coverage">
                   {hostsList.length === 0 ? (
                     <span>Add hosts to check network coverage.</span>
                   ) : uncoveredHosts.length === 0 ? (
@@ -859,7 +859,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 </label>
               </div>
               {methodsMode === "select" ? (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px" }}>
+              <div className="policy-binding-methods-wrap">
                 {BINDING_METHODS.map((method) => (
                   <label key={method} className="checkbox-row">
                     <input
@@ -904,7 +904,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 </div>
                 {prefixLineErrors.length > 0 ? (
                   <div data-testid="paths-error" className="error-banner">
-                    <ul style={{ margin: 0, paddingLeft: "18px" }}>
+                    <ul className="policy-binding-error-list">
                       {prefixLineErrors.map((problem) => (
                         <li key={`${problem.line}-${problem.entry}`}>
                           Line {problem.line} ({problem.entry}): {problem.error}
@@ -919,16 +919,8 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             {showCrossProductWarning ? (
               <div
                 data-testid="cross-product-warning"
-                className="warning-banner"
+                className="warning-banner policy-binding-cross-product text-sm"
                 role="note"
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  backgroundColor: "rgba(245, 158, 11, 0.12)",
-                  border: "1px solid rgba(245, 158, 11, 0.35)",
-                  fontSize: "0.85rem",
-                  marginTop: "8px",
-                }}
               >
                 Prefixes apply to every host in this binding (with {hostsList.length} hosts
                 and {prefixesList.length} {prefixesList.length === 1 ? "prefix" : "prefixes"}). This
@@ -947,11 +939,11 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 </p>
                 <h4>Review and Test</h4>
                 <div data-testid="binding-review">
-                  <ul data-testid="review-summary" style={{ margin: "8px 0", paddingLeft: "18px" }}>
+                  <ul data-testid="review-summary" className="policy-binding-review-summary">
                     <li data-testid="review-key">
                       <span>Key: {keyTrimmed || "…"}</span>
                       {keyEdited ? (
-                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                        <span data-testid="edited-tag" className="edited-tag ml-2">
                           Edited
                         </span>
                       ) : null}
@@ -959,7 +951,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     <li data-testid="review-hosts">
                       <span>Hosts: {reviewHostsLabel}</span>
                       {hostsEdited ? (
-                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                        <span data-testid="edited-tag" className="edited-tag ml-2">
                           Edited
                         </span>
                       ) : null}
@@ -967,7 +959,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     <li data-testid="review-methods">
                       <span>Methods: {reviewMethodsLabel}</span>
                       {methodsEdited ? (
-                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                        <span data-testid="edited-tag" className="edited-tag ml-2">
                           Edited
                         </span>
                       ) : null}
@@ -975,7 +967,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     <li data-testid="review-paths">
                       <span>Paths: {reviewPrefixesLabel}</span>
                       {prefixesEdited ? (
-                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                        <span data-testid="edited-tag" className="edited-tag ml-2">
                           Edited
                         </span>
                       ) : null}
@@ -988,13 +980,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     <p data-testid="probe-helper" className="muted text-sm">
                       Enter a method, host, and path, then click Test to check whether the secret would be sent.
                     </p>
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr 1fr",
-                        gap: "8px",
-                      }}
-                    >
+                    <div className="policy-binding-probe-grid">
                       <div className="form-group">
                         <label htmlFor="binding-probe-method">Probe method</label>
                         <input
@@ -1059,7 +1045,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                       )}
                     </div>
                   </div>
-                  <div data-testid="network-coverage" className="muted text-sm" style={{ marginTop: "8px" }}>
+                  <div data-testid="network-coverage" className="muted text-sm policy-binding-network-coverage">
                     {hostsList.length === 0 ? (
                       <span>Add hosts to check network coverage.</span>
                     ) : uncoveredHosts.length === 0 ? (

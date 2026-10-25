@@ -31,7 +31,7 @@ export default function IndexPolicyAdvancedFields({
               {/* Per-document vector chunk cap: bounds embedding work so one text-dense document
                   cannot fan an outsized batch. Chunks beyond the cap stay keyword-searchable, so a
                   capped document remains fully findable; persisted only on Save like the others. */}
-              <div className="form-group" style={{ marginTop: 12 }}>
+              <div className="form-group mt-3">
                 <label htmlFor="index-vector-cap">
                   Max vector chunks per document
                 </label>

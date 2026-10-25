@@ -113,7 +113,7 @@ export function EngineTab({
           </select>
         </div>
       </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="max-tool-iterations">
             Max Tool Rounds per Turn (Chats)
@@ -133,14 +133,14 @@ export function EngineTab({
           </p>
         </div>
       </div>
-      <div data-testid="proactive-pane" style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color)" }}>
+      <div data-testid="proactive-pane" className="engine-proactive-pane">
         <div className="settings-section-title-group">
           <h3>Proactivity</h3>
         <p className="settings-section-hint">
           Background interruption policy. Applies live with no restart.
         </p>
         </div>
-        <div className="form-row" style={{ marginTop: "1rem" }}>
+        <div className="form-row settings-stack-gap">
           <div className="form-group flex-1">
             <label htmlFor="proactive-mode">Proactivity Mode</label>
             <select
@@ -190,7 +190,7 @@ export function EngineTab({
             <label htmlFor="compaction-threshold">
               Context Compaction Threshold: {compactionThresholdPercent}%
             </label>
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div className="engine-compaction-row">
               <input
                 id="compaction-threshold"
                 type="range"
@@ -199,9 +199,9 @@ export function EngineTab({
                 step={5}
                 value={compactionThresholdPercent}
                 onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
-                style={{ flex: 1 }}
+                className="engine-compaction-slider"
               />
-              <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
+              <span className="engine-compaction-value">
                 {compactionThresholdPercent}%
               </span>
             </div>
@@ -210,7 +210,7 @@ export function EngineTab({
             </p>
           </div>
         </div>
-        <div className="form-row" style={{ marginTop: "1rem" }}>
+        <div className="form-row settings-stack-gap">
           <div className="form-group flex-1">
             <p className="settings-field-hint">
               Chats use {engineMaxToolIterations(settings)} rounds per turn (parks for approval). Scheduled runs use {schedulerRounds} rounds by default with per-job override (synthesizes plus budget_exceeded, or parks when the job sets on_tool_limit to park). Goal runs use {goalRounds} rounds (always synthesizes plus budget_exceeded).
