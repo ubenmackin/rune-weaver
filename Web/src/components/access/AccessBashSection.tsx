@@ -24,6 +24,7 @@ import {
 } from "../../api";
 import { AlertTriangleIcon, PlusIcon } from "../icons";
 import { AdvancedDisclosure } from "../settings/AdvancedDisclosure";
+import { SwitchControl } from "../settings/SwitchControl";
 import {
   BashConfinementFields,
   BashTuningFields,
@@ -534,15 +535,13 @@ export function AccessBashSection({
           </div>
 
           <div className="form-group checkbox-group">
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-              <input
-                id="bash-allow-network"
-                type="checkbox"
-                checked={allowNetwork}
-                onChange={(e) => handleAllowNetworkChange(e.target.checked)}
-              />
-              <span>Allow network access</span>
-            </label>
+            <SwitchControl
+              testId="bash-allow-network"
+              checked={allowNetwork}
+              onChange={(e) => handleAllowNetworkChange(e.target.checked)}
+              label="Allow network access"
+              hint="Allow network access"
+            />
             <span className="form-group-hint">
               When on, sandboxed commands may reach the network; otherwise they run isolated.
             </span>

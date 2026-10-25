@@ -304,8 +304,12 @@ struct FanOutCancelTests {
         }
 
         // Worker A settles while B is still running: a settled child row
-        // accepts no cancel, and neither does an unknown identifier.
-        await waitUntil { runLogger.row(message: "A")?.status == "ok" }
+        // accepts no cancel, and neither does an unknown identifier. Pairing
+        // the row write with the live in-flight count anchors the settle in
+        // the worker's real completion instead of one audit-row write alone.
+        await waitUntil {
+            runLogger.row(message: "A")?.status == "ok" && orchestrator.inFlight == 1
+        }
         let settledChildRow = try #require(runLogger.row(message: "A"))
         #expect(await engine.cancel(rowID: settledChildRow.id) == .notRunning)
         #expect(await engine.cancel(rowID: UUID()) == .notRunning)

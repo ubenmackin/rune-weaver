@@ -14,6 +14,7 @@ import {
 } from "../../api";
 import { AlertTriangleIcon, RefreshIcon } from "../icons";
 import { AdvancedDisclosure } from "../settings/AdvancedDisclosure";
+import { SwitchControl } from "../settings/SwitchControl";
 import {
   FilesAdvancedFields,
   FilesDenyPatternsField,
@@ -290,18 +291,16 @@ export function AccessFilesSection({
         </div>
 
         <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-            <input
-              id="files-require-approval"
-              type="checkbox"
-              checked={filesRequireApprovalOnDeny}
-              onChange={(e) => {
-                setFilesRequireApprovalOnDeny(e.target.checked);
-                markEdited();
-              }}
-            />
-            <span>Require approval on deny</span>
-          </label>
+          <SwitchControl
+            testId="files-require-approval"
+            checked={filesRequireApprovalOnDeny}
+            onChange={(e) => {
+              setFilesRequireApprovalOnDeny(e.target.checked);
+              markEdited();
+            }}
+            label="Require approval on deny"
+            hint="Require approval on deny"
+          />
           <span className="form-group-hint">
             When on, denied paths escalate to the approvals inbox instead of failing silently.
           </span>

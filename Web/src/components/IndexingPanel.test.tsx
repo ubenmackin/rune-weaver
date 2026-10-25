@@ -3226,8 +3226,8 @@ describe("IndexingPanel effort control", () => {
       expect(screen.getByRole("radio", { name: label })).toBeInTheDocument();
     }
     // Toggles for thermal backoff and pause on battery persist on Save.
-    expect(screen.getByRole("checkbox", { name: "Thermal backoff" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Pause on battery" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Thermal backoff" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Pause on battery" })).toBeInTheDocument();
     // Custom reveals the stepper with bounded increment and decrement.
     await user.click(screen.getByRole("radio", { name: "Custom" }));
     expect(screen.getByLabelText("Custom workers")).toBeInTheDocument();

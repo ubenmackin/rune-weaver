@@ -1,5 +1,6 @@
 // Rune Weaver Dashboard — Effort presets and worker controls fieldset for IndexPolicyPanel.
 import { INDEX_EFFORT_OPTIONS } from "./indexPolicyHelpers";
+import { SwitchControl } from "../settings/SwitchControl";
 import type { IndexConfigData } from "../../api";
 
 interface IndexPolicyEffortFieldsetProps {
@@ -97,27 +98,23 @@ export default function IndexPolicyEffortFieldset({
         </div>
       ) : null}
 
-      <label className="toggle-label">
-        <input
-          type="checkbox"
-          checked={thermalBackoff}
-          onChange={(event) =>
-            updateConfig({ thermalBackoff: event.target.checked })
-          }
-        />
-        <span>Thermal backoff</span>
-      </label>
+      <SwitchControl
+        checked={thermalBackoff}
+        onChange={(event) =>
+          updateConfig({ thermalBackoff: event.target.checked })
+        }
+        label="Thermal backoff"
+        hint="Thermal backoff"
+      />
 
-      <label className="toggle-label">
-        <input
-          type="checkbox"
-          checked={pauseOnBattery}
-          onChange={(event) =>
-            updateConfig({ pauseOnBattery: event.target.checked })
-          }
-        />
-        <span>Pause on battery</span>
-      </label>
+      <SwitchControl
+        checked={pauseOnBattery}
+        onChange={(event) =>
+          updateConfig({ pauseOnBattery: event.target.checked })
+        }
+        label="Pause on battery"
+        hint="Pause on battery"
+      />
     </fieldset>
   );
 }

@@ -5,6 +5,7 @@ import { CheckIcon, CloseIcon } from "../icons";
 import Modal from "../Modal";
 import RuneMarketplaceModal from "../RuneMarketplaceModal";
 import { StoreSecretModal } from "../StoreSecretModal";
+import { SwitchControl } from "./SwitchControl";
 
 export interface SettingsModalsProps {
   // Marketplace modal
@@ -351,25 +352,14 @@ export function SettingsModals({
                 </span>
               </button>
             </div>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                marginTop: "14px",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
+            <div style={{ marginTop: "14px", display: "flex", alignItems: "center" }}>
+              <SwitchControl
                 checked={tokenSavedAck}
                 onChange={(event) => setTokenSavedAck(event.target.checked)}
+                label="I have saved this token and understand it will not be shown again."
+                hint="I have saved this token and understand it will not be shown again."
               />
-              <span>
-                I have saved this token and understand it will not be shown
-                again.
-              </span>
-            </label>
+            </div>
           </div>
           <div className="modal-footer">
             <button

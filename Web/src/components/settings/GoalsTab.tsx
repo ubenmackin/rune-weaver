@@ -20,6 +20,7 @@ import {
   TOOL_ROUNDS_MIN,
 } from "../../api";
 import { AdvancedDisclosure } from "./AdvancedDisclosure";
+import { SwitchControl } from "./SwitchControl";
 
 // Advanced Goals validation messages the disclosure can focus. Shared by the
 // panel prop and the shell error router so one message never prints twice.
@@ -106,29 +107,25 @@ export function GoalsTab({
       </p>
       </div>
       <div className="form-group checkbox-group">
-        <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-          <input
-            id="goals-enabled"
-            type="checkbox"
-            checked={goalsEnabled}
-            onChange={(e) => setGoalsEnabled(e.target.checked)}
-          />
-          <span>Enable goal pursuit</span>
-        </label>
+        <SwitchControl
+          testId="goals-enabled"
+          checked={goalsEnabled}
+          onChange={(e) => setGoalsEnabled(e.target.checked)}
+          label="Enable goal pursuit"
+          hint="Enable goal pursuit"
+        />
         <span className="form-group-hint">
           Off by default so a fresh install never spends planning calls until you opt in. Goals advance on cadence via the service worker and the CLI foreground loop.
         </span>
       </div>
       <div className="form-group checkbox-group">
-        <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-          <input
-            id="ideas-enabled"
-            type="checkbox"
-            checked={ideasEnabled}
-            onChange={(e) => setIdeasEnabled(e.target.checked)}
-          />
-          <span>Enable proactive ideas</span>
-        </label>
+        <SwitchControl
+          testId="ideas-enabled"
+          checked={ideasEnabled}
+          onChange={(e) => setIdeasEnabled(e.target.checked)}
+          label="Enable proactive ideas"
+          hint="Enable proactive ideas"
+        />
         <span className="form-group-hint">
           Off by default. When enabled, the agent proposes next moves it thinks you would value; each suggestion waits for Accept or Dismiss before anything changes.
         </span>
@@ -163,12 +160,12 @@ export function GoalsTab({
               </button>
             ))}
           </div>
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+          <p className="settings-field-hint">
             Cadence hint stored on each new goal. Range: {GOALS_STEP_INTERVAL_MIN_MINUTES}–{GOALS_STEP_INTERVAL_MAX_MINUTES}. Default is {DEFAULT_GOALS_STEP_INTERVAL_MINUTES} (daily).
           </p>
         </div>
       </div>
-      <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+      <p className="settings-field-hint">
         Goal runs use {goalsMaxToolIterations(goalsConfig)} consecutive tool rounds per turn (range {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}, set via [goals] max_tool_iterations in config.toml). When a goal run reaches its budget it synthesizes a summary and records budget_exceeded instead of parking for approval.
       </p>
       <div className="form-row" style={{ marginTop: "1rem" }}>
@@ -184,7 +181,7 @@ export function GoalsTab({
             value={ideasMaxPerCycle}
             onChange={(e) => setIdeasMaxPerCycle(e.target.value)}
           />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+          <p className="settings-field-hint">
             Maximum proactive suggestions generated per cycle. Range: 1–10. Default is {DEFAULT_IDEAS_MAX_PER_CYCLE}.
           </p>
         </div>
@@ -200,7 +197,7 @@ export function GoalsTab({
             value={ideasTimeoutSeconds}
             onChange={(e) => setIdeasTimeoutSeconds(e.target.value)}
           />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+          <p className="settings-field-hint">
             Timeout in seconds for proactive ideas generation review. Range: 1–120. Default is {DEFAULT_IDEAS_TIMEOUT_SECONDS}s.
           </p>
         </div>
@@ -227,7 +224,7 @@ export function GoalsTab({
               value={goalsMaxActiveGoals}
               onChange={(e) => setGoalsMaxActiveGoals(e.target.value)}
             />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Maximum goals in the active state at once. Range: {GOALS_MAX_ACTIVE_MIN}–{GOALS_MAX_ACTIVE_MAX}. Default is {DEFAULT_GOALS_MAX_ACTIVE_GOALS}.
             </p>
           </div>
@@ -245,7 +242,7 @@ export function GoalsTab({
               value={goalsMaxStepsPerGoal}
               onChange={(e) => setGoalsMaxStepsPerGoal(e.target.value)}
             />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Maximum plan steps generated per goal. Range: 1–24. Default is {DEFAULT_GOALS_MAX_STEPS_PER_GOAL}.
             </p>
           </div>
@@ -261,7 +258,7 @@ export function GoalsTab({
               value={goalsPlanTimeoutSeconds}
               onChange={(e) => setGoalsPlanTimeoutSeconds(e.target.value)}
             />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Timeout in seconds for model goal decomposition planning (0 for unlimited). Default is 0 (unlimited).
             </p>
           </div>
@@ -277,7 +274,7 @@ export function GoalsTab({
               value={goalsMaxTriggersPerGoal}
               onChange={(e) => setGoalsMaxTriggersPerGoal(e.target.value)}
             />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Event wake-up triggers allowed per goal. Range: 0–32. Default is {DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL}.
             </p>
           </div>

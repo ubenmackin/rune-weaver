@@ -218,7 +218,7 @@ export default function SettingsSidenav({
               {pendingCount > 0 && (
                 <span
                   className="settings-tab-badge"
-                  style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                  style={{ backgroundColor: "var(--status-amber)", color: "#ffffff" }}
                   title={`${pendingCount} runes pending human review`}
                 >
                   {pendingCount}
@@ -227,7 +227,7 @@ export default function SettingsSidenav({
               {tamperedCount > 0 && (
                 <span
                   className="settings-tab-badge"
-                  style={{ backgroundColor: "#f56565", color: "#ffffff" }}
+                  style={{ backgroundColor: "var(--status-red)", color: "#ffffff" }}
                   title={`${tamperedCount} runes modified since approval`}
                 >
                   {tamperedCount}
@@ -291,7 +291,7 @@ export default function SettingsSidenav({
               {serverRestartVisible ? (
                 <span
                   className="settings-tab-badge"
-                  style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                  style={{ backgroundColor: "var(--status-amber)", color: "#ffffff" }}
                   title="Network changes need a restart"
                 >
                   !

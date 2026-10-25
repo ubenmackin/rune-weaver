@@ -3,6 +3,7 @@
 import React from "react";
 import { AlertTriangleIcon, CloseIcon } from "../icons";
 import Modal from "../Modal";
+import { SwitchControl } from "./SwitchControl";
 
 export interface FanoutConfigModalProps {
   isOpen: boolean;
@@ -135,22 +136,13 @@ export function FanoutConfigModal({
         </div>
 
         <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              cursor: "pointer",
-            }}
-          >
-            <input
-              id="fanout-full-tools"
-              type="checkbox"
-              checked={fanoutFullTools}
-              onChange={(e) => setFanoutFullTools(e.target.checked)}
-            />
-            <span>Full tools</span>
-          </label>
+          <SwitchControl
+            testId="fanout-full-tools"
+            checked={fanoutFullTools}
+            onChange={(e) => setFanoutFullTools(e.target.checked)}
+            label="Full tools"
+            hint="Full tools"
+          />
           <span className="form-group-hint">
             Lets workers call the full tool registry, not just read-only tools.
           </span>

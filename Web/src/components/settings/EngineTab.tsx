@@ -128,12 +128,12 @@ export function EngineTab({
             value={maxToolIterations}
             onChange={(e) => setMaxToolIterations(e.target.value)}
           />
-          <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+          <p className="settings-field-hint">
             Applies to interactive chats only. When a chat reaches this many consecutive tool rounds it parks for your approval to continue. Range: {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}. Default is {DEFAULT_ENGINE_MAX_TOOL_ITERATIONS}.
           </p>
         </div>
       </div>
-      <div data-testid="proactive-pane" style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+      <div data-testid="proactive-pane" style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color)" }}>
         <div className="settings-section-title-group">
           <h3>Proactivity</h3>
         <p className="settings-section-hint">
@@ -170,7 +170,7 @@ export function EngineTab({
               value={proactiveJudgeTimeoutSeconds}
               onChange={(e) => setProactiveJudgeTimeoutSeconds(e.target.value)}
             />
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Seconds the guarded judge may spend before the gate fails open. Range: {PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS}–{PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS}. Default is {DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS}.
             </p>
           </div>
@@ -205,14 +205,14 @@ export function EngineTab({
                 {compactionThresholdPercent}%
               </span>
             </div>
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is {DEFAULT_ENGINE_COMPACTION_THRESHOLD}%.
             </p>
           </div>
         </div>
         <div className="form-row" style={{ marginTop: "1rem" }}>
           <div className="form-group flex-1">
-            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+            <p className="settings-field-hint">
               Chats use {engineMaxToolIterations(settings)} rounds per turn (parks for approval). Scheduled runs use {schedulerRounds} rounds by default with per-job override (synthesizes plus budget_exceeded, or parks when the job sets on_tool_limit to park). Goal runs use {goalRounds} rounds (always synthesizes plus budget_exceeded).
             </p>
           </div>

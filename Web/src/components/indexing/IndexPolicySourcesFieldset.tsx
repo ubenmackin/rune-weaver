@@ -1,6 +1,7 @@
 // Rune Weaver Dashboard — Sources enablement fieldset for IndexPolicyPanel.
 import { AlertTriangleIcon } from "../icons";
 import { INDEX_SOURCES } from "./indexHelpers";
+import { SwitchControl } from "../settings/SwitchControl";
 import type { IndexConfigData } from "../../api";
 
 interface IndexPolicySourcesFieldsetProps {
@@ -38,18 +39,15 @@ export default function IndexPolicySourcesFieldset({
             className="index-source-row"
             style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
           >
-            <label className="toggle-label">
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={!config.enabled}
-                aria-label={`Index ${source.label}`}
-                onChange={(event) =>
-                  updateConfig({ [key]: event.target.checked } as Partial<IndexConfigData>)
-                }
-              />
-              <span>{source.label}</span>
-            </label>
+            <SwitchControl
+              checked={checked}
+              disabled={!config.enabled}
+              label={`Index ${source.label}`}
+              hint={source.label}
+              onChange={(event) =>
+                updateConfig({ [key]: event.target.checked } as Partial<IndexConfigData>)
+              }
+            />
             {source.hint ? (
               <span
                 className="muted text-xs index-source-hint"

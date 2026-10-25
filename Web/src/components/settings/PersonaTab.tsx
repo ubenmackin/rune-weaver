@@ -81,10 +81,7 @@ export function PersonaTab({
             value={personaAssistantNameDraft}
             onChange={(e) => setPersonaAssistantNameDraft(e.target.value)}
           />
-          <p
-            className="settings-field-hint"
-            style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
-          >
+          <p className="settings-field-hint">
             How the agent names itself. Blank falls back to the stock identity. Max {MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.
           </p>
         </div>
@@ -123,10 +120,7 @@ export function PersonaTab({
             value={personaUserNameDraft}
             onChange={(e) => setPersonaUserNameDraft(e.target.value)}
           />
-          <p
-            className="settings-field-hint"
-            style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
-          >
+          <p className="settings-field-hint">
             Preferred spelling for the address clause. Optional. Max {MAX_PERSONA_USER_NAME_LENGTH} characters.
           </p>
         </div>
@@ -152,16 +146,12 @@ export function PersonaTab({
           <p
             className="settings-field-hint"
             data-testid="persona-style-count"
-            style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
           >
             {personaStyleDraft.length} / {MAX_PERSONA_STYLE_LENGTH} characters
           </p>
         </div>
         <div className="form-group" style={{ marginTop: "1rem" }}>
-          <p
-            className="settings-field-hint"
-            style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)" }}
-          >
+          <p className="settings-field-hint">
             Avatar accent: A client-side colorway for the assistant sprite. It never reaches the prompt.
           </p>
           <div

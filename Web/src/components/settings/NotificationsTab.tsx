@@ -2,6 +2,7 @@
 
 import { useMobilePush } from "../../hooks/useMobilePush";
 import { MobilePushSettingsCard } from "./MobilePushSettingsCard";
+import { SwitchControl } from "./SwitchControl";
 
 interface NotificationTypeMeta {
   key: "approvalRequested" | "schedulerRun" | "goalAdvance" | "ideaProposed" | "indexFailed" | "chatFailed";
@@ -76,28 +77,21 @@ export function NotificationsTab({
 
       {NOTIFICATION_TYPES.map((item) => (
         <div className="form-group checkbox-group" key={item.key}>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}
-          >
-            <input
-              id={`notifications-${item.key}`}
-              type="checkbox"
-              role="switch"
-              data-testid={`notifications-${item.key}`}
-              checked={prefs[item.key] ?? true}
-              onChange={(e) => setters[item.key](e.target.checked)}
-            />
-            <span>{item.label}</span>
-          </label>
+          <SwitchControl
+            testId={`notifications-${item.key}`}
+            checked={prefs[item.key] ?? true}
+            onChange={(e) => setters[item.key](e.target.checked)}
+            label={item.label}
+            hint={item.label}
+          />
           <span className="form-group-hint">{item.hint}</span>
         </div>
       ))}
 
       <div
-        className="info-banner"
+        className="info-banner settings-stack-gap"
         role="note"
         data-testid="notifications-bell-explainer"
-        style={{ marginTop: "1rem" }}
       >
         The bell is warnings-only: it shows degraded-tool warnings in amber while
         approvals, runs, and goals badge on their own tabs. Tapping the bell is
@@ -110,16 +104,15 @@ export function NotificationsTab({
 
       {!isStandalone ? (
         <div
-          className="settings-field-hint"
+          className="settings-field-hint settings-stack-gap"
           data-testid="notifications-desktop-guidance"
-          style={{ marginTop: "1rem" }}
         >
           On desktop, allow browser notifications to receive desktop banners.
           Push enrollment appears only in the installed standalone app.
         </div>
       ) : null}
 
-      <div style={{ marginTop: "1rem" }}>
+      <div className="settings-stack-gap">
         <MobilePushSettingsCard />
       </div>
     </div>

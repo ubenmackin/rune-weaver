@@ -82,7 +82,7 @@
 .settings-nav-search-icon {
   position: absolute;
   left: 10px;
-  color: var(--text-secondary, #a0aec0);
+  color: var(--text-muted);
   pointer-events: none;
 }
 
@@ -92,8 +92,8 @@ input.settings-nav-search-input[type="search"] {
   border-radius: 6px;
   box-sizing: border-box;
   background-color: var(--bg-card, #1e2533);
-  border: 1px solid var(--border-color, #2d3748);
-  color: var(--text-primary, #ffffff);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
   font-size: 0.88rem;
   outline: none;
   transition: border-color 0.15s ease;
@@ -140,7 +140,7 @@ input.settings-nav-search-input[type="search"] {
 }
 
 .settings-tab-btn:hover {
-  color: var(--text-primary);
+  color: var(--text-main);
   background: rgba(255, 255, 255, 0.05);
 }
 
@@ -428,7 +428,7 @@ input.settings-nav-search-input[type="search"] {
 .form-group label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-secondary, #cbd5e1);
+  color: var(--text-muted);
   user-select: text;
   -webkit-user-select: text;
   cursor: default;
@@ -667,6 +667,31 @@ section[data-testid="policy-pane"] .settings-footer {
   margin-bottom: 12px;
 }
 
+/* Neutral member of the banner rhythm: pure explanations carry no status tint,
+ * so fill and border come from surface tokens instead of status colors. */
+.info-banner {
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Free-standing field hint carries the form-group-hint typography for hint
+ * paragraphs that live outside a form group wrapper. */
+.settings-field-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Trailing stacked blocks keep a 1rem top separation for consistent rhythm. */
+.settings-stack-gap {
+  margin-top: 1rem;
+}
+
 /* Search-result tab name stays muted at the row end while the setting label keeps tab-btn emphasis. */
 .settings-search-result-tab {
   margin-left: auto;
@@ -694,5 +719,38 @@ section[data-testid="policy-pane"] .settings-footer {
   100% {
     box-shadow: 0 0 0 12px rgba(159, 122, 234, 0);
   }
+}
+
+/* Tools metrics cards: one shared class set so all four stat shells, labels,
+ * and counts render identically; per-card status colors stay inline on counts. */
+.settings-stat-card {
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+/* Alarm variant tints the tampered-runes shell from --status-red's own RGB so
+ * the alert surface stays inside the token palette. */
+.settings-stat-card.alarm {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.settings-stat-card.alarm .settings-stat-card-label {
+  color: var(--status-red);
+}
+
+.settings-stat-card-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.settings-stat-card-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-top: 4px;
 }
 
