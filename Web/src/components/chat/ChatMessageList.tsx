@@ -24,7 +24,11 @@ import MarkdownText from "../MarkdownText";
 import ThoughtContainer from "../ThoughtContainer";
 import ToolActionRow from "../ToolActionRow";
 import { isWriteReviewOwner } from "../writeReviewOwnership";
-import { formatCompletionRelative, getMessageCopyContent } from "./chatHelpers";
+import {
+  extractTurnErrorText,
+  formatCompletionRelative,
+  getMessageCopyContent,
+} from "./chatHelpers";
 import type { InFlightTurn, MessageItem } from "./chatTypes";
 import RecallChip from "./RecallChip";
 
@@ -127,9 +131,14 @@ export default function ChatMessageList({
             text.trim().startsWith("Chat request failed");
           const isSuppressedErrorText = (text: string) => {
             if (!message.isError) return false;
-            const failure = message.errorText?.trim();
+            const failure = message.errorText?.trim() || extractTurnErrorText(message);
             if (failure && failure.length > 0) {
-              return text.trim() === failure;
+              const trimmed = text.trim();
+              return (
+                trimmed === failure ||
+                trimmed === `Error: ${failure}` ||
+                trimmed.replace(/^Error:\s*/i, "") === failure
+              );
             }
             return isPersistedErrorText(text);
           };
@@ -256,7 +265,7 @@ export default function ChatMessageList({
                 >
                   <AlertTriangleIcon size={18} style={{ flexShrink: 0, marginTop: "2px" }} />
                   <div style={{ wordBreak: "break-word" }}>
-                    Turn failed: {message.errorText || message.text.replace(/^Error:\s*/, "")}
+                    Turn failed: {extractTurnErrorText(message)}
                   </div>
                 </div>
               ) : null}

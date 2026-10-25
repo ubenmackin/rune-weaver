@@ -597,6 +597,18 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         }
                         target_key = key_map.get(raw_key.lower(), raw_key)
                         el.press(target_key, timeout=action_timeout_ms)
+                        if target_key == "Enter":
+                            try:
+                                btn_check = "e => (e.tagName === 'INPUT' && (e.type === 'submit' || e.type === 'button'))" + \
+                                    " || e.tagName === 'BUTTON' || e.getAttribute('role') === 'button'"
+                                is_btn = page.evaluate(btn_check, el)
+                                if is_btn:
+                                    try:
+                                        el.click(timeout=action_timeout_ms)
+                                    except Exception:
+                                        page.evaluate("e => e.click()", el)
+                            except Exception:
+                                pass
                     elif action == "scroll":
                         scroll_cmd = (text or "").strip().lower()
                         if scroll_cmd in ("down", "up", "top", "bottom") or scroll_cmd.isdigit() or (scroll_cmd.startswith("-") and scroll_cmd[1:].isdigit()):
