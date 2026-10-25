@@ -37,7 +37,6 @@ export default function IndexPolicySourcesFieldset({
           <div
             key={source.kind}
             className="index-source-row"
-            style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
           >
             <SwitchControl
               checked={checked}
@@ -50,8 +49,7 @@ export default function IndexPolicySourcesFieldset({
             />
             {source.hint ? (
               <span
-                className="muted text-xs index-source-hint"
-                style={{ marginLeft: 4 }}
+                className="muted text-xs index-source-hint ml-1"
               >
                 <AlertTriangleIcon size={12} /> {source.hint}
               </span>

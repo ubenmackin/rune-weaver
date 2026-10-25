@@ -57,26 +57,15 @@ export function BrowserConfigModal({
           <CloseIcon size={16} />
         </button>
       </div>
-      <div
-        className="modal-body"
-        style={{ maxHeight: "calc(85vh - 130px)", overflowY: "auto" }}
-      >
+      <div className="modal-body browser-config-body">
         {browserModalError && (
-          <div
-            className="error-banner"
-            style={{
-              marginBottom: "14px",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="error-banner browser-config-error">
             <AlertTriangleIcon size={16} />
             <span>{browserModalError}</span>
           </div>
         )}
 
-        <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+        <p className="muted text-sm browser-config-intro">
           Configure timeouts and execution limits for browser automation (
           <code>browser.navigate</code>, <code>browser.act</code>), web fetch
           &amp; search (<code>web.fetch</code>, <code>web.search</code>), and
@@ -84,23 +73,12 @@ export function BrowserConfigModal({
         </p>
 
         {/* Timeouts Section */}
-        <div
-          style={{
-            padding: "14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            marginBottom: "16px",
-            backgroundColor: "var(--bg-secondary, #141822)",
-          }}
-        >
-          <h4 style={{ margin: "0 0 12px 0", fontSize: "0.88rem" }}>
+        <div className="browser-config-card">
+          <h4 className="browser-config-heading">
             Request &amp; Automation Timeouts
           </h4>
-          <div className="form-group" style={{ marginBottom: "12px" }}>
-            <label
-              htmlFor="browser-timeout-seconds"
-              style={{ fontSize: "0.82rem" }}
-            >
+          <div className="form-group mb-3">
+            <label htmlFor="browser-timeout-seconds" className="text-sm">
               Browser Automation Timeout (seconds)
             </label>
             <input
@@ -112,21 +90,15 @@ export function BrowserConfigModal({
               value={browserTimeoutSeconds}
               onChange={(e) => setBrowserTimeoutSeconds(e.target.value)}
             />
-            <span
-              className="form-group-hint"
-              style={{ marginTop: "4px", display: "block" }}
-            >
+            <span className="form-group-hint browser-config-hint-block">
               Timeout in seconds for Playwright actions (navigation, clicking,
               waiting for selectors). Default is {DEFAULT_BROWSER_TIMEOUT_SECONDS}
               s.
             </span>
           </div>
 
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label
-              htmlFor="browser-fetch-timeout-seconds"
-              style={{ fontSize: "0.82rem" }}
-            >
+          <div className="form-group m-0">
+            <label htmlFor="browser-fetch-timeout-seconds" className="text-sm">
               HTTP Request Timeout (seconds)
             </label>
             <input
@@ -138,10 +110,7 @@ export function BrowserConfigModal({
               value={browserFetchTimeoutSeconds}
               onChange={(e) => setBrowserFetchTimeoutSeconds(e.target.value)}
             />
-            <span
-              className="form-group-hint"
-              style={{ marginTop: "4px", display: "block" }}
-            >
+            <span className="form-group-hint browser-config-hint-block">
               Timeout in seconds for direct HTTP requests made by{" "}
               <code>web.fetch</code> and <code>api.request</code>. Default is{" "}
               {DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS}s.
@@ -153,40 +122,20 @@ export function BrowserConfigModal({
             network access, and credentials live on the Access tab's
             Network and Credentials sections, so this modal keeps only
             a compact pointer to that surface. */}
-        <div
-          style={{
-            padding: "14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            marginBottom: "16px",
-            backgroundColor: "var(--bg-secondary, #141822)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
+        <div className="browser-config-card">
+          <div className="browser-policy-head">
             <div>
-              <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>
+              <h4 className="browser-policy-heading">
                 Security &amp; Network Policy
               </h4>
-              <p className="muted text-sm" style={{ margin: 0 }}>
+              <p className="muted text-sm m-0">
                 Domain allow/deny rules and local network access are managed
                 under the Access tab.
               </p>
             </div>
             <button
               type="button"
-              className="ghost"
-              style={{
-                whiteSpace: "nowrap",
-                fontSize: "0.8rem",
-                padding: "6px 10px",
-              }}
+              className="ghost browser-policy-action"
               onClick={onManageSecurityPolicy}
             >
               Manage Security Policy &rarr;
@@ -194,10 +143,7 @@ export function BrowserConfigModal({
           </div>
         </div>
       </div>
-      <div
-        className="modal-footer"
-        style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
-      >
+      <div className="modal-footer">
         <button
           type="button"
           className="ghost"

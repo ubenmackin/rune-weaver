@@ -223,10 +223,9 @@ export function AccessFilesSection({
     <div className="access-files-pane" data-testid="files-pane">
       {/* SECTION 1: Files & Access */}
       <section
-        className="settings-section card"
+        className="settings-section card access-files-card-spaced"
         aria-label="Files & Access"
         data-testid="files-access-pane"
-        style={{ marginBottom: "20px" }}
       >
         <div className="settings-section-title-group">
           <h3>Files & Access</h3>
@@ -245,9 +244,9 @@ export function AccessFilesSection({
           write-path rules they override.
         </p>
 
-        <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+        <div className="settings-subsection-header access-subsection-spaced">
           <div className="settings-section-title-group">
-            <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
+            <h4 className="access-subsection-heading">Allowed Roots</h4>
             <p className="settings-section-hint">
               Home containment boundary (`~` expands to the home directory). Paths outside
               these roots escalate to approval.
@@ -265,7 +264,7 @@ export function AccessFilesSection({
           </div>
         </div>
 
-        <div className="form-group" style={{ marginTop: "8px" }}>
+        <div className="form-group mt-2">
           <label htmlFor="allow-roots-textarea">
             Allowed roots, one per line{" "}
             <span className="muted text-sm">
@@ -290,7 +289,7 @@ export function AccessFilesSection({
           </span>
         </div>
 
-        <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+        <div className="form-group checkbox-group mt-4">
           <SwitchControl
             testId="files-require-approval"
             checked={filesRequireApprovalOnDeny}
@@ -316,7 +315,6 @@ export function AccessFilesSection({
               <div
                 className="error-banner"
                 data-testid="files-write-load-error"
-                style={{ marginBottom: "12px" }}
               >
                 <AlertTriangleIcon size={16} />
                 <span>{loadError}</span>
@@ -328,7 +326,6 @@ export function AccessFilesSection({
                   <div
                     className="error-banner"
                     data-testid="files-write-error"
-                    style={{ marginBottom: "12px" }}
                   >
                     <AlertTriangleIcon size={16} />
                     <span>{saveError}</span>
@@ -337,20 +334,13 @@ export function AccessFilesSection({
                 {saved ? (
                   <div
                     data-testid="files-write-saved"
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: "6px",
-                      backgroundColor: "rgba(16, 185, 129, 0.15)",
-                      color: "#10b981",
-                      fontSize: "0.85rem",
-                      marginBottom: "12px",
-                    }}
+                    className="settings-save-success"
                   >
                     File write settings saved. Changes apply immediately with no
                     restart.
                   </div>
                 ) : null}
-                <p className="muted text-sm" style={{ marginBottom: "16px" }} data-testid="files-write-precedence">
+                <p className="muted text-sm access-precedence-note" data-testid="files-write-precedence">
                   Deny patterns refuse first. The longest matching write-path rule
                   below decides next: a rule covers its path and everything inside it,
                   so a deeper rule outranks a broader one. Otherwise the write mode
@@ -375,7 +365,7 @@ export function AccessFilesSection({
                     <p className="muted text-sm" data-testid="advanced-files-loading">Loading advanced files settings…</p>
                   ) : null}
                   {advanced.loadError ? (
-                    <div className="error-banner" data-testid="advanced-files-load-error" style={{ marginBottom: "12px" }}>
+                    <div className="error-banner" data-testid="advanced-files-load-error">
                       <AlertTriangleIcon size={16} />
                       <span>{advanced.loadError}</span>
                     </div>

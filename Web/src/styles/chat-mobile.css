@@ -20,7 +20,7 @@
   .chat-main-panel {
     flex: 1;
     min-width: 0;
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -35,7 +35,7 @@
    * assistant turns stretch edge to edge. Radius stays at the 12px desktop
    * token so shape never shifts across breakpoints. */
   .message {
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     min-width: 0;
     box-sizing: border-box;
   }
@@ -272,7 +272,7 @@
   padding: 0 14px;
   background: transparent;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 500;

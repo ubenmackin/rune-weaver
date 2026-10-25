@@ -3,8 +3,8 @@
 
 
 .unified-diff-container {
-  border-radius: 6px;
-  border: 1px solid var(--border-color, #2c2c36);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
   background: #0d0d11;
   overflow: hidden;
   margin: 6px 0;
@@ -16,16 +16,16 @@
   align-items: center;
   padding: 6px 12px;
   background: #15151c;
-  border-bottom: 1px solid var(--border-color, #2c2c36);
+  border-bottom: 1px solid var(--border-color);
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
 }
 
 .unified-diff-copy-btn {
   background: transparent;
-  border: 1px solid var(--border-color, #2c2c36);
-  border-radius: 4px;
-  color: var(--text-muted, #8e8e9f);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
   padding: 2px 8px;
   font-size: 11px;
   cursor: pointer;
@@ -33,7 +33,7 @@
 }
 
 .unified-diff-copy-btn:hover {
-  background: var(--bg-subtle, #23232d);
+  background: var(--bg-subtle);
   color: #ffffff;
 }
 
@@ -62,7 +62,7 @@
 
 .unified-diff-line.diff-hunk {
   background: rgba(56, 189, 248, 0.1);
-  color: #38bdf8;
+  color: var(--accent-sky);
   font-weight: 600;
 }
 
@@ -72,7 +72,7 @@
 }
 
 .unified-diff-line.diff-context {
-  color: #cbd5e1;
+  color: var(--text-muted);
 }
 
 .unified-diff-expand-btn {
@@ -80,23 +80,23 @@
   text-align: center;
   padding: 6px;
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
   background: #15151c;
   border: none;
-  border-top: 1px solid var(--border-color, #2c2c36);
+  border-top: 1px solid var(--border-color);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .unified-diff-expand-btn:hover {
-  background: var(--bg-subtle, #23232d);
+  background: var(--bg-subtle);
   color: #ffffff;
 }
 
 /* In-Chat DiffCard */
 .diff-card-root {
   margin: 8px 0;
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   border: 1px solid rgba(139, 92, 246, 0.3);
   background: #14141c;
   padding: 12px;
@@ -123,7 +123,7 @@
   padding: 2px;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: inherit;
   cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease;
@@ -152,7 +152,7 @@
 
 .diff-card-path {
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -163,7 +163,7 @@
   display: inline-flex;
   gap: 6px;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.3);
   font-size: 11px;
 }
@@ -181,7 +181,7 @@
 .diff-status-pill {
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 9999px;
+  border-radius: var(--radius-sm);
   font-weight: 500;
 }
 
@@ -234,7 +234,7 @@
 
 .diff-action-btn {
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 500;
   border: none;
@@ -254,7 +254,7 @@
 .diff-action-btn.discard {
   background: #2a2a36;
   color: #e2e8f0;
-  border: 1px solid var(--border-color, #2c2c36);
+  border: 1px solid var(--border-color);
 }
 
 .diff-action-btn.discard:hover:not(:disabled) {
@@ -268,7 +268,7 @@
 
 .diff-review-note {
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
 }
 
 /* Staged Changes Drawer */
@@ -287,7 +287,7 @@
   max-width: 680px;
   height: 100%;
   background: #14141b;
-  border-left: 1px solid var(--border-color, #2c2c36);
+  border-left: 1px solid var(--border-color);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
@@ -299,7 +299,7 @@
   align-items: center;
   padding: 14px 20px;
   background: #111116;
-  border-bottom: 1px solid var(--border-color, #2c2c36);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .staged-drawer-title-group {
@@ -317,7 +317,7 @@
 
 .staged-drawer-count-badge {
   padding: 2px 8px;
-  border-radius: 9999px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   background: rgba(139, 92, 246, 0.2);
   color: #c4b5fd;
@@ -332,7 +332,7 @@
 
 .staged-batch-btn {
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 500;
   border: none;
@@ -353,8 +353,8 @@
 
 .staged-batch-btn.discard {
   background: #23232d;
-  color: #cbd5e1;
-  border: 1px solid var(--border-color, #2c2c36);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
 }
 
 .staged-batch-btn.discard:hover:not(:disabled) {
@@ -371,7 +371,7 @@
  * header row on one line at narrow widths. */
 button.ghost.staged-expand-all-btn {
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -379,9 +379,9 @@ button.ghost.staged-expand-all-btn {
 .staged-drawer-close-btn {
   background: transparent;
   border: none;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
   padding: 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -389,7 +389,7 @@ button.ghost.staged-expand-all-btn {
 }
 
 .staged-drawer-close-btn:hover {
-  background: var(--bg-subtle, #23232d);
+  background: var(--bg-subtle);
   color: #ffffff;
 }
 
@@ -409,7 +409,7 @@ button.ghost.staged-expand-all-btn {
   justify-content: center;
   padding: 40px 20px;
   text-align: center;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
 }
 
 .staged-drawer-body {
@@ -423,8 +423,8 @@ button.ghost.staged-expand-all-btn {
 
 .staged-change-card {
   background: #171720;
-  border: 1px solid var(--border-color, #2c2c36);
-  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
 }
 
 .staged-change-card-header {
@@ -442,14 +442,14 @@ button.ghost.staged-expand-all-btn {
   padding: 2px;
   background: transparent;
   border: none;
-  border-radius: 4px;
-  color: var(--text-muted, #8e8e9f);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .staged-change-toggle:hover {
-  background: var(--bg-subtle, #23232d);
+  background: var(--bg-subtle);
   color: #ffffff;
 }
 
@@ -466,7 +466,7 @@ button.ghost.staged-expand-all-btn {
   flex: 1;
   min-width: 0;
   font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
+  color: var(--text-muted);
   font-family: monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -497,7 +497,7 @@ button.ghost.staged-expand-all-btn {
 .staged-item-btn {
   flex: 1;
   padding: 3px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   border: none;
   cursor: pointer;
@@ -515,7 +515,7 @@ button.ghost.staged-expand-all-btn {
 
 .staged-item-btn.discard {
   background: #282834;
-  color: #cbd5e1;
+  color: var(--text-muted);
 }
 
 .staged-item-btn.discard:hover:not(:disabled) {
@@ -523,7 +523,7 @@ button.ghost.staged-expand-all-btn {
 }
 
 .staged-change-card-body {
-  border-top: 1px solid var(--border-color, #2c2c36);
+  border-top: 1px solid var(--border-color);
   padding: 8px 12px 12px;
 }
 
@@ -533,7 +533,7 @@ button.ghost.staged-expand-all-btn {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 9999px;
+  border-radius: var(--radius-sm);
   background: rgba(139, 92, 246, 0.15);
   border: 1px solid rgba(139, 92, 246, 0.4);
   color: #c4b5fd;
@@ -552,10 +552,16 @@ button.ghost.staged-expand-all-btn {
 
 .top-nav-staged-badge {
   padding: 1px 6px;
-  border-radius: 9999px;
+  border-radius: var(--radius-sm);
   background: #8b5cf6;
   color: #ffffff;
   font-size: 10px;
   font-weight: 700;
+}
+
+/* Zero-count staged badge reads as idle slate instead of the active purple. */
+.top-nav-staged-badge.is-zero {
+  background: rgba(148, 163, 184, 0.25);
+  color: #94a3b8;
 }
 

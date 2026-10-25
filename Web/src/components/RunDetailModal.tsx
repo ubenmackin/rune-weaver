@@ -92,7 +92,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
 
       <div className="modal-body">
           {run.status === "budget_exceeded" && (
-            <div className="notice-banner warning" style={{ marginBottom: "1rem" }}>
+            <div className="notice-banner warning run-budget-notice">
               <strong>Tool Budget Exceeded:</strong> This run reached its tool iteration limit before completing all actions. Tool execution was halted and diagnostic synthesis was forced. Review the draft report and incomplete actions below.
             </div>
           )}
@@ -120,22 +120,14 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
             ) : null}
             <div className="meta-card">
               <span className="meta-label">Run ID</span>
-              <span
-                className="meta-value font-mono"
-                title={run.id}
-                style={{ wordBreak: "break-all" }}
-              >
+              <span className="meta-value font-mono break-all" title={run.id}>
                 {run.id}
               </span>
             </div>
             {sessionID ? (
               <div className="meta-card">
                 <span className="meta-label">Session ID</span>
-                <span
-                  className="meta-value font-mono"
-                  title={sessionID}
-                  style={{ wordBreak: "break-all" }}
-                >
+                <span className="meta-value font-mono break-all" title={sessionID}>
                   {sessionID}
                 </span>
               </div>
@@ -143,11 +135,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
             {run.jobID ? (
               <div className="meta-card">
                 <span className="meta-label">Job ID</span>
-                <span
-                  className="meta-value font-mono"
-                  title={run.jobID}
-                  style={{ wordBreak: "break-all" }}
-                >
+                <span className="meta-value font-mono break-all" title={run.jobID}>
                   {run.jobID}
                 </span>
               </div>

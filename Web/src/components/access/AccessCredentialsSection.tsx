@@ -120,30 +120,25 @@ export function CredentialsList({
     return (
       <div data-testid="credentials-list">
         <div
-          style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px" }}
+          className="row mb-2"
           data-testid="credentials-list-header"
         >
           <span className="muted text-sm" data-testid="credentials-count">
             0 bindings
           </span>
-          <span style={{ flex: 1 }} />
+          <span className="credentials-spacer" />
           <button type="button" className="ghost btn-sm" data-testid="credentials-add" onClick={() => onAdd?.()}>
             Add binding
           </button>
         </div>
         <div
           data-testid="credentials-empty"
-          style={{
-            padding: "12px",
-            borderRadius: "6px",
-            border: "1px dashed rgba(148, 163, 184, 0.4)",
-            fontSize: "0.85rem",
-          }}
+          className="credentials-empty-box"
         >
-          <p className="muted" style={{ margin: "0 0 4px 0" }}>
+          <p className="muted m-0 mb-1">
             No credential bindings yet.
           </p>
-          <p className="muted" style={{ margin: "0 0 8px 0" }}>
+          <p className="muted m-0 mb-2">
             Add a binding, then set its secret value here. Type MY_KEY to store Keychain account MY_KEY used as rwsecret:MY_KEY; pasting rwsecret:MY_KEY stores the same slot. Values take effect on the next request with no restart.
           </p>
           <button
@@ -162,7 +157,7 @@ export function CredentialsList({
   return (
     <div data-testid="credentials-list">
       <div
-        style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginBottom: "8px" }}
+        className="row mb-2 credentials-list-header-wrap"
         data-testid="credentials-list-header"
       >
         <span className="muted text-sm" data-testid="credentials-count">
@@ -172,7 +167,7 @@ export function CredentialsList({
         </span>
         <input
           type="text"
-          className="input-field"
+          className="input-field credentials-search-input"
           aria-label="Search bindings"
           placeholder="Search by key or host…"
           data-testid="credentials-search"
@@ -180,9 +175,8 @@ export function CredentialsList({
           onChange={(event) => setQuery(event.target.value)}
           autoComplete="off"
           spellCheck={false}
-          style={{ maxWidth: "220px" }}
         />
-        <label className="checkbox-row" style={{ fontSize: "0.82rem" }}>
+        <label className="checkbox-row credentials-attention-label">
           <input
             type="checkbox"
             data-testid="credentials-attention-toggle"
@@ -192,13 +186,13 @@ export function CredentialsList({
           />
           <span>Needs attention</span>
         </label>
-        <span style={{ flex: 1 }} />
+        <span className="credentials-spacer" />
         <button type="button" className="ghost btn-sm" data-testid="credentials-add" onClick={() => onAdd?.()}>
           Add binding
         </button>
       </div>
       {filtered.length === 0 ? (
-        <div data-testid="credentials-no-match" className="muted text-sm" style={{ padding: "8px 0" }}>
+        <div data-testid="credentials-no-match" className="muted text-sm credentials-no-match">
           No bindings match this filter.{" "}
           <button
             type="button"
@@ -212,79 +206,47 @@ export function CredentialsList({
           </button>
         </div>
       ) : (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0 }} aria-label="Credential bindings">
+        <ul className="credentials-plain-list" aria-label="Credential bindings">
           {filtered.map((row) => (
             <li
               key={row.key}
               data-testid="credential-row"
               data-key={row.key}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "2px",
-                padding: "6px 8px",
-                borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
-              }}
+              className="credential-row"
             >
-              <div
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                  alignItems: "center",
-                }}
-              >
+              <div className="row">
               <button
                 type="button"
                 data-testid={`edit-binding-${row.key}`}
                 aria-label={`Edit ${row.key}`}
                 onClick={() => onEdit?.(row.key)}
                 title={row.attention.needsAttention ? row.attention.reasons.join(" ") : `Edit ${row.key}`}
-                style={{
-                  flex: 1,
-                  display: "flex",
-                  gap: "8px",
-                  alignItems: "center",
-                  background: "none",
-                  border: "none",
-                  padding: 0,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: "0.82rem",
-                  minWidth: 0,
-                }}
+                className="credential-row-button"
               >
                 {row.attention.needsAttention ? (
                   <span
                     data-testid="binding-attention"
                     aria-label="Needs attention"
                     title={row.attention.reasons.join(" ")}
-                    style={{ color: "var(--warning-color, #f59e0b)", fontSize: "0.7rem", flexShrink: 0 }}
+                    className="credential-attention-dot"
                   >
                     ●
                   </span>
                 ) : null}
-                <code style={{ fontFamily: "monospace", flexShrink: 0 }}>{row.key}</code>
+                <code className="credential-key-code">{row.key}</code>
                 <span
                   data-testid="keychain-badge"
-                  className="status-pill"
-                  style={{
-                    fontSize: "0.72rem",
-                    padding: "1px 8px",
-                    borderRadius: "999px",
-                    border: "1px solid rgba(148, 163, 184, 0.35)",
-                    flexShrink: 0,
-                  }}
+                  className="status-pill credential-keychain-badge"
                 >
                   {row.stored ? "Keychain Stored" : "Keychain Missing"}
                 </span>
                 <span
                   data-testid="binding-hosts-summary"
-                  className="muted"
-                  style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  className="muted credential-hosts-summary"
                 >
                   {row.hostsSummary}
                 </span>
-                <span data-testid="binding-scope-summary" className="muted" style={{ flexShrink: 0 }}>
+                <span data-testid="binding-scope-summary" className="muted credential-scope-summary">
                   {row.scopeSummary}
                 </span>
               </button>
@@ -349,8 +311,7 @@ export function CredentialsList({
               {row.attention.needsAttention ? (
                 <div
                   data-testid="binding-attention-reason"
-                  className="muted text-sm"
-                  style={{ fontSize: "0.75rem", lineHeight: "1.35", paddingLeft: "16px" }}
+                  className="muted text-sm credential-attention-reason"
                 >
                   {row.attention.reasons.join(" ")}
                 </div>
@@ -445,7 +406,7 @@ export function AccessCredentialsSection({
           <section
             aria-label="Credentials"
             data-testid="policy-credentials-section"
-            style={{ marginTop: "16px" }}
+            className="credentials-section-spaced"
           >
             <h4>Target-bound credentials</h4>
             <p className="settings-section-hint">
@@ -469,7 +430,7 @@ export function AccessCredentialsSection({
           <section
             aria-label="Unlinked Keychain secrets"
             data-testid="unlinked-secrets"
-            style={{ marginTop: "16px" }}
+            className="credentials-section-spaced"
           >
             <h4>Unlinked Keychain secrets</h4>
             <p className="settings-section-hint">
@@ -486,31 +447,18 @@ export function AccessCredentialsSection({
                 </p>
               ) : null
             ) : (
-              <ul style={{ listStyle: "none", margin: 0, padding: 0 }} aria-label="Unlinked secrets">
+              <ul className="credentials-plain-list" aria-label="Unlinked secrets">
                 {unlinkedKeys.map((key) => (
                   <li
                     key={key}
                     data-testid="unlinked-secret-row"
                     data-key={key}
-                    style={{
-                      display: "flex",
-                      gap: "8px",
-                      alignItems: "center",
-                      padding: "6px 8px",
-                      borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
-                    }}
+                    className="unlinked-secret-row"
                   >
-                    <code style={{ fontFamily: "monospace", flex: 1 }}>{key}</code>
+                    <code className="unlinked-secret-key">{key}</code>
                     <span
                       data-testid={`unlinked-stored-${key}`}
-                      className="status-pill"
-                      style={{
-                        fontSize: "0.72rem",
-                        padding: "1px 8px",
-                        borderRadius: "999px",
-                        border: "1px solid rgba(148, 163, 184, 0.35)",
-                        flexShrink: 0,
-                      }}
+                      className="status-pill credential-keychain-badge"
                     >
                       Stored
                     </span>
@@ -590,11 +538,11 @@ export function AccessCredentialsSection({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will remove the binding for &lsquo;{pendingDeleteKey}&rsquo;. The Keychain
               secret stays stored; only the policy binding is removed. This cannot be undone.
             </p>
-            <label className="checkbox-row" style={{ marginTop: "8px", fontSize: "0.85rem" }}>
+            <label className="checkbox-row credentials-delete-option">
               <input
                 type="checkbox"
                 data-testid="delete-binding-also-secret"
@@ -641,7 +589,7 @@ export function AccessCredentialsSection({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will delete the Keychain secret for &lsquo;{pendingDeleteSecretKey}&rsquo;.
               The policy binding stays; only the stored value is removed. This cannot be undone.
             </p>

@@ -56,37 +56,23 @@ export function FanoutConfigModal({
           <CloseIcon size={16} />
         </button>
       </div>
-      <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+      <div className="modal-body fanout-modal-body">
         {fanoutModalError && (
-          <div
-            className="error-banner"
-            style={{
-              marginBottom: "14px",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="error-banner fanout-modal-error">
             <AlertTriangleIcon size={16} />
             <span>{fanoutModalError}</span>
           </div>
         )}
 
-        <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+        <p className="muted text-sm fanout-modal-intro">
           Tune the parallel worker swarm for <code>fanout.run</code>. Workers
           fan out over caller-composed subtasks and merge through one
           reviewer pass; these knobs take effect without a restart.
         </p>
 
-        <div
-          className="form-row"
-          style={{ display: "flex", gap: "10px", marginBottom: "4px" }}
-        >
-          <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-            <label
-              htmlFor="fanout-max-workers"
-              style={{ fontSize: "0.82rem" }}
-            >
+        <div className="form-row fanout-form-row">
+          <div className="form-group flex-1 m-0">
+            <label htmlFor="fanout-max-workers">
               Max workers
             </label>
             <input
@@ -108,11 +94,8 @@ export function FanoutConfigModal({
               Maximum workers running at once. Clearing the field saves 2.
             </span>
           </div>
-          <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-            <label
-              htmlFor="fanout-worker-timeout"
-              style={{ fontSize: "0.82rem" }}
-            >
+          <div className="form-group flex-1 m-0">
+            <label htmlFor="fanout-worker-timeout">
               Worker timeout (seconds)
             </label>
             <input
@@ -135,7 +118,7 @@ export function FanoutConfigModal({
           </div>
         </div>
 
-        <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+        <div className="form-group checkbox-group mt-4">
           <SwitchControl
             testId="fanout-full-tools"
             checked={fanoutFullTools}
@@ -148,10 +131,7 @@ export function FanoutConfigModal({
           </span>
         </div>
       </div>
-      <div
-        className="modal-footer"
-        style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
-      >
+      <div className="modal-footer">
         <button
           type="button"
           className="ghost"

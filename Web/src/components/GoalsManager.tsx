@@ -501,7 +501,7 @@ export default function GoalsManager({
       {error ? <p className="error">{error}</p> : null}
       {notice ? <div className="notice-banner">{notice}</div> : null}
 
-      <div className="filter-chip-row" style={{ marginTop: 12 }}>
+      <div className="filter-chip-row mt-3">
         <button
           type="button"
           className={`filter-chip ${filter === "current" ? "active" : ""}`}
@@ -523,9 +523,9 @@ export default function GoalsManager({
       {/* Ideas panel: proactive suggestions above the goal list. Each card
           carries a kind pill plus the title and body; the body renders through
           the sanitized MarkdownText path only, never raw HTML. */}
-      <div className="ideas-panel" data-testid="ideas-panel" style={{ marginTop: 12 }}>
+      <div className="ideas-panel mt-3" data-testid="ideas-panel">
         <div className="panel-header-row">
-          <h3 style={{ margin: 0 }}>Ideas</h3>
+          <h3 className="m-0">Ideas</h3>
           <span className="muted text-sm">
             {ideasLoading && ideas.length === 0
               ? "Loading…"
@@ -533,7 +533,7 @@ export default function GoalsManager({
           </span>
         </div>
         {visibleIdeas.length === 0 && !ideasLoading ? (
-          <p className="muted text-xs" style={{ marginTop: 6 }}>
+          <p className="muted text-xs goals-ideas-empty-note">
             No suggestions right now. The agent proposes ideas as goals and
             activity accumulate.
           </p>
@@ -654,7 +654,7 @@ export default function GoalsManager({
             >
               Create Your First Goal
             </button>
-            <p className="muted text-xs" style={{ margin: 0 }}>
+            <p className="muted text-xs m-0">
               Need the same task repeated on a schedule instead? Use Schedules.
             </p>
           </div>
@@ -798,27 +798,18 @@ export default function GoalsManager({
 
               {/* Progress bar: the plan-wide completion at a glance. An empty
                   plan renders an empty track rather than a misleading full bar. */}
-              <div style={{ marginTop: 10 }}>
+              <div className="goal-card-progress">
                 <div
                   role="progressbar"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={percent}
                   aria-label={`${goal.title} progress`}
-                  style={{
-                    height: 6,
-                    borderRadius: 999,
-                    background: "rgba(255, 255, 255, 0.08)",
-                    overflow: "hidden",
-                  }}
+                  className="progress-track"
                 >
                   <div
-                    style={{
-                      height: "100%",
-                      width: `${percent}%`,
-                      borderRadius: 999,
-                      background: "var(--accent-purple, #8b5cf6)",
-                    }}
+                    className="progress-fill"
+                    style={{ width: `${percent}%` }}
                   />
                 </div>
               </div>
@@ -848,52 +839,18 @@ export default function GoalsManager({
 
                   {detail ? (
                     <>
-                      <ol
-                        className="goal-plan-list"
-                        style={{
-                          listStyle: "none",
-                          margin: 0,
-                          padding: 0,
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                        }}
-                      >
+                      <ol className="goal-plan-list">
                         {goal.isPlanning ? (
-                          <li
-                            className="muted text-xs"
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: "6px",
-                              background: "rgba(59, 130, 246, 0.1)",
-                              border: "1px solid rgba(59, 130, 246, 0.2)",
-                              color: "var(--accent-blue, #60a5fa)",
-                            }}
-                          >
+                          <li className="muted text-xs goal-plan-notice-planning">
                             Drafting plan… The agent is breaking down this goal into actionable steps.
                           </li>
                         ) : detail.steps.length === 0 ? (
-                          <li
-                            className="muted text-xs"
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: "6px",
-                              background: "rgba(255, 255, 255, 0.04)",
-                              border: "1px dashed rgba(255, 255, 255, 0.15)",
-                            }}
-                          >
+                          <li className="muted text-xs goal-plan-notice-empty">
                             No plan drafted yet. Click &quot;Plan Goal&quot; above to have the agent generate actionable steps.
                           </li>
                         ) : (
                           detail.steps.map((step) => (
-                            <li
-                              key={step.id}
-                              style={{
-                                display: "flex",
-                                alignItems: "flex-start",
-                                gap: 8,
-                              }}
-                            >
+                            <li key={step.id} className="goal-plan-step">
                               <input
                                 type="checkbox"
                                 checked={step.status === "done"}
@@ -907,13 +864,11 @@ export default function GoalsManager({
                               />
                               <div>
                                 <span
-                                  className="text-xs"
-                                  style={{
-                                    textDecoration:
-                                      step.status === "done"
-                                        ? "line-through"
-                                        : "none",
-                                  }}
+                                  className={
+                                    step.status === "done"
+                                      ? "text-xs goal-plan-step-title done"
+                                      : "text-xs goal-plan-step-title"
+                                  }
                                 >
                                   {step.title}
                                 </span>
@@ -933,16 +888,15 @@ export default function GoalsManager({
                         )}
                       </ol>
 
-                      <h4 style={{ marginTop: 12 }}>Recent activity</h4>
+                      <h4 className="mt-3">Recent activity</h4>
                       {detail.events.length === 0 ? (
                         <p className="muted text-xs">No activity recorded yet.</p>
                       ) : (
                         <div className="embedded-runs-list">
                           {detail.events.map((event) => (
                             <div
-                              className="embedded-run-item"
+                              className="embedded-run-item goal-event-item"
                               key={event.id}
-                              style={{ display: "block" }}
                             >
                               <div className="muted text-xs">
                                 {goalEventKindLabel(event.kind)} ·{" "}
@@ -959,7 +913,7 @@ export default function GoalsManager({
                         </div>
                       )}
 
-                      <h4 style={{ marginTop: 12 }}>Linked runs</h4>
+                      <h4 className="mt-3">Linked runs</h4>
                       {runsForGoal.length === 0 ? (
                         <p className="muted text-xs">
                           No runs recorded for this goal yet. Use Work on it now to
@@ -1019,7 +973,7 @@ export default function GoalsManager({
               </button>
             </div>
             <div className="modal-body">
-              <p className="muted text-sm" style={{ marginTop: 0 }}>
+              <p className="muted text-sm m-0">
                 Tell the agent what you want to get done. It will make a plan
                 and work on it a step at a time.
               </p>
@@ -1116,7 +1070,7 @@ export default function GoalsManager({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               Permanently delete &quot;{purgeTarget.title}&quot; and its plan.
               This cannot be undone. Abandon instead to keep the history.
             </p>

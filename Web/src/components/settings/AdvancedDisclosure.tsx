@@ -83,7 +83,7 @@ export function AdvancedDisclosure({
     testId ?? `advanced-${tabName.toLowerCase().replace(/\s+/g, "-")}`;
 
   return (
-    <div style={{ marginTop: "16px" }}>
+    <div className="mt-4">
       <details
         ref={detailsRef}
         data-testid={slug}
@@ -95,13 +95,13 @@ export function AdvancedDisclosure({
       >
         <summary
           data-testid={`${slug}-trigger`}
-          style={{ cursor: "pointer", fontWeight: 600 }}
+          className="advanced-disclosure-trigger"
         >
           Advanced {tabName} settings
         </summary>
-        <div style={{ marginTop: "12px" }}>{children}</div>
+        <div className="mt-3">{children}</div>
         {isOpen && validationError && matchesError(validationError) ? (
-          <p className="advanced-error" style={{ marginTop: "0.75rem" }}>
+          <p className="advanced-error mt-3">
             <a
               href={`#${slug}-error`}
               id={`${slug}-error`}
@@ -113,7 +113,7 @@ export function AdvancedDisclosure({
           </p>
         ) : null}
         {isOpen && onReset ? (
-          <div style={{ marginTop: "0.75rem" }}>
+          <div className="mt-3">
             <button
               type="button"
               className="ghost icon-text-btn"

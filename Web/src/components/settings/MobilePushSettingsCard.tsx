@@ -50,12 +50,12 @@ export function MobilePushSettingsCard() {
         </div>
       ) : (
         <>
-          <div className="form-row" style={{ alignItems: "center", justifyContent: "space-between" }}>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label style={{ display: "block", fontWeight: 600 }}>
+          <div className="form-row mobile-push-row">
+            <div className="form-group m-0">
+              <label className="mobile-push-label">
                 {isSubscribed ? "Push Notifications Active" : "Push Notifications Inactive"}
               </label>
-              <span style={{ fontSize: "12px", opacity: 0.8 }}>
+              <span className="text-xs mobile-push-hint">
                 {isSubscribed
                   ? "This device is registered to receive background push alerts."
                   : "Enable push notifications to be alerted when approvals are requested."}
@@ -73,7 +73,7 @@ export function MobilePushSettingsCard() {
           </div>
 
           {isSubscribed && (
-            <div className="form-row" style={{ marginTop: "1rem" }}>
+            <div className="form-row settings-stack-gap">
               <button
                 type="button"
                 className="ghost"
@@ -84,7 +84,7 @@ export function MobilePushSettingsCard() {
                 Send Test Push
               </button>
               {testResult && (
-                <span style={{ fontSize: "12px", marginLeft: "8px", alignSelf: "center", opacity: 0.9 }}>
+                <span className="text-xs ml-2 mobile-push-result">
                   {testResult}
                 </span>
               )}
@@ -92,7 +92,7 @@ export function MobilePushSettingsCard() {
           )}
 
           {error && (
-            <div className="error-banner" style={{ marginTop: "1rem" }} role="alert">
+            <div className="error-banner settings-stack-gap" role="alert">
               {error}
             </div>
           )}

@@ -600,7 +600,7 @@ export default function RunLogViewer() {
                   // Worker children render status plus duration each with the
                   // same pill colors as run statuses, indented under their
                   // parent swarm so the audit trail reads the swarm shape.
-                  <div style={{ paddingLeft: 22 }}>
+                  <div className="run-workers-indent">
                     {group.children.map((worker) => {
                       const workerDuration = formatRunDuration(worker.durationMs);
                       return (
@@ -712,7 +712,7 @@ export default function RunLogViewer() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted run-modal-paragraph">
               This will permanently delete this run entry. This cannot be
               undone.
             </p>
@@ -764,7 +764,7 @@ export default function RunLogViewer() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted run-modal-paragraph">
               This stops the whole swarm. Every worker still in flight is
               asked to stop. Completed worker output is kept.
             </p>
@@ -815,7 +815,7 @@ export default function RunLogViewer() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
+            <p className="muted run-modal-paragraph-spaced">
               You can archive your execution history by downloading an audit export (JSON) before clearing.
               Clearing will permanently delete all completed run entries. In-progress runs will be preserved.
             </p>

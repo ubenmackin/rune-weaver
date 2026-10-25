@@ -88,9 +88,9 @@ export default function RuneMarketplaceModal({
   return (
     <Modal label="Rune Marketplace" onClose={onClose} containerClassName="modal-container marketplace-modal">
       <div className="modal-header">
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="rune-marketplace-header-row">
           <WrenchIcon size={20} className="header-icon" />
-          <h3 style={{ margin: 0 }}>Community Rune Marketplace</h3>
+          <h3>Community Rune Marketplace</h3>
         </div>
         <button
           type="button"
@@ -102,86 +102,42 @@ export default function RuneMarketplaceModal({
         </button>
       </div>
 
-      <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
-        <p style={{ margin: "0 0 12px 0", color: "var(--text-secondary, #a0aec0)", fontSize: "0.9rem" }}>
+      <div className="modal-body rune-marketplace-body">
+        <p className="rune-marketplace-intro text-sm">
           Browse and install community runes to extend Rune Weaver's capabilities.
           All installed runes are quarantined in a <strong>disabled state by default</strong> until you review and enable them.
         </p>
 
         {installedNotice && (
-          <div
-            style={{
-              padding: "10px 14px",
-              backgroundColor: "rgba(72, 187, 120, 0.15)",
-              border: "1px solid rgba(72, 187, 120, 0.4)",
-              borderRadius: "6px",
-              color: "#48bb78",
-              marginBottom: "14px",
-              fontSize: "0.88rem",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="rune-marketplace-success text-sm">
             <CheckIcon size={16} />
             <span>{installedNotice}</span>
           </div>
         )}
 
         {error && (
-          <div
-            style={{
-              padding: "10px 14px",
-              backgroundColor: "rgba(245, 101, 101, 0.15)",
-              border: "1px solid rgba(245, 101, 101, 0.4)",
-              borderRadius: "6px",
-              color: "#f56565",
-              marginBottom: "14px",
-              fontSize: "0.88rem",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="rune-marketplace-error text-sm">
             <AlertTriangleIcon size={16} />
             <span>{error}</span>
           </div>
         )}
 
-        <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              flex: 1,
-              backgroundColor: "var(--bg-secondary, #1a202c)",
-              border: "1px solid var(--border-color, #2d3748)",
-              borderRadius: "6px",
-              padding: "6px 10px",
-            }}
-          >
-            <SearchIcon size={16} style={{ color: "var(--text-secondary, #a0aec0)", marginRight: "8px" }} />
+        <div className="rune-marketplace-search-row">
+          <div className="rune-marketplace-search-box">
+            <SearchIcon size={16} className="rune-marketplace-search-icon" />
             <input
               type="text"
               placeholder="Search runes by name, description, tags, or tools..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              style={{
-                background: "transparent",
-                border: "none",
-                outline: "none",
-                color: "inherit",
-                width: "100%",
-                fontSize: "0.9rem",
-              }}
+              className="rune-marketplace-search-input text-sm"
             />
           </div>
           <button
             type="button"
-            className="btn btn-secondary"
+            className="btn btn-secondary rune-marketplace-refresh-btn"
             onClick={loadMarketplace}
             disabled={loading}
-            style={{ display: "flex", alignItems: "center", gap: "6px" }}
           >
             <RefreshIcon size={14} className={loading ? "spin" : ""} />
             <span>Refresh</span>
@@ -189,58 +145,38 @@ export default function RuneMarketplaceModal({
         </div>
 
         {loading && items.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "30px", color: "var(--text-secondary, #a0aec0)" }}>
+          <div className="rune-marketplace-empty text-sm">
             Loading community marketplace catalog...
           </div>
         ) : filteredItems.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "30px", color: "var(--text-secondary, #a0aec0)" }}>
+          <div className="rune-marketplace-empty text-sm">
             No community runes found matching your search.
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div className="rune-marketplace-list">
             {filteredItems.map((item) => (
-              <div
-                key={item.id}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--bg-card, #202634)",
-                  border: "1px solid var(--border-color, #2d3748)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "8px",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div key={item.id} className="rune-marketplace-card">
+                <div className="rune-marketplace-card-top">
                   <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <span style={{ fontWeight: 600, fontSize: "1rem" }}>{item.name}</span>
-                      <span style={{ fontSize: "0.75rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
+                    <div className="rune-marketplace-card-identity">
+                      <span className="rune-marketplace-name">{item.name}</span>
+                      <span className="rune-marketplace-version-badge text-xs">
                         v{item.version}
                       </span>
-                      <span style={{ fontSize: "0.75rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2c3e50", color: "#63b3ed" }}>
+                      <span className="rune-marketplace-runtime-badge text-xs">
                         {item.runtime}
                       </span>
                     </div>
-                    <div style={{ fontSize: "0.8rem", color: "var(--text-secondary, #a0aec0)", marginTop: "2px" }}>
-                      by {item.author} &bull; <code style={{ fontSize: "0.75rem" }}>{item.id}</code>
+                    <div className="rune-marketplace-meta rune-marketplace-byline text-sm">
+                      by {item.author} &bull; <code className="text-xs">{item.id}</code>
                     </div>
                   </div>
 
                   {item.isInstalled ? (
                     <button
                       type="button"
-                      className="btn"
+                      className="btn rune-marketplace-installed-btn"
                       disabled
-                      style={{
-                        backgroundColor: "rgba(72, 187, 120, 0.15)",
-                        color: "#48bb78",
-                        border: "1px solid rgba(72, 187, 120, 0.3)",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        padding: "6px 12px",
-                      }}
                     >
                       <CheckIcon size={14} />
                       <span>Installed</span>
@@ -248,48 +184,26 @@ export default function RuneMarketplaceModal({
                   ) : (
                     <button
                       type="button"
-                      className="primary"
+                      className="primary rune-marketplace-install-btn"
                       onClick={() => handleInstall(item)}
                       disabled={installingId === item.id}
-                      style={{ padding: "6px 14px" }}
                     >
                       {installingId === item.id ? "Installing..." : "Install"}
                     </button>
                   )}
                 </div>
 
-                <p style={{ margin: "4px 0 0 0", fontSize: "0.88rem", color: "var(--text-primary, #e2e8f0)", lineHeight: "1.4" }}>
-                  {item.description}
-                </p>
+                <p className="rune-marketplace-description text-sm">{item.description}</p>
 
-                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)" }}>Tools:</span>
+                <div className="rune-marketplace-tags-row">
+                  <span className="rune-marketplace-tools-label text-xs">Tools:</span>
                   {item.declaredTools.map((tool) => (
-                    <span
-                      key={tool}
-                      style={{
-                        fontSize: "0.75rem",
-                        padding: "1px 6px",
-                        borderRadius: "4px",
-                        backgroundColor: "rgba(237, 137, 54, 0.15)",
-                        color: "#ed8936",
-                        border: "1px solid rgba(237, 137, 54, 0.3)",
-                      }}
-                    >
+                    <span key={tool} className="rune-marketplace-tool-chip text-xs">
                       {tool}
                     </span>
                   ))}
                   {item.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      style={{
-                        fontSize: "0.75rem",
-                        padding: "1px 6px",
-                        borderRadius: "4px",
-                        backgroundColor: "var(--bg-secondary, #1a202c)",
-                        color: "#a0aec0",
-                      }}
-                    >
+                    <span key={tag} className="rune-marketplace-tag-chip text-xs">
                       #{tag}
                     </span>
                   ))}
@@ -300,7 +214,7 @@ export default function RuneMarketplaceModal({
         )}
       </div>
 
-      <div className="modal-footer" style={{ justifyContent: "flex-end" }}>
+      <div className="modal-footer">
         <button type="button" className="btn btn-secondary" onClick={onClose}>
           Close
         </button>

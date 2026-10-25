@@ -457,9 +457,9 @@ export default function ScheduleWizardModal({
         </div>
 
         {/* Wizard Progress Bar */}
-        <div className="wizard-progress-track">
+        <div className="progress-track">
           <div
-            className="wizard-progress-bar"
+            className="progress-fill"
             style={{ width: `${(step / 4) * 100}%` }}
           />
         </div>

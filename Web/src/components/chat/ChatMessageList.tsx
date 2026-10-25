@@ -247,24 +247,9 @@ export default function ChatMessageList({
 
               {/* Turn error callout */}
               {message.isError ? (
-                <div
-                  className="chat-turn-error-card"
-                  role="alert"
-                  style={{
-                    marginTop: "8px",
-                    padding: "10px 14px",
-                    background: "rgba(239, 68, 68, 0.12)",
-                    border: "1px solid rgba(239, 68, 68, 0.35)",
-                    borderRadius: "8px",
-                    color: "var(--color-danger, #ef4444)",
-                    fontSize: "0.875rem",
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: "10px",
-                  }}
-                >
-                  <AlertTriangleIcon size={18} style={{ flexShrink: 0, marginTop: "2px" }} />
-                  <div style={{ wordBreak: "break-word" }}>
+                <div className="chat-turn-error-card" role="alert">
+                  <AlertTriangleIcon size={18} className="chat-turn-error-icon" />
+                  <div className="break-all">
                     Turn failed: {extractTurnErrorText(message)}
                   </div>
                 </div>

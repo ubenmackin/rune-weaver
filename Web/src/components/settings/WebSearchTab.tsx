@@ -131,9 +131,9 @@ export function WebSearchTab({
         </p>
       </div>
 
-      <div className="settings-section-header" style={{ marginTop: "16px" }}>
+      <div className="settings-section-header mt-4">
         <div className="settings-section-title-group">
-          <h4 style={{ margin: "0 0 4px 0" }}>Web Search (SearXNG)</h4>
+          <h4 className="m-0 mb-1">Web Search (SearXNG)</h4>
           <p className="settings-section-hint">
             Web search runs locally through SearXNG. No Docker needed, it uses the Apple Container CLI. First start pulls the SearXNG image (about 150 MB), later starts reuse it.
           </p>
@@ -246,21 +246,21 @@ export function WebSearchTab({
       {searchDiagnostics ? (
         <details className="muted text-sm" data-testid="search-health-diagnostics">
           <summary>Diagnostics</summary>
-          <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0 0" }}>
+          <pre className="web-diagnostics-pre">
             {searchDiagnostics}
           </pre>
         </details>
       ) : null}
 
-      <p className="muted text-sm" data-testid="search-lifecycle-hint" style={{ margin: "8px 0 0 0" }}>
+      <p className="muted text-sm m-0 mt-2" data-testid="search-lifecycle-hint">
         Stop keeps the container for fast restart, Remove deletes it fully, and quit leaves it running by design.
       </p>
 
       {/* Browser automation section */}
-      <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid var(--border-color)" }}>
+      <div className="web-section-divider">
         <div className="settings-section-header">
           <div className="settings-section-title-group">
-            <h4 style={{ margin: "0 0 4px 0" }}>Browser automation</h4>
+            <h4 className="m-0 mb-1">Browser automation</h4>
             <p className="settings-section-hint">
               Browser automation for browser.navigate and browser.act runs through an isolated managed Python environment. First use provisions Playwright plus Chromium; later uses reuse it.
             </p>
@@ -351,7 +351,7 @@ export function WebSearchTab({
         {browserDiagnostics ? (
           <details className="muted text-sm" data-testid="browser-health-diagnostics">
             <summary>Diagnostics</summary>
-            <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0 0" }}>
+            <pre className="web-diagnostics-pre">
               {browserDiagnostics}
             </pre>
           </details>
@@ -401,21 +401,21 @@ export function WebSearchTab({
             </span>
           </div>
         </div>
-        <details className="muted text-sm" style={{ marginTop: "16px" }} data-testid="browser-troubleshooting-details">
-          <summary style={{ cursor: "pointer", userSelect: "none" }}>Manual environment setup &amp; troubleshooting</summary>
-          <div style={{ marginTop: "8px", paddingLeft: "4px" }}>
-            <p style={{ margin: "4px 0 0 0" }}>
+        <details className="muted text-sm mt-4" data-testid="browser-troubleshooting-details">
+          <summary className="web-troubleshooting-toggle">Manual environment setup &amp; troubleshooting</summary>
+          <div className="web-troubleshooting-body">
+            <p className="m-0 mt-1">
               Managed Python at <code>{browserVenvPath}</code>.
             </p>
             {browserPythonPath ? (
-              <p style={{ margin: "4px 0 0 0" }}>
+              <p className="m-0 mt-1">
                 Active interpreter: <code>{browserPythonPath}</code>
               </p>
             ) : null}
-            <p style={{ margin: "8px 0 0 0" }}>
+            <p className="m-0 mt-2">
               Manual fallback:
             </p>
-            <pre className="code-block" style={{ margin: "4px 0 0 0", fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+            <pre className="code-block web-manual-fallback-code">
               {browserVenvPath}/bin/python -m pip install {BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT} &amp;&amp; {browserVenvPath}/bin/python -m playwright install chromium
             </pre>
           </div>
@@ -445,7 +445,7 @@ export function WebSearchTab({
           </button>
         </div>
         <div className="modal-body">
-          <p className="muted" style={{ margin: 0 }}>
+          <p className="muted m-0">
             This will stop (if running) and delete the runeweaver-searxng container. The image cache stays and next Start recreates the container.
           </p>
         </div>

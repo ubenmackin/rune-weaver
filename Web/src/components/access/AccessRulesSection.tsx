@@ -680,7 +680,7 @@ export function AccessRulesSection({
             matching call; a deny rule parks it every time and never expires.
           </p>
         </div>
-        <div className="row" style={{ gap: "8px" }}>
+        <div className="row">
           <button
             type="button"
             className="primary icon-text-btn"
@@ -713,7 +713,6 @@ export function AccessRulesSection({
         <div
           className="error-banner"
           data-testid="access-rules-load-error"
-          style={{ marginBottom: "12px" }}
         >
           <AlertTriangleIcon size={16} />
           <span>{loadError}</span>
@@ -800,11 +799,10 @@ export function AccessRulesSection({
                       <div className="access-rule-scope-desc">{describeAccessScope(rule.scope)}</div>
                       {rule.reason ? (
                         <div
-                          className="access-rule-reason muted text-xs"
+                          className="access-rule-reason muted text-xs mt-1"
                           data-testid={`access-rule-reason-${rule.id}`}
-                          style={{ marginTop: "4px" }}
                         >
-                          <span style={{ opacity: 0.75 }}>Reason:</span> {rule.reason}
+                          <span className="access-rule-reason-label">Reason:</span> {rule.reason}
                         </div>
                       ) : null}
                     </td>
@@ -864,14 +862,14 @@ export function AccessRulesSection({
           </div>
           <div className="modal-body">
             {/* Effect selection */}
-            <div className="form-group" style={{ marginBottom: "16px" }}>
-              <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "6px" }}>
+            <div className="form-group access-modal-group">
+              <label className="access-modal-label">
                 Rule Effect
               </label>
               <div
                 role="radiogroup"
                 aria-label="Rule Effect"
-                style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}
+                className="access-effect-group"
               >
                 {RULE_EFFECT_OPTIONS.map((option) => {
                   const selected = ruleEffect === option.value;
@@ -879,20 +877,6 @@ export function AccessRulesSection({
                     <label
                       key={option.value}
                       className={`access-rule-effect-pill${selected ? ` active effect-${option.value}` : ""}`}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        padding: "8px 14px",
-                        borderRadius: "999px",
-                        border: `1px solid ${selected ? "var(--accent-purple)" : "var(--border-color)"}`,
-                        background: selected
-                          ? "rgba(147, 51, 234, 0.15)"
-                          : "var(--bg-card)",
-                        color: selected ? "#ffffff" : "var(--text-muted)",
-                        fontWeight: selected ? 600 : 500,
-                        cursor: "pointer",
-                      }}
                     >
                       <input
                         type="radio"
@@ -912,8 +896,8 @@ export function AccessRulesSection({
             </div>
 
             {/* Tool Selection */}
-            <div className="form-group" style={{ marginBottom: "16px" }}>
-              <label htmlFor="access-rule-tool-select" style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "4px" }}>
+            <div className="form-group access-modal-group">
+              <label htmlFor="access-rule-tool-select" className="access-modal-label-tight">
                 Tool
               </label>
               <select
@@ -934,7 +918,7 @@ export function AccessRulesSection({
                   </option>
                 ))}
               </select>
-              <label htmlFor="access-rule-tool-custom" style={{ fontSize: "0.82rem", display: "block", marginTop: "8px", marginBottom: "4px" }}>
+              <label htmlFor="access-rule-tool-custom" className="access-modal-sublabel">
                 Custom tool (write-in)
               </label>
               <input
@@ -953,16 +937,16 @@ export function AccessRulesSection({
             </div>
 
             {/* Scope Selection */}
-            <div className="form-group" style={{ marginBottom: "16px" }}>
-              <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "6px" }}>
+            <div className="form-group access-modal-group">
+              <label className="access-modal-label">
                 Scope
               </label>
               <div
                 role="radiogroup"
                 aria-label="Scope"
-                style={{ display: "flex", gap: "16px", marginBottom: "8px", flexWrap: "wrap" }}
+                className="access-scope-group"
               >
-                <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <label className="access-radio-label">
                   <input
                     type="radio"
                     name="ruleScopeKind"
@@ -972,7 +956,7 @@ export function AccessRulesSection({
                   />
                   <span>Specific target or pattern</span>
                 </label>
-                <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <label className="access-radio-label">
                   <input
                     type="radio"
                     name="ruleScopeKind"
@@ -985,7 +969,7 @@ export function AccessRulesSection({
               </div>
               {scopeKind === "exactTarget" ? (
                 <div>
-                  <label htmlFor="access-deny-target" style={{ fontSize: "0.82rem", display: "block", marginBottom: "4px" }}>
+                  <label htmlFor="access-deny-target" className="access-target-label">
                     {targetInfo.label}
                   </label>
                   <input
@@ -996,17 +980,8 @@ export function AccessRulesSection({
                     onChange={(e) => setTargetValue(e.target.value)}
                     placeholder={targetInfo.placeholder}
                   />
-                  <span className="form-group-hint" style={{ display: "block", marginBottom: "6px" }}>{targetInfo.hint}</span>
-                  <div
-                    style={{
-                      fontSize: "0.78rem",
-                      color: "var(--color-text-secondary, #6b7280)",
-                      background: "var(--color-bg-subtle, rgba(0, 0, 0, 0.03))",
-                      padding: "6px 10px",
-                      borderRadius: "6px",
-                      border: "1px solid var(--color-border-subtle, rgba(0, 0, 0, 0.08))",
-                    }}
-                  >
+                  <span className="form-group-hint access-target-hint">{targetInfo.hint}</span>
+                  <div className="access-wildcard-hint">
                     💡 <strong>Wildcards:</strong> Use <code>*</code> to match any characters (e.g. <code>* https://api.kraken.com/*</code>, <code>GET https://*.kraken.com/*</code>, <code>*@example.com</code>, <code>/tmp/*</code>).
                   </div>
                 </div>
@@ -1015,19 +990,19 @@ export function AccessRulesSection({
 
             {/* Duration Selection (only for Allow) */}
             {ruleEffect === "allow" ? (
-              <div className="form-group" style={{ marginBottom: "16px" }}>
-                <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "6px" }}>
+              <div className="form-group access-modal-group">
+                <label className="access-modal-label">
                   Duration
                 </label>
                 <div
                   role="radiogroup"
                   aria-label="Duration"
-                  style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}
+                  className="access-duration-group"
                 >
                   {ALLOW_DURATION_TIERS.map((tier) => (
                     <label
                       key={tier}
-                      style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }}
+                      className="access-duration-option"
                     >
                       <input
                         type="radio"
@@ -1042,7 +1017,7 @@ export function AccessRulesSection({
                 </div>
               </div>
             ) : (
-              <p className="form-group-hint" style={{ marginBottom: "16px" }}>
+              <p className="form-group-hint access-deny-note">
                 Deny rules never expire and outrank every allow rule.
                 {durationValue === "forever"
                   ? ""
@@ -1051,8 +1026,8 @@ export function AccessRulesSection({
             )}
 
             {/* Reason */}
-            <div className="form-group" style={{ marginBottom: "16px" }}>
-              <label htmlFor="access-deny-reason" style={{ fontSize: "0.82rem", display: "block", marginBottom: "4px" }}>
+            <div className="form-group access-modal-group">
+              <label htmlFor="access-deny-reason" className="access-target-label">
                 Reason (optional)
               </label>
               <input
@@ -1075,7 +1050,7 @@ export function AccessRulesSection({
             </div>
 
             {ruleFormError ? (
-              <p className="error" role="alert" data-testid="access-deny-error" style={{ marginBottom: "12px" }}>
+              <p className="error mb-3" role="alert" data-testid="access-deny-error">
                 {ruleFormError}
               </p>
             ) : null}
@@ -1130,7 +1105,7 @@ export function AccessRulesSection({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted text-sm" style={{ margin: 0 }}>
+            <p className="muted text-sm m-0">
               Revoke the {getRuleEffect(pendingRevoke) === "allow" ? "allow" : "deny"} rule
               for <code>{pendingRevoke.toolName}</code> (
               {describeAccessScope(pendingRevoke.scope)})? Revocation stops future

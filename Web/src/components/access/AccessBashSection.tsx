@@ -430,7 +430,7 @@ export function AccessBashSection({
       {loading ? <p className="muted text-sm" data-testid="bash-loading">Loading bash settings…</p> : null}
 
       {loadError ? (
-        <div className="error-banner" data-testid="bash-load-error" style={{ marginBottom: "12px" }}>
+        <div className="error-banner" data-testid="bash-load-error">
           <AlertTriangleIcon size={16} />
           <span>{loadError}</span>
         </div>
@@ -440,37 +440,27 @@ export function AccessBashSection({
         <>
           {/* Advanced errors print once inside the disclosure, never twice behind the top banner. */}
           {saveError && !isBashAdvancedError(saveError) ? (
-            <div className="error-banner" data-testid="bash-error" style={{ marginBottom: "12px" }}>
+            <div className="error-banner" data-testid="bash-error">
               <AlertTriangleIcon size={16} />
               <span>{saveError}</span>
             </div>
           ) : null}
 
           {saved ? (
-            <div
-              data-testid="bash-saved"
-              style={{
-                padding: "8px 12px",
-                borderRadius: "6px",
-                backgroundColor: "rgba(16, 185, 129, 0.15)",
-                color: "#10b981",
-                fontSize: "0.85rem",
-                marginBottom: "12px",
-              }}
-            >
+            <div data-testid="bash-saved" className="settings-save-success">
               Bash settings saved. Changes apply immediately with no restart.
             </div>
           ) : null}
 
-          <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+          <p className="muted text-sm bash-intro-note">
             Rules evaluate top-to-bottom last-match-wins; the default action applies
             when nothing matches. Default working directory is the engine home with an
             optional per-call override inside allowed roots, confined by the execution
             tier below.
           </p>
 
-          <div className="form-group" style={{ marginBottom: "12px" }}>
-            <label htmlFor="bash-default-action" style={{ fontSize: "0.82rem" }}>Default action</label>
+          <div className="form-group mb-3">
+            <label htmlFor="bash-default-action" className="text-sm">Default action</label>
             <select
               id="bash-default-action"
               className="input-field"
@@ -488,13 +478,13 @@ export function AccessBashSection({
             </span>
           </div>
 
-          <p className="muted text-sm" data-testid="bash-confinement-summary" style={{ marginBottom: "12px" }}>
+          <p className="muted text-sm mb-3" data-testid="bash-confinement-summary">
             Execution tier: {BASH_SANDBOX_TIERS.find((tier) => tier.value === effectiveSandboxMode)?.label ?? effectiveSandboxMode}. {bashSandboxSummary(effectiveSandboxMode, allowNetwork)} Host allow patterns: {effectiveHostPatternCount} configured. Edit both in Advanced Bash settings below.
           </p>
 
-          <div className="settings-subsection-header" style={{ marginTop: "16px" }}>
+          <div className="settings-subsection-header access-subsection-spaced-md">
             <div className="settings-section-title-group">
-              <h4 style={{ margin: "0 0 4px 0" }}>Rules</h4>
+              <h4 className="access-subsection-heading">Rules</h4>
               <p className="settings-section-hint">
                 Ordered top-to-bottom, last match wins. Patterns match the command line.
               </p>
@@ -510,7 +500,7 @@ export function AccessBashSection({
               </button>
             </div>
           </div>
-          <div className="form-group" style={{ marginTop: "8px" }}>
+          <div className="form-group mt-2">
             <label htmlFor="bash-rules-textarea">
               Rules, one per line{" "}
               <span className="muted text-sm">
@@ -560,7 +550,7 @@ export function AccessBashSection({
               <p className="muted text-sm" data-testid="advanced-bash-loading">Loading advanced bash settings…</p>
             ) : null}
             {advanced?.loadError ? (
-              <div className="error-banner" data-testid="advanced-bash-load-error" style={{ marginBottom: "12px" }}>
+              <div className="error-banner" data-testid="advanced-bash-load-error">
                 <AlertTriangleIcon size={16} />
                 <span>{advanced.loadError}</span>
               </div>

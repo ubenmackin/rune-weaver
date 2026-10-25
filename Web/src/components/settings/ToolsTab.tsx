@@ -190,10 +190,10 @@ export function ToolsTab({
       </div>
 
       {/* Metrics cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "12px", margin: "16px 0" }}>
+      <div className="tools-metrics-grid">
         <div className="settings-stat-card">
           <div className="settings-stat-card-label">Active Tools</div>
-          <div className="settings-stat-card-value" style={{ color: "var(--status-green)" }}>
+          <div className="settings-stat-card-value tools-stat-ok">
             {safeTools.filter((t) => t.isEnabled).length}
           </div>
         </div>
@@ -203,14 +203,14 @@ export function ToolsTab({
         </div>
         <div className="settings-stat-card">
           <div className="settings-stat-card-label">Pending Review</div>
-          <div className="settings-stat-card-value" style={{ color: pendingCount > 0 ? "var(--status-amber)" : "inherit" }}>
+          <div className={`settings-stat-card-value ${pendingCount > 0 ? "tools-stat-warn" : ""}`}>
             {pendingCount}
           </div>
         </div>
         {tamperedCount > 0 && (
           <div className="settings-stat-card alarm">
             <div className="settings-stat-card-label">Tampered</div>
-            <div className="settings-stat-card-value" style={{ color: "var(--status-red)" }}>
+            <div className="settings-stat-card-value tools-stat-alert">
               {tamperedCount}
             </div>
           </div>
@@ -219,23 +219,11 @@ export function ToolsTab({
 
       {/* Warning banners */}
       {pendingCount > 0 && (
-        <div
-          style={{
-            padding: "12px 16px",
-            borderRadius: "8px",
-            backgroundColor: "rgba(237, 137, 54, 0.15)",
-            border: "1px solid rgba(237, 137, 54, 0.4)",
-            marginBottom: "16px",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: "12px",
-            color: "var(--status-amber)",
-          }}
-        >
-          <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
-          <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
+        <div className="tools-warning-banner">
+          <AlertTriangleIcon size={20} className="tools-banner-icon" />
+          <div className="tools-banner-body">
             <strong>{pendingCount} newly discovered rune(s) awaiting review.</strong>
-            <div style={{ marginTop: "2px", color: "var(--text-main)" }}>
+            <div className="tools-banner-detail">
               In accordance with security policy, new tools start disabled by default. Review their code and permissions below before enabling.
             </div>
           </div>
@@ -243,23 +231,11 @@ export function ToolsTab({
       )}
 
       {tamperedCount > 0 && (
-        <div
-          style={{
-            padding: "12px 16px",
-            borderRadius: "8px",
-            backgroundColor: "rgba(245, 101, 101, 0.15)",
-            border: "1px solid rgba(245, 101, 101, 0.4)",
-            marginBottom: "16px",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: "12px",
-            color: "var(--status-red)",
-          }}
-        >
-          <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
-          <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
+        <div className="tools-critical-banner">
+          <AlertTriangleIcon size={20} className="tools-banner-icon" />
+          <div className="tools-banner-body">
             <strong>Security Alert: {tamperedCount} plugin(s) have been modified on disk since approval!</strong>
-            <div style={{ marginTop: "2px", color: "var(--text-main)" }}>
+            <div className="tools-banner-detail">
               Cryptographic tree hash does not match the approved signature. They have been quarantined and disabled.
             </div>
           </div>
@@ -278,8 +254,8 @@ export function ToolsTab({
       />
 
       {/* Built-in Core Tools Section */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "28px 0 8px 0", flexWrap: "wrap", gap: "10px" }}>
-        <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+      <div className="tools-builtin-header">
+        <h4 className="tools-builtin-title">
           <span>Built-in Engine Tools</span>
         </h4>
         <span className="muted text-sm">
@@ -338,17 +314,16 @@ export function ToolsTab({
           <p>No built-in tools available.</p>
         </div>
       ) : filteredTools.length === 0 ? (
-        <div className="empty-state-box" style={{ padding: "32px 16px" }}>
+        <div className="empty-state-box">
           <SearchIcon size={28} />
-          <p style={{ margin: "8px 0 4px 0" }}>No tools match your filter criteria.</p>
+          <p className="tools-empty-filter-text">No tools match your filter criteria.</p>
           <button
             type="button"
-            className="accent-ghost"
+            className="accent-ghost tools-reset-btn"
             onClick={() => {
               setToolSearchQuery("");
               setSelectedToolCategory("all");
             }}
-            style={{ marginTop: "8px", fontSize: "0.82rem" }}
           >
             Reset filters
           </button>
@@ -398,10 +373,9 @@ export function ToolsTab({
                     {categoryConfigKey !== null && categoryHasConfig ? (
                       <button
                         type="button"
-                        className="tool-category-action-btn configure accent-ghost icon-text-btn"
+                        className="tool-category-action-btn configure accent-ghost icon-text-btn tools-category-config-btn"
                         title={categoryConfigTitle}
                         onClick={() => onConfigureTool(categoryConfigKey)}
-                        style={{ padding: "4px 8px", fontSize: "0.78rem" }}
                       >
                         <SettingsIcon size={12} />
                         <span>Configure</span>
@@ -432,8 +406,7 @@ export function ToolsTab({
                         )}
                         <div className="builtin-tool-footer">
                           <label
-                            className="toggle-label tool-switch"
-                            style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
+                            className={`toggle-label tool-switch tools-toggle-label ${isToggling ? "is-busy" : ""}`}
                           >
                             <input
                               type="checkbox"
@@ -477,7 +450,7 @@ export function ToolsTab({
         onReset={resetToolsAdvanced}
       >
         <div className="settings-section-title-group">
-          <h4 style={{ margin: "0 0 4px 0" }}>Plugin Configuration</h4>
+          <h4 className="tools-plugin-heading">Plugin Configuration</h4>
           <p className="settings-section-hint">
             Configure directory location, remote marketplace index, and startup scanning behavior.
           </p>
@@ -512,7 +485,7 @@ export function ToolsTab({
             </span>
           </div>
         </div>
-        <div className="form-row" style={{ marginTop: "12px" }}>
+        <div className="form-row mt-3">
           <div className="form-group checkbox-group">
             <SwitchControl
               testId="plugins-autorescan"

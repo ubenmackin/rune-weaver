@@ -90,9 +90,8 @@ export default function IndexStatCards({
                 </span>
                 {storage.hasStorage ? null : (
                   <span
-                    className="muted text-xs"
+                    className="muted text-xs index-size-sizing"
                     data-testid="index-size-sizing"
-                    style={{ marginLeft: 8, fontWeight: 400, fontSize: 12 }}
                   >
                     Sizing storage…
                   </span>
@@ -100,33 +99,32 @@ export default function IndexStatCards({
               </div>
               {storage.hasBreakdown && storageBreakdownTotal > 0 ? (
                 <div
-                  className="index-storage-meter"
+                  className="progress-track"
                   data-testid="index-size-meter"
                   aria-hidden="true"
                 >
                   <span
-                    className="index-storage-seg text"
+                    className="progress-fill"
                     style={{ width: `${percentOf(storage.text, storageBreakdownTotal)}%` }}
                   />
                   <span
-                    className="index-storage-seg vector"
+                    className="progress-fill"
                     style={{ width: `${percentOf(storage.vector, storageBreakdownTotal)}%` }}
                   />
                   <span
-                    className="index-storage-seg fts"
+                    className="progress-fill"
                     style={{ width: `${percentOf(storage.fts, storageBreakdownTotal)}%` }}
                   />
                   <span
-                    className="index-storage-seg free"
+                    className="progress-fill"
                     style={{ width: `${percentOf(storage.free, storageBreakdownTotal)}%` }}
                   />
                 </div>
               ) : null}
               {storage.hasBreakdown ? (
                 <div
-                  className="muted text-xs"
+                  className="muted text-xs mt-1"
                   data-testid="index-size-breakdown"
-                  style={{ marginTop: 4 }}
                 >
                   <span data-testid="index-size-text">
                     Text {formatIndexBytes(storage.text)}
@@ -147,18 +145,16 @@ export default function IndexStatCards({
               ) : null}
               {storage.hasOnDisk ? (
                 <div
-                  className="muted text-xs"
+                  className="muted text-xs index-stat-sub"
                   data-testid="index-size-files"
-                  style={{ marginTop: 2 }}
                 >
                   DB {formatIndexBytes(storage.dbFile)} · WAL{" "}
                   {formatIndexBytes(storage.wal)}
                 </div>
               ) : null}
               <div
-                className="muted text-xs"
+                className="muted text-xs index-stat-sub"
                 data-testid="index-size-content"
-                style={{ marginTop: 2 }}
               >
                 Content {formatIndexBytes(storage.content)}
               </div>
@@ -179,7 +175,7 @@ export default function IndexStatCards({
                   +{formatIndexCount(liveIndexedDelta)} this run
                 </div>
               ) : (
-                <div className="muted text-xs" style={{ marginTop: 2 }}>
+                <div className="muted text-xs index-stat-sub">
                   Across {formatIndexCount(status.sources.filter((s) => s.enabled).length)} active sources
                 </div>
               )}
@@ -193,18 +189,18 @@ export default function IndexStatCards({
                 {formatIndexCount(displayChunks)}
               </div>
               {vectorChunks + keywordChunks > 0 ? (
-                <div className="index-chunks-meter" aria-hidden="true">
+                <div className="progress-track" aria-hidden="true">
                   <span
-                    className="index-chunks-seg vector"
+                    className="progress-fill"
                     style={{ width: `${percentOf(vectorChunks, vectorChunks + keywordChunks)}%` }}
                   />
                   <span
-                    className="index-chunks-seg keyword"
+                    className="progress-fill"
                     style={{ width: `${percentOf(keywordChunks, vectorChunks + keywordChunks)}%` }}
                   />
                 </div>
               ) : null}
-              <div className="muted text-xs" style={{ marginTop: 2 }}>
+              <div className="muted text-xs index-stat-sub">
                 {formatIndexCount(vectorChunks)} vector · {formatIndexCount(keywordChunks)} keyword
               </div>
             </div>
@@ -216,7 +212,7 @@ export default function IndexStatCards({
               <div className="index-stat-value">
                 {formatIndexAge(status.indexAsOf)}
               </div>
-              <div className="muted text-xs" style={{ marginTop: 2 }}>
+              <div className="muted text-xs index-stat-sub">
                 {formatIndexAsOf(status.indexAsOf)}
               </div>
             </div>
@@ -245,8 +241,7 @@ export default function IndexStatCards({
             </div>
           </div>
           <div
-            className="index-source-pills"
-            style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}
+            className="index-source-pills index-source-pills-skeleton"
           >
             <span className="status-pill skipped">Loading…</span>
             <span className="status-pill skipped">Loading…</span>

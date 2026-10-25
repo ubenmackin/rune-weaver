@@ -51,7 +51,7 @@ export function VoiceTab({
           Speech-to-text and text-to-speech voice providers. Enablement lives on the voice tool toggle alone; this tab carries behavior knobs only.
         </p>
       </div>
-      <div className="form-row" style={{ marginTop: "1rem" }}>
+      <div className="form-row settings-stack-gap">
         <div className="form-group flex-1">
           <label htmlFor="stt-provider">Speech-to-Text (STT) Provider</label>
           <input

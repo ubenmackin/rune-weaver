@@ -1,0 +1,530 @@
+/* Rune Weaver Dashboard — settings, policy binding, and store dialogs:
+ * chat options, keychain pills, marketplace, and secret prompts. */
+
+
+/* ==========================================================================
+   Chat Settings Modal & Controls
+   ========================================================================== */
+
+.chat-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.chat-settings-modal {
+  max-width: 520px;
+}
+
+.chat-settings-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-purple);
+}
+
+.chat-settings-modal-title h3 {
+  margin: 0;
+  color: var(--text-main);
+}
+
+.chat-settings-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+
+.chat-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.chat-settings-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.chat-settings-section-header h4 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.chat-settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.chat-settings-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.chat-settings-radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-settings-radio-card:hover {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.chat-settings-radio-card.active {
+  background: rgba(168, 85, 247, 0.08);
+  border-color: var(--accent-purple);
+}
+
+.chat-settings-radio-input {
+  margin-top: 3px;
+  accent-color: var(--accent-purple);
+  cursor: pointer;
+}
+
+.chat-settings-radio-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-settings-option-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-main);
+}
+
+.chat-settings-option-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.chat-settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.chat-settings-toggle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.chat-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+
+/* ==========================================================================
+   Policy Binding Modal Step Layout
+   ========================================================================== */
+
+/* Separates hint text from its error block on every step. */
+.policy-binding-modal .error-banner {
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
+/* Method scope radios stack so the two options never share one line. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Adjacent container holds the seven method boxes; sibling keeps scope radios untouched. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] + div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+/* Narrow probe grid stacks to one column so the three inputs never crush. */
+@media (max-width: 560px) {
+  .policy-binding-modal [data-testid="binding-review"] > div {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Step indicator drops below the subtitle so the header stacks instead of running inline. */
+.policy-binding-modal .wizard-step-indicator {
+  display: block;
+  margin-top: 4px;
+}
+
+/* Stored pill reuses the shipped success tokens so In Keychain reads like other success states. */
+.policy-binding-modal .keychain-pill-stored {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+/* Missing pill stays neutral slate so Not in Keychain never reads as an error. */
+.policy-binding-modal .keychain-pill-missing {
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: var(--text-muted);
+}
+
+/* Review allow-domains row wraps so the label and the uncovered count never crowd. */
+.policy-binding-modal .allow-domains-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Review step stacks its blocks so summary, explanation, and probe never crowd. */
+.policy-binding-modal [data-testid="binding-review"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Summary rows keep even rhythm without touching other steps. */
+.policy-binding-modal [data-testid="review-summary"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Scoped per-surface rules replacing inline colors so later migrations bind by class. */
+.rune-marketplace-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rune-marketplace-meta {
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.rune-marketplace-version-badge {
+  background: var(--panel-deep);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+.rune-marketplace-runtime-badge {
+  background: var(--panel-navy);
+  color: var(--accent-blue);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+.rune-marketplace-tool-chip {
+  background: color-mix(in srgb, var(--status-amber) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-amber) 30%, transparent);
+  color: #ed8936;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.rune-marketplace-tag-chip {
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.rune-marketplace-success {
+  background: color-mix(in srgb, var(--status-green) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-green) 30%, transparent);
+  color: var(--status-green);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rune-marketplace-error {
+  background: color-mix(in srgb, var(--status-red) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-red) 30%, transparent);
+  color: var(--status-red);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rune-marketplace-install {
+  background: var(--accent-blue);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+}
+.rune-marketplace-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rune-marketplace-body {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.rune-marketplace-intro {
+  margin: 0 0 12px 0;
+  color: var(--text-secondary);
+}
+.rune-marketplace-search-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.rune-marketplace-search-box {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.rune-marketplace-search-icon {
+  color: var(--text-secondary);
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+.rune-marketplace-search-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  width: 100%;
+}
+.rune-marketplace-refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rune-marketplace-empty {
+  text-align: center;
+  padding: 30px;
+  color: var(--text-secondary);
+}
+.rune-marketplace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.rune-marketplace-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.rune-marketplace-card-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rune-marketplace-name {
+  font-weight: 600;
+  font-size: 1rem;
+}
+.rune-marketplace-install-btn {
+  padding: 6px 14px;
+}
+.rune-marketplace-byline {
+  margin-top: 2px;
+  color: var(--text-secondary);
+}
+.rune-marketplace-installed-btn {
+  background: color-mix(in srgb, var(--status-green) 15%, transparent);
+  color: var(--status-green);
+  border: 1px solid color-mix(in srgb, var(--status-green) 30%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+}
+.rune-marketplace-install-btn {
+  padding: 6px 14px;
+}
+.rune-marketplace-description {
+  margin: 4px 0 0 0;
+  color: var(--text-main);
+  line-height: 1.4;
+}
+.rune-marketplace-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.rune-marketplace-tools-label {
+  color: var(--text-secondary);
+}
+.policy-binding-step-panel {
+  background: var(--panel-deep);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+.policy-binding-step-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.policy-binding-step-warning {
+  color: var(--status-amber);
+}
+.policy-binding-step-error {
+  color: var(--status-red);
+}
+.policy-binding-keychain-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.policy-binding-error-list {
+  margin: 0;
+  padding-left: 18px;
+}
+.policy-binding-network-coverage {
+  margin-top: 8px;
+}
+.policy-binding-methods-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.policy-binding-cross-product {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  margin-top: 8px;
+}
+.policy-binding-review-summary {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+.policy-binding-probe-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.store-secret-key {
+  background: var(--panel-deep);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-family: monospace;
+}
+.store-secret-hint {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.store-secret-error {
+  background: color-mix(in srgb, var(--status-red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-red) 35%, transparent);
+  color: var(--status-red);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.store-secret-icon {
+  color: var(--accent-sky);
+}
+.store-secret-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.store-secret-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.store-secret-lead {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.store-secret-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  display: block;
+}
+.store-secret-label-strong {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: block;
+}
+.store-secret-key-box {
+  padding: 8px 12px;
+  background: var(--bg-main);
+  border-radius: var(--radius-sm);
+  font-family: monospace;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+.store-secret-input-row {
+  display: flex;
+  gap: 8px;
+  position: relative;
+  align-items: center;
+}
+.store-secret-value-input {
+  flex: 1;
+  padding-right: 40px;
+}
+.store-secret-toggle {
+  position: absolute;
+  right: 6px;
+  background: transparent;
+  border: none;
+}
+.store-secret-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.run-budget-notice {
+  margin-bottom: 1rem;
+}
+
+/* Goal card progress gutter between the header and the prompt. */
+.goal-card-progress {
+  margin-top: 10px;
+}
+
+/* Ideas empty note keeps a tight rhythm under the header. */
+.goals-ideas-empty-note {
+  margin-top: 6px;
+}

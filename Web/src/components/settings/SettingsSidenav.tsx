@@ -126,9 +126,8 @@ export default function SettingsSidenav({
             ))}
             {showEmpty ? (
               <p
-                className="muted text-sm"
+                className="muted text-sm settings-nav-empty"
                 data-testid="settings-nav-empty"
-                style={{ padding: "8px 6px", margin: 0 }}
               >
                 No settings match.
               </p>
@@ -217,8 +216,7 @@ export default function SettingsSidenav({
               <span>{SETTINGS_TAB_LABELS.tools}</span>
               {pendingCount > 0 && (
                 <span
-                  className="settings-tab-badge"
-                  style={{ backgroundColor: "var(--status-amber)", color: "#ffffff" }}
+                  className="settings-tab-badge settings-tab-badge--amber"
                   title={`${pendingCount} runes pending human review`}
                 >
                   {pendingCount}
@@ -226,8 +224,7 @@ export default function SettingsSidenav({
               )}
               {tamperedCount > 0 && (
                 <span
-                  className="settings-tab-badge"
-                  style={{ backgroundColor: "var(--status-red)", color: "#ffffff" }}
+                  className="settings-tab-badge settings-tab-badge--red"
                   title={`${tamperedCount} runes modified since approval`}
                 >
                   {tamperedCount}
@@ -290,8 +287,7 @@ export default function SettingsSidenav({
               <span>{SETTINGS_TAB_LABELS.network}</span>
               {serverRestartVisible ? (
                 <span
-                  className="settings-tab-badge"
-                  style={{ backgroundColor: "var(--status-amber)", color: "#ffffff" }}
+                  className="settings-tab-badge settings-tab-badge--amber"
                   title="Network changes need a restart"
                 >
                   !

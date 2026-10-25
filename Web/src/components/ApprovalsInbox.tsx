@@ -952,7 +952,7 @@ export default function ApprovalsInbox({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted text-sm" style={{ margin: 0 }}>
+            <p className="muted text-sm m-0">
               {SCOPE_EDITOR_COPY[scopeDraft.kind].hint}
             </p>
             <label className="muted text-sm" htmlFor="approval-scope-editor">
@@ -970,7 +970,7 @@ export default function ApprovalsInbox({
               }
             />
             {scopeDraftError ? (
-              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
+              <p className="error mt-2" role="alert">
                 {scopeDraftError}
               </p>
             ) : null}

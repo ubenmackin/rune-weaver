@@ -90,20 +90,12 @@ export default function InlineQuestionCard({
       data-testid={`inline-question-${request.id}`}
     >
       <div className="inline-approval-header">
-        <span
-          className="badge approval-tool-badge question-badge"
-          style={{ backgroundColor: "#2563eb", color: "#fff" }}
-        >
-          Question
-        </span>
-        <span className="approval-desc question-title" style={{ fontWeight: 600 }}>
-          {question}
-        </span>
+        <span className="badge badge-blue inline-question-badge">Question</span>
+        <span className="approval-desc inline-question-title">{question}</span>
         {onOpenSession && request.sessionID ? (
           <button
             type="button"
-            className="btn-link open-session-link"
-            style={{ marginLeft: "auto" }}
+            className="btn-link open-session-link ml-auto"
             onClick={() => onOpenSession(request.sessionID!)}
             title="Open chat thread for this question"
           >
@@ -116,32 +108,15 @@ export default function InlineQuestionCard({
         ) : null}
       </div>
 
-      <div
-        className="question-options-list"
-        style={{ display: "flex", flexDirection: "column", gap: "8px", margin: "8px 0" }}
-      >
+      <div className="inline-question-options">
         {options.map((opt, idx) => (
           <label
             key={`opt-${idx}`}
-            className={`question-option-item ${
-              selectedIndex === idx && !isOtherSelected ? "selected" : ""
+            className={`inline-question-option ${
+              selectedIndex === idx && !isOtherSelected
+                ? "inline-question-option-selected"
+                : ""
             }`}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              padding: "6px 10px",
-              borderRadius: "6px",
-              background:
-                selectedIndex === idx && !isOtherSelected
-                  ? "rgba(37, 99, 235, 0.15)"
-                  : "rgba(255, 255, 255, 0.04)",
-              border:
-                selectedIndex === idx && !isOtherSelected
-                  ? "1px solid #2563eb"
-                  : "1px solid rgba(255, 255, 255, 0.08)",
-              cursor: "pointer",
-            }}
           >
             <input
               type="radio"
@@ -150,27 +125,15 @@ export default function InlineQuestionCard({
               onChange={() => handleSelectOption(idx)}
               disabled={deciding}
             />
-            <span style={{ fontSize: "13px" }}>{opt}</span>
+            <span className="text-sm">{opt}</span>
           </label>
         ))}
 
         {/* Automatic "Other" write-in escape hatch */}
         <label
-          className={`question-option-item ${isOtherSelected ? "selected" : ""}`}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            padding: "6px 10px",
-            borderRadius: "6px",
-            background: isOtherSelected
-              ? "rgba(37, 99, 235, 0.15)"
-              : "rgba(255, 255, 255, 0.04)",
-            border: isOtherSelected
-              ? "1px solid #2563eb"
-              : "1px solid rgba(255, 255, 255, 0.08)",
-            cursor: "pointer",
-          }}
+          className={`inline-question-option ${
+            isOtherSelected ? "inline-question-option-selected" : ""
+          }`}
         >
           <input
             type="radio"
@@ -179,10 +142,10 @@ export default function InlineQuestionCard({
             onChange={handleSelectOther}
             disabled={deciding}
           />
-          <span style={{ fontSize: "13px", whiteSpace: "nowrap" }}>Other:</span>
+          <span className="text-sm inline-question-other-label">Other:</span>
           <input
             type="text"
-            className="question-other-input"
+            className="inline-question-other-input"
             value={customText}
             placeholder="Type your own answer…"
             disabled={deciding}
@@ -199,25 +162,13 @@ export default function InlineQuestionCard({
                 handleSubmit();
               }
             }}
-            style={{
-              flex: 1,
-              padding: "4px 8px",
-              fontSize: "13px",
-              background: "rgba(0, 0, 0, 0.3)",
-              border: "1px solid rgba(255, 255, 255, 0.15)",
-              borderRadius: "4px",
-              color: "inherit",
-            }}
           />
         </label>
       </div>
 
       <div className="inline-approval-actions">
         {deciding ? (
-          <span
-            className="text-xs muted inline-approval-deciding"
-            style={{ display: "flex", alignItems: "center", gap: "4px" }}
-          >
+          <span className="text-xs muted inline-approval-deciding inline-question-deciding">
             <RefreshIcon size={12} className="spin" />
             <span>Submitting…</span>
           </span>

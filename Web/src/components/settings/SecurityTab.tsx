@@ -151,7 +151,7 @@ export function SecurityTab({
             ) : null}
           </div>
         </div>
-        <p className="muted text-sm" style={{ margin: "0 0 4px 0" }}>
+        <p className="muted text-sm m-0 mb-1">
           The current token is never shown. After a rotation, save the new token from the one-time reveal; if it is lost, re-mint one on the Mac Studio with <code>rune-weaver auth token rotate</code>.
         </p>
         {rotateError ? (

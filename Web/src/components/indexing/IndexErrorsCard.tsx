@@ -118,11 +118,10 @@ export default function IndexErrorsCard({
           at run time, and the top frame navigation beats a window.open popup block. */}
       {showFdaGuidance ? (
         <div
-          className="index-fda-guidance"
+          className="index-fda-guidance mt-2"
           data-testid="index-fda-guidance"
-          style={{ marginTop: 8 }}
         >
-          <p className="muted text-sm" style={{ marginBottom: 8 }}>
+          <p className="muted text-sm mb-2">
             Messages indexing needs Full Disk Access. Grant it to
             RuneWeaver.app (or to your terminal emulator, for example
             Terminal.app or iTerm2, when you run rune-weaver serve),
@@ -137,7 +136,7 @@ export default function IndexErrorsCard({
           >
             <span>Open Full Disk Access Settings</span>
           </button>
-          <ol className="muted text-sm" style={{ marginTop: 8, paddingLeft: 20 }}>
+          <ol className="muted text-sm mt-2 index-fda-steps">
             <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
             <li>Click + and add RuneWeaver.app (or your terminal emulator, for example Terminal.app or iTerm2, when you run rune-weaver serve).</li>
             <li>Toggle the added entry ON and authenticate when prompted.</li>

@@ -278,10 +278,7 @@ export function ToolConfigModals({
           changed.
         </p>
       </div>
-      <div
-        className="modal-footer"
-        style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
-      >
+      <div className="modal-footer">
         <button
           type="button"
           className="primary"

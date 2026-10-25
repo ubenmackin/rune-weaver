@@ -328,8 +328,8 @@ export default function GettingStartedWizard({
               </span>
             </div>
           </div>
-          <div className="wizard-progress-track">
-            <div className="wizard-progress-bar" style={{ width: "100%" }} />
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: "100%" }} />
           </div>
           <div className="modal-body wizard-body">
             {error ? (
@@ -396,9 +396,9 @@ export default function GettingStartedWizard({
           </div>
         </div>
 
-        <div className="wizard-progress-track">
+        <div className="progress-track">
           <div
-            className="wizard-progress-bar"
+            className="progress-fill"
             style={{ width: `${((index + 1) / total) * 100}%` }}
           />
         </div>

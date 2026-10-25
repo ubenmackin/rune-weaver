@@ -50,33 +50,15 @@ export function WorkspaceStorageSection({
   setWorkspaceTmpTTLDays,
 }: WorkspaceStorageSectionProps) {
   return (
-    <section
-      aria-label="Workspace storage"
-      style={{
-        margin: "8px 0 16px 0",
-        padding: "16px",
-        borderRadius: "8px",
-        backgroundColor: "var(--bg-card, #1e2533)",
-        border: "1px solid var(--border-color, #2d3748)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-          gap: "8px",
-          marginBottom: "8px",
-        }}
-      >
+    <section aria-label="Workspace storage" className="workspace-storage-section">
+      <div className="workspace-storage-head">
         <div>
-          <h4 style={{ margin: 0 }}>Workspace Storage</h4>
-          <p className="settings-section-hint" style={{ margin: "4px 0 0 0" }}>
+          <h4 className="m-0">Workspace Storage</h4>
+          <p className="settings-section-hint workspace-storage-hint">
             Bounded agent scratch under ~/.runeweaver/workspace. Quotas save with the tab below.
           </p>
         </div>
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div className="row">
           <button
             type="button"
             className="ghost icon-text-btn"
@@ -98,27 +80,31 @@ export function WorkspaceStorageSection({
         </div>
       </div>
       {workspaceError ? (
-        <div className="error-banner" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="error-banner row">
           <AlertTriangleIcon size={16} />
           <span>{workspaceError}</span>
         </div>
       ) : workspaceLoading && !workspaceUsage ? (
-        <p className="muted text-sm" style={{ margin: 0 }}>Loading workspace usage…</p>
+        <p className="muted text-sm m-0">Loading workspace usage…</p>
       ) : workspaceUsage ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        <div className="workspace-usage-stack">
           {(() => {
             const quotaBytes = workspaceUsage.quotaMB * 1024 * 1024;
             const bytesPercent = workspaceQuotaPercent(workspaceUsage.bytes, quotaBytes);
             const filesPercent = workspaceQuotaPercent(workspaceUsage.files, workspaceUsage.quotaFiles);
-            const bar = (percent: number) => (
-              <div style={{ height: "8px", borderRadius: "4px", background: "var(--bg-secondary, #141822)", overflow: "hidden" }}>
-                <div style={{ width: `${percent}%`, height: "100%", background: percent >= 90 ? "#f56565" : percent >= 70 ? "#ed8936" : "#48bb78", transition: "width 0.2s ease" }} />
-              </div>
-            );
+            // Threshold color rides a token-bound modifier; only the width stays inline.
+            const bar = (percent: number) => {
+              const level = percent >= 90 ? "is-critical" : percent >= 70 ? "is-warning" : "is-ok";
+              return (
+                <div className="progress-track">
+                  <div className={`progress-fill workspace-quota-fill ${level}`} style={{ width: `${percent}%` }} />
+                </div>
+              );
+            };
             return (
               <>
                 <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "4px" }}>
+                  <div className="workspace-usage-row text-sm">
                     <span>Disk usage</span>
                     <span className="muted">
                       {formatWorkspaceBytes(workspaceUsage.bytes)} of {workspaceUsage.quotaMB} MB ({bytesPercent}%)
@@ -127,7 +113,7 @@ export function WorkspaceStorageSection({
                   {bar(bytesPercent)}
                 </div>
                 <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "4px" }}>
+                  <div className="workspace-usage-row text-sm">
                     <span>File usage</span>
                     <span className="muted">
                       {(workspaceUsage.files ?? 0).toLocaleString("en-US")} of {(workspaceUsage.quotaFiles ?? 0).toLocaleString("en-US")} files ({filesPercent}%)
@@ -136,7 +122,7 @@ export function WorkspaceStorageSection({
                   {bar(filesPercent)}
                 </div>
                 {workspaceUsage.truncated ? (
-                  <div style={{ fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)" }}>
+                  <div className="text-xs workspace-truncated-note">
                     Walk truncated; actual usage may be higher.
                   </div>
                 ) : null}
@@ -145,13 +131,13 @@ export function WorkspaceStorageSection({
           })()}
         </div>
       ) : (
-        <p className="muted text-sm" style={{ margin: 0 }}>Workspace usage unknown.</p>
+        <p className="muted text-sm m-0">Workspace usage unknown.</p>
       )}
-      <div style={{ marginTop: "14px", padding: "12px", borderRadius: "8px", background: "var(--bg-secondary, #141822)", border: "1px solid var(--border-color, #2d3748)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+      <div className="workspace-machine-panel">
+        <div className="workspace-machine-head">
           <div>
-            <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>Workspace machine</div>
-            <div data-testid="workspace-machine-status" style={{ fontSize: "0.82rem", color: "var(--text-secondary, #a0aec0)", marginTop: "4px" }}>
+            <div className="workspace-machine-title">Workspace machine</div>
+            <div data-testid="workspace-machine-status" className="text-sm workspace-machine-status">
               {workspaceMachineLoading && !workspaceMachine
                 ? "Loading machine status…"
                 : workspaceMachineError
@@ -161,7 +147,7 @@ export function WorkspaceStorageSection({
                     : "Machine status unknown."}
             </div>
           </div>
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div className="row">
             <button
               type="button"
               className="ghost icon-text-btn"
@@ -183,8 +169,8 @@ export function WorkspaceStorageSection({
           </div>
         </div>
       </div>
-      <div className="form-row" style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "14px" }}>
-        <div className="form-group" style={{ flex: "1 1 140px" }}>
+      <div className="form-row workspace-quota-row">
+        <div className="form-group workspace-quota-field">
           <label htmlFor="workspace-quota-mb">Quota (MB)</label>
           <input
             id="workspace-quota-mb"
@@ -203,7 +189,7 @@ export function WorkspaceStorageSection({
             Total bytes permitted under the workspace root.
           </span>
         </div>
-        <div className="form-group" style={{ flex: "1 1 140px" }}>
+        <div className="form-group workspace-quota-field">
           <label htmlFor="workspace-quota-files">Max files</label>
           <input
             id="workspace-quota-files"
@@ -222,7 +208,7 @@ export function WorkspaceStorageSection({
             Total files permitted under the workspace root.
           </span>
         </div>
-        <div className="form-group" style={{ flex: "1 1 140px" }}>
+        <div className="form-group workspace-quota-field">
           <label htmlFor="workspace-tmp-ttl">Tmp TTL (days)</label>
           <input
             id="workspace-tmp-ttl"

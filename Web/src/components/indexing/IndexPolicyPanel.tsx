@@ -400,24 +400,24 @@ export function IndexPolicyPanel() {
                 list stays generic and never enumerates patterns here. */}
             {alwaysSkipped.length > 0 ? (
               <>
-                <p style={{ marginTop: 4, marginBottom: 0 }}>
+                <p className="m-0 mt-1">
                   Always skipped, even when they are not in the Exclude
                   patterns list:
                 </p>
                 <p
                   data-testid="index-always-skipped"
-                  style={{ marginTop: 4, marginBottom: 0 }}
+                  className="m-0 mt-1"
                 >
                   {alwaysSkipped.join(", ")}
                 </p>
               </>
             ) : (
-              <p style={{ marginTop: 4, marginBottom: 0 }}>
+              <p className="m-0 mt-1">
                 The walker also skips its built-in prune list, even when
                 entries are not in the Exclude patterns list.
               </p>
             )}
-            <p style={{ marginTop: 4, marginBottom: 0 }}>
+            <p className="m-0 mt-1">
               Credential and key files blocked by your file access rules are
               never indexed either. Paths denied under Security Files and
               Access are never indexed.
@@ -463,9 +463,8 @@ export function IndexPolicyPanel() {
               not be readable by live file tools. The save still persists regardless. */}
           {outsideRoots.length > 0 ? (
             <p
-              className="muted text-xs"
+              className="muted text-xs m-0 mt-1"
               data-testid="index-roots-outside-warning"
-              style={{ marginTop: 4, marginBottom: 0 }}
             >
               An index root sits outside your Files allow roots: recalled
               content from there may not be readable by live file tools. Keep

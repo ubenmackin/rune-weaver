@@ -72,23 +72,22 @@ export default function IndexingPanel({ hideHeader = false, highlightRun = false
       )}
 
       {state.error ? (
-        <div className="banner error" role="alert" style={{ marginBottom: 16 }}>
+        <div className="banner error index-panel-banner" role="alert">
           <span>{state.error}</span>
         </div>
       ) : null}
 
       {state.notice ? (
-        <div className="banner info" role="status" style={{ marginBottom: 16 }}>
+        <div className="banner info index-panel-banner" role="status">
           <span>{state.notice}</span>
         </div>
       ) : null}
 
       {state.reclaimResult ? (
         <div
-          className="banner info"
+          className="banner info index-panel-banner"
           role="status"
           data-testid="index-reclaim-banner"
-          style={{ marginBottom: 16 }}
         >
           <span>{state.reclaimSummary}</span>
         </div>

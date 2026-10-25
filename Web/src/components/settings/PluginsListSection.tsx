@@ -27,25 +27,15 @@ export function PluginsListSection({
 }: PluginsListSectionProps) {
   return (
     <>
-      <h4
-        style={{
-          margin: "20px 0 12px 0",
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
-        }}
-      >
+      <h4 className="plugins-section-heading">
         <span>Installed Runes & Plugins</span>
       </h4>
 
       {pluginsList.length === 0 ? (
-        <div
-          className="empty-state-box"
-          style={{ padding: "28px", textAlign: "center" }}
-        >
+        <div className="empty-state-box plugins-empty-box">
           <WrenchIcon size={32} />
           <p>No external runes discovered in plugins directory.</p>
-          <p className="muted text-sm" style={{ marginTop: "8px" }}>
+          <p className="muted text-sm mt-2">
             Add rune packages to the plugins directory below, then use Rescan
             Plugins to discover them.
           </p>
@@ -140,70 +130,39 @@ export function PluginsListSection({
                   </div>
                 </div>
 
-                <div style={{ marginBottom: "12px" }}>
-                  <div
-                    style={{
-                      fontSize: "0.8rem",
-                      color: "var(--text-secondary, #a0aec0)",
-                    }}
-                  >
+                <div className="mb-3">
+                  <div className="text-sm plugins-meta-line">
                     <code>{plugin.id}</code>{" "}
                     {plugin.author ? `• by ${plugin.author}` : ""}
                   </div>
                   {plugin.description && (
-                    <p
-                      style={{
-                        margin: "4px 0 8px 0",
-                        fontSize: "0.88rem",
-                        color: "var(--text-secondary, #cbd5e0)",
-                      }}
-                    >
+                    <p className="text-sm plugins-desc mt-1 mb-2">
                       {plugin.description}
                     </p>
                   )}
                   {isPending && (
-                    <div
-                      style={{
-                        fontSize: "0.8rem",
-                        color: "#ed8936",
-                        marginBottom: "8px",
-                      }}
-                    >
+                    <div className="text-sm plugins-pending mb-2">
                       Awaiting approval — disabled by default until approved.
                     </div>
                   )}
                   {isTampered && (
-                    <div
-                      style={{
-                        fontSize: "0.8rem",
-                        color: "#f56565",
-                        marginBottom: "8px",
-                      }}
-                    >
+                    <div className="text-sm plugins-tampered mb-2">
                       Changed on disk since approval — quarantined and
                       disabled.
                     </div>
                   )}
                   {plugin.integrityHash && (
-                    <div
-                      style={{
-                        fontSize: "0.75rem",
-                        color: "var(--text-secondary, #a0aec0)",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "6px",
-                      }}
-                    >
+                    <div className="text-xs plugins-hash-row">
                       <span>SHA-256 Hash:</span>
-                      <code style={{ fontSize: "0.72rem" }}>
+                      <code className="text-xs">
                         {plugin.integrityHash.substring(0, 16)}...
                       </code>
                       {isTampered ? (
-                        <span style={{ color: "#f56565" }}>
+                        <span className="plugins-hash-mismatch">
                           (MISMATCH DETECTED)
                         </span>
                       ) : (
-                        <span style={{ color: "#48bb78" }}>✓ Verified</span>
+                        <span className="plugins-hash-verified">✓ Verified</span>
                       )}
                     </div>
                   )}
@@ -247,20 +206,8 @@ export function PluginsListSection({
                             </p>
                           </details>
                         )}
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "6px",
-                            marginTop: "8px",
-                          }}
-                        >
-                          <span
-                            style={{
-                              fontSize: "0.75rem",
-                              color: "var(--text-secondary, #a0aec0)",
-                            }}
-                          >
+                        <div className="plugins-permission-row">
+                          <span className="text-xs plugins-permission-label">
                             Permission:
                           </span>
                           <select
@@ -286,14 +233,7 @@ export function PluginsListSection({
                         </div>
                         <div className="builtin-tool-footer">
                           <label
-                            className="toggle-label tool-switch"
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "8px",
-                              flexShrink: 0,
-                              cursor: isToggling ? "wait" : "pointer",
-                            }}
+                            className={`toggle-label tool-switch plugins-tool-switch${isToggling ? " is-busy" : ""}`}
                           >
                             <input
                               type="checkbox"

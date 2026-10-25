@@ -195,12 +195,12 @@ export function EmailTab({
                   </div>
                 </div>
 
-                <div className="email-env-hint" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
+                <div className="email-env-hint email-env-hint-spread">
                   <div>
                     <span>Password resolved via SecretsManager from: </span>
                     <code>{passwordEnv}</code>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div className="row">
                     {secretStatus[passwordEnv] ? (
                       <span className="keychain-status-badge stored">
                         <CheckIcon size={12} /> Stored in Keychain

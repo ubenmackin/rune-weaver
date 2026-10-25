@@ -13,7 +13,7 @@
   width: 260px;
   background: #15151b;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   transition: width 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
@@ -54,7 +54,7 @@
   padding: 8px 12px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: #ffffff;
   font-size: 13px;
   font-weight: 500;
@@ -72,7 +72,7 @@
   color: var(--text-muted);
   cursor: pointer;
   padding: 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .toggle-sidebar-btn:hover {
@@ -93,7 +93,7 @@
   padding: 4px 6px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 500;
@@ -138,7 +138,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: background 0.1s ease;
   color: var(--text-muted);
@@ -162,7 +162,7 @@
 }
 
 .session-item-icon.scheduled {
-  color: #38bdf8;
+  color: var(--accent-sky);
 }
 
 .session-item.active .session-item-icon.scheduled {
@@ -200,7 +200,7 @@
   padding: 0;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
 
@@ -222,7 +222,7 @@
   color: var(--text-muted);
   background: rgba(167, 139, 250, 0.15);
   border: 1px solid rgba(167, 139, 250, 0.35);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 1px 5px;
   white-space: nowrap;
 }
@@ -234,7 +234,7 @@
   font-size: 10px;
   font-weight: 700;
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   background: rgba(16, 185, 129, 0.18);
   color: #34d399;
@@ -262,7 +262,7 @@
   border: none;
   color: var(--text-muted);
   padding: 3px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -287,7 +287,7 @@
   flex: 1;
   padding: 2px 6px;
   font-size: 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .sidebar-muted {

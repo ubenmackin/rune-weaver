@@ -335,7 +335,7 @@ export default function ApprovalHistory() {
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
+            <p className="muted run-modal-paragraph-spaced">
               Clearing will permanently delete all decision history.
             </p>
           </div>

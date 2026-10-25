@@ -87,8 +87,8 @@ export function StoreSecretModal({
     <Modal label={title} onClose={submitting ? () => {} : handleClose} containerClassName="modal-container store-secret-modal" testId="store-secret-modal">
       <form onSubmit={handleSubmit}>
         <div className="modal-header">
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <KeyIcon size={18} style={{ color: "#38bdf8" }} />
+          <div className="store-secret-header-row">
+            <KeyIcon size={18} className="store-secret-icon" />
             <h3>{title}</h3>
           </div>
           <button
@@ -102,45 +102,39 @@ export function StoreSecretModal({
           </button>
         </div>
 
-        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)", lineHeight: 1.5 }}>
+        <div className="modal-body store-secret-body">
+          <p className="store-secret-lead text-sm">
             This secret will be stored directly into your macOS Keychain under service <code>com.runeweaver.secrets</code>. It is never written to disk files, database, or browser storage.
           </p>
 
           <div className="form-group">
-            <label style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "4px", display: "block" }}>
-              Keychain Key / Account
-            </label>
-            <div style={{ padding: "8px 12px", background: "var(--bg-main, #0f0f13)", borderRadius: "6px", fontFamily: "monospace", fontSize: "13px", border: "1px solid var(--border-color, #272733)" }}>
-              {secretKey}
-            </div>
+            <label className="store-secret-label">Keychain Key / Account</label>
+            <div className="store-secret-key-box text-sm">{secretKey}</div>
           </div>
 
           <div className="form-group">
-            <label htmlFor="secret-value-input" style={{ fontSize: "12px", fontWeight: 600, marginBottom: "4px", display: "block" }}>
+            <label htmlFor="secret-value-input" className="store-secret-label-strong">
               {isUpdate ? "New Secret / Password" : "Secret / Password"}
             </label>
-            <div style={{ display: "flex", gap: "8px", position: "relative", alignItems: "center" }}>
+            <div className="store-secret-input-row">
               <input
                 ref={inputRef}
                 id="secret-value-input"
                 data-testid="secret-value-input"
                 type={showPlaintext ? "text" : "password"}
-                className="input-field"
+                className="input-field store-secret-value-input"
                 value={secretValue}
                 onChange={(e) => setSecretValue(e.target.value)}
                 placeholder="Enter secret..."
                 disabled={submitting}
                 required
-                style={{ flex: 1, paddingRight: "40px" }}
               />
               <button
                 type="button"
-                className="icon-button"
+                className="icon-button store-secret-toggle"
                 data-testid="store-secret-toggle"
                 onClick={() => setShowPlaintext((prev) => !prev)}
                 title={showPlaintext ? "Hide secret" : "Show secret"}
-                style={{ position: "absolute", right: "6px", background: "transparent", border: "none" }}
               >
                 {showPlaintext ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
               </button>
@@ -148,24 +142,13 @@ export function StoreSecretModal({
           </div>
 
           {error && (
-            <div
-              data-testid="store-secret-error"
-              role="alert"
-              style={{
-                padding: "8px 12px",
-                background: "rgba(239, 68, 68, 0.12)",
-                border: "1px solid rgba(239, 68, 68, 0.35)",
-                borderRadius: "6px",
-                color: "#ef4444",
-                fontSize: "13px",
-              }}
-            >
+            <div data-testid="store-secret-error" role="alert" className="store-secret-error text-sm">
               {error}
             </div>
           )}
         </div>
 
-        <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+        <div className="modal-footer store-secret-footer">
           <button
             type="button"
             className="ghost"

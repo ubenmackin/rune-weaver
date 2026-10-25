@@ -13,14 +13,34 @@
   --text-main: #f2f2f5;
   --text-muted: #8e8e9f;
   --accent-purple: #8b5cf6;
+  --accent-purple-light: #a78bfa;
   --accent-purple-glow: rgba(139, 92, 246, 0.15);
   --accent-blue: #3b82f6;
   --status-green: #10b981;
   --status-amber: #f59e0b;
+  --status-orange: #f0a35e;
   --status-red: #ef4444;
   --tool-progress-track: #2c2c36;
   --tool-progress-stripe-high: rgba(196, 181, 253, 0.95);
   --tool-progress-stripe-low: rgba(139, 92, 246, 0.45);
+  /* Extended palette */
+  --accent-sky: #38bdf8;
+  --accent-indigo: #6366f1;
+  --accent-teal: #14b8a6;
+  --text-secondary: #a0aec0;
+  --panel-deep: #2d3748;
+  --panel-navy: #2c3e50;
+  /* Persona avatar blink lid per colorway */
+  --avatar-lid-violet: #8b5cf6;
+  --avatar-lid-cyan: #22d3ee;
+  --avatar-lid-emerald: #34d399;
+  --avatar-lid-rose: #fb7185;
+  /* Radius scale */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  --radius-card: 10px;
 }
 
 body {

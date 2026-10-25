@@ -21,22 +21,14 @@ export function FilesWriteModeRadios({
 }) {
   return (
     <div
-      className="form-group"
+      className="form-group mb-3"
       role="radiogroup"
       aria-label="Files write mode"
-      style={{ marginBottom: "12px" }}
     >
       {FILES_WRITE_MODE_OPTIONS.map((option) => (
         <label
           key={option.value}
-          className="toggle-label"
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: "8px",
-            marginBottom: "10px",
-            cursor: "pointer",
-          }}
+          className="toggle-label access-files-mode-option"
         >
           <input
             type="radio"
@@ -45,7 +37,7 @@ export function FilesWriteModeRadios({
             checked={writeMode === option.value}
             onChange={() => onChange(option.value)}
           />
-          <span style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+          <span className="access-files-mode-text">
             <span>{option.label}</span>
             <span className="muted text-sm">{option.description}</span>
           </span>
@@ -128,7 +120,7 @@ export function FilesResetModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will replace {denyPatternCount}{" "}
               {denyPatternCount === 1 ? "custom pattern" : "custom patterns"} with{" "}
               {DEFAULT_FILES_DENY_PATTERNS.length} defaults. This only updates the
@@ -169,7 +161,7 @@ export function FilesResetModals({
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted m-0">
               This will replace {allowRootsCount}{" "}
               {allowRootsCount === 1 ? "custom root" : "custom roots"} with{" "}
               {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}

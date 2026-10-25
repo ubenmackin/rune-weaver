@@ -137,10 +137,10 @@ export default function GoalDrawer({
           aria-valuemax={100}
           aria-valuenow={percent}
           aria-label={`${detail.goal.title} progress`}
-          className="goal-drawer-progress"
+          className="progress-track"
         >
           <div
-            className="goal-drawer-progress-fill"
+            className="progress-fill"
             style={{ width: `${percent}%` }}
           />
         </div>

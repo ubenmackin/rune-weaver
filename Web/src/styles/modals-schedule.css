@@ -1,0 +1,437 @@
+/* Rune Weaver Dashboard — schedule wizard and schedule cards: trigger picks,
+ * review rows, status toggles, and embedded run history. */
+
+
+/* ==========================================================================
+   Schedule Wizard
+   ========================================================================== */
+
+.wizard-modal {
+  max-width: 640px;
+  max-height: min(90vh, calc(100vh - 40px));
+  display: flex;
+  flex-direction: column;
+}
+
+/* Compact body fits brain fields without scrolling at 800px height. */
+.wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  max-height: calc(90vh - 160px);
+  padding: 20px;
+}
+
+/* Footer stays pinned while the body scrolls; never overlays inputs. */
+.modal-footer.wizard-footer {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+/* Progress geometry lives in progress.css (.progress-track/.progress-fill plus
+ * .wizard-progress-track/.wizard-progress-bar aliases); this file owns no
+ * progress definitions. */
+
+.wizard-step-indicator {
+  font-size: 12px;
+  color: var(--accent-purple);
+  font-weight: 500;
+}
+
+.trigger-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.trigger-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border-color);
+  border-radius: var(--radius-card);
+  padding: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.trigger-card:hover {
+  border-color: var(--border-focus);
+}
+
+.trigger-card.selected {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.trigger-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.trigger-icon {
+  color: var(--accent-purple);
+}
+
+.trigger-card p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.preset-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-card:hover {
+  border-color: var(--border-focus);
+}
+
+.preset-card.selected {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.preset-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.preset-card-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.preset-cron-tag {
+  font-size: 11px;
+  color: var(--accent-purple);
+  margin-top: 4px;
+}
+
+/* Goals empty state: centered explainer steps plus example cards that reuse
+   the preset look with a roomier grid and a cadence accent. */
+.goal-explainer-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 560px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.goal-example-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  width: 100%;
+  margin-top: 4px;
+}
+
+.goal-example-card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.goal-example-cadence {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent-purple);
+}
+
+.template-pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.template-pill {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.template-pill:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-focus);
+}
+
+.review-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+  padding: 14px;
+}
+
+.review-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+}
+
+.review-label {
+  color: var(--text-muted);
+}
+
+.prompt-preview-box {
+  margin-top: 6px;
+  padding: 10px;
+  background: var(--bg-main);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ==========================================================================
+   Schedule Cards & Embedded Runs
+   ========================================================================== */
+
+.job-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.schedule-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  transition: border-color 0.15s ease;
+}
+
+.schedule-card.disabled {
+  opacity: 0.7;
+}
+
+.schedule-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Flex ancestors must allow shrinking below content width, otherwise a long
+ * cron string forces the card wider instead of letting the badge truncate. */
+.schedule-card-identity {
+  min-width: 0;
+}
+
+.schedule-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.schedule-card-name {
+  font-size: 16px;
+}
+
+.trigger-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Cron badge stays on one line inside the card: it shrinks with the title row
+ * and truncates with an ellipsis instead of wrapping, while the full expression
+ * stays hover-readable via the title attribute. The poll variant keeps wrapping. */
+.trigger-badge.cron {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+/* Inner text carries the truncation so the leading icon keeps its size while
+ * only the schedule string clips. */
+.trigger-badge.cron > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.trigger-badge.poll {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+
+.trigger-badge.poll.messages {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.trigger-badge.poll.calendar {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.schedule-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-toggle-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.status-toggle-btn.enabled {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.status-toggle-btn.disabled {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+
+/* Goal pause/resume stays actionable in both states; only :disabled dims. */
+.status-toggle-btn.is-pause {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.status-toggle-btn.is-resume {
+  background: rgba(139, 92, 246, 0.15);
+  color: #c4b5fd;
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.status-toggle-btn.is-resume:hover {
+  border-color: #8b5cf6;
+  color: #ddd6fe;
+}
+
+.status-toggle-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.status-toggle-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.schedule-card-prompt {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #d1d1db;
+}
+
+.prompt-label {
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.schedule-card-footer {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.view-history-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent-purple);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.view-history-btn:hover {
+  text-decoration: underline;
+}
+
+.embedded-history-drawer {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+}
+
+.embedded-history-drawer h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+}
+
+.embedded-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.embedded-run-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.embedded-run-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.embedded-run-response {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cfcfe0;
+}

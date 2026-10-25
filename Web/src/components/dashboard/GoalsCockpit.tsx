@@ -173,9 +173,9 @@ export default function GoalsCockpit({
                     </span>
                     <span className="percent-text">{percent}%</span>
                   </div>
-                  <div className="progress-bar-track" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="progress-track" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
                     <div
-                      className="progress-bar-fill"
+                      className="progress-fill"
                       style={{ width: `${percent}%` }}
                     />
                   </div>

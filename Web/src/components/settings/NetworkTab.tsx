@@ -96,13 +96,8 @@ export function NetworkTab({
 
       {restartVisible ? (
         <div
-          className="error-banner"
+          className="error-banner network-restart-banner"
           data-testid="server-restart-banner"
-          style={{
-            backgroundColor: "rgba(237, 137, 54, 0.15)",
-            border: "1px solid rgba(237, 137, 54, 0.4)",
-            color: "#ed8936",
-          }}
         >
           Restart required: network changes are saved but the live bind is still{" "}
           <code>
@@ -117,14 +112,8 @@ export function NetworkTab({
       ) : null}
       {isDirty && !restartVisible ? (
         <div
-          className="muted text-sm"
+          className="muted text-sm network-pending-banner"
           data-testid="server-pending-banner"
-          style={{
-            padding: "10px 14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            marginBottom: "12px",
-          }}
         >
           Unsaved network changes: pending{" "}
           <code>
@@ -216,14 +205,8 @@ export function NetworkTab({
 
       {!isLoopbackHostname(serverHostname) ? (
         <div
-          className="muted text-sm"
+          className="muted text-sm network-lan-hint"
           data-testid="server-lan-hint"
-          style={{
-            padding: "10px 14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            margin: "12px 0",
-          }}
         >
           A non-loopback bind serves on your local network and requires a resolvable owner
           token. Without one the save is refused (400) instead of silently downgrading.
@@ -239,9 +222,9 @@ export function NetworkTab({
         </div>
       ) : null}
 
-      <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+      <div className="settings-subsection-header network-subsection-spaced">
         <div className="settings-section-title-group">
-          <h4 style={{ margin: "0 0 4px 0" }}>Allowed hosts</h4>
+          <h4 className="access-subsection-heading">Allowed hosts</h4>
           <p className="settings-section-hint">
             Exact-only extra Host entries (max {MAX_SERVER_ALLOWED_HOSTS}, max{" "}
             {MAX_SERVER_ALLOWED_HOST_LENGTH} chars each). Lowercased and port-stripped on
@@ -255,7 +238,7 @@ export function NetworkTab({
           </span>
         </div>
       </div>
-      <div className="form-group" style={{ marginTop: "8px" }}>
+      <div className="form-group mt-2">
         <label htmlFor="server-allowed-hosts-textarea">
           Allowed hosts, one per line{" "}
           <span className="muted text-sm">
@@ -279,9 +262,8 @@ export function NetworkTab({
         </span>
         {serverAllowedHostsError ? (
           <span
-            className="form-group-hint"
+            className="form-group-hint network-hosts-error"
             data-testid="server-allowed-error"
-            style={{ color: "#f56565" }}
           >
             {serverAllowedHostsError}
           </span>

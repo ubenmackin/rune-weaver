@@ -97,47 +97,24 @@ export function MediaConfigModal({
           <CloseIcon size={16} />
         </button>
       </div>
-      <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+      <div className="modal-body media-config-body">
         {mediaModalError && (
-          <div
-            className="error-banner"
-            style={{
-              marginBottom: "14px",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+          <div className="error-banner media-config-error">
             <AlertTriangleIcon size={16} />
             <span>{mediaModalError}</span>
           </div>
         )}
 
-        <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+        <p className="muted text-sm media-config-intro">
           Configure your local or network Sonarr (TV) and Radarr (Movie) instances.
           API keys are resolved from environment variables or macOS Keychain (
           <code>com.runeweaver.secrets</code>) and never stored in plaintext config.
         </p>
 
         {/* Sonarr Card */}
-        <div
-          style={{
-            padding: "14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            marginBottom: "16px",
-            backgroundColor: "var(--bg-secondary, #141822)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "12px",
-            }}
-          >
-            <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="media-config-card">
+          <div className="media-config-card-head">
+            <h4 className="media-config-card-title">
               <span>Sonarr (TV Shows)</span>
             </h4>
             <SwitchControl
@@ -148,8 +125,8 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-group" style={{ marginBottom: "10px" }}>
-            <label htmlFor="sonarr-url" style={{ fontSize: "0.82rem" }}>
+          <div className="form-group media-config-field">
+            <label htmlFor="sonarr-url" className="text-sm">
               Server URL
             </label>
             <input
@@ -162,18 +139,9 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-group" style={{ marginBottom: "10px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: "4px",
-                flexWrap: "wrap",
-                gap: "6px",
-              }}
-            >
-              <label htmlFor="sonarr-key-env" style={{ fontSize: "0.82rem" }}>
+          <div className="form-group media-config-field">
+            <div className="provider-key-row">
+              <label htmlFor="sonarr-key-env" className="text-sm">
                 API Key Environment Variable / Keychain Key
               </label>
               {(() => {
@@ -181,7 +149,7 @@ export function MediaConfigModal({
                 if (!keyEnv) return null;
                 const isStored = !!secretStatus[keyEnv];
                 return (
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div className="row">
                     {isStored ? (
                       <span className="keychain-status-badge stored">
                         <CheckIcon size={12} /> Stored in Keychain
@@ -220,9 +188,9 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-row" style={{ display: "flex", gap: "10px" }}>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-              <label htmlFor="sonarr-quality" style={{ fontSize: "0.82rem" }}>
+          <div className="form-row media-config-form-row">
+            <div className="form-group media-config-form-field">
+              <label htmlFor="sonarr-quality" className="text-sm">
                 Default Quality Profile (Optional)
               </label>
               <input
@@ -234,8 +202,8 @@ export function MediaConfigModal({
                 placeholder="e.g. HD-1080p"
               />
             </div>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-              <label htmlFor="sonarr-root" style={{ fontSize: "0.82rem" }}>
+            <div className="form-group media-config-form-field">
+              <label htmlFor="sonarr-root" className="text-sm">
                 Default Root Folder (Optional)
               </label>
               <input
@@ -251,23 +219,9 @@ export function MediaConfigModal({
         </div>
 
         {/* Radarr Card */}
-        <div
-          style={{
-            padding: "14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            backgroundColor: "var(--bg-secondary, #141822)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "12px",
-            }}
-          >
-            <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="media-config-card-last">
+          <div className="media-config-card-head">
+            <h4 className="media-config-card-title">
               <span>Radarr (Movies)</span>
             </h4>
             <SwitchControl
@@ -278,8 +232,8 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-group" style={{ marginBottom: "10px" }}>
-            <label htmlFor="radarr-url" style={{ fontSize: "0.82rem" }}>
+          <div className="form-group media-config-field">
+            <label htmlFor="radarr-url" className="text-sm">
               Server URL
             </label>
             <input
@@ -292,18 +246,9 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-group" style={{ marginBottom: "10px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: "4px",
-                flexWrap: "wrap",
-                gap: "6px",
-              }}
-            >
-              <label htmlFor="radarr-key-env" style={{ fontSize: "0.82rem" }}>
+          <div className="form-group media-config-field">
+            <div className="provider-key-row">
+              <label htmlFor="radarr-key-env" className="text-sm">
                 API Key Environment Variable / Keychain Key
               </label>
               {(() => {
@@ -311,7 +256,7 @@ export function MediaConfigModal({
                 if (!keyEnv) return null;
                 const isStored = !!secretStatus[keyEnv];
                 return (
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div className="row">
                     {isStored ? (
                       <span className="keychain-status-badge stored">
                         <CheckIcon size={12} /> Stored in Keychain
@@ -350,9 +295,9 @@ export function MediaConfigModal({
             />
           </div>
 
-          <div className="form-row" style={{ display: "flex", gap: "10px" }}>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-              <label htmlFor="radarr-quality" style={{ fontSize: "0.82rem" }}>
+          <div className="form-row media-config-form-row">
+            <div className="form-group media-config-form-field">
+              <label htmlFor="radarr-quality" className="text-sm">
                 Default Quality Profile (Optional)
               </label>
               <input
@@ -364,8 +309,8 @@ export function MediaConfigModal({
                 placeholder="e.g. HD-1080p"
               />
             </div>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-              <label htmlFor="radarr-root" style={{ fontSize: "0.82rem" }}>
+            <div className="form-group media-config-form-field">
+              <label htmlFor="radarr-root" className="text-sm">
                 Default Root Folder (Optional)
               </label>
               <input
@@ -381,17 +326,9 @@ export function MediaConfigModal({
         </div>
 
         {/* Media Request Timeout Card */}
-        <div
-          style={{
-            padding: "14px",
-            borderRadius: "8px",
-            border: "1px solid var(--border-color, #2d3748)",
-            marginTop: "16px",
-            backgroundColor: "var(--bg-secondary, #141822)",
-          }}
-        >
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label htmlFor="media-timeout-seconds" style={{ fontSize: "0.82rem" }}>
+        <div className="media-timeout-card">
+          <div className="form-group m-0">
+            <label htmlFor="media-timeout-seconds" className="text-sm">
               Request Timeout (seconds)
             </label>
             <input
@@ -403,20 +340,14 @@ export function MediaConfigModal({
               value={mediaTimeoutSeconds}
               onChange={(e) => setMediaTimeoutSeconds(e.target.value)}
             />
-            <span
-              className="form-group-hint"
-              style={{ marginTop: "4px", display: "block" }}
-            >
+            <span className="form-group-hint media-config-hint-block">
               Timeout in seconds for API calls to Sonarr and Radarr. Default is{" "}
               {DEFAULT_MEDIA_TIMEOUT_SECONDS}s.
             </span>
           </div>
         </div>
       </div>
-      <div
-        className="modal-footer"
-        style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
-      >
+      <div className="modal-footer">
         <button
           type="button"
           className="ghost"
