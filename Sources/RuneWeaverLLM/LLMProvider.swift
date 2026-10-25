@@ -824,6 +824,13 @@ struct OpenAICompatibleHTTPClient: Sendable {
         RuneWeaverVersion.userAgent
     }
 
+    private static let streamingSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 1800
+        return URLSession(configuration: config)
+    }()
+
     /// Creates a client.
     init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil, cachePrompt: Bool? = nil, slotID: Int? = nil) {
         let normalized = openAIBaseURL(from: baseURL)
@@ -898,7 +905,7 @@ struct OpenAICompatibleHTTPClient: Sendable {
                 continuation.finish()
             }
         }
-        guard let request = makeRequest(path: path, body: body) else {
+        guard let request = makeRequest(path: path, body: body, timeout: 300) else {
             let base = baseURL
             let style = label.lowercased()
             return AsyncStream { continuation in
@@ -921,33 +928,43 @@ struct OpenAICompatibleHTTPClient: Sendable {
                 defer {
                     unregister?()
                 }
-                do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request, delegate: delegate)
-                    guard let http = response as? HTTPURLResponse else {
-                        continuation.yield(.error("No HTTP response from \(clientBase)"))
+                var streamAttempt = 0
+                while streamAttempt < 2 {
+                    streamAttempt += 1
+                    do {
+                        let (bytes, response) = try await Self.streamingSession.bytes(for: request, delegate: delegate)
+                        guard let http = response as? HTTPURLResponse else {
+                            continuation.yield(.error("No HTTP response from \(clientBase)"))
+                            continuation.finish()
+                            return
+                        }
+                        guard (200 ..< 300).contains(http.statusCode) else {
+                            let detail = await OpenAISSEPump.responseDetail(from: bytes)
+                            continuation.yield(.error("\(label) request failed (\(http.statusCode)): \(detail)"))
+                            continuation.finish()
+                            return
+                        }
+                        await pump(bytes, clientModel, continuation)
+                        return
+                    } catch is CancellationError {
+                        continuation.finish()
+                        return
+                    } catch let urlError as URLError where urlError.code == .cancelled {
+                        continuation.finish()
+                        return
+                    } catch let urlError as URLError where urlError.code == .networkConnectionLost && streamAttempt < 2 && !Task.isCancelled {
+                        continue
+                    } catch {
+                        let message = if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
+                            "\(label) cleartext HTTP was blocked by macOS App Transport Security. " +
+                                "For local endpoints, use an RFC 1918 private IP address, a .local domain, or HTTPS."
+                        } else {
+                            "\(label) stream failed: \(error.localizedDescription)"
+                        }
+                        continuation.yield(.error(message))
                         continuation.finish()
                         return
                     }
-                    guard (200 ..< 300).contains(http.statusCode) else {
-                        let detail = await OpenAISSEPump.responseDetail(from: bytes)
-                        continuation.yield(.error("\(label) request failed (\(http.statusCode)): \(detail)"))
-                        continuation.finish()
-                        return
-                    }
-                    await pump(bytes, clientModel, continuation)
-                } catch is CancellationError {
-                    continuation.finish()
-                } catch let urlError as URLError where urlError.code == .cancelled {
-                    continuation.finish()
-                } catch {
-                    let message = if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
-                        "\(label) cleartext HTTP was blocked by macOS App Transport Security. " +
-                            "For local endpoints, use an RFC 1918 private IP address, a .local domain, or HTTPS."
-                    } else {
-                        "\(label) stream failed: \(error.localizedDescription)"
-                    }
-                    continuation.yield(.error(message))
-                    continuation.finish()
                 }
             }
             continuation.onTermination = { @Sendable _ in

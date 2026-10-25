@@ -8,6 +8,7 @@ import {
   buildDoneSegments,
   removeResumedCallFromMessages,
 } from "./chatTimeline";
+import { extractTurnErrorText } from "./chatHelpers";
 import {
   mergeLiveSnapshotIntoInFlightTurn,
   mergePersistedMessagesIntoInFlightTurn,
@@ -331,5 +332,47 @@ describe("chatTimeline approval resume and mid-turn reload ordering", () => {
     expect(withTools?.text).toBe("*(Turn cancelled by user)*");
     expect(withTools?.toolActions).toHaveLength(1);
     expect(withTools?.toolActions?.[0].callID).toBe("call-nav");
+  });
+
+  it("extractTurnErrorText extracts concise failure message instead of entire multi-round narrative", () => {
+    // 1. Explicit errorText priority
+    const explicitMsg: MessageItem = {
+      id: "err-1",
+      role: "assistant",
+      text: "Some thoughts\n\nMore thoughts",
+      errorText: "Chat stream failed: The network connection was lost.",
+      isError: true,
+    };
+    expect(extractTurnErrorText(explicitMsg)).toBe(
+      "Chat stream failed: The network connection was lost.",
+    );
+
+    // 2. Segment error text when errorText is missing (e.g. from history reload)
+    const segmentMsg: MessageItem = {
+      id: "err-2",
+      role: "assistant",
+      text: "Round 1 thought\n\nRound 2 thought\n\nError: Chat stream failed: The network connection was lost.",
+      segments: [
+        { kind: "text", text: "Round 1 thought: searching for hubs." },
+        { kind: "tools", actions: [] },
+        { kind: "text", text: "Round 2 thought: adding to cart." },
+        { kind: "text", text: "Error: Chat stream failed: The network connection was lost." },
+      ],
+      isError: true,
+    };
+    expect(extractTurnErrorText(segmentMsg)).toBe(
+      "Chat stream failed: The network connection was lost.",
+    );
+
+    // 3. Fallback when only concatenated text exists
+    const textOnlyMsg: MessageItem = {
+      id: "err-3",
+      role: "assistant",
+      text: "Good news: you're already logged in.\n\nNavigating to search results.\n\nError: Chat stream failed: The network connection was lost.",
+      isError: true,
+    };
+    expect(extractTurnErrorText(textOnlyMsg)).toBe(
+      "Chat stream failed: The network connection was lost.",
+    );
   });
 });

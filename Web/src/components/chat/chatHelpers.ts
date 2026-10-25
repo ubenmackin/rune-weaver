@@ -63,6 +63,46 @@ export function getMessageCopyContent(message: MessageItem): string {
   return "";
 }
 
+// Extracts the concise failure reason for an error turn without dumping earlier round thoughts.
+export function extractTurnErrorText(message: MessageItem): string {
+  const explicit = message.errorText?.trim();
+  if (explicit && explicit.length > 0) {
+    return explicit.replace(/^Error:\s*/i, "");
+  }
+  if (message.segments && message.segments.length > 0) {
+    for (let i = message.segments.length - 1; i >= 0; i--) {
+      const seg = message.segments[i];
+      if (seg.kind === "text") {
+        const trimmed = seg.text.trim();
+        if (
+          trimmed.startsWith("Error:") ||
+          trimmed.startsWith("Chat stream failed") ||
+          trimmed.startsWith("Chat request failed")
+        ) {
+          return trimmed.replace(/^Error:\s*/i, "");
+        }
+      }
+    }
+  }
+  if (message.text) {
+    const lines = message.text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (
+        line.startsWith("Error:") ||
+        line.includes("stream failed") ||
+        line.includes("request failed")
+      ) {
+        return line.replace(/^Error:\s*/i, "");
+      }
+    }
+  }
+  return "Chat turn failed";
+}
+
 // Relative completion label sharing the approvals countdown ladder so elapsed time reads with
 // identical granularity across the dashboard.
 export function formatCompletionRelative(
