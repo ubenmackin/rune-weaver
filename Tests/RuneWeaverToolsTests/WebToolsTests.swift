@@ -535,9 +535,19 @@ struct WebFetchSafetyTests {
         #expect((allowedEnvelope.content ?? "").contains("homelab ok"))
         // The factory threads the same set so a built web tool set honors
         // the exemption without callers reaching for the concrete type.
+        let builtPolicyStore = await ToolsTestSupport.makeTestPolicyStore()
+        await builtPolicyStore.update(SecurityPolicy(
+            network: NetworkEgressPolicy(
+                mode: .unrestricted,
+                blockedDomains: [],
+                localExemptions: ["192.168.1.10"]
+            )
+        ))
+        let builtSupervisor = try await OutboundEgressSupervisor.make(policyStore: builtPolicyStore)
         let built = WebTools.makeTools(
             browserConfig: BrowserConfig(),
             fetchTransport: transport,
+            supervisor: builtSupervisor,
             extraAllowlistedOrigins: ["192.168.1.10"]
         )
         let builtFetch = try #require(built.first(where: { $0.name == "web.fetch" }))
@@ -546,6 +556,72 @@ struct WebFetchSafetyTests {
             context: ToolContext(conversationID: UUID())
         )
         #expect(!builtOutput.isError)
+    }
+
+    @Test
+    func `WebTools factory defaults gateway and threads explicit gateway`() async throws {
+        // Supervised factory needs a verified store so no gateway boots unsupervised.
+        let defaultPolicyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let defaultSupervisor = try await OutboundEgressSupervisor.make(policyStore: defaultPolicyStore)
+        let defaultTools = WebTools.makeTools(browserConfig: BrowserConfig(), supervisor: defaultSupervisor)
+        let defaultFetch = try #require(defaultTools.first(where: { $0.name == "web.fetch" }) as? WebFetchTool)
+        #expect(defaultFetch.browserGateway is SubprocessPlaywrightGateway)
+
+        let customGateway = WebTestSupport.StubBrowserGateway { url, _ in
+            BrowserSnapshot(url: url, title: "", text: "", refs: [])
+        }
+        // Stub gateway passes through unchanged while fetch still carries the supervisor.
+        let customSupervisor = try await OutboundEgressSupervisor.make(policyStore: defaultPolicyStore)
+        let customTools = WebTools.makeTools(browserConfig: BrowserConfig(), gateway: customGateway, supervisor: customSupervisor)
+        let customFetch = try #require(customTools.first(where: { $0.name == "web.fetch" }) as? WebFetchTool)
+        #expect(customFetch.browserGateway is WebTestSupport.StubBrowserGateway)
+
+        // Fallback gateway keeps model endpoints so reuse checks agree.
+        let llmURLs = ["http://127.0.0.1:11434"]
+        let llmPolicyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let llmSupervisor = try await OutboundEgressSupervisor.make(
+            policyStore: llmPolicyStore,
+            browserConfig: BrowserConfig(),
+            llmServerURLs: llmURLs
+        )
+        let llmTools = WebTools.makeTools(browserConfig: BrowserConfig(), supervisor: llmSupervisor, llmServerURLs: llmURLs)
+        let llmFetch = try #require(llmTools.first(where: { $0.name == "web.fetch" }) as? WebFetchTool)
+        let llmGateway = try #require(llmFetch.browserGateway as? SubprocessPlaywrightGateway)
+        #expect(llmGateway.llmServerURLs == llmURLs)
+        #expect(llmGateway.allowlistedOrigins == ApiSSRFGuard.allowlistedOrigins(browserConfig: BrowserConfig(), llmServerURLs: llmURLs))
+
+        // Plugin build threads one instance so fetch and navigate share the gateway.
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let pluginTools = try await BuiltinToolPlugins.makeTools(
+            browserConfig: BrowserConfig(),
+            gateway: customGateway,
+            policyStore: policyStore
+        )
+        let pluginFetch = try #require(pluginTools.first(where: { $0.name == "web.fetch" }) as? WebFetchTool)
+        let pluginNavigate = try #require(pluginTools.first(where: { $0.name == "browser.navigate" }) as? BrowserNavigateTool)
+        #expect(pluginFetch.browserGateway is WebTestSupport.StubBrowserGateway)
+        #expect(pluginNavigate.browserGateway is WebTestSupport.StubBrowserGateway)
+
+        // Nil gateway still shares one supervised gateway with matching config.
+        let nilPolicyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let nilSupervisor = try await OutboundEgressSupervisor.make(policyStore: nilPolicyStore)
+        let nilTools = try await BuiltinToolPlugins.makeTools(
+            browserConfig: BrowserConfig(),
+            llmServerURLs: llmURLs,
+            policyStore: nilPolicyStore,
+            egressSupervisor: nilSupervisor
+        )
+        let nilFetch = try #require(nilTools.first(where: { $0.name == "web.fetch" }) as? WebFetchTool)
+        let nilNavigate = try #require(nilTools.first(where: { $0.name == "browser.navigate" }) as? BrowserNavigateTool)
+        let nilFetchGateway = try #require(nilFetch.browserGateway as? SubprocessPlaywrightGateway)
+        let nilNavigateGateway = try #require(nilNavigate.browserGateway as? SubprocessPlaywrightGateway)
+        #expect(nilFetchGateway.llmServerURLs == llmURLs)
+        #expect(nilNavigateGateway.llmServerURLs == llmURLs)
+        #expect(nilFetchGateway.allowlistedOrigins == nilNavigateGateway.allowlistedOrigins)
+        let nilFetchSupervisor = try #require(nilFetchGateway.egressSupervisor)
+        let nilNavigateSupervisor = try #require(nilNavigateGateway.egressSupervisor)
+        #expect(nilFetchSupervisor === nilSupervisor)
+        #expect(nilNavigateSupervisor === nilSupervisor)
     }
 }
 

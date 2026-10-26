@@ -145,6 +145,29 @@ private enum BrowserEgressSupport {
         await store.update(policy)
         return store
     }
+
+    /// Builds a permissive supervisor isolating the SSRF layer for hermetic proofs.
+    /// Unrestricted with no blocks lets public literals dial while the guard still
+    /// refuses loopback, link-local, and metadata targets.
+    static func permissiveSupervisor(
+        browserConfig: BrowserConfig = publicSearchConfig(),
+        llmServerURLs: [String] = []
+    ) async throws -> OutboundEgressSupervisor {
+        let store = await policyStore(
+            SecurityPolicy(
+                network: NetworkEgressPolicy(
+                    mode: .unrestricted,
+                    allowedDomains: [],
+                    blockedDomains: []
+                )
+            )
+        )
+        return try await OutboundEgressSupervisor.make(
+            policyStore: store,
+            browserConfig: browserConfig,
+            llmServerURLs: llmServerURLs
+        )
+    }
 }
 
 /// Runs `body` with the debug DNS resolver bound to `resolver` for this test's task and its
@@ -181,7 +204,12 @@ struct BrowserEgressTests {
         )
         // A public search origin leaves loopback without an exemption, so the
         // entry must fail before the bridge spawns.
-        let tool = BrowserNavigateTool(gateway: gateway, browserConfig: BrowserEgressSupport.publicSearchConfig())
+        let supervisor = try await BrowserEgressSupport.permissiveSupervisor()
+        let tool = BrowserNavigateTool(
+            gateway: gateway,
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
+        )
         let output = try await tool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"http://localhost/"}"#),
             context: ToolContext(conversationID: UUID())
@@ -202,7 +230,12 @@ struct BrowserEgressTests {
             actFlag: actFlag
         )
         // Metadata denials are literal-only, so they need no resolver.
-        let tool = BrowserNavigateTool(gateway: gateway, browserConfig: BrowserEgressSupport.publicSearchConfig())
+        let supervisor = try await BrowserEgressSupport.permissiveSupervisor()
+        let tool = BrowserNavigateTool(
+            gateway: gateway,
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
+        )
         let output = try await tool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"http://metadata.google.internal/latest"}"#),
             context: ToolContext(conversationID: UUID())
@@ -224,7 +257,12 @@ struct BrowserEgressTests {
         )
         // Link-local stays never-allowlisted, so even an explicit homelab
         // pattern cannot launder it through the entry check.
-        let tool = BrowserNavigateTool(gateway: gateway, browserConfig: BrowserEgressSupport.publicSearchConfig())
+        let supervisor = try await BrowserEgressSupport.permissiveSupervisor()
+        let tool = BrowserNavigateTool(
+            gateway: gateway,
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
+        )
         let output = try await tool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"http://169.254.169.254/latest/meta-data"}"#),
             context: ToolContext(conversationID: UUID())
@@ -247,6 +285,10 @@ struct BrowserEgressTests {
             redirectChain: [BrowserRedirectStep(url: modelURL)]
         )
         let allowedFlag = BrowserEgressSupport.CallFlag()
+        let allowedSupervisor = try await BrowserEgressSupport.permissiveSupervisor(
+            browserConfig: browser,
+            llmServerURLs: ["http://127.0.0.1:11434"]
+        )
         let allowedTool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: exemptSnapshot,
@@ -254,7 +296,8 @@ struct BrowserEgressTests {
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
             browserConfig: browser,
-            llmServerURLs: ["http://127.0.0.1:11434"]
+            llmServerURLs: ["http://127.0.0.1:11434"],
+            egressSupervisor: allowedSupervisor
         )
         let allowed = try await allowedTool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"\#(modelURL)"}"#),
@@ -266,13 +309,15 @@ struct BrowserEgressTests {
         // the allowance came from the configured origin rather than a broad
         // loopback pass.
         let deniedFlag = BrowserEgressSupport.CallFlag()
+        let deniedSupervisor = try await BrowserEgressSupport.permissiveSupervisor(browserConfig: browser)
         let deniedTool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: exemptSnapshot,
                 navigateFlag: deniedFlag,
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: browser
+            browserConfig: browser,
+            egressSupervisor: deniedSupervisor
         )
         let denied = try await deniedTool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"http://127.0.0.1:9999/admin"}"#),
@@ -298,13 +343,15 @@ struct BrowserEgressTests {
             ]
         )
         let navigateFlag = BrowserEgressSupport.CallFlag()
+        let poisonedSupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: poisoned,
                 navigateFlag: navigateFlag,
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: poisonedSupervisor
         )
         let output = try await tool.execute(
             input: ToolInput(
@@ -329,13 +376,15 @@ struct BrowserEgressTests {
             refs: [],
             redirectChain: [BrowserRedirectStep(url: BrowserEgressSupport.publicStartURL)]
         )
+        let loopbackSupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: loopbackLanding,
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: loopbackSupervisor
         )
         let output = try await tool.execute(
             input: ToolInput(
@@ -364,13 +413,15 @@ struct BrowserEgressTests {
         // The tool still delegates denials to the guard before spawning: a
         // literal sensitive entry never enters the bridge.
         let navigateFlag = BrowserEgressSupport.CallFlag()
+        let unverifiedSupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: BrowserEgressSupport.publicSnapshot(),
                 navigateFlag: navigateFlag,
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: unverifiedSupervisor
         )
         let output = try await tool.execute(
             input: ToolInput(toolName: "browser.navigate", argumentsJSON: #"{"url":"http://localhost/"}"#),
@@ -384,13 +435,15 @@ struct BrowserEgressTests {
     @Test
     func `Act denies sensitive snapshot URLs before dispatch`() async throws {
         let actFlag = BrowserEgressSupport.CallFlag()
+        let entrySupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserActTool(
             gateway: BrowserEgressSupport.CannedActGateway(
                 result: BrowserActResult(url: BrowserEgressSupport.publicLandedURL, action: .click, ref: "e1"),
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: actFlag
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: entrySupervisor
         )
         let output = try await tool.execute(
             input: ToolInput(
@@ -409,13 +462,15 @@ struct BrowserEgressTests {
     func `Act denies sensitive post-action landings`() async throws {
         // The snapshot URL is a public literal, but the action lands in metadata space.
         let actFlag = BrowserEgressSupport.CallFlag()
+        let landingSupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserActTool(
             gateway: BrowserEgressSupport.CannedActGateway(
                 result: BrowserActResult(url: "http://metadata.google.internal/", action: .click, ref: "e1"),
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: actFlag
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: landingSupervisor
         )
         let output = try await tool.execute(
             input: ToolInput(
@@ -435,13 +490,15 @@ struct BrowserEgressTests {
         // re-validation, and act landing all succeed hermetically while prod
         // still fails closed on unverified hostnames.
         let navigateFlag = BrowserEgressSupport.CallFlag()
+        let publicSupervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let navigateTool = BrowserNavigateTool(
             gateway: BrowserEgressSupport.CannedNavigateGateway(
                 snapshot: BrowserEgressSupport.publicSnapshot(),
                 navigateFlag: navigateFlag,
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: publicSupervisor
         )
         let navigateOutput = try await navigateTool.execute(
             input: ToolInput(
@@ -465,7 +522,8 @@ struct BrowserEgressTests {
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: actFlag
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: publicSupervisor
         )
         let actOutput = try await actTool.execute(
             input: ToolInput(
@@ -486,7 +544,8 @@ struct BrowserEgressTests {
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: previewFlag
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: publicSupervisor
         )
         let preview = try await previewTool.execute(
             input: ToolInput(
@@ -580,13 +639,20 @@ struct BrowserEgressTests {
     }
 
     @Test
-    func `Tool descriptions disclose the SSRF guard`() {
-        let navigate = BrowserNavigateTool(browserConfig: BrowserEgressSupport.publicSearchConfig())
+    func `Tool descriptions disclose the SSRF guard`() async throws {
+        let supervisor = try await BrowserEgressSupport.permissiveSupervisor()
+        let navigate = BrowserNavigateTool(
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
+        )
         #expect(navigate.description.contains("SSRF-guarded"))
         #expect(navigate.description.contains("loopback"))
         #expect(navigate.description.contains("link-local"))
         #expect(navigate.description.contains("metadata"))
-        let act = BrowserActTool(browserConfig: BrowserEgressSupport.publicSearchConfig())
+        let act = BrowserActTool(
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
+        )
         #expect(act.description.contains("SSRF-guarded"))
     }
 
@@ -813,6 +879,7 @@ struct BrowserEgressTests {
 
     @Test
     func `BrowserActEnvelope for fill lightweight envelope omits title/text/refs/truncated when non-empty`() async throws {
+        let supervisor = try await BrowserEgressSupport.permissiveSupervisor()
         let tool = BrowserActTool(
             gateway: BrowserEgressSupport.CannedActGateway(
                 result: BrowserActResult(
@@ -827,7 +894,8 @@ struct BrowserEgressTests {
                 navigateFlag: BrowserEgressSupport.CallFlag(),
                 actFlag: BrowserEgressSupport.CallFlag()
             ),
-            browserConfig: BrowserEgressSupport.publicSearchConfig()
+            browserConfig: BrowserEgressSupport.publicSearchConfig(),
+            egressSupervisor: supervisor
         )
         let output = try await tool.execute(
             input: ToolInput(
