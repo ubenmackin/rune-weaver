@@ -59,8 +59,10 @@ export default function ChatView(props: ChatViewProps) {
     pending,
     inFlightTurn,
     messageListRef,
-    messageListEndRef,
     handleMessageListScroll,
+    handleMessageListWheel,
+    handleMessageListTouchStart,
+    handleMessageListTouchMove,
     error,
     trimmedLiveFlights,
     setTrimmedLiveFlights,
@@ -175,8 +177,10 @@ export default function ChatView(props: ChatViewProps) {
           handleCopyMessage={handleCopyMessage}
           handleCancelTool={handleCancelTool}
           messageListRef={messageListRef}
-          messageListEndRef={messageListEndRef}
           onScroll={handleMessageListScroll}
+          onWheel={handleMessageListWheel}
+          onTouchStart={handleMessageListTouchStart}
+          onTouchMove={handleMessageListTouchMove}
           error={error}
           trimmedLiveFlights={trimmedLiveFlights}
           onDismissTrimmedFlights={() => setTrimmedLiveFlights([])}

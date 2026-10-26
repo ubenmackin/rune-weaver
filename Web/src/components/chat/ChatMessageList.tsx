@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Chat message stream, in-flight turns, tools, inline approvals, and liveness indicator.
 
-import type { RefObject } from "react";
+import type { RefObject, TouchEvent, WheelEvent } from "react";
 import {
   isRecallDiagnosticsVisible,
   parseRecallDiagnostics,
@@ -45,8 +45,10 @@ interface ChatMessageListProps {
   handleCopyMessage: (id: string, text: string) => Promise<void>;
   handleCancelTool: (callID: string, reason?: string) => void;
   messageListRef: RefObject<HTMLDivElement>;
-  messageListEndRef: RefObject<HTMLDivElement>;
   onScroll: () => void;
+  onWheel: (event: WheelEvent<HTMLElement>) => void;
+  onTouchStart: (event: TouchEvent<HTMLElement>) => void;
+  onTouchMove: (event: TouchEvent<HTMLElement>) => void;
   error: string | null;
   trimmedLiveFlights: string[];
   onDismissTrimmedFlights: () => void;
@@ -76,8 +78,10 @@ export default function ChatMessageList({
   handleCopyMessage,
   handleCancelTool,
   messageListRef,
-  messageListEndRef,
   onScroll,
+  onWheel,
+  onTouchStart,
+  onTouchMove,
   error,
   trimmedLiveFlights,
   onDismissTrimmedFlights,
@@ -110,6 +114,9 @@ export default function ChatMessageList({
         aria-live="polite"
         ref={messageListRef}
         onScroll={onScroll}
+        onWheel={onWheel}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
       >
         {messages.length === 0 && !pending ? (
           <div className="chat-empty-state">
@@ -469,8 +476,6 @@ export default function ChatMessageList({
             </span>
           </div>
         ) : null}
-
-        <div ref={messageListEndRef} />
       </div>
 
       {error ? <p className="error chat-error">{error}</p> : null}

@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Main controller hook coordinating chat session, WebSocket stream, tool actions, and metrics.
 
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type TouchEvent, type WheelEvent } from "react";
 import {
   isActiveRunStatus,
   parseRunTimestamp,
@@ -47,6 +47,9 @@ import { useChatHistoryLoader } from "./useChatHistoryLoader";
 import { useChatSession } from "./useChatSession";
 import { useChatWebSocketHandler } from "./useChatWebSocketHandler";
 import { useParkedFlights } from "./useParkedFlights";
+
+// Scroll events within this distance of the bottom re-engage stream follow mode.
+const REATTACH_BOTTOM_PX = 30;
 
 export function useChatController({
   health,
@@ -104,8 +107,9 @@ export function useChatController({
     setSidebarOpen((previous) => !previous);
   }, []);
 
-  const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const lastMessageScrollTopRef = useRef(0);
+  const lastMessageTouchYRef = useRef<number | null>(null);
   const userHasScrolledUpRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inputHistoryRef = useRef<string[]>([]);
@@ -638,12 +642,11 @@ export function useChatController({
   }, []);
 
   useEffect(() => {
-    if (
-      !userHasScrolledUpRef.current &&
-      chatSettings.autoScrollOnStream &&
-      messageListHasActiveSelection(messageListRef.current) === false
-    ) {
-      messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
+    if (!chatSettings.autoScrollOnStream) return;
+    if (userHasScrolledUpRef.current) return;
+    const el = messageListRef.current;
+    if (el && messageListHasActiveSelection(el) === false) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages, pending, inFlightTurn, chatSettings.autoScrollOnStream]);
 
@@ -651,8 +654,47 @@ export function useChatController({
     const el = messageListRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    userHasScrolledUpRef.current = distanceFromBottom > 150;
+    // Re-attach first: a content shrink clamps scrollTop to the new bottom,
+    // which must read as "back at bottom", not as an upward scroll.
+    if (distanceFromBottom <= REATTACH_BOTTOM_PX) {
+      userHasScrolledUpRef.current = false;
+    } else if (el.scrollTop < lastMessageScrollTopRef.current) {
+      userHasScrolledUpRef.current = true;
+    }
+    lastMessageScrollTopRef.current = el.scrollTop;
   }, []);
+
+  const handleMessageListWheel = useCallback(
+    (event: WheelEvent<HTMLElement>) => {
+      if (event.deltaY < 0) {
+        userHasScrolledUpRef.current = true;
+      }
+    },
+    [],
+  );
+
+  const handleMessageListTouchStart = useCallback(
+    (event: TouchEvent<HTMLElement>) => {
+      const touch = event.touches[0];
+      lastMessageTouchYRef.current = touch ? touch.clientY : null;
+    },
+    [],
+  );
+
+  const handleMessageListTouchMove = useCallback(
+    (event: TouchEvent<HTMLElement>) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      if (
+        lastMessageTouchYRef.current != null &&
+        touch.clientY > lastMessageTouchYRef.current
+      ) {
+        userHasScrolledUpRef.current = true;
+      }
+      lastMessageTouchYRef.current = touch.clientY;
+    },
+    [],
+  );
 
   const handleInputChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const next = event.target.value;
@@ -803,8 +845,10 @@ export function useChatController({
     pending,
     inFlightTurn,
     messageListRef,
-    messageListEndRef,
     handleMessageListScroll,
+    handleMessageListWheel,
+    handleMessageListTouchStart,
+    handleMessageListTouchMove,
     error,
     trimmedLiveFlights,
     setTrimmedLiveFlights,
