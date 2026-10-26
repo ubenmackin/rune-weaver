@@ -12,12 +12,12 @@ public enum DesktopPermissionCheck: Sendable {
     @MainActor
     public static func isAccessibilityTrusted() -> Bool {
         #if canImport(ApplicationServices)
-            return AXIsProcessTrustedWithOptions(trustOptions(prompt: false))
+            AXIsProcessTrustedWithOptions(trustOptions(prompt: false))
         #else
             // Platforms without TCC have no Accessibility gate; returning true
             // here lets the control bridge fall through to its
             // unsupported-platform error, which remains the fail-closed signal.
-            return true
+            true
         #endif
     }
 
@@ -26,11 +26,11 @@ public enum DesktopPermissionCheck: Sendable {
     @discardableResult
     public static func requestAccessibilityTrust() -> Bool {
         #if canImport(ApplicationServices)
-            return AXIsProcessTrustedWithOptions(trustOptions(prompt: true))
+            AXIsProcessTrustedWithOptions(trustOptions(prompt: true))
         #else
             // No TCC gate off macOS; mirror the silent check so both paths
             // agree and downstream platform handling stays authoritative.
-            return true
+            true
         #endif
     }
 

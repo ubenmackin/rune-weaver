@@ -114,16 +114,16 @@ public struct DesktopCaptureBridge: DesktopCapturing, Sendable {
     public static func hasScreenRecordingAccess() -> Bool {
         #if canImport(CoreGraphics)
             if #available(macOS 10.15, *) {
-                return CGPreflightScreenCaptureAccess()
+                CGPreflightScreenCaptureAccess()
             } else {
                 // Older systems lack the preflight API; let the
                 // shareable-content trigger path surface the denial instead.
-                return true
+                true
             }
         #else
             // Platforms without TCC have no Screen Recording gate; let the
             // unsupported-platform error remain the fail-closed signal.
-            return true
+            true
         #endif
     }
 

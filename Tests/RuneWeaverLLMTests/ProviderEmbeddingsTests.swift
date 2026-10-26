@@ -34,7 +34,7 @@ private struct StubEmbeddingsProvider: LLMProvider, Sendable {
     func embeddings(text _: [String]) async throws -> [[Float]] {
         switch result {
         case let .success(vectors):
-            return vectors
+            vectors
         case let .failure(error):
             throw error
         }

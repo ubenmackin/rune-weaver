@@ -311,23 +311,11 @@ extension ServeCommand {
         )
     }
 
-    private func registerAndVerifyTools(
+    private func verifyServedPrompt(
         context: ServerContext,
-        plugins: [any Tool],
         selected: any LLMProvider,
         effectiveSystemPrompt: String
     ) async {
-        for tool in plugins {
-            // Preserve live enabled state across re-registration: a bare register would reset every
-            // tool to enabled, and desktop tools ship disabled — without this, a fresh install would
-            // flip them live between registration and the restore below.
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-        }
-        // Registration preserves live state now, but re-apply persisted
-        // toggles anyway; the cached load makes this a memory-only pass after
-        // the boot hydration in `make`.
-        await context.restoreToolStates(forceReload: false)
         // Re-snapshot the live service registry so drift between the startup
         // preview and the serving bus surfaces instead of silently omitting
         // a rune from the prompt.
@@ -423,9 +411,6 @@ extension ServeCommand {
         // One seed shared by the prompt preview and the served registry so both
         // builds observe the same media policy, secrets, and policy store.
         let seed = ToolBuildSeed(mediaConfig: resolvedMediaConfig, secrets: sharedSecrets, policyStore: policyStore)
-        // Compose the default system prompt from the live registry so the
-        // served model sees every registered tool; an explicit flag still wins.
-        let plugins = try await makePlugins(loaded: assembly.loaded, deps: deps, seed: seed)
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt on first boot.
         let effectiveSystemPrompt = try await resolveEffectiveSystemPrompt(
@@ -473,7 +458,7 @@ extension ServeCommand {
             notificationsConfig: assembly.loaded.config.notifications
         )
         await attachIndexFailureNotifier(context: context)
-        await registerAndVerifyTools(context: context, plugins: plugins, selected: assembly.selected, effectiveSystemPrompt: effectiveSystemPrompt)
+        await verifyServedPrompt(context: context, selected: assembly.selected, effectiveSystemPrompt: effectiveSystemPrompt)
         return (context, assembly.permissionGate)
     }
 
@@ -504,35 +489,6 @@ extension ServeCommand {
             hub: hub,
             embedder: embedder,
             makeEmbeddingsBackend: makeEmbeddingsBackend
-        )
-    }
-
-    private func makePlugins(
-        loaded: CLIConfigLoader.LoadedConfig,
-        deps: ToolBootstrapDependencies,
-        seed: ToolBuildSeed
-    ) async throws -> [any Tool] {
-        let previewWorkspace = WorkspaceStore(config: loaded.config.workspace)
-        return try await CLIShared.pluginTools(
-            emailConfig: loaded.config.email,
-            filesConfig: loaded.config.files,
-            bashConfig: loaded.config.bash,
-            memoryEngine: deps.memoryEngine,
-            containersConfig: loaded.config.containers,
-            embedder: deps.embedder,
-            browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm,
-            mediaConfig: seed.mediaConfig,
-            securityConfig: loaded.config.security,
-            secrets: seed.secrets,
-            goalEngine: deps.goalEngine,
-            goalStore: deps.goalStore,
-            goalConversations: deps.conversations,
-            goalsConfig: loaded.config.goals,
-            policyStore: seed.policyStore,
-            recipientAliasStore: deps.recipientAliasStore,
-            workspaceConfig: loaded.config.workspace,
-            workspaceStore: previewWorkspace
         )
     }
 

@@ -370,12 +370,12 @@ struct EgressDecisionContractTests {
         #expect(rules.first?.toolName == "api.request")
         #expect(rules.first?.scope == .domain(host: "api.github.com", subdomains: false))
         #expect(rules.first?.expiresAt == nil)
-        // A durable egress allow stores no supervisor grant and writes no
-        // policy entry: the rule is the whole durable record.
+        // A durable egress allow persists directly to policy.toml so policy.toml
+        // remains the authoritative single source of truth for network boundaries.
         let summary = await harness.context.egressSupervisor?.activeGrants(sessionID: sessionID)
         #expect(summary?.sessionDomains.isEmpty == true)
         #expect(summary?.oneShotDomains.isEmpty == true)
-        #expect(harness.persistedPolicy()?.contains("api.github.com") != true)
+        #expect(harness.persistedPolicy()?.contains("api.github.com") == true)
 
         // The rule authorizes the next identical call: the gate allows it and the supervisor
         // reports the host allowed, in a session that never approved anything, proving the trust is
@@ -751,6 +751,7 @@ struct EgressDecisionTransportTests {
         let nextCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.github.com/repos"}"#)
         #expect(await harness.context.permissionGate.checkPermission(toolCall: nextCall, tool: EgressGateProbeTool(name: "api.request")) == .allowed)
         #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "api.github.com", sessionID: nil) == .allowed)
+        #expect(harness.persistedPolicy()?.contains("api.github.com") == true)
     }
 
     @Test
@@ -931,6 +932,7 @@ struct EgressDecisionTransportTests {
         let siblingCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://raw.github.com/file"}"#)
         #expect(await harness.context.permissionGate.checkPermission(toolCall: siblingCall, tool: EgressGateProbeTool(name: "api.request"), sessionID: UUID()) == .allowed)
         #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "raw.github.com", sessionID: UUID()) == .allowed)
+        #expect(harness.persistedPolicy()?.contains("*.github.com") == true)
     }
 
     @Test
@@ -1100,5 +1102,39 @@ struct EgressDecisionTransportTests {
         let policy = try await harness.store.snapshot()
         #expect(policy.network.blockedDomains.contains("api.example.com"))
         #expect(policy.network.blockedDomains.contains("*.example.com") == false)
+    }
+
+    @Test
+    func `widened forever allow appends wildcard domain to policy.toml and authorizes host`() async throws {
+        let harness = try await makeDecisionHarness()
+        defer { harness.cleanUp() }
+        let sessionID = UUID()
+        let request = await enqueueEgressRequest(host: "www.reddit.com", sessionID: sessionID, context: harness.context)
+
+        let outcome = await applyApprovalDecision(
+            input: ApprovalDecisionInput(
+                id: request.id,
+                approved: true,
+                duration: .forever,
+                scope: .domain(host: "reddit.com", subdomains: true),
+                pending: request
+            ),
+            pulse: nil,
+            context: harness.context,
+            spawnResume: { _ in }
+        )
+        guard case let .resolved(approved) = outcome else {
+            Issue.record("Expected widened forever allow to resolve")
+            return
+        }
+        #expect(approved == true)
+
+        let policy = try await harness.store.snapshot()
+        #expect(policy.network.allowedDomains.contains("*.reddit.com"))
+        #expect(harness.persistedPolicy()?.contains("*.reddit.com") == true)
+
+        // The policy allow authorizes both apex and subdomains
+        #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "www.reddit.com", sessionID: UUID()) == .allowed)
+        #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "reddit.com", sessionID: UUID()) == .allowed)
     }
 }

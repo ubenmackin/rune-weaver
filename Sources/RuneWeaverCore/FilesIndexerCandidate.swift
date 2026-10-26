@@ -348,15 +348,8 @@ extension FilesIndexer {
             return nil
         }
         do {
-            if let fingerprint = try await services.store.storedFingerprint(
-                source: .files,
-                externalID: resolved.canonicalPath
-            ),
-                FilesIndexer.fingerprintMatchesStored(
-                    fingerprint,
-                    size: size,
-                    currentMtime: values.contentModificationDate
-                )
+            if let fingerprint = try await services.store.storedFingerprint(source: .files, externalID: resolved.canonicalPath),
+               FilesIndexer.fingerprintMatchesStored(fingerprint, size: size, currentMtime: values.contentModificationDate)
             {
                 if Task.isCancelled {
                     return FileOutcome(kind: .cancelled, relative: resolved.relative)

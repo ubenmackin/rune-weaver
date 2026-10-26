@@ -1275,7 +1275,7 @@ struct AccessRulesRouteTests {
     private func widenRuleStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.widenGrant(id: id) {
         case .widened:
-            return .noContent
+            .noContent
         case .notFound:
             throw Abort(.notFound, reason: "Unknown rule \(id.uuidString)")
         case let .notWidenable(reason):
@@ -1289,7 +1289,7 @@ struct AccessRulesRouteTests {
     private func rearmRuleStatus(id: UUID, duration: TrustDuration, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.rearmGrant(id: id, duration: duration) {
         case .rearmed:
-            return .noContent
+            .noContent
         case .notFound:
             throw Abort(.notFound, reason: "Unknown rule \(id.uuidString)")
         case let .invalidDuration(reason):
