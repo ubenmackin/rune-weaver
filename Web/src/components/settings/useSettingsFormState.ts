@@ -224,6 +224,8 @@ export function useSettingsFormState() {
     useState<boolean>(true);
   const [notificationsChatFailed, setNotificationsChatFailed] =
     useState<boolean>(true);
+  const [notificationsPushContact, setNotificationsPushContact] =
+    useState<string>("");
 
   // Persona state
   const [personaAssistantNameDraft, setPersonaAssistantNameDraft] = useState("");
@@ -400,6 +402,7 @@ export function useSettingsFormState() {
       setNotificationsIdeaProposed(resolved.ideaProposed);
       setNotificationsIndexFailed(resolved.indexFailed);
       setNotificationsChatFailed(resolved.chatFailed);
+      setNotificationsPushContact(resolved.pushContact ?? "");
     },
     []
   );
@@ -900,6 +903,8 @@ export function useSettingsFormState() {
     setNotificationsIndexFailed,
     notificationsChatFailed,
     setNotificationsChatFailed,
+    notificationsPushContact,
+    setNotificationsPushContact,
     personaAssistantNameDraft,
     setPersonaAssistantNameDraft,
     personaToneDraft,

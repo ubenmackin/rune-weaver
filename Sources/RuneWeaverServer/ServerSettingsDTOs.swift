@@ -735,6 +735,8 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
     public var indexFailed: Bool?
     /// Whether chat failures interrupt. Nil preserves the stored value.
     public var chatFailed: Bool?
+    /// Contact email or domain for Web Push VAPID subject. Nil preserves the stored value.
+    public var pushContact: String?
 
     /// Creates a partial notifications patch.
     public init(
@@ -743,7 +745,8 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         goalAdvance: Bool? = nil,
         ideaProposed: Bool? = nil,
         indexFailed: Bool? = nil,
-        chatFailed: Bool? = nil
+        chatFailed: Bool? = nil,
+        pushContact: String? = nil
     ) {
         self.approvalRequested = approvalRequested
         self.schedulerRun = schedulerRun
@@ -751,6 +754,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         self.ideaProposed = ideaProposed
         self.indexFailed = indexFailed
         self.chatFailed = chatFailed
+        self.pushContact = pushContact
     }
 
     /// Populates a patch from a full snapshot so programmatic callers holding
@@ -763,6 +767,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         self.ideaProposed = config.ideaProposed
         self.indexFailed = config.indexFailed
         self.chatFailed = config.chatFailed
+        self.pushContact = config.pushContact
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -772,6 +777,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         case ideaProposed
         case indexFailed
         case chatFailed
+        case pushContact
     }
 
     private struct AnyKey: CodingKey {
@@ -791,7 +797,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
     /// Decodes tolerantly on missing keys but rejects unknown keys.
     public init(from decoder: any Decoder) throws {
         let dynamic = try decoder.container(keyedBy: AnyKey.self)
-        let known = Set(["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed"])
+        let known = Set(["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed", "pushContact"])
         for key in dynamic.allKeys where !known.contains(key.stringValue) {
             throw DecodingError.dataCorruptedError(
                 forKey: key,
@@ -806,6 +812,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         ideaProposed = try container.decodeIfPresent(Bool.self, forKey: .ideaProposed)
         indexFailed = try container.decodeIfPresent(Bool.self, forKey: .indexFailed)
         chatFailed = try container.decodeIfPresent(Bool.self, forKey: .chatFailed)
+        pushContact = try container.decodeIfPresent(String.self, forKey: .pushContact)
     }
 
     /// Encodes only the present keys so an omitted patch preserves the stored section.
@@ -817,6 +824,7 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         try container.encodeIfPresent(ideaProposed, forKey: .ideaProposed)
         try container.encodeIfPresent(indexFailed, forKey: .indexFailed)
         try container.encodeIfPresent(chatFailed, forKey: .chatFailed)
+        try container.encodeIfPresent(pushContact, forKey: .pushContact)
     }
 
     /// Merges this patch onto the stored preferences, preserving every field the request omits.
@@ -840,6 +848,9 @@ public struct NotificationsSettingsUpdate: Content, Sendable, Equatable {
         }
         if let chatFailed {
             notifications.chatFailed = chatFailed
+        }
+        if let pushContact {
+            notifications.pushContact = pushContact
         }
     }
 }

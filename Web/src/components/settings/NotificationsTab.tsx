@@ -32,6 +32,8 @@ export interface NotificationsTabProps {
   setNotificationsIndexFailed: (val: boolean) => void;
   notificationsChatFailed: boolean;
   setNotificationsChatFailed: (val: boolean) => void;
+  notificationsPushContact?: string;
+  setNotificationsPushContact?: (val: string) => void;
 }
 
 export function NotificationsTab({
@@ -47,6 +49,8 @@ export function NotificationsTab({
   setNotificationsIndexFailed,
   notificationsChatFailed,
   setNotificationsChatFailed,
+  notificationsPushContact = "",
+  setNotificationsPushContact = () => {},
 }: NotificationsTabProps) {
   const { isStandalone } = useMobilePush();
   const prefs: Record<NotificationTypeMeta["key"], boolean> = {
@@ -87,6 +91,24 @@ export function NotificationsTab({
           <span className="form-group-hint">{item.hint}</span>
         </div>
       ))}
+
+      <div className="form-group settings-stack-gap">
+        <label htmlFor="notifications-push-contact">
+          Web Push Contact (Email or URL)
+        </label>
+        <input
+          id="notifications-push-contact"
+          data-testid="notifications-push-contact-input"
+          type="text"
+          value={notificationsPushContact}
+          onChange={(e) => setNotificationsPushContact(e.target.value)}
+          placeholder="operator@yourdomain.com or https://yourdomain.com"
+          maxLength={320}
+        />
+        <span className="form-group-hint">
+          Required for iOS PWA Web Push: Apple APNs validates that the VAPID subject domain resolves via public DNS.
+        </span>
+      </div>
 
       <div
         className="info-banner settings-stack-gap"

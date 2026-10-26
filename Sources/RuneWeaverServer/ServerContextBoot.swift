@@ -503,7 +503,12 @@ extension ServerContext {
         let pushTransport: any WebPushTransport = ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] == "1"
             ? NoOpWebPushTransport()
             : URLSessionWebPushTransport()
-        let pushSender = WebPushSender(vapidKeys: vapidKeys, subscriptions: pushSubscriptions, transport: pushTransport)
+        let pushSender = WebPushSender(
+            vapidKeys: vapidKeys,
+            subscriptions: pushSubscriptions,
+            transport: pushTransport,
+            notificationsBox: notificationsBox
+        )
         let combinedNotifier = CompositeSchedulerNotifier(
             primary: notifier,
             pushSender: pushSender,

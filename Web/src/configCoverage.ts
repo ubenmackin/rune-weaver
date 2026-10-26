@@ -185,6 +185,7 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "notifications.idea_proposed": "notifications-pane",
   "notifications.index_failed": "notifications-pane",
   "notifications.chat_failed": "notifications-pane",
+  "notifications.push_contact": "notifications-pane",
 };
 
 export const CONFIG_COVERAGE_EXCLUSIONS: Record<string, string> = {

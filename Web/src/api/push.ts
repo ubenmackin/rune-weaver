@@ -30,6 +30,8 @@ export interface PushUnsubscribeResponse {
 export interface PushTestResponse {
   status: string;
   delivered: number;
+  totalSubscribers: number;
+  errors: string[];
 }
 
 export async function getVapidPublicKey(options?: RequestInit): Promise<VapidPublicKeyResponse> {

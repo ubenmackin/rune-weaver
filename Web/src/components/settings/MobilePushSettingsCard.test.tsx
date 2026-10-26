@@ -16,7 +16,7 @@ describe("MobilePushSettingsCard", () => {
     error: null,
     subscribeMobilePush: vi.fn(),
     unsubscribeMobilePush: vi.fn(),
-    sendTestPush: vi.fn().mockResolvedValue(1),
+    sendTestPush: vi.fn().mockResolvedValue({ status: "ok", delivered: 1, totalSubscribers: 1, errors: [] }),
   };
 
   beforeEach(() => {
@@ -68,7 +68,7 @@ describe("MobilePushSettingsCard", () => {
 
   it("renders active state with disable button and send test button", async () => {
     const unsubscribeMock = vi.fn().mockResolvedValue(true);
-    const sendTestMock = vi.fn().mockResolvedValue(2);
+    const sendTestMock = vi.fn().mockResolvedValue({ status: "ok", delivered: 2, totalSubscribers: 2, errors: [] });
     vi.mocked(useMobilePushModule.useMobilePush).mockReturnValue({
       ...defaultHookValues,
       isSubscribed: true,
@@ -90,7 +90,27 @@ describe("MobilePushSettingsCard", () => {
 
     fireEvent.click(testBtn);
     expect(sendTestMock).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("Test push delivered!")).toBeInTheDocument();
+    expect(await screen.findByText("Test push delivered to 2 devices!")).toBeInTheDocument();
+  });
+
+  it("renders server error feedback when test push delivery fails", async () => {
+    const sendTestMock = vi.fn().mockResolvedValue({
+      status: "failed",
+      delivered: 0,
+      totalSubscribers: 1,
+      errors: ["Apple APNs HTTP 400: BadJwtToken"],
+    });
+    vi.mocked(useMobilePushModule.useMobilePush).mockReturnValue({
+      ...defaultHookValues,
+      isSubscribed: true,
+      sendTestPush: sendTestMock,
+    });
+
+    render(<MobilePushSettingsCard />);
+    const testBtn = screen.getByTestId("send-test-push-btn");
+    fireEvent.click(testBtn);
+
+    expect(await screen.findByText("Delivery failed: Apple APNs HTTP 400: BadJwtToken")).toBeInTheDocument();
   });
 
   it("renders error banner when error is present", () => {

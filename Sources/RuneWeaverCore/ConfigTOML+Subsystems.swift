@@ -234,5 +234,8 @@ extension RuneWeaverConfig {
         if let chatFailed = try notifications.strictBool("chat_failed", field: "notifications.chat_failed") {
             config.notifications.chatFailed = chatFailed
         }
+        if let pushContact = try notifications.strictString("push_contact", field: "notifications.push_contact") {
+            config.notifications.pushContact = pushContact
+        }
     }
 }

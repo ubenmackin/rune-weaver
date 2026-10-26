@@ -4,13 +4,19 @@ import CryptoKit
 import Foundation
 import RuneWeaverCore
 
-/// Failures loading or persisting the VAPID keypair.
+/// Failures loading or persisting the VAPID keypair or signing tokens.
 public enum WebPushKeysError: LocalizedError, Sendable {
     case persistenceUnavailable(reason: String)
+    case missingSubject
+    case invalidSubject(reason: String)
 
     public var errorDescription: String? {
         switch self {
         case let .persistenceUnavailable(reason):
+            reason
+        case .missingSubject:
+            "Web Push contact is not configured. Please set a contact email or domain under Settings -> Notifications."
+        case let .invalidSubject(reason):
             reason
         }
     }
@@ -90,20 +96,44 @@ public struct WebPushKeys: Sendable {
         Self.base64URL(privateKey.publicKey.x963Representation)
     }
 
+    /// Normalizes a user-supplied contact (email or URL) into a valid RFC 8292 `sub` claim.
+    public static func normalizeSubject(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasPrefix("mailto:") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("http://") {
+            return trimmed
+        }
+        if trimmed.contains("@") {
+            return "mailto:\(trimmed)"
+        }
+        return "https://\(trimmed)"
+    }
+
     /// Signs a VAPID ES256 JWT for the target push gateway audience (RFC 8292).
+    /// - Parameters:
+    ///   - audience: Push gateway audience origin (e.g. `https://web.push.apple.com`).
+    ///   - subject: Contact URI (`mailto:...` or `https://...`) identifying the operator.
+    ///   - expirationSeconds: Expiry delta. Defaults to 43,200s (12h) to avoid clock skew rejection.
     public func signJWT(
         audience: String,
-        subject: String = "mailto:operator@runeweaver.local",
-        expirationSeconds: Int = 86400
+        subject: String,
+        expirationSeconds: Int = 43200
     ) throws -> String {
+        let normalized = Self.normalizeSubject(subject)
+        guard !normalized.isEmpty else {
+            throw WebPushKeysError.missingSubject
+        }
+
         let headerJSON = #"{"alg":"ES256","typ":"JWT"}"#
         let headerB64 = Self.base64URL(Data(headerJSON.utf8))
 
-        let exp = Int(Date().timeIntervalSince1970) + expirationSeconds
+        // Clamped expiration: must not exceed 24 hours (86,400s) per RFC 8292 §2.1.
+        let clampedDelta = max(60, min(expirationSeconds, 86400))
+        let exp = Int(Date().timeIntervalSince1970) + clampedDelta
         let payloadDict: [String: Any] = [
             "aud": audience,
             "exp": exp,
-            "sub": subject
+            "sub": normalized
         ]
         let payloadData = try JSONSerialization.data(withJSONObject: payloadDict, options: [.sortedKeys])
         let payloadB64 = Self.base64URL(payloadData)

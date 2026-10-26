@@ -139,6 +139,8 @@ describe("useMobilePush hook", () => {
     vi.mocked(pushApi.sendTestPushNotification).mockResolvedValue({
       status: "ok",
       delivered: 1,
+      totalSubscribers: 1,
+      errors: [],
     });
   });
 
@@ -200,7 +202,7 @@ describe("useMobilePush hook", () => {
 
     expect(success).toBe(false);
     expect(result.current.isSubscribed).toBe(false);
-    expect(result.current.error).toMatch(/Notification permission denied/);
+    expect(result.current.error).toMatch(/Notification permission/);
   });
 
   it("unsubscribes and calls unregisterPushSubscription", async () => {
@@ -228,15 +230,17 @@ describe("useMobilePush hook", () => {
     );
   });
 
-  it("dispatches test push notification and returns count", async () => {
+  it("dispatches test push notification and returns result", async () => {
     const { result } = renderHook(() => useMobilePush());
 
-    let count = 0;
+    let res: pushApi.PushTestResponse | undefined;
     await act(async () => {
-      count = await result.current.sendTestPush();
+      res = await result.current.sendTestPush();
     });
 
-    expect(count).toBe(1);
+    expect(res).toBeDefined();
+    expect(res!.delivered).toBe(1);
+    expect(res!.totalSubscribers).toBe(1);
     expect(pushApi.sendTestPushNotification).toHaveBeenCalledTimes(1);
   });
 });

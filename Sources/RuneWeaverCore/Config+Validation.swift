@@ -929,8 +929,16 @@ extension RuneWeaverConfig {
         _ = PersonaConfig.normalizedStyle(persona.style)
     }
 
-    /// Validates the `[notifications]` section. Booleans need no range check.
-    private func validateNotificationsSection() throws {}
+    /// Validates the `[notifications]` section.
+    private func validateNotificationsSection() throws {
+        let contact = notifications.pushContact.trimmingCharacters(in: .whitespacesAndNewlines)
+        if contact.count > 320 {
+            throw ConfigError.validationError(
+                field: "notifications.push_contact",
+                message: "must be 320 characters or fewer"
+            )
+        }
+    }
 
     /// Known `[notifications]` TOML keys in file shape.
     static let notificationsKnownKeys: Set<String> = [
@@ -939,7 +947,8 @@ extension RuneWeaverConfig {
         "goal_advance",
         "idea_proposed",
         "index_failed",
-        "chat_failed"
+        "chat_failed",
+        "push_contact"
     ]
 
     /// Rejects unknown `[notifications]` keys fail-closed.

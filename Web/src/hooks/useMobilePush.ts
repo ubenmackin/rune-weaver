@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   getVapidPublicKey,
+  PushTestResponse,
   registerPushSubscription,
   sendTestPushNotification,
   unregisterPushSubscription,
@@ -79,6 +80,24 @@ export function useMobilePush() {
       setError("Web Push is not supported in this browser.");
       return false;
     }
+
+    // On iOS Safari PWA, Notification.requestPermission() MUST be invoked synchronously
+    // in direct response to the user gesture before any await ticks expire transient activation.
+    let permission = Notification.permission;
+    if (permission !== "granted") {
+      try {
+        permission = await Notification.requestPermission();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to request notification permission.";
+        setError(message);
+        return false;
+      }
+    }
+    if (permission !== "granted") {
+      setError("Notification permission was not granted.");
+      return false;
+    }
+
     setIsLoading(true);
     setError(null);
     try {
@@ -91,11 +110,6 @@ export function useMobilePush() {
       const { publicKey } = await getVapidPublicKey();
       if (!publicKey) {
         throw new Error("VAPID public key unavailable from server.");
-      }
-
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        throw new Error("Notification permission denied by user.");
       }
 
       const applicationServerKey = urlBase64ToUint8Array(publicKey);
@@ -155,16 +169,16 @@ export function useMobilePush() {
     }
   }, [isSupported]);
 
-  const sendTestPush = useCallback(async (): Promise<number> => {
+  const sendTestPush = useCallback(async (): Promise<PushTestResponse> => {
     setIsLoading(true);
     setError(null);
     try {
       const res = await sendTestPushNotification();
-      return res.delivered;
+      return res;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to send test push notification.";
       setError(message);
-      return 0;
+      return { status: "failed", delivered: 0, totalSubscribers: 0, errors: [message] };
     } finally {
       setIsLoading(false);
     }

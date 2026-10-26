@@ -60,6 +60,7 @@ extension RuneWeaverConfig {
         lines += renderFanOutTOML()
         lines += renderWorkspaceTOML()
         lines += renderPersonaTOML()
+        lines += renderNotificationsTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -522,6 +523,24 @@ extension RuneWeaverConfig {
             "avatar = \(Self.tomlQuoted(persona.avatar.rawValue))",
             ""
         ]
+    }
+
+    /// Renders the additive `[notifications]` section.
+    private func renderNotificationsTOML() -> [String] {
+        var lines = [
+            "[notifications]",
+            "approval_requested = \(notifications.approvalRequested)",
+            "scheduler_run = \(notifications.schedulerRun)",
+            "goal_advance = \(notifications.goalAdvance)",
+            "idea_proposed = \(notifications.ideaProposed)",
+            "index_failed = \(notifications.indexFailed)",
+            "chat_failed = \(notifications.chatFailed)"
+        ]
+        if !notifications.pushContact.isEmpty {
+            lines.append("push_contact = \(Self.tomlQuoted(notifications.pushContact))")
+        }
+        lines.append("")
+        return lines
     }
 }
 

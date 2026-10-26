@@ -376,6 +376,7 @@ export interface NotificationsConfigData {
   ideaProposed: boolean;
   indexFailed: boolean;
   chatFailed: boolean;
+  pushContact?: string;
 }
 
 // Partial notifications patch for `PUT /settings`. Every field is optional so
@@ -387,6 +388,7 @@ export interface NotificationsSettingsUpdate {
   ideaProposed?: boolean;
   indexFailed?: boolean;
   chatFailed?: boolean;
+  pushContact?: string;
 }
 
 // Combined notifications default: every interruption type surfaces unless the
@@ -398,9 +400,10 @@ export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfigData = {
   ideaProposed: true,
   indexFailed: true,
   chatFailed: true,
+  pushContact: "",
 };
 
-// Resolves a stored notifications snapshot to the six-switch shape, degrading
+// Resolves a stored notifications snapshot to the full shape, degrading
 // missing or non-boolean entries to true so absent keys read as enabled.
 export function resolveNotificationsConfig(
   value: Partial<NotificationsConfigData> | null | undefined,
@@ -413,6 +416,7 @@ export function resolveNotificationsConfig(
     typeof source[key] === "boolean"
       ? (source[key] as boolean)
       : true;
+  const rawContact = (value as Record<string, unknown> | undefined | null)?.pushContact;
   return {
     approvalRequested: pick("approvalRequested"),
     schedulerRun: pick("schedulerRun"),
@@ -420,6 +424,7 @@ export function resolveNotificationsConfig(
     ideaProposed: pick("ideaProposed"),
     indexFailed: pick("indexFailed"),
     chatFailed: pick("chatFailed"),
+    pushContact: typeof rawContact === "string" ? rawContact : "",
   };
 }
 

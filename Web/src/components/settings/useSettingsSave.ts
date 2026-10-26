@@ -53,7 +53,7 @@ import {
 import type { useSettingsFormState } from "./useSettingsFormState";
 import { useSettingsSaveModals } from "./useSettingsSaveModals";
 
-// Assembles the six-switch notifications patch for the shared save footer.
+// Assembles the notifications patch for the shared save footer.
 // Every key rides the shared `PUT /settings` with live apply; no dedicated
 // push endpoint is used so history and inbox rows keep recording.
 export function buildNotificationsPayload(
@@ -63,6 +63,7 @@ export function buildNotificationsPayload(
   ideaProposed: boolean,
   indexFailed: boolean,
   chatFailed: boolean,
+  pushContact?: string,
 ): NotificationsSettingsUpdate {
   return {
     approvalRequested,
@@ -71,6 +72,7 @@ export function buildNotificationsPayload(
     ideaProposed,
     indexFailed,
     chatFailed,
+    ...(pushContact !== undefined ? { pushContact: pushContact.trim() } : {}),
   };
 }
 
@@ -724,7 +726,8 @@ export function useSettingsSave({
           form.notificationsGoalAdvance,
           form.notificationsIdeaProposed,
           form.notificationsIndexFailed,
-          form.notificationsChatFailed
+          form.notificationsChatFailed,
+          form.notificationsPushContact
         ),
         ideas: buildIdeasPayload(
           form.ideasEnabled,
