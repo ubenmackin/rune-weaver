@@ -229,9 +229,21 @@ public protocol WebFetchTransport: Sendable {
     /// - Parameter request: Request to send.
     /// - Returns: Body bytes plus the URL response.
     func data(for request: URLRequest) async throws -> (Data, URLResponse)
+
+    /// Performs one HTTP round trip against the SSRF-vetted dial pin.
+    func data(for request: URLRequest, pin: SSRFDialPin) async throws -> (Data, URLResponse)
 }
 
-/// Live fetch transport that never follows redirects automatically.
+extension WebFetchTransport {
+    /// Default pinned entry for stub transports. Hermetic suites keep implementing only the
+    /// unpinned entry; production's live transport overrides this with the pinned dialer, so the
+    /// default is never the production path.
+    public func data(for request: URLRequest, pin _: SSRFDialPin) async throws -> (Data, URLResponse) {
+        try await data(for: request)
+    }
+}
+
+/// Live fetch transport that dials only the address the SSRF gate pinned.
 public struct URLSessionWebFetchTransport: WebFetchTransport, Sendable {
     /// Request timeout in seconds.
     public let timeoutSeconds: Double
@@ -242,12 +254,17 @@ public struct URLSessionWebFetchTransport: WebFetchTransport, Sendable {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    /// Sends one request, surfacing 3xx instead of following.
-    /// - Parameter request: Request to send.
-    /// - Returns: Body plus response.
-    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await CappedNoRedirectDelegate.downloadCapped(
+    /// Refuses an unpinned dial: a hostname reaching this entry would bypass
+    /// the SSRF gate's dial-time proof, so it fails closed instead.
+    public func data(for _: URLRequest) async throws -> (Data, URLResponse) {
+        throw PinnedDialError.unpinnedDialRefused
+    }
+
+    /// Sends one request against the pinned addresses, surfacing 3xx instead of following.
+    public func data(for request: URLRequest, pin: SSRFDialPin) async throws -> (Data, URLResponse) {
+        try await PinnedHTTPDialer.perform(
             request: request,
+            pin: pin,
             maxBytes: WebFetchTool.maxFetchBytes,
             timeoutSeconds: timeoutSeconds
         )
@@ -262,7 +279,7 @@ public struct WebFetchTool: Tool, Sendable {
     public let description =
         "Fetches one web page as readable text. "
             + "Use when the user asks to open, quote, or summarize a URL. "
-            + "Follows up to 5 redirects with a 1 MB cap; login walls return auth_required with a browser.navigate hint."
+            + "Follows up to 5 redirects with a 1 MB cap; automatically escalates to interactive browser on auth walls."
     /// Function-calling contract for `url`.
     /// Schema advertises only the canonical key; retired spellings stay out of
     /// the schema as removed aliases so strict validators and the decoder agree.
@@ -308,6 +325,8 @@ public struct WebFetchTool: Tool, Sendable {
     private let mediaConfig: MediaConfig?
     /// HTTP transport (live session by default, stub in tests).
     private let transport: any WebFetchTransport
+    /// Optional Playwright gateway for automatic browser escalation on auth walls or challenge pages.
+    private let gateway: any BrowserPlaywrightGateway?
     /// Optional egress supervisor enforcing declarative security policy.
     private let egressSupervisor: OutboundEgressSupervisor?
     /// Owner-declared local grants unioned with the config-derived origins.
@@ -320,11 +339,13 @@ public struct WebFetchTool: Tool, Sendable {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: any WebFetchTransport? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
+        self.gateway = gateway
         self.egressSupervisor = egressSupervisor
         self.extraAllowlistedOrigins = extraAllowlistedOrigins
         if let transport {
@@ -376,7 +397,20 @@ public struct WebFetchTool: Tool, Sendable {
             return .failure("Invalid web.fetch arguments: 'url' is not a valid URL.", callID: input.callID)
         }
         do {
-            let envelope = try await fetchChain(from: initialURL, originalURL: rawURL, sessionID: context.sessionID)
+            var envelope = try await fetchChain(from: initialURL, originalURL: rawURL, sessionID: context.sessionID)
+            if envelope.status == WebFetchEnvelope.statusAuthRequired,
+               let gateway,
+               !context.dryRun
+            {
+                if let resolved = try await escalateToBrowser(
+                    targetURL: envelope.finalUrl,
+                    originalURL: rawURL,
+                    gateway: gateway,
+                    sessionID: context.sessionID
+                ) {
+                    envelope = resolved
+                }
+            }
             let content = try ToolEnvelopeEncoding.encode(envelope)
             // Typed non-ok outcomes still return success so the model can
             // read `status`/`suggestedNext`; only invalid input is a failure.
@@ -398,15 +432,121 @@ public struct WebFetchTool: Tool, Sendable {
 // MARK: - Redirect Chain & Helpers
 
 extension WebFetchTool {
+    /// Escalates an auth-walled or challenge-blocked fetch to the browser gateway.
+    /// Runs headless first; if auth/challenge is detected, escalates to headed mode for human interaction.
+    private func escalateToBrowser(
+        targetURL: String,
+        originalURL: String,
+        gateway: any BrowserPlaywrightGateway,
+        sessionID: UUID?
+    ) async throws -> WebFetchEnvelope? {
+        var snapshot: BrowserSnapshot
+        do {
+            snapshot = try await gateway.navigate(
+                url: targetURL,
+                includeScreenshot: false,
+                headed: false,
+                dryRun: false,
+                sessionID: sessionID
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
+
+        if snapshot.authRequired {
+            do {
+                snapshot = try await gateway.navigate(
+                    url: targetURL,
+                    includeScreenshot: false,
+                    headed: true,
+                    dryRun: false,
+                    sessionID: sessionID
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return nil
+            }
+        }
+
+        for step in snapshot.redirectChain {
+            do {
+                _ = try await BrowserValidation.validateEgressURLAsync(
+                    step.url,
+                    browserConfig: browserConfig,
+                    mediaConfig: mediaConfig,
+                    extraAllowlistedOrigins: extraAllowlistedOrigins,
+                    egressSupervisor: egressSupervisor,
+                    sessionID: sessionID
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return WebFetchEnvelope(
+                    status: WebFetchEnvelope.statusUnsupported,
+                    finalUrl: step.url,
+                    url: originalURL,
+                    reason: "Egress denied during browser navigation: \(error.localizedDescription)"
+                )
+            }
+        }
+        do {
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                snapshot.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                extraAllowlistedOrigins: extraAllowlistedOrigins,
+                egressSupervisor: egressSupervisor,
+                sessionID: sessionID
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return WebFetchEnvelope(
+                status: WebFetchEnvelope.statusUnsupported,
+                finalUrl: snapshot.url,
+                url: originalURL,
+                reason: "Egress denied during browser navigation: \(error.localizedDescription)"
+            )
+        }
+
+        if !snapshot.authRequired {
+            let (returned, charTruncated) = Self.truncateForContext(snapshot.text)
+            return WebFetchEnvelope(
+                status: WebFetchEnvelope.statusOK,
+                finalUrl: snapshot.url,
+                url: originalURL,
+                contentType: "text/html",
+                content: returned,
+                truncated: snapshot.truncated || charTruncated,
+                reason: nil
+            )
+        } else {
+            return WebFetchEnvelope(
+                status: WebFetchEnvelope.statusAuthRequired,
+                finalUrl: snapshot.url,
+                url: originalURL,
+                contentType: "text/html",
+                suggestedNext: "browser.navigate",
+                reason: "Page requires authentication or challenge resolution; "
+                    + "operator closed browser or did not complete login in the interactive browser."
+            )
+        }
+    }
+
     /// Validates hop safety against scheme, egress supervisor, and SSRF guard.
-    private func validateHopSafety(url: URL, sessionID: UUID?, vettedHosts: inout Set<String>) async -> String? {
+    /// Returns the refusal plus the vetted dial pin the transport must use.
+    private func validateHopSafety(url: URL, sessionID: UUID?, vettedHosts: inout Set<String>) async -> (refusal: String?, pin: SSRFDialPin?) {
         guard WebURLSafety.isSafeUrl(url.absoluteString) else {
-            return "Unsafe redirect target: refusing to dereference \(url.absoluteString)."
+            return ("Unsafe redirect target: refusing to dereference \(url.absoluteString).", nil)
         }
         let canonicalHost = url.host.map { SensitiveAddressNormalization.normalizedHost($0) } ?? ""
         // Repeat hosts still re-enter the supervisor so blocked plus
         // credential plus SSRF checks run on every hop; the supervisor
         // carries redirect equivalence via previouslyVettedHosts.
+        var vettedPin: SSRFDialPin?
         if let supervisor = egressSupervisor {
             let verdict = await supervisor.validate(
                 url: url,
@@ -417,24 +557,49 @@ extension WebFetchTool {
                 previouslyVettedHosts: vettedHosts
             )
             switch verdict {
-            case .allowed:
-                break
+            case let .allowed(result):
+                guard !result.dialPin.addresses.isEmpty else {
+                    return ("SSRF denied: vetting produced no dialable address.", nil)
+                }
+                vettedPin = result.dialPin
             case let .denied(reason), let .unlistedDomain(_, reason):
-                return reason
+                return (reason, nil)
             }
         }
-        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
+        if vettedPin == nil {
+            // Without a supervisor the SSRF gate still proves a pin, so the
+            // transport never re-resolves the hostname at dial time.
+            switch await ApiSSRFGuard.vetAsync(
+                for: url.absoluteString,
+                allowlistedOrigins: ApiSSRFGuard.allowlistedOrigins(
+                    browserConfig: browserConfig,
+                    mediaConfig: mediaConfig,
+                    llmServerURLs: []
+                ).union(extraAllowlistedOrigins)
+            ) {
+            case let .dialable(pin):
+                guard !pin.addresses.isEmpty else {
+                    return ("SSRF denied: vetting produced no dialable address.", nil)
+                }
+                vettedPin = pin
+            case let .refused(reason):
+                return (reason, nil)
+            }
+        } else if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
             for: url.absoluteString,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {
-            return refusal
+            return (refusal, nil)
         }
         if !canonicalHost.isEmpty {
             vettedHosts.insert(canonicalHost)
         }
-        return nil
+        guard let pin = vettedPin else {
+            return ("SSRF denied: vetting produced no dialable address.", nil)
+        }
+        return (nil, pin)
     }
 
     /// Follows the redirect chain manually with per-hop validation.
@@ -467,15 +632,23 @@ extension WebFetchTool {
             )
         }
         while true {
-            if let refusal = await validateHopSafety(url: currentURL, sessionID: sessionID, vettedHosts: &vettedHosts) {
+            let hop = await validateHopSafety(url: currentURL, sessionID: sessionID, vettedHosts: &vettedHosts)
+            if let refusal = hop.refusal {
                 return chainEnvelope(
                     status: WebFetchEnvelope.statusUnsupported,
                     finalURL: currentURL.absoluteString,
                     reason: refusal
                 )
             }
+            guard let pin = hop.pin else {
+                return chainEnvelope(
+                    status: WebFetchEnvelope.statusUnsupported,
+                    finalURL: currentURL.absoluteString,
+                    reason: "SSRF denied: vetting produced no dialable address."
+                )
+            }
             let request = makeFetchRequest(url: currentURL)
-            let (data, response) = try await transport.data(for: request)
+            let (data, response) = try await transport.data(for: request, pin: pin)
             guard let http = response as? HTTPURLResponse else {
                 return chainEnvelope(
                     status: WebFetchEnvelope.statusUnsupported,
@@ -502,7 +675,8 @@ extension WebFetchTool {
                         reason: failure.reason
                     )
                 }
-                if let refusal = await validateHopSafety(url: next, sessionID: sessionID, vettedHosts: &vettedHosts) {
+                let nextHop = await validateHopSafety(url: next, sessionID: sessionID, vettedHosts: &vettedHosts)
+                if let refusal = nextHop.refusal {
                     return chainEnvelope(
                         status: WebFetchEnvelope.statusUnsupported,
                         finalURL: next.absoluteString,
@@ -758,6 +932,7 @@ public enum WebFetchTools {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: any WebFetchTransport? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
@@ -766,6 +941,7 @@ public enum WebFetchTools {
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 transport: transport,
+                gateway: gateway,
                 egressSupervisor: supervisor,
                 extraAllowlistedOrigins: extraAllowlistedOrigins
             )
@@ -778,6 +954,7 @@ public enum WebFetchTools {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: any WebFetchTransport? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) async {
@@ -785,6 +962,7 @@ public enum WebFetchTools {
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             transport: transport,
+            gateway: gateway,
             supervisor: supervisor,
             extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {

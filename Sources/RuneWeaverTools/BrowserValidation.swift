@@ -79,8 +79,10 @@ public enum BrowserValidation: Sendable {
                 // the canonical guard below re-vets resolved addresses.
                 let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
                 switch verdict {
-                case .allowed:
-                    break
+                case let .allowed(result):
+                    guard !result.dialPin.addresses.isEmpty else {
+                        throw BrowserError.invalidURL("Egress blocked: SSRF vetting produced no dialable address.")
+                    }
                 case let .denied(reason):
                     throw BrowserError.invalidURL("Egress blocked: \(reason)")
                 case let .unlistedDomain(host, reason):

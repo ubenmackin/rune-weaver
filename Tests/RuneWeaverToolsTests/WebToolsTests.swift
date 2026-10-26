@@ -78,6 +78,33 @@ private enum WebTestSupport {
         let reason: String?
     }
 
+    /// Stub gateway returning custom snapshots for escalation tests.
+    struct StubBrowserGateway: BrowserPlaywrightGateway, Sendable {
+        let handler: @Sendable (String, Bool) async throws -> BrowserSnapshot
+
+        func navigate(
+            url: String,
+            includeScreenshot: Bool,
+            headed: Bool,
+            dryRun: Bool,
+            sessionID: UUID?
+        ) async throws -> BrowserSnapshot {
+            _ = includeScreenshot
+            _ = dryRun
+            _ = sessionID
+            return try await handler(url, headed)
+        }
+
+        func navigate(url: String, includeScreenshot: Bool) async throws -> BrowserSnapshot {
+            _ = includeScreenshot
+            return try await handler(url, false)
+        }
+
+        func act(action: BrowserActAction, ref: String, text _: String?, url: String) async throws -> BrowserActResult {
+            BrowserActResult(url: url, action: action, ref: ref)
+        }
+    }
+
     /// SearXNG fixture with key drift: content vs snippet, url vs link.
     static func mixedKeysFixture() -> Data {
         Data("""
@@ -314,6 +341,92 @@ struct WebFetchSafetyTests {
             #expect(envelope.suggestedNext == "browser.navigate")
             #expect(envelope.finalUrl == "https://93.184.216.34/private")
         }
+    }
+
+    @Test
+    func `Auth status auto-escalates to gateway and returns content on resolution`() async throws {
+        let page = try #require(URL(string: "https://93.184.216.34/protected"))
+        let transport = WebTestSupport.RoutingFetchTransport { _ in
+            (Data(), WebTestSupport.statusResponse(for: page, statusCode: 403))
+        }
+        let gateway = WebTestSupport.StubBrowserGateway { url, headed in
+            BrowserSnapshot(
+                url: url,
+                title: "Secret Area",
+                text: "Welcome to the secret area",
+                refs: [],
+                authRequired: !headed,
+                redirectChain: [BrowserRedirectStep(url: url)]
+            )
+        }
+        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport, gateway: gateway)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://93.184.216.34/protected"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!output.isError)
+        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "ok")
+        #expect(envelope.content == "Welcome to the secret area")
+        #expect(envelope.finalUrl == "https://93.184.216.34/protected")
+    }
+
+    @Test
+    func `Auth status returns auth_required if gateway remains authRequired`() async throws {
+        let page = try #require(URL(string: "https://93.184.216.34/login-wall"))
+        let transport = WebTestSupport.RoutingFetchTransport { _ in
+            (Data(), WebTestSupport.statusResponse(for: page, statusCode: 401))
+        }
+        let gateway = WebTestSupport.StubBrowserGateway { url, _ in
+            BrowserSnapshot(
+                url: url,
+                title: "Login",
+                text: "Please log in",
+                refs: [],
+                authRequired: true,
+                redirectChain: [BrowserRedirectStep(url: url)]
+            )
+        }
+        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport, gateway: gateway)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://93.184.216.34/login-wall"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!output.isError)
+        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "auth_required")
+        #expect(envelope.reason?.contains("operator closed browser or did not complete login") == true)
+    }
+
+    @Test
+    func `Gateway egress denial during auto-escalation returns unsupported failure`() async throws {
+        let page = try #require(URL(string: "https://93.184.216.34/redirect-to-internal"))
+        let transport = WebTestSupport.RoutingFetchTransport { _ in
+            (Data(), WebTestSupport.statusResponse(for: page, statusCode: 403))
+        }
+        let gateway = WebTestSupport.StubBrowserGateway { _, _ in
+            BrowserSnapshot(
+                url: "http://169.254.169.254/latest/meta-data",
+                title: "Internal Admin",
+                text: "Secret internal info",
+                refs: [],
+                authRequired: false,
+                redirectChain: [
+                    BrowserRedirectStep(url: "https://93.184.216.34/redirect-to-internal"),
+                    BrowserRedirectStep(url: "http://169.254.169.254/latest/meta-data")
+                ]
+            )
+        }
+        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport, gateway: gateway)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://93.184.216.34/redirect-to-internal"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError)
+        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "unsupported")
+        #expect(envelope.reason?.contains("Egress denied") == true)
+        #expect(envelope.reason?.contains("SSRF") == true)
     }
 
     @Test

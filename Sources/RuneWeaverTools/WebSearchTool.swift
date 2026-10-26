@@ -853,6 +853,7 @@ public enum WebTools {
         searchTransport: any WebSearchTransport? = nil,
         fetchTransport: any WebFetchTransport? = nil,
         ensurer: any SearXNGEnsuring? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
@@ -861,6 +862,7 @@ public enum WebTools {
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 transport: fetchTransport,
+                gateway: gateway,
                 supervisor: supervisor,
                 extraAllowlistedOrigins: extraAllowlistedOrigins
             )
@@ -874,6 +876,7 @@ public enum WebTools {
         searchTransport: any WebSearchTransport? = nil,
         fetchTransport: any WebFetchTransport? = nil,
         ensurer: any SearXNGEnsuring? = nil,
+        gateway: any BrowserPlaywrightGateway? = nil,
         supervisor: OutboundEgressSupervisor? = nil,
         extraAllowlistedOrigins: Set<String> = []
     ) async {
@@ -883,6 +886,7 @@ public enum WebTools {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer,
+            gateway: gateway,
             supervisor: supervisor,
             extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {
