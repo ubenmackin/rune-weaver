@@ -434,13 +434,13 @@ private func messagesDatabasePathForProbe() -> String {
     private func indexEventKitSourceAccess(for entity: EKEntityType) -> String {
         switch EKEventStore.authorizationStatus(for: entity) {
         case .fullAccess:
-            return "granted"
+            "granted"
         case .notDetermined:
-            return "notDetermined"
+            "notDetermined"
         case .denied, .writeOnly, .restricted:
-            return "denied"
+            "denied"
         @unknown default:
-            return "denied"
+            "denied"
         }
     }
 #endif

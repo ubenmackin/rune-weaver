@@ -533,7 +533,7 @@ public actor ApprovalDecisionLogStore: ApprovalDecisionRecording {
     /// predicates that ride the SELECT.
     public func list(limit: Int, offset: Int, toolName: String?, allowed: Bool?) async throws -> [ApprovalDecisionEntry] {
         #if canImport(SQLite3)
-            return await SQLiteSerialIO.runUncancellable {
+            await SQLiteSerialIO.runUncancellable {
                 SQLiteApprovalDecisionStorage.list(
                     limit: limit,
                     offset: offset,
@@ -543,18 +543,18 @@ public actor ApprovalDecisionLogStore: ApprovalDecisionRecording {
                 )
             }
         #else
-            return []
+            []
         #endif
     }
 
     /// Counts stored decisions under the optional tool/polarity narrowing.
     public func count(toolName: String?, allowed: Bool?) async throws -> Int {
         #if canImport(SQLite3)
-            return await SQLiteSerialIO.runUncancellable {
+            await SQLiteSerialIO.runUncancellable {
                 SQLiteApprovalDecisionStorage.count(toolName: toolName, allowed: allowed, dbPath: self.dbPath)
             }
         #else
-            return 0
+            0
         #endif
     }
 

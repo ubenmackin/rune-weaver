@@ -244,9 +244,16 @@ func egressApprovalVerdict(
             guard let sessionID = pending.sessionID, let supervisor = context.egressSupervisor else { return nil }
             await supervisor.allowDomainForSession(sessionID: sessionID, domain: targetDomain)
             return true
-        case .forTask, .fiveMinutes, .oneHour, .oneDay, .forever:
-            // The durable half runs inside `decide`, which mints the
-            // domain-scoped rule for the resolved widened scope.
+        case .forTask, .fiveMinutes, .oneHour, .oneDay:
+            return true
+        case .forever:
+            // The durable allow writes directly to policy.toml so it is persisted
+            // to disk and visible in Settings -> Access -> Network without backdoors.
+            do {
+                try await context.policyStore.appendAllowedDomain(targetDomain)
+            } catch {
+                return nil
+            }
             return true
         }
     }

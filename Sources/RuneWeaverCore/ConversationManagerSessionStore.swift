@@ -25,18 +25,18 @@ enum SessionStoreIO {
     /// - Returns: Stored sessions, empty when the store is missing.
     static func read(dbPath: String) throws -> [ConversationSession] {
         #if canImport(SQLite3)
-            return try SQLiteSessionStore.read(dbPath: dbPath)
+            try SQLiteSessionStore.read(dbPath: dbPath)
         #else
-            return try JSONSessionStore.read(dbPath: dbPath)
+            try JSONSessionStore.read(dbPath: dbPath)
         #endif
     }
 
     /// Reads a single session from the store.
     static func readSingle(sessionID: UUID, dbPath: String) throws -> ConversationSession? {
         #if canImport(SQLite3)
-            return try SQLiteSessionStore.readSingle(sessionID: sessionID, dbPath: dbPath)
+            try SQLiteSessionStore.readSingle(sessionID: sessionID, dbPath: dbPath)
         #else
-            return try JSONSessionStore.readSingle(sessionID: sessionID, dbPath: dbPath)
+            try JSONSessionStore.readSingle(sessionID: sessionID, dbPath: dbPath)
         #endif
     }
 

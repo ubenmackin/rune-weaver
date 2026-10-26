@@ -369,11 +369,11 @@ public struct SQLiteAccessRuleStore: AccessRuleStoring, Sendable {
     /// throwing: an unreadable database must re-prompt everything, never fabricate trust.
     public func load() async throws -> [AccessRule] {
         #if canImport(SQLite3)
-            return await SQLiteSerialIO.runUncancellable {
+            await SQLiteSerialIO.runUncancellable {
                 SQLiteAccessRuleStorage.load(dbPath: dbPath)
             }
         #else
-            return []
+            []
         #endif
     }
 

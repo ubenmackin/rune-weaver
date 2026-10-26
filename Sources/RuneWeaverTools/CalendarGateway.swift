@@ -851,16 +851,16 @@ extension ProductionCalendarGateway {
         public func authorizationStatus() -> CalendarAuthorizationStatus {
             switch EKEventStore.authorizationStatus(for: .event) {
             case .fullAccess:
-                return .authorized
+                .authorized
             case .restricted:
-                return .restricted
+                .restricted
             case .denied, .writeOnly:
-                return .denied
+                .denied
             case .notDetermined:
-                return .notDetermined
+                .notDetermined
             @unknown default:
                 // Unknown future cases fail closed to denied so no layer claims access it has not verified.
-                return .denied
+                .denied
             }
         }
 
@@ -987,16 +987,16 @@ extension ProductionCalendarGateway {
         public func reminderAuthorizationStatus() -> EventKitReminderAuthorization {
             switch EKEventStore.authorizationStatus(for: .reminder) {
             case .fullAccess:
-                return .authorized
+                .authorized
             case .restricted:
-                return .restricted
+                .restricted
             case .denied, .writeOnly:
-                return .denied
+                .denied
             case .notDetermined:
-                return .notDetermined
+                .notDetermined
             @unknown default:
                 // Unknown future cases fail closed to denied so no layer claims access it has not verified.
-                return .denied
+                .denied
             }
         }
 

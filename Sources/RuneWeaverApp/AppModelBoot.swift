@@ -85,7 +85,6 @@ extension AppModel {
         let runs: RunLogStore
         let hub: WSHub
         let indexComponents: ServerIndexComponents?
-        let plugins: [any Tool]
         let permissionGate: PermissionGate
         let effectiveSystemPrompt: String
         /// The one security policy store for this process, shared by the
@@ -222,7 +221,6 @@ extension AppModel {
             runs: runs,
             hub: hub,
             indexComponents: indexComponents,
-            plugins: plugins,
             permissionGate: permissionGate,
             effectiveSystemPrompt: effectiveSystemPrompt,
             policyStore: policyStore
@@ -280,14 +278,5 @@ extension AppModel {
             await context.indexCoordinator?.setReporter(reporter)
         }
         return context
-    }
-
-    /// Registers the builtin plugin tools and restores persisted states on the context.
-    func registerBootTools(context: ServerContext, plugins: [any Tool]) async {
-        for tool in plugins {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-        }
-        await context.restoreToolStates(forceReload: false)
     }
 }

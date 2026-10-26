@@ -450,9 +450,9 @@ extension AccessScope {
     /// between platforms.
     private static func matchesGlobString(candidate: String, pattern: String, crossesPathSeparator: Bool) -> Bool {
         #if canImport(Darwin) || canImport(Glibc)
-            return fnmatch(pattern, candidate, crossesPathSeparator ? 0 : FNM_PATHNAME) == 0
+            fnmatch(pattern, candidate, crossesPathSeparator ? 0 : FNM_PATHNAME) == 0
         #else
-            return wildcardPathnameMatch(candidate: candidate, pattern: pattern, crossesPathSeparator: crossesPathSeparator)
+            wildcardPathnameMatch(candidate: candidate, pattern: pattern, crossesPathSeparator: crossesPathSeparator)
         #endif
     }
 

@@ -289,36 +289,36 @@ enum EpisodeStoreIO {
     /// Reads one session's episodes, oldest first.
     static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+            try SQLiteEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #else
-            return try JSONEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+            try JSONEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #endif
     }
 
     /// Reads one session's newest episodes, oldest first.
     static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+            try SQLiteEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #else
-            return try JSONEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+            try JSONEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #endif
     }
 
     /// Reads episodes at or before a cutoff, oldest first.
     static func episodes(olderThan: Date, dbPath: String) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.episodes(olderThan: olderThan, dbPath: dbPath)
+            try SQLiteEpisodeStore.episodes(olderThan: olderThan, dbPath: dbPath)
         #else
-            return try JSONEpisodeStore.episodes(olderThan: olderThan, dbPath: dbPath)
+            try JSONEpisodeStore.episodes(olderThan: olderThan, dbPath: dbPath)
         #endif
     }
 
     /// Reads the newest episodes across all sessions.
     static func recent(dbPath: String, limit: Int) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.recent(dbPath: dbPath, limit: limit)
+            try SQLiteEpisodeStore.recent(dbPath: dbPath, limit: limit)
         #else
-            return try JSONEpisodeStore.recent(dbPath: dbPath, limit: limit)
+            try JSONEpisodeStore.recent(dbPath: dbPath, limit: limit)
         #endif
     }
 
@@ -345,9 +345,9 @@ enum EpisodeStoreIO {
     /// Full-text search over episode content.
     static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
+            try SQLiteEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
         #else
-            return try JSONEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
+            try JSONEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
         #endif
     }
 
@@ -356,9 +356,9 @@ enum EpisodeStoreIO {
     /// - Returns: Session identifiers.
     static func sessionIDs(dbPath: String) throws -> [UUID] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.sessionIDs(dbPath: dbPath)
+            try SQLiteEpisodeStore.sessionIDs(dbPath: dbPath)
         #else
-            return try JSONEpisodeStore.sessionIDs(dbPath: dbPath)
+            try JSONEpisodeStore.sessionIDs(dbPath: dbPath)
         #endif
     }
 
@@ -367,9 +367,9 @@ enum EpisodeStoreIO {
     /// - Returns: Row count.
     static func count(dbPath: String) throws -> Int {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.count(dbPath: dbPath)
+            try SQLiteEpisodeStore.count(dbPath: dbPath)
         #else
-            return try JSONEpisodeStore.count(dbPath: dbPath)
+            try JSONEpisodeStore.count(dbPath: dbPath)
         #endif
     }
 
@@ -424,9 +424,9 @@ enum EpisodeStoreIO {
     /// - Returns: Episode count measured in the same transaction before deleting.
     static func clearReturningCount(dbPath: String) throws -> Int {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.clearReturningCount(dbPath: dbPath)
+            try SQLiteEpisodeStore.clearReturningCount(dbPath: dbPath)
         #else
-            return try JSONEpisodeStore.clearReturningCount(dbPath: dbPath)
+            try JSONEpisodeStore.clearReturningCount(dbPath: dbPath)
         #endif
     }
 
@@ -443,9 +443,9 @@ enum EpisodeStoreIO {
     /// Reads the sovereign anchor, if present.
     static func readAnchor(dbPath: String) throws -> SovereignAnchor? {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.readAnchor(dbPath: dbPath)
+            try SQLiteEpisodeStore.readAnchor(dbPath: dbPath)
         #else
-            return try JSONEpisodeStore.readAnchor(dbPath: dbPath)
+            try JSONEpisodeStore.readAnchor(dbPath: dbPath)
         #endif
     }
 
