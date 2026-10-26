@@ -53,7 +53,8 @@ public enum WebFetchSSRFGuard: Sendable {
         for rawURL: String,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
@@ -61,12 +62,12 @@ public enum WebFetchSSRFGuard: Sendable {
         // Effective exemptions union the config-derived auto origins with the
         // owner-declared local grants so a policy exemption reaches the
         // initial guard; never-exempt targets stay refused inside the guard.
-        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
+        let effective = SupervisedBrowserGateway.mergedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
-            llmServerURLs: []
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
         )
-        let effective = baseOrigins.union(extraAllowlistedOrigins)
         return ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: effective)
     }
 
@@ -75,17 +76,18 @@ public enum WebFetchSSRFGuard: Sendable {
         for rawURL: String,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) async -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
         }
-        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
+        let effective = SupervisedBrowserGateway.mergedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
-            llmServerURLs: []
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
         )
-        let effective = baseOrigins.union(extraAllowlistedOrigins)
         return await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: effective)
     }
 
@@ -94,9 +96,16 @@ public enum WebFetchSSRFGuard: Sendable {
         for rawURL: String,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) -> Bool {
-        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, extraAllowlistedOrigins: extraAllowlistedOrigins) == nil
+        denyReason(
+            for: rawURL,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
+        ) == nil
     }
 
     /// Async allow check that keeps blocking DNS on the bounded pool.
@@ -104,9 +113,16 @@ public enum WebFetchSSRFGuard: Sendable {
         for rawURL: String,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) async -> Bool {
-        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, extraAllowlistedOrigins: extraAllowlistedOrigins) == nil
+        await denyReasonAsync(
+            for: rawURL,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
+        ) == nil
     }
 
     /// Normalizes a URL host for sensitive-range comparison.
@@ -327,12 +343,19 @@ public struct WebFetchTool: Tool, Sendable {
     private let transport: any WebFetchTransport
     /// Optional Playwright gateway for automatic browser escalation on auth walls or challenge pages.
     private let gateway: any BrowserPlaywrightGateway?
+    /// Underlying browser gateway used for interactive escalation, or nil when headless-only.
+    public var browserGateway: any BrowserPlaywrightGateway? {
+        gateway
+    }
+
     /// Optional egress supervisor enforcing declarative security policy.
     private let egressSupervisor: OutboundEgressSupervisor?
     /// Owner-declared local grants unioned with the config-derived origins.
     /// Keeps the approval-free initial guard from rejecting an internal URL
     /// the supervised hop gate would allow.
     private let extraAllowlistedOrigins: Set<String>
+    /// Configured model endpoints threaded into the SSRF exemption set.
+    private let llmServerURLs: [String]
 
     /// Creates a fetch tool.
     public init(
@@ -341,13 +364,15 @@ public struct WebFetchTool: Tool, Sendable {
         transport: any WebFetchTransport? = nil,
         gateway: any BrowserPlaywrightGateway? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
         self.gateway = gateway
         self.egressSupervisor = egressSupervisor
         self.extraAllowlistedOrigins = extraAllowlistedOrigins
+        self.llmServerURLs = llmServerURLs
         if let transport {
             self.transport = transport
         } else {
@@ -384,7 +409,8 @@ public struct WebFetchTool: Tool, Sendable {
             for: rawURL,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
         ) {
             return unsupportedFailure(
                 originalURL: rawURL,
@@ -477,6 +503,7 @@ extension WebFetchTool {
                     step.url,
                     browserConfig: browserConfig,
                     mediaConfig: mediaConfig,
+                    llmServerURLs: llmServerURLs,
                     extraAllowlistedOrigins: extraAllowlistedOrigins,
                     egressSupervisor: egressSupervisor,
                     sessionID: sessionID
@@ -497,6 +524,7 @@ extension WebFetchTool {
                 snapshot.url,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
                 extraAllowlistedOrigins: extraAllowlistedOrigins,
                 egressSupervisor: egressSupervisor,
                 sessionID: sessionID
@@ -571,11 +599,12 @@ extension WebFetchTool {
             // transport never re-resolves the hostname at dial time.
             switch await ApiSSRFGuard.vetAsync(
                 for: url.absoluteString,
-                allowlistedOrigins: ApiSSRFGuard.allowlistedOrigins(
+                allowlistedOrigins: SupervisedBrowserGateway.mergedOrigins(
                     browserConfig: browserConfig,
                     mediaConfig: mediaConfig,
-                    llmServerURLs: []
-                ).union(extraAllowlistedOrigins)
+                    llmServerURLs: llmServerURLs,
+                    extraAllowlistedOrigins: extraAllowlistedOrigins
+                )
             ) {
             case let .dialable(pin):
                 guard !pin.addresses.isEmpty else {
@@ -589,7 +618,8 @@ extension WebFetchTool {
             for: url.absoluteString,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
         ) {
             return (refusal, nil)
         }
@@ -926,24 +956,41 @@ public enum WebFetchTools {
     public static let toolNames = ["web.fetch"]
 
     /// Builds the fetch tool for a browser and media config.
-    /// - Parameter extraAllowlistedOrigins: Owner-declared local grants
-    ///   unioned with the config-derived origins in the initial guard.
+    /// - Parameter extraAllowlistedOrigins: Owner grants unioned with config origins.
+    /// - Parameter llmServerURLs: Model endpoints threaded into the fallback gateway.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: any WebFetchTransport? = nil,
         gateway: any BrowserPlaywrightGateway? = nil,
-        supervisor: OutboundEgressSupervisor? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        supervisor: OutboundEgressSupervisor,
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) -> [any Tool] {
-        [
+        // Single supervised construction so the gateway matches the guard verdict.
+        let mergedOrigins = SupervisedBrowserGateway.mergedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        )
+        let sharedGateway = SupervisedBrowserGateway.resolve(
+            injected: gateway,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            mergedOrigins: mergedOrigins,
+            supervisor: supervisor
+        )
+        return [
             WebFetchTool(
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 transport: transport,
-                gateway: gateway,
+                gateway: sharedGateway,
                 egressSupervisor: supervisor,
-                extraAllowlistedOrigins: extraAllowlistedOrigins
+                extraAllowlistedOrigins: mergedOrigins,
+                llmServerURLs: llmServerURLs
             )
         ]
     }
@@ -955,8 +1002,9 @@ public enum WebFetchTools {
         mediaConfig: MediaConfig? = nil,
         transport: any WebFetchTransport? = nil,
         gateway: any BrowserPlaywrightGateway? = nil,
-        supervisor: OutboundEgressSupervisor? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        supervisor: OutboundEgressSupervisor,
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
@@ -964,7 +1012,8 @@ public enum WebFetchTools {
             transport: transport,
             gateway: gateway,
             supervisor: supervisor,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
         ) {
             await bus.register(tool: tool)
         }

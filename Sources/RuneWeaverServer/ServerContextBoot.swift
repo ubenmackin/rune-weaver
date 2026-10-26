@@ -292,6 +292,32 @@ extension ServerContext {
         RuneWeaverConfig.serviceEgressCandidates(browser: browser, media: media, email: email)
     }
 
+    /// Merges config origins with stored exemptions for the boot gateway.
+    /// Reads the verified snapshot so boot and settings agree on the set.
+    private static func mergedBootOrigins(
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig?,
+        llmServerURLs: [String],
+        store: PolicyStore
+    ) async -> Set<String> {
+        do {
+            let snapshot = try await store.snapshot()
+            return SupervisedBrowserGateway.mergedOrigins(
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: snapshot.network.localExemptions
+            )
+        } catch {
+            RuneWeaverLog.server.warning("ServerContext: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
+            return SupervisedBrowserGateway.mergedOrigins(
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs
+            )
+        }
+    }
+
     private static func setupEgressAndPolicy(
         policyStore: PolicyStore,
         toolConfigs: ToolConfigs,
@@ -321,6 +347,56 @@ extension ServerContext {
         return egressSupervisor
     }
 
+    /// Injected transports for the boot egress chain, before supervision.
+    /// Keeps the unresolved gateway beside search and fetch bridges.
+    private struct BootEgressInputs: Sendable {
+        let browserGateway: any BrowserPlaywrightGateway?
+        let search: any WebSearchTransport?
+        let fetch: any WebFetchTransport?
+        let api: any ApiRequestTransport?
+        let media: any MediaArrTransport?
+        let ensurer: any SearXNGEnsuring?
+        let mediaSecrets: SecretsManager?
+        let secrets: SecretsManager?
+        let desktopCapture: any DesktopCapturing?
+        let desktopControl: any DesktopControlling?
+    }
+
+    /// Supervised egress chain resolved at boot.
+    /// Bundles the single supervisor with gateway and bridges.
+    private struct BootEgress: Sendable {
+        let supervisor: OutboundEgressSupervisor
+        let gateway: any BrowserPlaywrightGateway
+        let transports: ToolTransports
+    }
+
+    /// Builds the supervised egress chain so `make` stays within budget.
+    /// Supervisor first, then gateway and transports.
+    private static func resolveBootEgress(
+        configs: ToolConfigs, policyStore: PolicyStore, permissionGate: PermissionGate,
+        transports: BootEgressInputs
+    ) async throws -> BootEgress {
+        let supervisor = try await setupEgressAndPolicy(
+            policyStore: policyStore, toolConfigs: configs, secrets: transports.secrets, permissionGate: permissionGate
+        )
+        let mergedOrigins = await mergedBootOrigins(
+            browserConfig: configs.browser, mediaConfig: configs.media, llmServerURLs: configs.llmServerURLs, store: policyStore
+        )
+        let gateway = SupervisedBrowserGateway.resolve(
+            injected: transports.browserGateway, browserConfig: configs.browser, mediaConfig: configs.media,
+            llmServerURLs: configs.llmServerURLs, mergedOrigins: mergedOrigins, supervisor: supervisor
+        )
+        let resolved = ToolTransports(
+            gateway: gateway, search: transports.search, fetch: transports.fetch,
+            api: transports.api, media: transports.media, ensurer: transports.ensurer,
+            mediaSecrets: transports.mediaSecrets, secrets: transports.secrets,
+            desktopCapture: transports.desktopCapture, desktopControl: transports.desktopControl
+        )
+        return BootEgress(
+            supervisor: supervisor, gateway: gateway, transports: resolved
+        )
+    }
+
     private struct ToolRegistrationArgs: Sendable {
         let services: ServerBootstrapServices
         let configs: ToolConfigs
@@ -334,14 +410,20 @@ extension ServerContext {
         let policyStore: PolicyStore
         let secrets: SecretsManager?
         let permissionGate: PermissionGate
+        /// Prebuilt supervisor so boot builds the gateway once with one instance.
+        let existingSupervisor: OutboundEgressSupervisor?
     }
 
     /// Sets up egress supervision, re-evaluates plugins, and registers all builtin tools.
     private static func registerAllTools(_ args: ToolRegistrationArgs) async throws -> OutboundEgressSupervisor {
-        let egressSupervisor = try await setupEgressAndPolicy(
-            policyStore: args.policyStore, toolConfigs: args.configs,
-            secrets: args.secrets, permissionGate: args.permissionGate
-        )
+        let egressSupervisor = if let existing = args.existingSupervisor {
+            existing
+        } else {
+            try await setupEgressAndPolicy(
+                policyStore: args.policyStore, toolConfigs: args.configs,
+                secrets: args.secrets, permissionGate: args.permissionGate
+            )
+        }
         // Early rescan registered bridges without supervision, so refresh the
         // evaluator and re-register before serving network-capable tools.
         args.services.pluginStack.discovery.updateEgressEvaluator(egressSupervisor)
@@ -451,6 +533,79 @@ extension ServerContext {
         )
     }
 
+    /// Resolves the single policy store plus workspace root so `make` stays within budget.
+    /// Gate posture applies before any tool registers.
+    private static func resolveMakePolicyWorkspace(
+        policyStore: PolicyStore?,
+        permissionGate: PermissionGate,
+        bashConfig: BashConfig,
+        filesConfig: FilesConfig,
+        workspaceConfig: WorkspaceConfig,
+        workspaceStore: WorkspaceStore?
+    ) async -> (PolicyStore, WorkspaceStore) {
+        // Injected store wins so one instance feeds supervisor and routes.
+        let resolvedPolicyStore = await PolicyStore.makeLoaded(injected: policyStore)
+        await permissionGate.updateBashConfig(bashConfig)
+        // Gate posture lands before tools so verdict and execution agree.
+        await permissionGate.updateFilesConfig(filesConfig)
+        let resolvedWorkspaceStore = await prepareWorkspaceStore(
+            workspaceStore: workspaceStore, workspaceConfig: workspaceConfig, permissionGate: permissionGate
+        )
+        return (resolvedPolicyStore, resolvedWorkspaceStore)
+    }
+
+    /// Goal wiring plus ledger bundle resolved together so `make` stays within budget.
+    /// Groups collaborators sharing one database path to keep tuple arity within limit.
+    private struct MakeGoalState: Sendable {
+        let goalComponents: GoalComponents
+        let dbPath: String
+        let stagedFilesStore: StagedFilesStore
+        let sovereignLedger: SovereignLedger
+    }
+
+    /// Resolves goal wiring plus staged files and ledger so `make` stays within budget.
+    /// Ledger preload fails closed before serving.
+    private static func resolveMakeGoalState(
+        services: ServerBootstrapServices,
+        conversations: ConversationManager,
+        episodesDBPath: String?,
+        sovereignLedger: SovereignLedger?,
+        secrets: SecretsManager?
+    ) async throws -> MakeGoalState {
+        let goalComponents = GoalComponents(
+            engine: services.goalEngine, store: services.goalStore, conversations: conversations
+        )
+        let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+        let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
+        let resolvedSovereignLedger = try await resolveSovereignLedger(
+            sovereignLedger: sovereignLedger, dbPath: dbPath, secrets: secrets
+        )
+        return MakeGoalState(
+            goalComponents: goalComponents,
+            dbPath: dbPath,
+            stagedFilesStore: stagedFilesStore,
+            sovereignLedger: resolvedSovereignLedger
+        )
+    }
+
+    /// Prepares turns plus push fan-out so `make` stays within budget.
+    /// Push rides the combined notifier from the first turn.
+    private static func resolveMakePushTurns(
+        secrets: SecretsManager?,
+        dbPath: String,
+        notifier: any SchedulerNotifier?,
+        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?,
+        notificationsConfig: NotificationsConfig
+    ) async throws -> (ActiveTurnTracker, WebPushComponents) {
+        let activeTurns = ActiveTurnTracker()
+        let notificationsBox = NotificationsConfigBox(notificationsConfig)
+        let webPush = try await prepareWebPush(
+            secrets: secrets, dbPath: dbPath, notifier: notifier,
+            onApprovalRequested: onApprovalRequested, notificationsBox: notificationsBox
+        )
+        return (activeTurns, webPush)
+    }
+
     /// Builds a context wired for live approval prompts over WebSocket.
     /// - Parameter policyStore: The one security policy store for this process.
     public static func make(
@@ -505,19 +660,10 @@ extension ServerContext {
         onboarding: any OnboardingStoring? = nil,
         notificationsConfig: NotificationsConfig = NotificationsConfig()
     ) async throws -> ServerContext {
-        // Resolve the one store for this process before any tool registers: an injected store is
-        // authoritative, while the factory default is loaded here so the same instance feeds both
-        // the egress supervisor and the settings policy routes.
-        let resolvedPolicyStore = await PolicyStore.makeLoaded(
-            injected: policyStore
-        )
-        await permissionGate.updateBashConfig(bashConfig)
-        // The gate owns the write posture ahead of the tool, so the served
-        // `[files]` policy reaches it here: a `write_mode` change then behaves
-        // identically in the verdict and in the tool that executes the call.
-        await permissionGate.updateFilesConfig(filesConfig)
-        let resolvedWorkspaceStore = await prepareWorkspaceStore(
-            workspaceStore: workspaceStore, workspaceConfig: workspaceConfig, permissionGate: permissionGate
+        // Single store plus workspace resolve first so supervisor and routes share one instance.
+        let (resolvedPolicyStore, resolvedWorkspaceStore) = await resolveMakePolicyWorkspace(
+            policyStore: policyStore, permissionGate: permissionGate, bashConfig: bashConfig,
+            filesConfig: filesConfig, workspaceConfig: workspaceConfig, workspaceStore: workspaceStore
         )
         let services = await bootstrapServices(
             permissionGate: permissionGate,
@@ -525,51 +671,51 @@ extension ServerContext {
                 scheduler: schedulerConfig, episodesDBPath: episodesDBPath, plugins: pluginConfig,
                 goals: goalsConfig, ideas: ideasConfig
             ),
-            llm: llm,
-            memoryEngine: memoryEngine,
-            runs: runs,
-            hub: hub,
-            secrets: secrets
+            llm: llm, memoryEngine: memoryEngine, runs: runs,
+            hub: hub, secrets: secrets
         )
         let toolConfigs = ToolConfigs(
-            email: emailConfig, files: filesConfig, bash: bashConfig, containers: containersConfig,
-            browser: browserConfig, media: mediaConfig, desktop: desktopConfig,
-            llmServerURLs: llmServerURLs, security: securityConfig, goals: goalsConfig,
-            workspace: workspaceConfig
+            email: emailConfig, files: filesConfig, bash: bashConfig,
+            containers: containersConfig, browser: browserConfig, media: mediaConfig,
+            desktop: desktopConfig, llmServerURLs: llmServerURLs, security: securityConfig,
+            goals: goalsConfig, workspace: workspaceConfig
         )
-        let transports = ToolTransports(
-            gateway: browserGateway, search: searchTransport, fetch: fetchTransport,
-            api: apiTransport, media: mediaTransport, ensurer: searchEnsurer,
-            mediaSecrets: mediaSecrets, secrets: secrets,
-            desktopCapture: desktopCaptureBridge, desktopControl: desktopControlBridge
+        // Supervisor first so no gateway can boot without policy enforcement.
+        let egress = try await resolveBootEgress(
+            configs: toolConfigs, policyStore: resolvedPolicyStore, permissionGate: permissionGate,
+            transports: BootEgressInputs(
+                browserGateway: browserGateway, search: searchTransport, fetch: fetchTransport,
+                api: apiTransport, media: mediaTransport, ensurer: searchEnsurer,
+                mediaSecrets: mediaSecrets, secrets: secrets,
+                desktopCapture: desktopCaptureBridge, desktopControl: desktopControlBridge
+            )
         )
-        let goalComponents = GoalComponents(
-            engine: services.goalEngine, store: services.goalStore, conversations: conversations
+        let bootSupervisor = egress.supervisor
+        let resolvedBrowserGateway = egress.gateway
+        let transports = egress.transports
+        // Goal plus ledger resolve together so restarts reuse one database path.
+        let goalState = try await resolveMakeGoalState(
+            services: services, conversations: conversations, episodesDBPath: episodesDBPath,
+            sovereignLedger: sovereignLedger, secrets: secrets
         )
-        let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
-        let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
-        let resolvedSovereignLedger = try await resolveSovereignLedger(sovereignLedger: sovereignLedger, dbPath: dbPath, secrets: secrets)
+        let goalComponents = goalState.goalComponents
+        let dbPath = goalState.dbPath
+        let stagedFilesStore = goalState.stagedFilesStore
+        let resolvedSovereignLedger = goalState.sovereignLedger
         // Execution engines build before tool registration so the fan-out engine can ride the live
         // orchestrator into the fanout.run tool; engine construction is side-effect free, so the
         // earlier position changes nothing else about boot.
-        let activeTurns = ActiveTurnTracker()
-        let notificationsBox = NotificationsConfigBox(notificationsConfig)
-        let webPush = try await prepareWebPush(
-            secrets: secrets,
-            dbPath: dbPath,
-            notifier: notifier,
-            onApprovalRequested: onApprovalRequested,
-            notificationsBox: notificationsBox
+        let (activeTurns, webPush) = try await resolveMakePushTurns(
+            secrets: secrets, dbPath: dbPath, notifier: notifier,
+            onApprovalRequested: onApprovalRequested, notificationsConfig: notificationsConfig
         )
         let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
-            systemPrompt: systemPrompt, engineConfig: engineConfig,
-            memoryEngine: memoryEngine, approvals: services.approvals,
-            permissionGate: permissionGate, embedder: embedder,
-            securityConfig: securityConfig, recallBudgets: recallBudgets.clamped(),
-            durable: services.durable, notifier: webPush.combinedNotifier,
-            indexCoordinator: indexCoordinator, goalStore: services.goalStore,
-            goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
+            systemPrompt: systemPrompt, engineConfig: engineConfig, memoryEngine: memoryEngine,
+            approvals: services.approvals, permissionGate: permissionGate, embedder: embedder,
+            securityConfig: securityConfig, recallBudgets: recallBudgets.clamped(), durable: services.durable,
+            notifier: webPush.combinedNotifier, indexCoordinator: indexCoordinator,
+            goalStore: services.goalStore, goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
             proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
             activeTurns: activeTurns, persona: persona
         ))
@@ -578,33 +724,36 @@ extension ServerContext {
             memoryEngine: memoryEngine, embedder: embedder, goals: goalComponents,
             stagedFiles: stagedFilesStore, workspaceStore: resolvedWorkspaceStore,
             fanOutEngine: engines.fanOutEngine, policyStore: resolvedPolicyStore,
-            secrets: secrets, permissionGate: permissionGate
+            secrets: secrets, permissionGate: permissionGate, existingSupervisor: bootSupervisor
         ))
 
         let context = ServerContext(
-            config: config, conversations: conversations, toolBus: services.bus, orchestrator: engines.orchestrator,
-            memoryEngine: memoryEngine, embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
-            scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub, runLock: services.durable.runLock,
-            activeTurns: activeTurns, steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
+            config: config, conversations: conversations, toolBus: services.bus,
+            orchestrator: engines.orchestrator, memoryEngine: memoryEngine, embedder: embedder,
+            permissionGate: permissionGate, approvals: services.approvals,
+            scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub,
+            runLock: services.durable.runLock, activeTurns: activeTurns,
+            steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
             pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery,
             pluginConfig: pluginConfig, toolStates: services.pluginStack.states,
-            containersConfig: containersConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
-            indexCoordinator: indexCoordinator, indexStore: indexStore, servingLLM: llm, auth: auth, browserGateway: browserGateway,
-            searchTransport: searchTransport, fetchTransport: fetchTransport, apiTransport: apiTransport, mediaTransport: mediaTransport,
-            searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets, secrets: secrets,
-            desktopCaptureBridge: desktopCaptureBridge, desktopControlBridge: desktopControlBridge, desktopConfig: desktopConfig,
-            goals: services.goalStore, goalEngine: services.goalEngine, goalsConfig: goalsConfig, ideas: services.ideasStore,
-            ideasEngine: services.ideasEngine, ideasConfig: ideasConfig, proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
-            fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
-            mediaConfig: toolConfigs.media, emailConfig: toolConfigs.email, llmServerURLs: toolConfigs.llmServerURLs,
-            workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
-            notifier: webPush.combinedNotifier,
-            persona: persona,
-            watchdog: watchdog, sovereignLedger: resolvedSovereignLedger,
+            containersConfig: containersConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash,
+            browserConfig: browserConfig, indexCoordinator: indexCoordinator, indexStore: indexStore,
+            servingLLM: llm, auth: auth, browserGateway: resolvedBrowserGateway,
+            searchTransport: searchTransport, fetchTransport: fetchTransport, apiTransport: apiTransport,
+            mediaTransport: mediaTransport, searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets,
+            secrets: secrets, desktopCaptureBridge: desktopCaptureBridge,
+            desktopControlBridge: desktopControlBridge, desktopConfig: desktopConfig,
+            goals: services.goalStore, goalEngine: services.goalEngine, goalsConfig: goalsConfig,
+            ideas: services.ideasStore, ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
+            proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore, fanOut: engines.fanOutEngine,
+            policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
+            mediaConfig: toolConfigs.media, emailConfig: toolConfigs.email,
+            llmServerURLs: toolConfigs.llmServerURLs, workspaceConfig: workspaceConfig,
+            workspaceStore: resolvedWorkspaceStore, notifier: webPush.combinedNotifier,
+            persona: persona, watchdog: watchdog, sovereignLedger: resolvedSovereignLedger,
             onboarding: onboarding ?? OnboardingStore(dbPath: dbPath),
             approvalDecisions: ApprovalDecisionLogStore(dbPath: dbPath),
-            pushSubscriptions: webPush.subscriptions,
-            webPushSender: webPush.sender
+            pushSubscriptions: webPush.subscriptions, webPushSender: webPush.sender
         )
         // Await the verified-pulse wiring before serving so early tool calls
         // observe watchdog counts and goal/policy changes invalidate the

@@ -370,22 +370,17 @@ func gatewayForLiveReload(
     mediaConfig: MediaConfig? = nil,
     llmServerURLs: [String] = [],
     origins: Set<String> = [],
-    egressSupervisor: OutboundEgressSupervisor?
-) -> (any BrowserPlaywrightGateway)? {
+    egressSupervisor: OutboundEgressSupervisor
+) -> any BrowserPlaywrightGateway {
     let baseGateway = stored ?? busGateway
-    if let baseGateway, let managed = baseGateway as? SubprocessPlaywrightGateway {
-        return SubprocessPlaywrightGateway(
-            pythonExecutable: managed.pythonExecutable,
-            timeoutSeconds: TimeInterval(browserConfig.timeoutSeconds),
-            maxOutputBytes: managed.maxOutputBytes,
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs,
-            allowlistedOrigins: origins,
-            egressSupervisor: egressSupervisor
-        )
-    }
-    return baseGateway
+    return SupervisedBrowserGateway.resolve(
+        injected: baseGateway,
+        browserConfig: browserConfig,
+        mediaConfig: mediaConfig,
+        llmServerURLs: llmServerURLs,
+        mergedOrigins: origins,
+        supervisor: egressSupervisor
+    )
 }
 
 /// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply
@@ -713,15 +708,22 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
 /// Merges config-derived origins with stored local exemptions. The config side is the auto service
 /// origins only (`searxng_url`, enabled media LAN URLs, configured LLM server URLs).
 private func mergedNetworkOrigins(browserConfig: BrowserConfig, mediaConfig: MediaConfig?, llmServerURLs: [String], store: PolicyStore) async -> Set<String> {
-    let base = ApiSSRFGuard.allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
-    let exemptions: Set<String>
     do {
-        exemptions = try await store.snapshot().network.localExemptions
+        let exemptions = try await store.snapshot().network.localExemptions
+        return SupervisedBrowserGateway.mergedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: exemptions
+        )
     } catch {
         RuneWeaverLog.server.warning("ServerSettingsRoutes: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
-        exemptions = []
+        return SupervisedBrowserGateway.mergedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
     }
-    return base.union(exemptions)
 }
 
 /// Re-registers browser, web, and API tools over one merged origin set.
@@ -744,7 +746,8 @@ private func reregisterNetworkTools(
     for tool in WebTools.makeTools(
         browserConfig: browserConfig, mediaConfig: mediaConfig, searchTransport: context.searchTransport,
         fetchTransport: context.fetchTransport, ensurer: context.searchEnsurer,
-        gateway: gateway, supervisor: supervisor, extraAllowlistedOrigins: origins
+        gateway: gateway, supervisor: supervisor, extraAllowlistedOrigins: origins,
+        llmServerURLs: llmServerURLs
     ) {
         await reregisterPreservingToggle(tool, on: context)
     }

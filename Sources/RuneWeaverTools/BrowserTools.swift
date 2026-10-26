@@ -452,7 +452,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
     /// Configured model endpoints exempted from the loopback deny.
     private let llmServerURLs: [String]
     /// Outbound egress supervisor screening destination URLs against policy.toml.
-    public let egressSupervisor: OutboundEgressSupervisor?
+    public let egressSupervisor: OutboundEgressSupervisor
 
     /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
     /// without dropping an injected test double.
@@ -464,7 +464,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
     public init(
         gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) {
         self.init(
             gateway: gateway,
@@ -483,19 +483,20 @@ public struct BrowserNavigateTool: Tool, Sendable {
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
         self.llmServerURLs = llmServerURLs
         self.allowlistedOrigins = allowlistedOrigins
         self.egressSupervisor = egressSupervisor
-        self.gateway = gateway ?? SubprocessPlaywrightGateway(
+        self.gateway = SupervisedBrowserGateway.resolve(
+            injected: gateway,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            allowlistedOrigins: allowlistedOrigins,
-            egressSupervisor: egressSupervisor
+            mergedOrigins: allowlistedOrigins,
+            supervisor: egressSupervisor
         )
     }
 
@@ -689,7 +690,7 @@ public struct BrowserActTool: Tool, Sendable {
     /// Configured model endpoints exempted from the loopback deny.
     private let llmServerURLs: [String]
     /// Outbound egress supervisor screening destination URLs against policy.toml.
-    public let egressSupervisor: OutboundEgressSupervisor?
+    public let egressSupervisor: OutboundEgressSupervisor
 
     /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
     /// without dropping an injected test double.
@@ -702,7 +703,7 @@ public struct BrowserActTool: Tool, Sendable {
     public init(
         gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) {
         self.init(
             gateway: gateway,
@@ -721,19 +722,20 @@ public struct BrowserActTool: Tool, Sendable {
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
         self.llmServerURLs = llmServerURLs
         self.allowlistedOrigins = allowlistedOrigins
         self.egressSupervisor = egressSupervisor
-        self.gateway = gateway ?? SubprocessPlaywrightGateway(
+        self.gateway = SupervisedBrowserGateway.resolve(
+            injected: gateway,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            allowlistedOrigins: allowlistedOrigins,
-            egressSupervisor: egressSupervisor
+            mergedOrigins: allowlistedOrigins,
+            supervisor: egressSupervisor
         )
     }
 
@@ -893,7 +895,7 @@ public enum BrowserTools {
     public static func makeTools(
         gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) -> [any Tool] {
         makeTools(
             gateway: gateway,
@@ -912,14 +914,15 @@ public enum BrowserTools {
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) -> [any Tool] {
-        let shared: any BrowserPlaywrightGateway = gateway ?? SubprocessPlaywrightGateway(
+        let shared: any BrowserPlaywrightGateway = SupervisedBrowserGateway.resolve(
+            injected: gateway,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            allowlistedOrigins: allowlistedOrigins,
-            egressSupervisor: egressSupervisor
+            mergedOrigins: allowlistedOrigins,
+            supervisor: egressSupervisor
         )
         let navigate: any Tool = BrowserNavigateTool(
             gateway: shared,
@@ -947,7 +950,7 @@ public enum BrowserTools {
         on bus: ToolBus,
         gateway: any BrowserPlaywrightGateway? = nil,
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) async {
         await register(
             on: bus,
@@ -968,7 +971,7 @@ public enum BrowserTools {
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         allowlistedOrigins: Set<String> = [],
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor
     ) async {
         for tool in makeTools(
             gateway: gateway,

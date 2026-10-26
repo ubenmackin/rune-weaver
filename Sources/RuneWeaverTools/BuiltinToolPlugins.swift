@@ -316,8 +316,9 @@ public enum BuiltinToolPlugins {
 // MARK: - Web / Browser Tool Suite
 
 extension BuiltinToolPlugins {
-    /// Builds the shared five-tool set for one `[browser]` policy. browserConfig:
-    /// `[browser]` policy feeding search, fetch, and API tools.
+    /// Builds the shared five-tool set for one `[browser]` policy.
+    /// - Parameter browserConfig: `[browser]` policy feeding search, fetch, and API tools.
+    /// - Parameter mediaConfig: Media policy supplying auto-allowed origins.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -337,21 +338,6 @@ extension BuiltinToolPlugins {
         let resolvedStore = await PolicyStore.makeLoaded(
             injected: policyStore
         )
-        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs
-        )
-        // Effective exemptions union the config-derived auto origins
-        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
-        let localExemptions: Set<String>
-        do {
-            localExemptions = try await resolvedStore.snapshot().network.localExemptions
-        } catch {
-            RuneWeaverLog.tools.warning("BuiltinToolPlugins: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
-            localExemptions = []
-        }
-        let mergedOrigins = baseOrigins.union(localExemptions)
         let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
             egressSupervisor
         } else {
@@ -363,18 +349,75 @@ extension BuiltinToolPlugins {
                 llmServerURLs: llmServerURLs
             )
         }
+        // Reuse boot's single instance without a second snapshot or resolve.
+        if let managed = gateway as? SubprocessPlaywrightGateway,
+           managed.egressSupervisor === supervisor,
+           managed.llmServerURLs == llmServerURLs
+        {
+            let mergedOrigins = managed.allowlistedOrigins
+            let sharedGateway: any BrowserPlaywrightGateway = managed
+            return WebTools.makeTools(
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                searchTransport: searchTransport,
+                fetchTransport: fetchTransport,
+                ensurer: ensurer,
+                gateway: sharedGateway,
+                supervisor: supervisor,
+                extraAllowlistedOrigins: mergedOrigins,
+                llmServerURLs: llmServerURLs
+            )
+                + BrowserTools.makeTools(
+                    gateway: sharedGateway,
+                    browserConfig: browserConfig,
+                    mediaConfig: mediaConfig,
+                    llmServerURLs: llmServerURLs,
+                    allowlistedOrigins: mergedOrigins,
+                    egressSupervisor: supervisor
+                )
+                + ApiRequestTools.makeTools(
+                    supervisor: supervisor,
+                    transport: apiTransport,
+                    browserConfig: browserConfig
+                )
+        }
+        // Effective exemptions union the config-derived auto origins
+        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with
+        // stored local exemptions.
+        let localExemptions: Set<String>
+        do {
+            localExemptions = try await resolvedStore.snapshot().network.localExemptions
+        } catch {
+            RuneWeaverLog.tools.warning("BuiltinToolPlugins: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
+            localExemptions = []
+        }
+        let mergedOrigins = SupervisedBrowserGateway.mergedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: localExemptions
+        )
+        let sharedGateway = SupervisedBrowserGateway.resolve(
+            injected: gateway,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            mergedOrigins: mergedOrigins,
+            supervisor: supervisor
+        )
         return WebTools.makeTools(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer,
-            gateway: gateway,
+            gateway: sharedGateway,
             supervisor: supervisor,
-            extraAllowlistedOrigins: mergedOrigins
+            extraAllowlistedOrigins: mergedOrigins,
+            llmServerURLs: llmServerURLs
         )
             + BrowserTools.makeTools(
-                gateway: gateway,
+                gateway: sharedGateway,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 llmServerURLs: llmServerURLs,

@@ -845,8 +845,8 @@ public enum WebTools {
     public static let toolNames = ["web.search", "web.fetch"]
 
     /// Builds both web tools for a browser config and optional media config.
-    /// - Parameter extraAllowlistedOrigins: Owner-declared local grants
-    ///   threaded into the fetch initial guard alongside config origins.
+    /// - Parameter extraAllowlistedOrigins: Owner grants threaded into the fetch guard.
+    /// - Parameter llmServerURLs: Model endpoints threaded into the fallback gateway.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -854,9 +854,11 @@ public enum WebTools {
         fetchTransport: any WebFetchTransport? = nil,
         ensurer: any SearXNGEnsuring? = nil,
         gateway: any BrowserPlaywrightGateway? = nil,
-        supervisor: OutboundEgressSupervisor? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        supervisor: OutboundEgressSupervisor,
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) -> [any Tool] {
+        // Single supervised construction lives in the fetch factory below.
         WebSearchTools.makeTools(browserConfig: browserConfig, transport: searchTransport, ensurer: ensurer)
             + WebFetchTools.makeTools(
                 browserConfig: browserConfig,
@@ -864,7 +866,8 @@ public enum WebTools {
                 transport: fetchTransport,
                 gateway: gateway,
                 supervisor: supervisor,
-                extraAllowlistedOrigins: extraAllowlistedOrigins
+                extraAllowlistedOrigins: extraAllowlistedOrigins,
+                llmServerURLs: llmServerURLs
             )
     }
 
@@ -877,8 +880,9 @@ public enum WebTools {
         fetchTransport: any WebFetchTransport? = nil,
         ensurer: any SearXNGEnsuring? = nil,
         gateway: any BrowserPlaywrightGateway? = nil,
-        supervisor: OutboundEgressSupervisor? = nil,
-        extraAllowlistedOrigins: Set<String> = []
+        supervisor: OutboundEgressSupervisor,
+        extraAllowlistedOrigins: Set<String> = [],
+        llmServerURLs: [String] = []
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
@@ -888,7 +892,8 @@ public enum WebTools {
             ensurer: ensurer,
             gateway: gateway,
             supervisor: supervisor,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            llmServerURLs: llmServerURLs
         ) {
             await bus.register(tool: tool)
         }
