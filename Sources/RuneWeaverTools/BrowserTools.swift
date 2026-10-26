@@ -530,13 +530,22 @@ public struct BrowserNavigateTool: Tool, Sendable {
                 extraAllowlistedOrigins: allowlistedOrigins,
                 egressSupervisor: nil
             )
-            let snapshot = try await gateway.navigate(
+            var snapshot = try await gateway.navigate(
                 url: args.trimmedURL,
                 includeScreenshot: includeScreenshot,
                 headed: args.headed,
                 dryRun: context.dryRun,
                 sessionID: context.sessionID
             )
+            if snapshot.authRequired, !args.headed, !context.dryRun {
+                snapshot = try await gateway.navigate(
+                    url: args.trimmedURL,
+                    includeScreenshot: includeScreenshot,
+                    headed: true,
+                    dryRun: context.dryRun,
+                    sessionID: context.sessionID
+                )
+            }
             for step in snapshot.redirectChain {
                 _ = try await BrowserValidation.validateEgressURLAsync(
                     step.url,
@@ -571,8 +580,9 @@ public struct BrowserNavigateTool: Tool, Sendable {
         var notes: [String] = []
         if snapshot.authRequired {
             notes.append(
-                "Page requires authentication (auth_required). Escalate to human login by re-navigating with headed=true; "
-                    + "never re-fetch with credentials or invent credentials."
+                "Page requires authentication or challenge resolution (authRequired: true). "
+                    + "Escalate to operator login immediately by re-navigating with headed=true; "
+                    + "do not search for third-party mirrors or alternative sites unless asked."
             )
         }
         if !snapshot.downloads.isEmpty {

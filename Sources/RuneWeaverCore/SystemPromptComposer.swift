@@ -379,7 +379,12 @@ public enum SystemPromptComposer {
         lines.append("")
         lines.append("Tool-use policy:")
         lines.append(untrustedContentRule)
-        lines.append("- Auth walls escalate to human login; never invent credentials.")
+        lines.append(
+            "- Auth walls escalate to human login; never invent credentials. "
+                + "When a web fetch or browser navigation indicates an auth wall or challenge "
+                + "(authRequired or status: auth_required), call 'browser.navigate' on that URL to let the operator log in; "
+                + "do not substitute unofficial mirrors or alternative sites without explicit operator instruction."
+        )
         lines.append(
             "- Read freely with read-only tools. Approval-gated actions run only after approval; report denials plainly."
         )

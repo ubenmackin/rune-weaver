@@ -603,7 +603,7 @@ extension WebFetchTool {
                 contentType: http.mimeType,
                 suggestedNext: "browser.navigate",
                 reason: "Page requires authentication (HTTP \(statusCode)); "
-                    + "open \(currentURL.absoluteString) in an interactive browser context."
+                    + "re-navigate to \(currentURL.absoluteString) using browser.navigate."
             )
         }
         guard (200 ..< 300).contains(statusCode) else {
@@ -634,7 +634,7 @@ extension WebFetchTool {
                 contentType: http.mimeType,
                 suggestedNext: "browser.navigate",
                 reason: "Page appears to require authentication; "
-                    + "open \(currentURL.absoluteString) in an interactive browser context."
+                    + "re-navigate to \(currentURL.absoluteString) using browser.navigate."
             )
         }
         guard Self.isSupportedContentType(mimeType) else {
