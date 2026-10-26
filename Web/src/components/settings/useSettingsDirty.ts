@@ -448,6 +448,8 @@ export function isSettingsFormDirty(form: SettingsForm): boolean {
   if (form.notificationsIndexFailed !== storedNotifications.indexFailed)
     return true;
   if (form.notificationsChatFailed !== storedNotifications.chatFailed) return true;
+  if ((form.notificationsPushContact ?? "").trim() !== (storedNotifications.pushContact ?? "").trim())
+    return true;
 
   const personaLoaded = form.personaLoadedRef.current ?? {};
   if (trimmed(form.personaAssistantNameDraft) !== (personaAssistantName(personaLoaded) ?? ""))

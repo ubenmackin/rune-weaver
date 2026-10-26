@@ -22,7 +22,10 @@ struct WebPushTests {
         #expect(pubKeyData.count == 65)
         #expect(pubKeyData.first == 0x04)
 
-        let jwt = try keys.signJWT(audience: "https://web.push.apple.com")
+        let jwt = try keys.signJWT(
+            audience: "https://web.push.apple.com",
+            subject: "mailto:operator@example.com"
+        )
         let components = jwt.components(separatedBy: ".")
         #expect(components.count == 3)
 
@@ -40,8 +43,11 @@ struct WebPushTests {
 
         let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
         #expect(payload?["aud"] as? String == "https://web.push.apple.com")
-        #expect(payload?["sub"] as? String == "mailto:operator@runeweaver.local")
-        #expect(payload?["exp"] is Int)
+        #expect(payload?["sub"] as? String == "mailto:operator@example.com")
+        let exp = try #require(payload?["exp"] as? Int)
+        let now = Int(Date().timeIntervalSince1970)
+        #expect(exp - now <= 43200 + 5)
+        #expect(exp - now >= 43200 - 5)
 
         // Verify cryptographic signature with public key
         let signingInput = "\(components[0]).\(components[1])"
@@ -195,5 +201,56 @@ struct WebPushTests {
     @Test
     func `sw_js is allowlisted for static root delivery without auth`() {
         #expect(ServerAuthRequest.isKnownStaticRootFile("sw.js"))
+    }
+
+    @Test
+    func `WebPushKeys subject normalization handles raw domains, emails, and URIs`() {
+        #expect(WebPushKeys.normalizeSubject("volcrypt.com") == "https://volcrypt.com")
+        #expect(WebPushKeys.normalizeSubject("operator@volcrypt.com") == "mailto:operator@volcrypt.com")
+        #expect(WebPushKeys.normalizeSubject("https://volcrypt.com/push") == "https://volcrypt.com/push")
+        #expect(WebPushKeys.normalizeSubject("mailto:alerts@volcrypt.com") == "mailto:alerts@volcrypt.com")
+        #expect(WebPushKeys.normalizeSubject("   ") == "")
+    }
+
+    private struct MockPushTransport: WebPushTransport {
+        let status: Int
+        let body: String
+
+        func send(request _: URLRequest) async throws -> (data: Data, httpStatus: Int) {
+            (Data(body.utf8), status)
+        }
+    }
+
+    @Test
+    func `WebPushSender surfaces APNs error status and body on non-2xx responses`() async throws {
+        let tempDB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("push-err-test-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: tempDB) }
+
+        let store = PushSubscriptionStore(dbPath: tempDB)
+        let deviceKey = P256.KeyAgreement.PrivateKey()
+        let deviceP256 = WebPushKeys.base64URL(deviceKey.publicKey.x963Representation)
+        let deviceAuth = WebPushKeys.base64URL(SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) })
+        _ = try await store.save(
+            endpoint: "https://web.push.apple.com/test-endpoint",
+            p256dh: deviceP256,
+            auth: deviceAuth
+        )
+
+        let mockTransport = MockPushTransport(status: 400, body: "BadJwtToken")
+        let vapid = WebPushKeys(privateKey: P256.Signing.PrivateKey())
+        let configBox = NotificationsConfigBox(NotificationsConfig(pushContact: "operator@volcrypt.com"))
+        let sender = WebPushSender(
+            vapidKeys: vapid,
+            subscriptions: store,
+            transport: mockTransport,
+            notificationsBox: configBox
+        )
+
+        let result = await sender.broadcast(payload: WebPushSender.PushPayload(title: "Alert", body: "Test"))
+        #expect(result.delivered == 0)
+        #expect(result.totalSubscribers == 1)
+        #expect(result.errors.count == 1)
+        #expect(result.errors[0].contains("HTTP 400: BadJwtToken"))
     }
 }

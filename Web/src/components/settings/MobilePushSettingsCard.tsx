@@ -31,8 +31,16 @@ export function MobilePushSettingsCard() {
 
   const handleSendTest = async () => {
     setTestResult(null);
-    const count = await sendTestPush();
-    setTestResult(count > 0 ? "Test push delivered!" : "No devices reached.");
+    const res = await sendTestPush();
+    if (res.delivered > 0) {
+      setTestResult(`Test push delivered to ${res.delivered} device${res.delivered === 1 ? "" : "s"}!`);
+    } else if (res.errors && res.errors.length > 0) {
+      setTestResult(`Delivery failed: ${res.errors.join("; ")}`);
+    } else if (res.totalSubscribers === 0) {
+      setTestResult("No devices registered.");
+    } else {
+      setTestResult("No devices reached.");
+    }
   };
 
   return (

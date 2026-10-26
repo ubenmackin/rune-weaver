@@ -292,6 +292,8 @@ export function SettingsFormPanels({
           setNotificationsIndexFailed={form.setNotificationsIndexFailed}
           notificationsChatFailed={form.notificationsChatFailed}
           setNotificationsChatFailed={form.setNotificationsChatFailed}
+          notificationsPushContact={form.notificationsPushContact}
+          setNotificationsPushContact={form.setNotificationsPushContact}
         />
       )}
       {activeTab === "network" && (

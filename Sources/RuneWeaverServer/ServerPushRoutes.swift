@@ -57,10 +57,19 @@ public struct PushUnsubscribeResponse: Content, Sendable {
 public struct PushTestResponse: Content, Sendable {
     public let status: String
     public let delivered: Int
+    public let totalSubscribers: Int
+    public let errors: [String]
 
-    public init(status: String = "ok", delivered: Int) {
+    public init(
+        status: String = "ok",
+        delivered: Int,
+        totalSubscribers: Int = 0,
+        errors: [String] = []
+    ) {
         self.status = status
         self.delivered = delivered
+        self.totalSubscribers = totalSubscribers
+        self.errors = errors
     }
 }
 
@@ -117,7 +126,7 @@ public func registerPushRoutes(_ app: Application) {
         guard let sender = context.webPushSender else {
             throw Abort(.internalServerError, reason: "Web Push not configured.")
         }
-        let delivered = await sender.broadcast(
+        let result = await sender.broadcast(
             payload: WebPushSender.PushPayload(
                 title: "Rune Weaver",
                 body: "Test notification from your Rune Weaver server.",
@@ -125,6 +134,12 @@ public func registerPushRoutes(_ app: Application) {
                 tag: "test-alert"
             )
         )
-        return PushTestResponse(delivered: delivered)
+        let status = (result.delivered > 0 || (result.totalSubscribers == 0 && result.errors.isEmpty)) ? "ok" : "failed"
+        return PushTestResponse(
+            status: status,
+            delivered: result.delivered,
+            totalSubscribers: result.totalSubscribers,
+            errors: result.errors
+        )
     }
 }

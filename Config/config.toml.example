@@ -480,6 +480,7 @@ max_triggers_per_goal = 8
 # idea_proposed = true  # Proactive suggestions awaiting review.
 # index_failed = true  # Document index failures.
 # chat_failed = true  # Background chat failures.
+# push_contact = "operator@yourdomain.com"  # Public contact email or domain for Web Push VAPID subject (RFC 8292).
 
 [ideas]
 # Proactive Wayfinder suggestions. Off by default so a fresh install never spends

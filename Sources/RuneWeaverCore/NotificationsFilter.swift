@@ -19,7 +19,7 @@ public enum NotificationKind: String, Sendable, Codable, CaseIterable, Equatable
     case chatFailed
 }
 
-/// Six per-type switches under `[notifications]`, all defaulting to true.
+/// Six per-type switches under `[notifications]`, plus optional VAPID push contact.
 public struct NotificationsConfig: Sendable, Equatable {
     /// Whether approval filings interrupt.
     public var approvalRequested: Bool
@@ -33,6 +33,8 @@ public struct NotificationsConfig: Sendable, Equatable {
     public var indexFailed: Bool
     /// Whether chat failures interrupt.
     public var chatFailed: Bool
+    /// Public contact email or domain for Web Push VAPID subject (RFC 8292).
+    public var pushContact: String
 
     /// Creates a config defaulting every kind to surfaced.
     public init(
@@ -41,7 +43,8 @@ public struct NotificationsConfig: Sendable, Equatable {
         goalAdvance: Bool = true,
         ideaProposed: Bool = true,
         indexFailed: Bool = true,
-        chatFailed: Bool = true
+        chatFailed: Bool = true,
+        pushContact: String = ""
     ) {
         self.approvalRequested = approvalRequested
         self.schedulerRun = schedulerRun
@@ -49,6 +52,7 @@ public struct NotificationsConfig: Sendable, Equatable {
         self.ideaProposed = ideaProposed
         self.indexFailed = indexFailed
         self.chatFailed = chatFailed
+        self.pushContact = pushContact
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -58,6 +62,7 @@ public struct NotificationsConfig: Sendable, Equatable {
         case ideaProposed
         case indexFailed
         case chatFailed
+        case pushContact
     }
 
     private struct AnyKey: CodingKey {
@@ -79,7 +84,7 @@ extension NotificationsConfig: Codable {
     /// Decodes tolerantly on missing keys but rejects unknown keys.
     public init(from decoder: any Decoder) throws {
         let dynamic = try decoder.container(keyedBy: AnyKey.self)
-        let known = Set(["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed"])
+        let known = Set(["approvalRequested", "schedulerRun", "goalAdvance", "ideaProposed", "indexFailed", "chatFailed", "pushContact"])
         for key in dynamic.allKeys where !known.contains(key.stringValue) {
             throw DecodingError.dataCorruptedError(
                 forKey: key,
@@ -94,9 +99,10 @@ extension NotificationsConfig: Codable {
         ideaProposed = try container.decodeIfPresent(Bool.self, forKey: .ideaProposed) ?? true
         indexFailed = try container.decodeIfPresent(Bool.self, forKey: .indexFailed) ?? true
         chatFailed = try container.decodeIfPresent(Bool.self, forKey: .chatFailed) ?? true
+        pushContact = try container.decodeIfPresent(String.self, forKey: .pushContact) ?? ""
     }
 
-    /// Encodes every switch so a round-trip never invents a default.
+    /// Encodes every switch and push contact so a round-trip never invents a default.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(approvalRequested, forKey: .approvalRequested)
@@ -105,6 +111,7 @@ extension NotificationsConfig: Codable {
         try container.encode(ideaProposed, forKey: .ideaProposed)
         try container.encode(indexFailed, forKey: .indexFailed)
         try container.encode(chatFailed, forKey: .chatFailed)
+        try container.encode(pushContact, forKey: .pushContact)
     }
 }
 

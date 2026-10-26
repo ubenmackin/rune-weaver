@@ -440,6 +440,33 @@ mode = "all"
 judge_timeout_seconds = 15
 ```
 
+### `[notifications]`
+
+Per-type interruption switches for desktop banners, mobile push, and web badge bumps. Every switch defaults `true`; turning a type off quiets interruptions only: run history, live run frames, and the approvals inbox still record every event. Applies live with no restart; unknown keys are rejected at load.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `approval_requested` | bool | `true` | Tool approvals waiting for a decision. |
+| `scheduler_run` | bool | `true` | Scheduled runs and due jobs. |
+| `goal_advance` | bool | `true` | Goal steps and progress updates. |
+| `idea_proposed` | bool | `true` | Proactive suggestions awaiting review. |
+| `index_failed` | bool | `true` | Document index failures. |
+| `chat_failed` | bool | `true` | Background chat failures. |
+| `push_contact` | string | `""` | Public contact email or domain for the Web Push VAPID `sub` claim (RFC 8292). Max 320 characters; longer values fail closed at load. |
+
+```toml
+[notifications]
+approval_requested = true
+scheduler_run = true
+goal_advance = true
+idea_proposed = true
+index_failed = true
+chat_failed = true
+# push_contact = "operator@yourdomain.com"
+```
+
+`push_contact` is the operator contact carried in the RFC 8292 VAPID `sub` claim, which Apple's Web Push gateway requires for iOS PWA push delivery. It is normalized before signing: a bare `name@domain` becomes `mailto:name@domain`, a bare domain becomes `https://domain`, and values already carrying `mailto:`, `https://`, or `http://` pass through unchanged. When `push_contact` is empty, the engine falls back to the `RUNEWEAVER_VAPID_SUBJECT` environment variable. It is a public contact, not a secret: it rides `config.toml` (non-sensitive settings only) and is never stored in Keychain.
+
 ### `[ideas]`
 
 Proactive Wayfinder suggestions reviewing goal outcomes and memory facts to brainstorm next steps.

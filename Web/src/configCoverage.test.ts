@@ -168,6 +168,7 @@ const EXPECTED_LEAF_KEYS: readonly string[] = [
   "notifications.idea_proposed",
   "notifications.index_failed",
   "notifications.chat_failed",
+  "notifications.push_contact",
 ];
 
 // Adding a RuneWeaverConfig leaf key rides one change across ledger, Settings
