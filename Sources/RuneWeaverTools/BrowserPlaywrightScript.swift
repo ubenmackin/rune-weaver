@@ -226,12 +226,14 @@ enum BrowserPlaywrightScriptBody: Sendable {
         try:
             if response is not None:
                 status = getattr(response, "status", 0)
-                if status == 202 or status == 429:
+                if status in (202, 403, 429):
                     return True
         except Exception:
             pass
         try:
             has_waf = page.evaluate("""() => {
+                const title = (document.title || '').toLowerCase();
+                const body = (document.body ? document.body.innerText || '' : '').toLowerCase();
                 return Boolean(
                     window.awsWafCookieDomainList ||
                     window.gokuProps ||
@@ -241,9 +243,13 @@ enum BrowserPlaywrightScriptBody: Sendable {
                     document.querySelector('#cf-wrapper') ||
                     document.querySelector('form[action*="/errors/validateCaptcha"]') ||
                     document.querySelector('input[name="amzn"]') ||
-                    document.title.toLowerCase().includes('robot check') ||
-                    document.title.toLowerCase().includes('just a moment') ||
-                    document.title.toLowerCase().includes('captcha')
+                    title.includes('robot check') ||
+                    title.includes('just a moment') ||
+                    title.includes('captcha') ||
+                    title.includes('security check') ||
+                    body.includes('blocked by network security') ||
+                    body.includes("you've been blocked") ||
+                    body.includes('attention required')
                 );
             }""")
             if has_waf:
@@ -482,10 +488,11 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         max_wait = \#(SubprocessPlaywrightGateway.headedWaitSeconds)
                         was_in_auth_or_challenge = is_challenge_or_auth(page, goto_response)
                         while time.time() - start_wait < max_wait:
-                            active = context.pages[-1] if context.pages else page
-                            if not context.pages or (active and active.is_closed()):
+                            open_pages = [p for p in context.pages if not p.is_closed()]
+                            if not open_pages:
                                 break
-                            save_storage_state(context)
+                            non_blank = [p for p in open_pages if p.url and p.url != "about:blank"]
+                            active = non_blank[-1] if non_blank else open_pages[-1]
                             current_in_auth = is_challenge_or_auth(active)
                             if current_in_auth:
                                 was_in_auth_or_challenge = True
@@ -494,20 +501,20 @@ enum BrowserPlaywrightScriptTail: Sendable {
                                     active.wait_for_load_state("domcontentloaded", timeout=4000)
                                 except Exception:
                                     pass
-                                save_storage_state(context)
                                 page = active
                                 break
                             elif not was_in_auth_or_challenge and (time.time() - start_wait > 15.0):
-                                save_storage_state(context)
                                 page = active
                                 break
                             try:
                                 page.wait_for_timeout(500)
                             except Exception:
                                 break
+                        save_storage_state(context)
                     if op == "navigate":
-                        active_page = context.pages[-1] if context.pages and not context.pages[-1].is_closed() else (page if not page.is_closed() else None)
-                        target_page = active_page or page
+                        open_pages = [p for p in context.pages if not p.is_closed()]
+                        non_blank = [p for p in open_pages if p.url and p.url != "about:blank"]
+                        target_page = non_blank[-1] if non_blank else (open_pages[-1] if open_pages else page)
                         final_url = ""
                         try:
                             final_url = target_page.url or url
