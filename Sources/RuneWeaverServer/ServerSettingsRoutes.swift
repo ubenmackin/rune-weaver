@@ -744,7 +744,7 @@ private func reregisterNetworkTools(
     for tool in WebTools.makeTools(
         browserConfig: browserConfig, mediaConfig: mediaConfig, searchTransport: context.searchTransport,
         fetchTransport: context.fetchTransport, ensurer: context.searchEnsurer,
-        supervisor: supervisor, extraAllowlistedOrigins: origins
+        gateway: gateway, supervisor: supervisor, extraAllowlistedOrigins: origins
     ) {
         await reregisterPreservingToggle(tool, on: context)
     }

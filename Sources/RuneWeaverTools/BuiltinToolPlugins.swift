@@ -369,6 +369,7 @@ extension BuiltinToolPlugins {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer,
+            gateway: gateway,
             supervisor: supervisor,
             extraAllowlistedOrigins: mergedOrigins
         )
