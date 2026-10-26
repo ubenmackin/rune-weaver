@@ -904,9 +904,6 @@ describe("reconstructMessages with structured tool actions", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -937,7 +934,9 @@ describe("reconstructMessages with structured tool actions", () => {
       sel?.removeAllRanges();
       sel?.addRange(range);
       expect(messageListHasActiveSelection(list)).toBe(true);
-      scrollSpy.mockClear();
+      // While a selection is live the stream anchor must leave scrollTop alone.
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
       for (let i = 0; i < 20; i++) {
         await dispatchFrameOrThrow(capture.onMessage, {
           type: "delta",
@@ -945,16 +944,23 @@ describe("reconstructMessages with structured tool actions", () => {
           sessionID: turnSID,
         });
       }
-      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(list.scrollTop).toBe(0);
       const afterSel = window.getSelection();
       expect(afterSel?.rangeCount).toBe(1);
       expect(afterSel?.isCollapsed).toBe(false);
       expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
       expect(list.contains(afterSel?.focusNode ?? null)).toBe(true);
+      window.getSelection()?.removeAllRanges();
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "streamed after clear ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(list.scrollTop).toBe(2000);
+      });
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 
@@ -963,9 +969,6 @@ describe("reconstructMessages with structured tool actions", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -994,7 +997,8 @@ describe("reconstructMessages with structured tool actions", () => {
       sel?.removeAllRanges();
       sel?.addRange(caret);
       expect(messageListHasActiveSelection(list)).toBe(false);
-      scrollSpy.mockClear();
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
       await dispatchFrameOrThrow(capture.onMessage, {
         type: "delta",
         delta: " more after caret ",
@@ -1003,11 +1007,11 @@ describe("reconstructMessages with structured tool actions", () => {
       await waitFor(() => {
         expect(screen.getByText(/more after caret/)).toBeInTheDocument();
       });
-      expect(scrollSpy).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(list.scrollTop).toBe(2000);
+      });
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 
@@ -1016,9 +1020,6 @@ describe("reconstructMessages with structured tool actions", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -1031,6 +1032,14 @@ describe("reconstructMessages with structured tool actions", () => {
       });
       const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
         .sessionID;
+      const list = document.querySelector(".message-list") as HTMLElement;
+      window.getSelection()?.removeAllRanges();
+      expect(messageListHasActiveSelection(list)).toBe(false);
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+      // Wheel-up engages the user-intent lock directly; a scroll event read
+      // from a static scrollTop no longer engages because it never decreases.
+      fireEvent.wheel(list, { deltaY: -100 });
       await dispatchFrameOrThrow(capture.onMessage, {
         type: "delta",
         delta: "history base ",
@@ -1039,20 +1048,6 @@ describe("reconstructMessages with structured tool actions", () => {
       await waitFor(() => {
         expect(screen.getByText(/history base/)).toBeInTheDocument();
       });
-      const list = document.querySelector(".message-list") as HTMLElement;
-      window.getSelection()?.removeAllRanges();
-      expect(messageListHasActiveSelection(list)).toBe(false);
-      Object.defineProperty(list, "scrollHeight", {
-        value: 2000,
-        configurable: true,
-      });
-      Object.defineProperty(list, "scrollTop", { value: 0, configurable: true });
-      Object.defineProperty(list, "clientHeight", {
-        value: 500,
-        configurable: true,
-      });
-      fireEvent.scroll(list);
-      scrollSpy.mockClear();
       for (let i = 0; i < 5; i++) {
         await dispatchFrameOrThrow(capture.onMessage, {
           type: "delta",
@@ -1060,11 +1055,9 @@ describe("reconstructMessages with structured tool actions", () => {
           sessionID: turnSID,
         });
       }
-      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(list.scrollTop).toBe(0);
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 
@@ -1073,37 +1066,27 @@ describe("reconstructMessages with structured tool actions", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
         expect(capture.onMessage).not.toBeNull();
       });
       const list = document.querySelector(".message-list") as HTMLElement;
-      Object.defineProperty(list, "scrollHeight", {
-        value: 2000,
-        configurable: true,
-      });
-      Object.defineProperty(list, "scrollTop", { value: 0, configurable: true });
-      Object.defineProperty(list, "clientHeight", {
-        value: 500,
-        configurable: true,
-      });
-      fireEvent.scroll(list);
-      scrollSpy.mockClear();
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+      // Wheel-up engages the lock; the next own send re-attaches follow.
+      fireEvent.wheel(list, { deltaY: -100 });
       window.getSelection()?.removeAllRanges();
       await user.type(screen.getByLabelText("Chat input"), "own send lands");
       await user.click(screen.getByRole("button", { name: "Send" }));
       await waitFor(() => {
         expect(screen.getByText("own send lands")).toBeInTheDocument();
       });
-      expect(scrollSpy).toHaveBeenCalled();
+      await waitFor(() => {
+        expect(list.scrollTop).toBe(2000);
+      });
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 
@@ -1112,9 +1095,6 @@ describe("reconstructMessages with structured tool actions", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -1148,7 +1128,10 @@ describe("reconstructMessages with structured tool actions", () => {
       sel?.addRange(range);
       const selectedBefore = window.getSelection()?.toString();
       expect(selectedBefore?.trim().length).toBeGreaterThan(0);
-      scrollSpy.mockClear();
+      // While the selection is live the stream anchor must leave scrollTop
+      // untouched, then resume anchoring once the selection clears.
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
       for (let i = 0; i < 5; i++) {
         await dispatchFrameOrThrow(capture.onMessage, {
           type: "delta",
@@ -1156,7 +1139,7 @@ describe("reconstructMessages with structured tool actions", () => {
           sessionID: turnSID,
         });
       }
-      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(list.scrollTop).toBe(0);
       const liveTextAfter = document.querySelector(
         ".streaming-bubble .message-text",
       );
@@ -1168,11 +1151,166 @@ describe("reconstructMessages with structured tool actions", () => {
       expect(afterSel?.rangeCount).toBe(1);
       expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
       expect(afterSel?.toString().trim().length).toBeGreaterThan(0);
+      window.getSelection()?.removeAllRanges();
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "stabilized after clear ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(list.scrollTop).toBe(2000);
+      });
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
+  });
+
+  // Mounts ChatView on a fresh capture, sends one own message, and returns the
+  // capture plus the live turn's session ID for delta streaming.
+  async function startScrollTurn(): Promise<{
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    turnSID: string;
+  }> {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Chat input"), "scroll probe");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+    return { capture, turnSID: turnSID as string };
+  }
+
+  it("freezes the stream when a wheel-up arrives mid-turn", async () => {
+    const { capture, turnSID } = await startScrollTurn();
+    const list = document.querySelector(".message-list") as HTMLElement;
+    expect(list).not.toBeNull();
+    Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "spin up content ",
+      sessionID: turnSID,
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/spin up content/)).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(list.scrollTop).toBe(2000);
+    });
+    const frozenScrollTop = list.scrollTop;
+    // Raising scrollHeight mid-turn makes any later anchor assignment move
+    // scrollTop away from the recorded value, so equality below proves the
+    // wheel-up froze the stream instead of merely leaving it at the bottom.
+    Object.defineProperty(list, "scrollHeight", { value: 3000, configurable: true });
+    fireEvent.wheel(list, { deltaY: -100 });
+    for (let i = 0; i < 5; i++) {
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: ` held-${i} `,
+        sessionID: turnSID,
+      });
+    }
+    await waitFor(() => {
+      expect(screen.getByText(/held-4/)).toBeInTheDocument();
+    });
+    expect(list.scrollTop).toBe(frozenScrollTop);
+  });
+
+  it("freezes the stream on an upward scrollbar drag", async () => {
+    const { capture, turnSID } = await startScrollTurn();
+    const list = document.querySelector(".message-list") as HTMLElement;
+    expect(list).not.toBeNull();
+    Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+    // A larger scrollTop while still following keeps follow intact; only the
+    // next decrease past the bottom threshold engages the lock.
+    list.scrollTop = 1200;
+    fireEvent.scroll(list);
+    list.scrollTop = 900;
+    fireEvent.scroll(list);
+    for (let i = 0; i < 5; i++) {
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: ` dragged-${i} `,
+        sessionID: turnSID,
+      });
+    }
+    await waitFor(() => {
+      expect(screen.getByText(/dragged-4/)).toBeInTheDocument();
+    });
+    expect(list.scrollTop).toBe(900);
+  });
+
+  it("re-attaches when the user scrolls back to the bottom", async () => {
+    const { capture, turnSID } = await startScrollTurn();
+    const list = document.querySelector(".message-list") as HTMLElement;
+    expect(list).not.toBeNull();
+    Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+    fireEvent.wheel(list, { deltaY: -100 });
+    // 2000 - 500 - 1470 = 30 lands exactly on the re-attach boundary.
+    list.scrollTop = 1470;
+    fireEvent.scroll(list);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: " back at bottom ",
+      sessionID: turnSID,
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/back at bottom/)).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(list.scrollTop).toBe(2000);
+    });
+  });
+
+  it("freezes the stream on an upward touch pan", async () => {
+    const { capture, turnSID } = await startScrollTurn();
+    const list = document.querySelector(".message-list") as HTMLElement;
+    expect(list).not.toBeNull();
+    Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
+    // A finger moving toward the screen top pans content downward and must
+    // leave follow intact, so a delta still re-anchors the list.
+    fireEvent.touchStart(list, { touches: [{ clientY: 500 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 480 }] });
+    list.scrollTop = 800;
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: " pan down check ",
+      sessionID: turnSID,
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/pan down check/)).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(list.scrollTop).toBe(2000);
+    });
+    // The reverse gesture drags content up the screen and engages the lock.
+    list.scrollTop = 1000;
+    const frozenScrollTop = list.scrollTop;
+    fireEvent.touchStart(list, { touches: [{ clientY: 500 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 540 }] });
+    for (let i = 0; i < 5; i++) {
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: ` panned-${i} `,
+        sessionID: turnSID,
+      });
+    }
+    await waitFor(() => {
+      expect(screen.getByText(/panned-4/)).toBeInTheDocument();
+    });
+    expect(list.scrollTop).toBe(frozenScrollTop);
   });
 });
 
@@ -3898,9 +4036,6 @@ describe("Poll-tick selection survival", () => {
         return jsonResponse({});
       }),
     );
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -3926,9 +4061,12 @@ describe("Poll-tick selection survival", () => {
       const selectedBefore = window.getSelection()?.toString() ?? "";
       expect(selectedBefore).toContain("Alpha line one");
       expect(selectedBefore).toContain("Beta line two");
+      // While the history selection is live the stream anchor must leave
+      // scrollTop untouched as background run-log ticks land.
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
       const paraBefore = document.querySelector("p.chat-p");
       expect(paraBefore).not.toBeNull();
-      scrollSpy.mockClear();
       for (let i = 0; i < 3; i++) {
         await dispatchFrameOrThrow(capture.onMessage, {
           type: "run_completed",
@@ -3952,7 +4090,7 @@ describe("Poll-tick selection survival", () => {
       expect(selectedAfter).toBe(selectedBefore);
       expect(selectedAfter).toContain("Alpha line one");
       expect(selectedAfter).toContain("Beta line two");
-      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(list.scrollTop).toBe(0);
       const paraAfter = document.querySelector("p.chat-p");
       expect(paraAfter).toBe(paraBefore);
       const afterSel = window.getSelection();
@@ -3961,8 +4099,6 @@ describe("Poll-tick selection survival", () => {
       expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 
@@ -4044,9 +4180,6 @@ describe("Poll-tick selection survival", () => {
         return jsonResponse({});
       }),
     );
-    const scrollSpy = vi.fn();
-    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
-      scrollSpy;
     try {
       render(<ChatView />);
       await waitFor(() => {
@@ -4080,7 +4213,10 @@ describe("Poll-tick selection survival", () => {
       expect(selectedBefore).toContain("Beta line two");
       const paraBefore = document.querySelector("p.chat-p");
       expect(paraBefore).not.toBeNull();
-      scrollSpy.mockClear();
+      // While the history selection is live the stream anchor must leave
+      // scrollTop untouched as identical run-log ticks land.
+      Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 500, configurable: true });
       // Drive three identical poll ticks through the shared poller; each
       // refresh fetches the same run row with fresh identities.
       const snapshotBefore = result.current.runs;
@@ -4103,7 +4239,7 @@ describe("Poll-tick selection survival", () => {
       expect(selectedAfter).toBe(selectedBefore);
       expect(selectedAfter).toContain("Alpha line one");
       expect(selectedAfter).toContain("Beta line two");
-      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(list.scrollTop).toBe(0);
       const paraAfter = document.querySelector("p.chat-p");
       expect(paraAfter).toBe(paraBefore);
       const afterSel = window.getSelection();
@@ -4112,8 +4248,6 @@ describe("Poll-tick selection survival", () => {
       expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
     } finally {
       window.getSelection()?.removeAllRanges();
-      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
-        .scrollIntoView;
     }
   });
 });

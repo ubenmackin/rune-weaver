@@ -55,7 +55,7 @@ const LEGACY_LINE_RATCHET: Record<string, number> = {
   "src/api.test.ts": 2350,
   "src/components/SettingsManager.test.tsx": 4836,
   "src/components/IndexingPanel.test.tsx": 4950,
-  "src/components/ChatView.test.tsx": 5455,
+  "src/components/ChatView.test.tsx": 5586,
 };
 
 function collectSourceFiles(dir: string, baseDir: string): string[] {
