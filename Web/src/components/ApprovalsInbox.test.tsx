@@ -12,16 +12,11 @@ interface StubOptions {
   approvals?: unknown[];
   sessions?: Array<{ id: string; title: string }>;
   onCall?: (path: string, init?: RequestInit) => void;
-  // Short-circuits the default response so a test can hold one decision in
-  // flight without holding the reads.
-  respond?: (
-    path: string,
-    init?: RequestInit,
-  ) => Response | Promise<Response> | null;
+  // Holds one decision in flight without holding the reads.
+  respond?: (path: string, init?: RequestInit) => Response | Promise<Response> | null;
 }
 
-// Answers the two reads the inbox makes (pending approvals plus session
-// titles) and records every call so decision payloads stay assertable.
+// Answers pending plus sessions reads; records calls for payload asserts.
 function stubEngine(options: StubOptions = {}) {
   const approvals = options.approvals ?? [];
   const sessions = options.sessions ?? [];
@@ -77,15 +72,12 @@ function pendingRequest(
   };
 }
 
-// Group headers in rendered order.
 function groupTitles(container: HTMLElement): string[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(".approvals-group-header"),
   ).map((node) => node.textContent ?? "");
 }
 
-// Approval card ids in rendered order; question cards carry their own test id
-// and stay out of this list.
 function cardIDs(container: HTMLElement): string[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(
@@ -107,7 +99,8 @@ describe("ApprovalsInbox", () => {
     });
     expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     // Standing rules live in Settings → Access, so the inbox links there
     // instead of managing grants itself.
     const link = screen.getByRole("link", { name: "Manage standing rules" });
@@ -158,24 +151,12 @@ describe("ApprovalsInbox", () => {
     await waitFor(() => {
       expect(screen.getByText("desktop.action")).toBeInTheDocument();
     });
-    // Dangerous group first, then moderate, then the unattributed safe card.
-    // Session identifiers compare case-insensitively against GET /sessions.
-    expect(groupTitles(container)).toEqual([
-      "Deploy chat",
-      "Ops chat",
-      "Unattributed",
-    ]);
-    // Every group header is sticky and no group is collapsed.
+    // Dangerous first, then moderate, then unattributed; ids match case-insensitively.
+    expect(groupTitles(container)).toEqual(["Deploy chat", "Ops chat", "Unattributed"]);
     const headers = container.querySelectorAll(".approvals-group-header");
     expect(headers).toHaveLength(3);
-    for (const header of Array.from(headers)) {
-      expect(header.tagName).toBe("H3");
-    }
-    expect(cardIDs(container)).toEqual([
-      "req-danger",
-      "req-moderate",
-      "req-safe",
-    ]);
+    for (const header of Array.from(headers)) expect(header.tagName).toBe("H3");
+    expect(cardIDs(container)).toEqual(["req-danger", "req-moderate", "req-safe"]);
   });
 
   it("renders engine-filed system notices under a System header with no decision controls", async () => {
@@ -1259,11 +1240,12 @@ describe("ApprovalsInbox", () => {
     });
     // Live frames, socket reopen, and visibility resync are the only refresh
     // paths, so the Pending header carries no manual control and keeps the
-    // pending count.
+    // tab count.
     expect(
       screen.queryByRole("button", { name: "Refresh" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
   });
 
   it("upserts identical-id approval frames so enrichment swaps pending for valued", async () => {
@@ -1335,7 +1317,8 @@ describe("ApprovalsInbox", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("Sends deploy notice to ops")).toBeInTheDocument();
     expect(screen.getByText(/External recipient/)).toBeInTheDocument();
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Allow" })).toBe(allowBefore);
     expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
     // Static description stays hidden once valued.
@@ -1447,9 +1430,7 @@ describe("ApprovalsInbox", () => {
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
-    expect(
-      screen.queryByTestId("ephemeral-trust-chip"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ephemeral-trust-chip")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.filter(([url]) =>
         String(url).startsWith("/approvals/session-trust"),
@@ -1489,37 +1470,42 @@ describe("ApprovalsInbox", () => {
         return jsonResponse({ approvals: [pendingRequest()], count: 1 });
       }),
     );
-    render(<ApprovalsInbox />);
+    const { container } = render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
     // Pending is the default view.
-    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
+    // Tablist lives below the header row and above the per-view panels.
+    const headerRow = container.querySelector(".panel-header-row");
+    const viewNav = container.querySelector(".approvals-view-nav");
+    expect(headerRow).not.toBeNull();
+    expect(viewNav).not.toBeNull();
+    expect(
+      (headerRow as HTMLElement).compareDocumentPosition(viewNav as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await user.click(screen.getByTestId("inbox-view-active-timed"));
+    expect(screen.getByTestId("inbox-view-active-timed")).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-active-trust")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
     await user.click(screen.getByTestId("inbox-view-history"));
-    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-pressed", "false");
     // History replaces the pending queue while the header row stays.
     await waitFor(() => {
       expect(screen.getByTestId("approval-history")).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("button", { name: "Allow" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
     expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.getByText("Inbox")).toBeInTheDocument();
     // Back to Pending restores the queue.
@@ -1527,7 +1513,8 @@ describe("ApprovalsInbox", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
     });
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.queryByTestId("approval-history")).not.toBeInTheDocument();
   });
 
@@ -1567,8 +1554,6 @@ describe("ApprovalsInbox", () => {
     await waitFor(() => {
       expect(screen.getByText("No recorded decisions.")).toBeInTheDocument();
     });
-    expect(
-      screen.queryByTestId("ephemeral-trust-chip"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ephemeral-trust-chip")).not.toBeInTheDocument();
   });
 });

@@ -6,6 +6,14 @@
   gap: 16px;
 }
 
+/* View nav row below the header: left-aligned so every view shares one tab
+ * position with no width shift from the removed header counter. */
+.approvals-view-nav {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 4px;
+}
+
 /* Pending | History segmented control: a joined pill pair whose aria-pressed
  * state (not an .active class) carries the selected view, so the toggle stays
  * honest with the buttons' accessibility contract. */
@@ -29,6 +37,7 @@
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   transition: all 0.15s ease;
 }
 
