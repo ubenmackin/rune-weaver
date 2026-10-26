@@ -811,65 +811,59 @@ export default function ApprovalsInbox({
             questions.
           </p>
         </div>
-
-        <div className="row">
-          <div
-            role="tablist"
-            aria-label="Inbox views"
-            className="approvals-view-toggle"
+        <a
+          className="ghost icon-text-btn"
+          href={STANDING_RULES_HREF}
+          title="Standing rules live in Settings → Access"
+        >
+          <ApprovalsIcon size={14} />
+          <span>Manage standing rules</span>
+        </a>
+      </div>
+      <div className="approvals-view-nav">
+        <div
+          role="tablist"
+          aria-label="Inbox views"
+          className="approvals-view-toggle"
+        >
+          <button
+            type="button"
+            role="tab"
+            id="inbox-tab-pending"
+            data-testid="inbox-view-pending"
+            aria-selected={view === "pending"}
+            aria-pressed={view === "pending"}
+            aria-controls="inbox-panel-pending"
+            onClick={() => setView("pending")}
           >
-            <button
-              type="button"
-              role="tab"
-              id="inbox-tab-pending"
-              data-testid="inbox-view-pending"
-              aria-selected={view === "pending"}
-              aria-pressed={view === "pending"}
-              aria-controls="inbox-panel-pending"
-              onClick={() => setView("pending")}
-            >
-              {`Pending (${approvals.length})`}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="inbox-tab-active-timed"
-              data-testid="inbox-view-active-timed"
-              aria-selected={view === "active-timed"}
-              aria-pressed={view === "active-timed"}
-              aria-controls="inbox-panel-active-timed"
-              onClick={() => setView("active-timed")}
-            >
-              {activeTimedCount !== null
-                ? `Active-timed (${activeTimedCount})`
-                : "Active-timed"}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="inbox-tab-history"
-              data-testid="inbox-view-history"
-              aria-selected={view === "history"}
-              aria-pressed={view === "history"}
-              aria-controls="inbox-panel-history"
-              onClick={() => setView("history")}
-            >
-              History
-            </button>
-          </div>
-          <a
-            className="ghost icon-text-btn"
-            href={STANDING_RULES_HREF}
-            title="Standing rules live in Settings → Access"
+            {`Pending (${approvals.length})`}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="inbox-tab-active-timed"
+            data-testid="inbox-view-active-timed"
+            aria-selected={view === "active-timed"}
+            aria-pressed={view === "active-timed"}
+            aria-controls="inbox-panel-active-timed"
+            onClick={() => setView("active-timed")}
           >
-            <ApprovalsIcon size={14} />
-            <span>Manage standing rules</span>
-          </a>
-          {view === "pending" ? (
-            // Live frames, socket reopen, and visibility resync are the only
-            // refresh paths, so the Pending header carries no manual control.
-            <span className="muted text-sm">{approvals.length} pending</span>
-          ) : null}
+            {activeTimedCount !== null
+              ? `Active-timed (${activeTimedCount})`
+              : "Active-timed"}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="inbox-tab-history"
+            data-testid="inbox-view-history"
+            aria-selected={view === "history"}
+            aria-pressed={view === "history"}
+            aria-controls="inbox-panel-history"
+            onClick={() => setView("history")}
+          >
+            History
+          </button>
         </div>
       </div>
 
