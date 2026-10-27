@@ -16,13 +16,20 @@ extension ServerSchedulerWorker {
     private static let messagesSendToolName = "messages.send"
 
     /// Expires past-due sends, then claims and fires everything due at `now`.
-    func fireDueScheduledSends(now: Date) async throws {
-        for skipped in await scheduler.expirePastDueSends(now: now) {
+    /// - Returns: Whether any send row settled, driving the sends-changed wake-up.
+    func fireDueScheduledSends(now: Date) async throws -> Bool {
+        let expired = await scheduler.expirePastDueSends(now: now)
+        for skipped in expired {
             await notePastDueSkip(skipped)
         }
-        for send in await scheduler.claimDueSends(now: now) {
+        let claimed = await scheduler.claimDueSends(now: now)
+        // Claims already rewrote rows to `sending`, so even a cancelled
+        // replay below leaves a change worth refetching.
+        let didSettle = !expired.isEmpty || !claimed.isEmpty
+        for send in claimed {
             try await fireScheduledSend(send)
         }
+        return didSettle
     }
 
     /// Records one skipped past-due send as its inbox note on the Runs surface.

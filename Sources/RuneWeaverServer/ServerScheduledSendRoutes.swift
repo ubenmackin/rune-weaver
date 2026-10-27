@@ -146,7 +146,11 @@ func registerScheduledSendRoutes(_ app: Application) {
         let body = try req.content.decode(NewScheduledSendRequest.self)
         let payload = try bookingPayload(from: body)
         do {
-            return try await req.application.runeWeaver.scheduler.scheduleSend(payload)
+            let booked = try await req.application.runeWeaver.scheduler.scheduleSend(payload)
+            // The new row changes what the Schedules panel lists, so open
+            // dashboards refetch instead of waiting for a manual refresh.
+            await req.application.runeWeaver.hub.broadcastScheduledSendsChanged()
+            return booked
         } catch let error as SchedulerStoreError {
             switch error {
             case let .invalidField(detail):
@@ -165,6 +169,9 @@ func registerScheduledSendRoutes(_ app: Application) {
         guard let cancelled = await req.application.runeWeaver.scheduler.cancelScheduledSend(id: id) else {
             throw Abort(.notFound, reason: "No cancellable scheduled send \(raw)")
         }
+        // Cancellation changes what the Schedules panel lists, so open
+        // dashboards refetch instead of showing a phantom row.
+        await req.application.runeWeaver.hub.broadcastScheduledSendsChanged()
         return cancelled
     }
 }

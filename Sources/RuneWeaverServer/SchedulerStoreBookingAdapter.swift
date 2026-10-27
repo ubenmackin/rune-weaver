@@ -7,11 +7,16 @@ import RuneWeaverCore
 public struct SchedulerStoreBookingAdapter: ScheduledSendBooking, Sendable {
     /// Registry owning the scheduled-send rows.
     private let store: SchedulerStore
+    /// Hub fanning out type-only wake-ups, nil in offline contexts.
+    private let hub: WSHub?
 
     /// Creates an adapter over a scheduler store.
-    /// - Parameter store: Registry receiving the booked rows.
-    public init(store: SchedulerStore) {
+    /// - Parameters:
+    ///   - store: Registry receiving the booked rows.
+    ///   - hub: Hub receiving the sends-changed wake-up.
+    public init(store: SchedulerStore, hub: WSHub? = nil) {
         self.store = store
+        self.hub = hub
     }
 
     /// Books one approved draft as an immutable scheduled-send row. Store validation and capacity
@@ -28,6 +33,11 @@ public struct SchedulerStoreBookingAdapter: ScheduledSendBooking, Sendable {
             bodyHtml: draft.html,
             fireAt: draft.fireAt
         ))
+        // The row is durable before dashboards refetch, and a dropped
+        // frame never fails the booking itself.
+        if let hub {
+            await hub.broadcastScheduledSendsChanged()
+        }
         return BookedScheduledSend(id: row.id, fireAt: row.fireAt)
     }
 }

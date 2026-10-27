@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SchedulerManager job creation, update, and manual run.
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SchedulerManager from "./SchedulerManager";
@@ -37,6 +37,7 @@ const EMPTY_SENDS_RESPONSE = { sends: [], count: 0 };
 describe("SchedulerManager", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    resetSharedSocket();
   });
 
   it("lists scheduled jobs with run history linkage hints", async () => {
@@ -657,7 +658,7 @@ describe("SchedulerManager scheduled sends", () => {
     ).toBeInTheDocument();
   });
 
-  it("refetches sends on run_completed frames, foreground returns, and socket reopen", async () => {
+  it("refetches sends on scheduled_sends_changed frames, foreground returns, and socket reopen", async () => {
     const capture = installSocket();
     let sendsCalls = 0;
     vi.stubGlobal(
@@ -693,7 +694,7 @@ describe("SchedulerManager scheduled sends", () => {
     const settledCalls = sendsCalls;
     expect(settledCalls).toBeGreaterThan(0);
 
-    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduled_sends_changed" });
     await waitFor(() => {
       expect(sendsCalls).toBeGreaterThan(settledCalls);
     });
@@ -754,11 +755,14 @@ describe("SchedulerManager scheduled sends", () => {
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
     const settledCalls = sendsCalls;
     shouldFail = true;
-    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduled_sends_changed" });
     await waitFor(() => {
       expect(sendsCalls).toBeGreaterThan(settledCalls);
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Settle the failed refetch inside act so retained rows assert quietly.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
     expect(screen.getByText("sam@example.com")).toBeInTheDocument();
   });
 
@@ -805,7 +809,10 @@ describe("SchedulerManager scheduled sends", () => {
     expect(document.getElementById("panel-sends")).not.toBeNull();
     expect(document.getElementById("panel-jobs")).toBeNull();
     // Shared header actions stay visible in both views with no standalone counts.
-    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    // Live frames plus reopen and foreground resync are the only refresh
+    // paths, so no manual Refresh control remains.
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Refresh/i })).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Create Schedule" }),
     ).toBeInTheDocument();
@@ -816,5 +823,163 @@ describe("SchedulerManager scheduled sends", () => {
       expect(screen.getByText("morning digest")).toBeInTheDocument();
     });
     expect(screen.queryByText("sam@example.com")).not.toBeInTheDocument();
+  });
+
+  it("refetches jobs on scheduler lifecycle frames", async () => {
+    const capture = installSocket();
+    let jobsCalls = 0;
+    let sendsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          jobsCalls += 1;
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          sendsCalls += 1;
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(jobsCalls).toBeGreaterThan(0));
+    const settledJobs = jobsCalls;
+    const settledSends = sendsCalls;
+
+    // Each scheduler wake-up is type-only, so every matching frame refetches
+    // the same GET pair without patching rows from the frame.
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduler_jobs_changed" });
+    await waitFor(() => {
+      expect(jobsCalls).toBeGreaterThan(settledJobs);
+    });
+
+    const afterJobsFrame = sendsCalls;
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduled_sends_changed" });
+    await waitFor(() => {
+      expect(sendsCalls).toBeGreaterThan(afterJobsFrame);
+    });
+
+    // A fired job's settlement advances its next due date, so run frames wake
+    // the same joined refetch as scheduler frames; unknown types stay ignored.
+    const afterSendsFrame = jobsCalls;
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_started" });
+    await waitFor(() => {
+      expect(jobsCalls).toBeGreaterThan(afterSendsFrame);
+    });
+
+    const afterRunStarted = jobsCalls;
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await waitFor(() => {
+      expect(jobsCalls).toBeGreaterThan(afterRunStarted);
+    });
+    expect(settledSends).toBeGreaterThanOrEqual(0);
+  });
+
+  it("refetches jobs on socket reopen and foreground return", async () => {
+    const capture = installSocket();
+    let jobsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          jobsCalls += 1;
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
+        }
+        return jsonResponse({});
+      }),
+    );
+    const view = render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(jobsCalls).toBeGreaterThan(0));
+    const settledCalls = jobsCalls;
+
+    const visibilitySpy = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(jobsCalls).toBeGreaterThan(settledCalls);
+    });
+    visibilitySpy.mockRestore();
+
+    const afterForegroundCalls = jobsCalls;
+    view.unmount();
+    resetSharedSocket();
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(jobsCalls).toBeGreaterThan(afterForegroundCalls);
+    });
+  });
+
+  it("ignores unknown and unrelated frames without refetching", async () => {
+    const capture = installSocket();
+    let jobsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          jobsCalls += 1;
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(jobsCalls).toBeGreaterThan(0));
+    // Drain the mount-plus-reopen coalesced refresh before snapshotting so
+    // the ignored-frame assertion proves no new GET fires.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    const settledCalls = jobsCalls;
+    // Settings and goal pushes belong to other surfaces, so they leave the
+    // schedules list still alongside truly unknown types.
+    await dispatchFrameOrThrow(capture.onMessage, { type: "settings_changed" });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "goal_updated",
+      goal: job(),
+    });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "definitely_unknown_xyz" });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(jobsCalls).toBe(settledCalls);
   });
 });

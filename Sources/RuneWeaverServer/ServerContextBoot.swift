@@ -438,7 +438,7 @@ extension ServerContext {
                 await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
             },
             fanOutEngine: args.fanOutEngine,
-            scheduledSendBooking: SchedulerStoreBookingAdapter(store: args.services.durable.scheduler),
+            scheduledSendBooking: SchedulerStoreBookingAdapter(store: args.services.durable.scheduler, hub: args.services.durable.hub),
             policyStore: args.policyStore,
             egressSupervisor: egressSupervisor
         ))

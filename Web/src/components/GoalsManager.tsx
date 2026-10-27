@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Long-horizon goal manager.
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   acceptIdea,
   ApiError,
@@ -40,13 +40,7 @@ import {
 } from "../hooks/useGoalDetail";
 import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
-import {
-  CloseIcon,
-  PlusIcon,
-  RefreshIcon,
-  TargetIcon,
-  TrashIcon,
-} from "./icons";
+import { CloseIcon, PlusIcon, TargetIcon, TrashIcon } from "./icons";
 
 // Default filter: hide abandoned goals so a long pursuit history never crowds
 // the active work, while an explicit "All" lets the owner audit dropped goals.
@@ -55,6 +49,10 @@ type GoalFilter = "current" | "all";
 // Bounded linked-runs window for an expanded goal row; the full history stays
 // on the Runs surface.
 const EXPANDED_RUN_LIMIT = 20;
+
+// Live frames arrive in bursts, so wake-ups coalesce into one refetch pair
+// instead of one request per frame.
+const GOALS_REFRESH_COALESCE_MS = 150;
 
 // First-run examples shown when the owner has no goals yet. Each card prefills
 // the create form so a new pursuit starts from a concrete shape instead of a
@@ -240,6 +238,40 @@ export default function GoalsManager({
     };
   }, []);
 
+  // Pending trailing-coalesce timer so a burst of frames folds into one
+  // refetch pair instead of one request per frame.
+  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(
+    null
+  );
+  // Guards overlapping pairs so a second burst never overlaps the first.
+  const isRefreshingRef = useRef(false);
+
+  const scheduleGoalsRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      if (isRefreshingRef.current) return;
+      isRefreshingRef.current = true;
+      void (async () => {
+        try {
+          await refresh();
+          await refreshIdeas();
+        } finally {
+          isRefreshingRef.current = false;
+        }
+      })();
+    }, GOALS_REFRESH_COALESCE_MS);
+  }, [refresh, refreshIdeas]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const handleSocketFrame = useCallback(
     (frame: WSIncomingFrame) => {
       // The shared hub passes unknown frame types through as generic records, so
@@ -251,18 +283,39 @@ export default function GoalsManager({
         // so a valid snapshot re-reads the list to pick up derived tallies. The
         // shell-owned attention count comes from its own hook, not this handler.
         if (parseGoalUpdatedFrame(raw)) {
-          void refresh();
+          scheduleGoalsRefresh();
         }
         return;
       }
       // A freshly proposed idea rides the shared proactive frame.
       if (isIdeaProposedProactive(raw)) {
-        void refreshIdeas();
+        scheduleGoalsRefresh();
       }
     },
-    [refresh, refreshIdeas],
+    [scheduleGoalsRefresh],
   );
-  useSharedWebSocket(handleSocketFrame);
+
+  // A reconnect may have missed frames while the socket was down, so the
+  // open event revalidates through the same coalescing window.
+  const handleSocketOpen = useCallback(() => {
+    scheduleGoalsRefresh();
+  }, [scheduleGoalsRefresh]);
+
+  useSharedWebSocket(handleSocketFrame, undefined, handleSocketOpen);
+
+  // A backgrounded tab may miss frames, so returning to the foreground
+  // revalidates through the same coalescer as a near-simultaneous reopen.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        scheduleGoalsRefresh();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [scheduleGoalsRefresh]);
 
   const visibleGoals =
     filter === "all"
@@ -459,18 +512,6 @@ export default function GoalsManager({
                 : `${attentionCount} goals need input`}
             </span>
           ) : null}
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => {
-              void refresh();
-              void refreshIdeas();
-            }}
-            disabled={loading}
-          >
-            <RefreshIcon size={14} className={loading ? "spin" : ""} />
-            <span>{loading ? "Refreshing…" : "Refresh"}</span>
-          </button>
           <span className="muted text-sm">{visibleGoals.length} goals</span>
 
           <button

@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Audit log viewer for inspecting chat turns and scheduler job runs.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   cancelRun,
@@ -20,9 +20,16 @@ import {
 import RunDetailModal from "./RunDetailModal";
 import Modal from "./Modal";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import type { WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import { useToastStack } from "../hooks/useToastStack";
 import { ToastStack } from "./Toast";
-import { ChevronDownIcon, ChevronRightIcon, CloseIcon, RefreshIcon, TrashIcon, WrenchIcon } from "./icons";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  TrashIcon,
+  WrenchIcon,
+} from "./icons";
 import {
   approvalSessionID,
   getSavedEnum,
@@ -35,37 +42,37 @@ import {
 export type FilterKind = "all" | "chat" | "scheduler";
 export type TimeRange = "all" | "24h" | "7d" | "30d";
 
-// One rendered row group: the parent record plus the fan-out worker rows that
-// belong to its swarm. Non-fan-out parents carry no children.
+// Start plus settle bursts fold into one refetch.
+const RUNS_REFRESH_COALESCE_MS = 150;
+
+// One row group: parent plus its fan-out workers; others carry no children.
 export interface RunRowGroup {
   parent: RunLogEntry;
   children: RunLogEntry[];
 }
 
-// Groups fan-out worker rows under their parent swarm record.
 export function groupFanOutRows(runs: RunLogEntry[]): RunRowGroup[] {
   const groups: RunRowGroup[] = [];
-  let pendingWorkers: RunLogEntry[] = [];
+  let pending: RunLogEntry[] = [];
   for (const run of runs) {
     if (run.kind === "fanout_worker") {
-      pendingWorkers.push(run);
+      pending.push(run);
       continue;
     }
     if (run.kind === "fanout") {
-      groups.push({ parent: run, children: pendingWorkers.reverse() });
-      pendingWorkers = [];
+      groups.push({ parent: run, children: pending.reverse() });
+      pending = [];
       continue;
     }
     groups.push({ parent: run, children: [] });
   }
-  for (const worker of pendingWorkers.reverse()) {
+  for (const worker of pending.reverse()) {
     groups.push({ parent: worker, children: [] });
   }
   return groups;
 }
 
-// Display label per run kind; fan-out rows read their own family so the swarm
-// shape and its worker turns never mislabel as chat turns.
+// Fan-out rows read their own family so the swarm never mislabels as chat.
 export function runKindLabel(run: RunLogEntry): string {
   if (run.kind === "scheduler") return "Scheduled Job";
   if (run.kind === "index") return indexRunLabelForRun(run);
@@ -78,7 +85,7 @@ export function getSavedRunsFilterKind(): FilterKind {
   return getSavedEnum<FilterKind>(
     "rw_runs_filter_kind",
     ["all", "chat", "scheduler"],
-    "all",
+    "all"
   );
 }
 
@@ -86,13 +93,12 @@ export function getSavedRunsTimeRange(): TimeRange {
   return getSavedEnum<TimeRange>(
     "rw_runs_filter_time",
     ["all", "24h", "7d", "30d"],
-    "all",
+    "all"
   );
 }
 
-// Matches unresolved approvals to one run by owning session, falling back to
-// overlapping tool call identifiers so older payloads without a session tag
-// still surface when the same gated call is awaiting a decision.
+// Falls back to overlapping call identifiers so older payloads without a
+// session tag still surface when the same gated call awaits a decision.
 export function runPendingApprovals(
   run: RunLogEntry,
   approvals: PermissionRequest[] | undefined | null,
@@ -102,28 +108,24 @@ export function runPendingApprovals(
   const runCallIDs = new Set<string>();
   if (run.toolActions) {
     for (const action of run.toolActions) {
-      if (typeof action.callID === "string" && action.callID.trim()) {
+      if (
+        typeof action.callID === "string" &&
+        action.callID.trim()
+      ) {
         runCallIDs.add(action.callID.trim());
       }
     }
   }
   return approvals.filter((request) => {
-    const approvalSID = approvalSessionID(request);
-    if (isSameSession(approvalSID, runSID)) {
-      return true;
-    }
+    if (isSameSession(approvalSessionID(request), runSID)) return true;
     const approvalCallID =
       typeof request.input?.callID === "string"
         ? request.input.callID.trim()
         : "";
-    if (approvalCallID && runCallIDs.has(approvalCallID)) {
-      return true;
-    }
-    return false;
+    return approvalCallID !== "" && runCallIDs.has(approvalCallID);
   });
 }
 
-// Reports whether one row's in-flight work can be stopped from the runs surface.
 export function canCancelRun(run: RunLogEntry): boolean {
   return (
     isActiveRunStatus(run.status) &&
@@ -141,25 +143,14 @@ export default function RunLogViewer() {
   const [timeRange, setTimeRange] = useState<TimeRange>(getSavedRunsTimeRange);
   const [clearModalOpen, setClearModalOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  // Non-blocking single-run delete confirmation: the pending run renders a
-  // true modal so an accidental trash click never drops audit history.
-  const [pendingDeleteRun, setPendingDeleteRun] = useState<RunLogEntry | null>(
-    null,
-  );
+  const [pendingDeleteRun, setPendingDeleteRun] =
+    useState<RunLogEntry | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  // Expanded fan-out swarm: the parent kind=fanout row whose worker children
-  // currently render; one swarm stays expanded at a time so the list never
-  // collapses into an unreadable wall of worker rows.
+  // One swarm stays expanded at a time so the list never fills with workers.
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  // Stop affordances for in-flight fan-out work: the parent row stages a confirmation because it
-  // stops the whole swarm, while a worker row fires directly for a one-click narrow stop.
-  const [pendingCancelRun, setPendingCancelRun] = useState<RunLogEntry | null>(
-    null,
-  );
+  const [pendingCancelRun, setPendingCancelRun] =
+    useState<RunLogEntry | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
-  // Transient cancel feedback in a top-right stack so the honest scope copy
-  // never blocks the list; identical copies refresh one notice instead of
-  // stacking, matching the shared toast pattern used elsewhere.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
     useToastStack();
 
@@ -182,8 +173,7 @@ export default function RunLogViewer() {
     a.download = `runs-export-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
-    // Release the anchor immediately but defer revoking the object URL so
-    // the download has time to start before the blob is torn down.
+    // Defer revoking the object URL so the download starts before teardown.
     a.removeAttribute("href");
     document.body.removeChild(a);
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -206,14 +196,11 @@ export default function RunLogViewer() {
   const handleDeleteRun = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     const target = runs.find((r) => r.id === id) ?? null;
-    // A stale identifier must fail visibly instead of opening an empty
-    // confirmation that would silently no-op on confirm.
+    // A stale identifier fails visibly instead of opening an empty confirm.
     if (!target) {
       setError("Failed to delete run");
       return;
     }
-    // Stage the confirmation first; the destructive request only fires from
-    // the modal so list-row clicks stay non-destructive by default.
     setPendingDeleteRun(target);
   };
 
@@ -224,9 +211,7 @@ export default function RunLogViewer() {
     try {
       await deleteRun(id);
       setRuns((prev) => prev.filter((r) => r.id !== id));
-      if (selected?.id === id) {
-        setSelected(null);
-      }
+      if (selected?.id === id) setSelected(null);
       setPendingDeleteRun(null);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to delete run");
@@ -250,18 +235,6 @@ export default function RunLogViewer() {
     }
   }, []);
 
-  // Live approval prompts join the badge set immediately so blocked runs
-  // show the amber indicator without waiting for the next refresh.
-  const handleWSApproval = useCallback((data: unknown) => {
-    const request = mergeApprovalFrame(data);
-    if (!request) return;
-    setApprovals((previous) =>
-      previous.some((item) => item.id === request.id) ? previous : [...previous, request],
-    );
-  }, []);
-
-  useSharedWebSocket(handleWSApproval);
-
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -275,6 +248,66 @@ export default function RunLogViewer() {
       setLoading(false);
     }
   }, [refreshApprovals]);
+
+  // First frame schedules, frames inside the window are absorbed.
+  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  const scheduleRunsRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, RUNS_REFRESH_COALESCE_MS);
+  }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    };
+  }, []);
+
+  // Approval prompts join the badge set immediately; run frames are
+  // type-only wake-ups that refetch the list while unknown types stay ignored.
+  const handleWSFrame = useCallback(
+    (data: WSIncomingFrame) => {
+      switch (data.type) {
+        case "run_started":
+        case "run_completed":
+          scheduleRunsRefresh();
+          return;
+        default:
+          break;
+      }
+      const request = mergeApprovalFrame(data);
+      if (request) {
+        setApprovals((previous) =>
+          previous.some((item) => item.id === request.id)
+            ? previous
+            : [...previous, request]
+        );
+      }
+    },
+    [scheduleRunsRefresh]
+  );
+
+  // A reconnect may have missed frames, so the open event revalidates
+  // through the same coalescing window as a burst.
+  const handleSocketOpen = useCallback(() => {
+    scheduleRunsRefresh();
+  }, [scheduleRunsRefresh]);
+
+  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
+
+  // A backgrounded tab may miss frames, so foreground return revalidates
+  // through the same coalescer as a near-simultaneous reopen.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") scheduleRunsRefresh();
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [scheduleRunsRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -301,42 +334,36 @@ export default function RunLogViewer() {
     };
   }, []);
 
-  // Live badges track only in-flight turns while parked approvals surface through the approvals
-  // badge, so the poller separates the two: running rows keep history fresh and parked rows keep
-  // approvals fresh without double-badging one blocked turn.
+  // Running rows keep history fresh and parked rows keep approvals fresh.
   const hasRunning = runs.some((r) => isActiveRunStatus(r.status));
   const hasParked = runs.some((r) => r.status === "awaiting_approval");
   useEffect(() => {
     if (!hasRunning && !hasParked) return;
-
     const interval = setInterval(() => {
-      // Parked turns settle through the approvals inbox, so a parked-only
-      // tick refreshes approvals without refetching settled history.
+      // The poll is a backstop only, so it rides the same coalescer
+      // as WS bursts instead of firing parallel GETs beside them.
       if (hasRunning) {
-        void listRuns(RUN_LOG_POLL_LIMIT)
-          .then((response) => setRuns(response.runs))
-          .catch(() => {
-            // Poll is best-effort; the next interval retries while a run stays active.
-          });
+        scheduleRunsRefresh();
+      } else {
+        void refreshApprovals();
       }
-      void refreshApprovals();
     }, RUN_POLL_INTERVAL_MS);
-
     return () => clearInterval(interval);
-  }, [hasRunning, hasParked, refreshApprovals]);
+  }, [hasRunning, hasParked, refreshApprovals, scheduleRunsRefresh]);
 
-  // Keep selected modal updated if its run changes while viewing
   useEffect(() => {
     if (!selected) return;
     const updated = runs.find((r) => r.id === selected.id);
-    if (updated && (updated.status !== selected.status || updated.response !== selected.response)) {
+    if (
+      updated &&
+      (updated.status !== selected.status ||
+        updated.response !== selected.response)
+    ) {
       setSelected(updated);
     }
   }, [runs, selected]);
 
-  // Fires one stop request and refetches so settled badges appear as workers stop. Scope copy names
-  // how far the stop reaches (whole swarm versus one worker) so the operator never has to infer it
-  // from the row kind.
+  // Fires one stop request and refetches so settled badges appear as workers stop.
   async function performCancel(run: RunLogEntry, scope: "run" | "worker") {
     setCancellingId(run.id);
     try {
@@ -358,21 +385,15 @@ export default function RunLogViewer() {
     }
   }
 
-  // Row entry point: a whole-swarm stop is destructive enough to confirm before
-  // firing, while a worker stop fires immediately because its blast radius is
-  // one worker.
+  // A whole-swarm stop confirms first; a worker stop fires immediately.
   function handleCancelClick(run: RunLogEntry, e?: React.MouseEvent) {
     if (e) e.stopPropagation();
-    if (run.kind === "fanout") {
-      setPendingCancelRun(run);
-      return;
-    }
+    if (run.kind === "fanout") { setPendingCancelRun(run); return; }
     void performCancel(run, "worker");
   }
 
   function dismissPendingCancel() {
-    // A stop already in flight must finish before the dialog can close so the
-    // honest outcome can never be swallowed by a dismissed confirmation.
+    // A stop in flight must finish before the dialog closes.
     if (pendingCancelRun && cancellingId === pendingCancelRun.id) return;
     setPendingCancelRun(null);
   }
@@ -381,15 +402,12 @@ export default function RunLogViewer() {
     if (!pendingCancelRun) return;
     const target = pendingCancelRun;
     await performCancel(target, "run");
-    // Close on success and on failure alike: a failure has already surfaced its
-    // honest reason through the error toast, and a stale dialog would invite a
-    // duplicate request against a run that may have settled.
+    // Close on success and failure alike; a failure already toasted honestly.
     setPendingCancelRun(null);
   }
 
-  // Groups form first (on the full fetched list) so a parent and its worker
-  // children always travel together, then filters apply to the parent: a
-  // group renders only when its parent passes the kind and time filters.
+  // Groups form first so parent plus workers travel together, then the
+  // parent alone decides whether the group passes the kind/time filters.
   const groups = groupFanOutRows(runs);
   const filteredGroups = groups.filter((group) => {
     const run = group.parent;
@@ -421,15 +439,6 @@ export default function RunLogViewer() {
         <div className="row">
           <button
             type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void refresh()}
-            disabled={loading}
-          >
-            <RefreshIcon size={14} className={loading ? "spin" : ""} />
-            <span>{loading ? "Refreshing…" : "Refresh"}</span>
-          </button>
-          <button
-            type="button"
             className="ghost icon-text-btn danger-hover"
             onClick={() => setClearModalOpen(true)}
             disabled={loading || runs.length === 0}
@@ -447,7 +456,6 @@ export default function RunLogViewer() {
         </div>
       </div>
 
-      {/* Filter Controls: Kind and Time Range */}
       <div className="filter-controls-container">
         <div className="filter-chip-row">
           <span className="filter-group-label muted text-xs">Source:</span>
@@ -521,8 +529,7 @@ export default function RunLogViewer() {
 
       <div className="run-cards-list">
         {filteredGroups.map((group) => {
-          // Amber badge only when this run's session (or one of its gated
-          // call identifiers) still has an unresolved approval.
+          // Amber badge only while this run still has an unresolved approval.
           const run = group.parent;
           const pendingCount = runPendingApprovals(run, approvals).length;
           const duration = formatRunDuration(run.durationMs);
@@ -597,9 +604,6 @@ export default function RunLogViewer() {
                 ) : null}
 
                 {isFanOutParent && isExpanded ? (
-                  // Worker children render status plus duration each with the
-                  // same pill colors as run statuses, indented under their
-                  // parent swarm so the audit trail reads the swarm shape.
                   <div className="run-workers-indent">
                     {group.children.map((worker) => {
                       const workerDuration = formatRunDuration(worker.durationMs);
@@ -680,12 +684,10 @@ export default function RunLogViewer() {
         })}
       </div>
 
-      {/* Full Run Details Modal */}
       {selected ? (
         <RunDetailModal run={selected} onClose={() => setSelected(null)} />
       ) : null}
 
-      {/* Single-run delete confirmation; the bulk Clear Logs dialog below stays untouched. */}
       {pendingDeleteRun ? (
         <Modal
           label="Confirm delete run"
@@ -739,8 +741,7 @@ export default function RunLogViewer() {
         </Modal>
       ) : null}
 
-      {/* Whole-swarm stop confirmation: cancelling a fan-out parent interrupts
-          every worker still in flight, so it never fires from a single click. */}
+      {/* A fan-out stop never fires from a single click. */}
       {pendingCancelRun ? (
         <Modal
           label="Confirm cancel run"
@@ -793,7 +794,6 @@ export default function RunLogViewer() {
         </Modal>
       ) : null}
 
-      {/* Clean up / Archive Confirmation Modal */}
       {clearModalOpen ? (
         <Modal
           label="Clean up run history"

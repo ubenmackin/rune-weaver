@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory, isSettingsTab } from "./SettingsManager";
@@ -61,6 +61,12 @@ import {
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+  dispatchFrameOrThrow,
+  resetSharedSocket,
+} from "../test-utils/mockWebSocket";
 
 const mockSettings = {
   engineName: "Test Engine",
@@ -106,7 +112,8 @@ const mockSettings = {
     },
   ],
   pluginsDir: "~/.runeweaver/plugins",
-  pluginsMarketplaceIndexURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json",
+  pluginsMarketplaceIndexURL:
+    "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json",
   pluginsAutoRescan: true,
   configPath: "/Users/test/.runeweaver/config.toml",
 };
@@ -511,7 +518,8 @@ describe("SettingsManager", () => {
       expect(screen.getByText("World Clock")).toBeDefined();
     });
     expect(screen.getByPlaceholderText(/Search runes by name/i)).toBeDefined();
-    expect(within(screen.getByRole("dialog", { name: /Rune Marketplace/i })).getByRole("button", { name: /^Refresh$/i })).toBeDefined();
+    const marketplaceDialog = screen.getByRole("dialog", { name: /Rune Marketplace/i });
+    expect(within(marketplaceDialog).queryByRole("button", { name: /^Refresh$/i })).not.toBeNull();
     const marketplaceInstallButton = screen.getByRole("button", { name: /^Install$/i });
     expect(marketplaceInstallButton).toBeDefined();
     expect(marketplaceInstallButton.className).toContain("primary");
@@ -3663,19 +3671,10 @@ describe("bash defaults and bounds contract", () => {
     expect(DEFAULT_BASH_CONFIG.allowNetwork).toBe(DEFAULT_BASH_ALLOW_NETWORK);
     expect(DEFAULT_BASH_CONFIG.rules).toEqual(DEFAULT_BASH_RULES);
     expect(DEFAULT_BASH_SANDBOX_MODE).toBe("strictContainer");
-    expect(DEFAULT_BASH_HOST_ALLOW_PATTERNS).toEqual([
-      "xcodebuild*",
-      "codesign*",
-    ]);
+    expect(DEFAULT_BASH_HOST_ALLOW_PATTERNS).toEqual(["xcodebuild*", "codesign*"]);
     expect(DEFAULT_BASH_CONFIG.sandboxMode).toBe(DEFAULT_BASH_SANDBOX_MODE);
-    expect(DEFAULT_BASH_CONFIG.hostAllowPatterns).toEqual(
-      DEFAULT_BASH_HOST_ALLOW_PATTERNS
-    );
-    expect([...BASH_SANDBOX_MODES]).toEqual([
-      "strictContainer",
-      "machineScoped",
-      "hostSeatbelt",
-    ]);
+    expect(DEFAULT_BASH_CONFIG.hostAllowPatterns).toEqual(DEFAULT_BASH_HOST_ALLOW_PATTERNS);
+    expect([...BASH_SANDBOX_MODES]).toEqual(["strictContainer", "machineScoped", "hostSeatbelt"]);
     expect(BASH_HOST_ALLOW_PATTERNS_MAX).toBe(50);
     expect(BASH_HOST_ALLOW_PATTERN_MAX_LENGTH).toBe(256);
     expect([...BASH_PERMISSION_ACTIONS]).toEqual(["allow", "ask", "deny"]);
@@ -3690,9 +3689,7 @@ describe("bash defaults and bounds contract", () => {
   });
 
   it("pins the workspace mirrors to the engine WorkspaceConfig", () => {
-    // Single cross-language contract: the server owns the defaults and clamps in
-    // `Sources/RuneWeaverCore/Config.swift`; these mirrors must stay equal so the Tools-tab editors
-    // and the client validator never drift from the engine.
+    // Cross-language contract: server owns defaults in Config.swift.
     expect(DEFAULT_WORKSPACE_QUOTA_MB).toBe(500);
     expect(DEFAULT_WORKSPACE_QUOTA_FILES).toBe(10000);
     expect(DEFAULT_WORKSPACE_TMP_TTL_DAYS).toBe(7);
@@ -3710,25 +3707,14 @@ describe("bash defaults and bounds contract", () => {
 
 describe("SettingsManager persona pane", () => {
   const STYLE_TEXT = "Answer in complete sentences.";
-  const PERSONA_SETTINGS = {
-    ...mockSettings,
-    persona: {
-      assistantName: "Zephyra",
-      tone: "concise",
-      style: STYLE_TEXT,
-      userName: "Kupan",
-      avatar: "rose",
-    },
-  };
+  const PERSONA_SETTINGS = { ...mockSettings, persona: { assistantName: "Zephyra", tone: "concise", style: STYLE_TEXT, userName: "Kupan", avatar: "rose" } };
 
   type PutOptions = {
     putResponse?: (body: Record<string, unknown>) => Response;
     settings?: Record<string, unknown>;
   };
 
-  // Routes every request through one stub so the pane's reads (settings, plugins, tools, run poll,
-  // secrets) all answer with the persona-shaped snapshot, while PUT /settings is captured for the
-  // changed-only contract.
+  // One stub answers all reads with the persona snapshot; PUT is captured.
   function stubPersonaFetch(options: PutOptions = {}): Record<string, unknown>[] {
     const settings = options.settings ?? PERSONA_SETTINGS;
     const putBodies: Record<string, unknown>[] = [];
@@ -3772,9 +3758,7 @@ describe("SettingsManager persona pane", () => {
     await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
   }
 
-  // Resolves the tab-form footer Save for the currently visible pane. Every
-  // tab owns exactly this one submit, so the helper pins the double-save
-  // regression guard to a single control.
+  // Single submit per tab pins the double-save guard.
   function tabSaveButton() {
     return screen.getByRole("button", { name: "Save" });
   }
@@ -4282,23 +4266,12 @@ describe("persona defaults and bounds contract", () => {
     expect(DEFAULT_PERSONA_TONE).toBe("warm");
     expect(DEFAULT_PERSONA_AVATAR).toBe("violet");
     expect([...PERSONA_TONES]).toEqual(["concise", "warm", "formal", "playful"]);
-    expect([...PERSONA_AVATAR_COLORS]).toEqual([
-      "violet",
-      "cyan",
-      "emerald",
-      "rose",
-    ]);
+    expect([...PERSONA_AVATAR_COLORS]).toEqual(["violet", "cyan", "emerald", "rose"]);
   });
 });
 
 describe("SettingsManager workspace", () => {
-  const workspaceUsagePayload = {
-    bytes: 12 * 1024 * 1024,
-    files: 120,
-    truncated: false,
-    quotaMB: 500,
-    quotaFiles: 10000,
-  };
+  const workspaceUsagePayload = { bytes: 12 * 1024 * 1024, files: 120, truncated: false, quotaMB: 500, quotaFiles: 10000 };
 
   function stubWorkspaceFetch(overrides: {
     onFetch?: (url: string, init?: RequestInit) => Response | Promise<Response> | null;
@@ -4373,28 +4346,10 @@ describe("SettingsManager workspace", () => {
 });
 
 describe("SettingsManager bash bounds and workspace quotas", () => {
-  const bashToolRow = {
-    name: "bash.exec",
-    description: "Run shell commands",
-    permissionLevel: "requiresApproval",
-    inputSchema: "{}",
-    isEnabled: true,
-    isBuiltIn: true,
-    pluginID: null,
-    source: "builtin",
-    integrityStatus: "valid",
-    hasConfig: true,
-  };
-  const usagePayload = {
-    bytes: 12 * 1024 * 1024,
-    files: 120,
-    truncated: false,
-    quotaMB: 500,
-    quotaFiles: 10000,
-  };
+  const bashToolRow = { name: "bash.exec", description: "Run shell commands", permissionLevel: "requiresApproval", inputSchema: "{}", isEnabled: true, isBuiltIn: true, pluginID: null, source: "builtin", integrityStatus: "valid", hasConfig: true };
+  const usagePayload = { bytes: 12 * 1024 * 1024, files: 120, truncated: false, quotaMB: 500, quotaFiles: 10000 };
 
-  // Opens the Tools tab with one stubbed fetch so settings, tools, plugins, and usage all answer
-  // without a second stub.
+  // One stubbed fetch answers settings, tools, plugins, and usage.
   function stubBoundFetch(settings: Record<string, unknown>, onPut?: (body: Record<string, unknown>) => Response) {
     const puts: Record<string, unknown>[] = [];
     let putCount = 0;
@@ -4538,9 +4493,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
           return jsonResponse({ ...settingsWithWorkspace });
         }
         if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-        if (urlStr.includes("/tools")) {
-          return jsonResponse({ tools: [bashToolRow] });
-        }
+      if (urlStr.includes("/tools")) return jsonResponse({ tools: [bashToolRow] });
         if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
         return jsonResponse(settingsWithWorkspace);
       }),
@@ -4570,7 +4523,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
 
 describe("bash sandbox copy and tiers", () => {
   it("pins tier values plus labels plus scope sentences", () => {
-    expect([...BASH_SANDBOX_TIERS.map((tier) => tier.value)]).toEqual([
+    expect(BASH_SANDBOX_TIERS.map((tier) => tier.value)).toEqual([
       "strictContainer",
       "machineScoped",
       "hostSeatbelt",
@@ -4683,18 +4636,9 @@ describe("SettingsManager workspace machine control", () => {
   });
 
   it("sorts provider cards alphabetically by provider name on load", async () => {
-    const unorderedProvidersSettings = {
-      ...mockSettings,
-      providers: {
-        zulu: { enabled: true, model: "zulu-model" },
-        alpha: { enabled: true, model: "alpha-model" },
-        bravo: { enabled: true, model: "bravo-model" },
-      },
-    };
-
+    const unorderedProvidersSettings = { ...mockSettings, providers: { zulu: { enabled: true, model: "zulu-model" }, alpha: { enabled: true, model: "alpha-model" }, bravo: { enabled: true, model: "bravo-model" } } };
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(unorderedProvidersSettings)));
     render(<SettingsManager />);
-
     await waitFor(() => {
       const providerInputs = screen.getAllByPlaceholderText("Provider Name") as HTMLInputElement[];
       expect(providerInputs.length).toBe(3);
@@ -4748,10 +4692,8 @@ describe("SettingsManager workspace machine control", () => {
     window.location.hash = "#settings?access=rules";
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
     render(<SettingsManager />);
-
     await waitFor(() => {
-      const accessBtn = screen.getByRole("tab", { name: "Access" });
-      expect(accessBtn.getAttribute("aria-selected")).toBe("true");
+      expect(screen.getByRole("tab", { name: "Access" }).getAttribute("aria-selected")).toBe("true");
     });
     window.location.hash = "";
   });
@@ -4767,22 +4709,7 @@ describe("SettingsManager workspace machine control", () => {
     const sidenav = document.querySelector(".settings-sidenav");
     expect(sidenav).not.toBeNull();
     const tabButtons = Array.from(sidenav!.querySelectorAll(".settings-tab-btn > span")).map((s) => s.textContent);
-    expect(tabButtons).toEqual([
-      "Access",
-      "LLM Providers",
-      "Persona",
-      "Voice",
-      "Memory and Storage",
-      "Goals",
-      "Tools and Runes",
-      "Indexing",
-      "Web",
-      "Email Accounts",
-      "Security",
-      "Network",
-      "Engine and Logs",
-      "Notifications",
-    ]);
+    expect(tabButtons).toEqual(["Access", "LLM Providers", "Persona", "Voice", "Memory and Storage", "Goals", "Tools and Runes", "Indexing", "Web", "Email Accounts", "Security", "Network", "Engine and Logs", "Notifications"]);
   });
 });
 
@@ -4828,6 +4755,79 @@ describe("SettingsManager engine advanced disclosure", () => {
     await user.click(reset);
     expect(screen.getByTestId("advanced-engine-trigger").textContent).toBe("Advanced Engine settings");
     expect(screen.queryByTestId("advanced-engine-chip")).toBeNull();
+  });
+});
+
+describe("SettingsManager live refresh", () => {
+  beforeEach(() => { vi.unstubAllGlobals(); resetSharedRunsForTesting(); resetSharedSocket(); });
+  function stubLiveSettingsFetch() {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/settings" && !init?.method) { n += 1; return jsonResponse(mockSettings); }
+      if (url.includes("/plugins") || url.includes("/tools")) return jsonResponse({ plugins: [], tools: [] });
+      return jsonResponse(mockSettings);
+    }));
+    return { get settingsCalls() { return n; } };
+  }
+  function installLiveSocket() {
+    const c = createMockWebSocketCapture(); vi.stubGlobal("WebSocket", createMockWebSocket(c));
+    return c;
+  }
+  it("carries no manual Refresh button and converges through live frames alone", async () => {
+    installLiveSocket(); stubLiveSettingsFetch(); render(<SettingsManager />);
+    await waitFor(() => expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined());
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Refresh/i })).not.toBeInTheDocument();
+  });
+  it("refetches clean settings on frame, foreground return, and socket reopen", async () => {
+    const c = installLiveSocket(); const k = stubLiveSettingsFetch();
+    const view = render(<SettingsManager />);
+    await waitFor(() => expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined());
+    await waitFor(() => expect(c.onMessage).not.toBeNull());
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(0));
+    const s0 = k.settingsCalls;
+    await dispatchFrameOrThrow(c.onMessage, { type: "settings_changed" });
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(s0));
+    expect(screen.queryByTestId("settings-stale-banner")).toBeNull();
+    const s1 = k.settingsCalls;
+    const spy = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(s1));
+    spy.mockRestore();
+    const s2 = k.settingsCalls;
+    view.unmount(); resetSharedSocket(); render(<SettingsManager />);
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(s2));
+  });
+  it("suppresses auto-refetch when dirty and shows the stale banner", async () => {
+    const user = userEvent.setup(); const c = installLiveSocket(); const k = stubLiveSettingsFetch();
+    render(<SettingsManager />);
+    await waitFor(() => expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined());
+    await waitFor(() => expect(c.onMessage).not.toBeNull());
+    // Dirty draft must not be clobbered by a remote wake-up.
+    const field = screen.getByDisplayValue("gemma-4-9b");
+    await user.clear(field); await user.type(field, "gemma-4-9b-edited");
+    const s0 = k.settingsCalls;
+    await dispatchFrameOrThrow(c.onMessage, { type: "settings_changed" });
+    await waitFor(() => expect(screen.getByTestId("settings-stale-banner")).toBeInTheDocument());
+    expect(screen.getByText("Settings changed elsewhere")).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(k.settingsCalls).toBe(s0);
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(s0));
+    await waitFor(() => expect(screen.queryByTestId("settings-stale-banner")).toBeNull());
+  });
+  it("ignores unknown frames without refetching or stale banner", async () => {
+    const c = installLiveSocket(); const k = stubLiveSettingsFetch();
+    render(<SettingsManager />);
+    await waitFor(() => expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined());
+    await waitFor(() => expect(c.onMessage).not.toBeNull());
+    await waitFor(() => expect(k.settingsCalls).toBeGreaterThan(0));
+    const s0 = k.settingsCalls;
+    for (const t of ["definitely_unknown_xyz", "scheduler_jobs_changed", "scheduled_sends_changed", "run_started", "run_completed", "goal_updated"]) await dispatchFrameOrThrow(c.onMessage, { type: t });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(k.settingsCalls).toBe(s0);
+    expect(screen.queryByTestId("settings-stale-banner")).toBeNull();
   });
 });
 

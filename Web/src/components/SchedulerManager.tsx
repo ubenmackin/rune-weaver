@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Scheduler manager for automated jobs with Wizard creation and embedded run history.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   cancelScheduledSend,
@@ -41,9 +41,12 @@ import {
   EditIcon,
   MailIcon,
   PlusIcon,
-  RefreshIcon,
   TrashIcon,
 } from "./icons";
+
+// Live frames arrive in bursts, so wake-ups coalesce into one refetch
+// instead of one request per frame.
+const SCHEDULER_REFRESH_COALESCE_MS = 150;
 
 export default function SchedulerManager() {
   const [jobs, setJobs] = useState<SchedulerJob[]>([]);
@@ -83,11 +86,15 @@ export default function SchedulerManager() {
     try {
       const response = await listScheduledSends();
       const pending = (response.sends || [])
-        .filter((send) => send.status === "queued" || send.status === "sending")
+        .filter(
+          (send) => send.status === "queued" || send.status === "sending"
+        )
         .sort((a, b) => {
           const aMs = new Date(a.fireAt).getTime();
           const bMs = new Date(b.fireAt).getTime();
-          return (Number.isFinite(aMs) ? aMs : Infinity) - (Number.isFinite(bMs) ? bMs : Infinity) || 0;
+          const aValue = Number.isFinite(aMs) ? aMs : Infinity;
+          const bValue = Number.isFinite(bMs) ? bMs : Infinity;
+          return aValue - bValue || 0;
         });
       setSends(pending);
     } catch {
@@ -104,11 +111,15 @@ export default function SchedulerManager() {
       const response = await listJobs();
       setJobs(response.jobs);
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure.message : "Schedules failed");
+      setError(
+        failure instanceof ApiError ? failure.message : "Schedules failed"
+      );
     } finally {
       setLoading(false);
     }
-    void refreshSends();
+    // Join the sends refetch so one coalesced wake-up yields one
+    // consistent jobs-plus-sends snapshot instead of overlapping GETs.
+    await refreshSends();
   }, [refreshSends]);
 
   useEffect(() => {
@@ -161,17 +172,52 @@ export default function SchedulerManager() {
     void refreshSends();
   }, [refreshSends]);
 
-  const handleSendsFrame = useCallback((frame: WSIncomingFrame) => {
-    if ((frame as { type?: string }).type === "run_completed") void refreshSends();
-  }, [refreshSends]);
-  const handleSendsSocketOpen = useCallback(() => void refreshSends(), [refreshSends]);
-  useSharedWebSocket(handleSendsFrame, undefined, handleSendsSocketOpen);
+  // Pending trailing-coalesce timer so a burst of frames folds into one
+  // refetch instead of one request per frame.
+  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(
+    null,
+  );
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, SCHEDULER_REFRESH_COALESCE_MS);
+  }, [refresh]);
 
   useEffect(() => {
-    const onVisible = () => { if (document.visibilityState === "visible") void refreshSends(); };
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Run settlement can advance a fired job, so run frames wake the same refetch.
+  const handleSchedulerFrame = useCallback((frame: WSIncomingFrame) => {
+    const frameType = (frame as { type?: string }).type;
+    if (
+      frameType === "scheduler_jobs_changed" ||
+      frameType === "scheduled_sends_changed" ||
+      frameType === "run_started" ||
+      frameType === "run_completed"
+    )
+      scheduleRefresh();
+  }, [scheduleRefresh]);
+  // A reconnect may have missed frames while the socket was down, so the
+  // open event revalidates through the same coalescing window.
+  const handleSchedulerSocketOpen = useCallback(() => scheduleRefresh(), [scheduleRefresh]);
+  useSharedWebSocket(handleSchedulerFrame, undefined, handleSchedulerSocketOpen);
+
+  // A backgrounded tab may miss frames, so returning to the foreground
+  // revalidates through the same coalescer as a near-simultaneous reopen.
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") scheduleRefresh(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [refreshSends]);
+  }, [scheduleRefresh]);
 
   // Poll while a job is running to detect completion and refresh runs
   useEffect(() => {
@@ -319,16 +365,6 @@ export default function SchedulerManager() {
         </div>
 
         <div className="row">
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void refresh()}
-            disabled={loading}
-          >
-            <RefreshIcon size={14} className={loading ? "spin" : ""} />
-            <span>{loading ? "Refreshing…" : "Refresh"}</span>
-          </button>
-
           <button
             type="button"
             className="primary icon-text-btn"

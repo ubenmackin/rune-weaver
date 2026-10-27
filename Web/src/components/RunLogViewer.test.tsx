@@ -1,10 +1,16 @@
 // Rune Weaver Dashboard — Component tests for RunLogViewer listing and details view.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import RunLogViewer from "./RunLogViewer";
 import { jsonResponse } from "../test-utils/http";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+  dispatchFrameOrThrow,
+  resetSharedSocket,
+} from "../test-utils/mockWebSocket";
 
 const runsPayload = {
   runs: [
@@ -24,6 +30,7 @@ describe("RunLogViewer", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     localStorage.clear();
+    resetSharedSocket();
   });
 
   it("lists runs and opens details", async () => {
@@ -728,5 +735,133 @@ describe("RunLogViewer", () => {
     expect(screen.getByLabelText("Run details")).toBeInTheDocument();
     expect(screen.getByText("Tool Budget Exceeded:")).toBeInTheDocument();
     expect(screen.getByText(/Partial draft report collected before reaching tool budget limit/)).toBeInTheDocument();
+  });
+
+  it("carries no manual Refresh button and converges through live frames alone", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(runsPayload)));
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+    // Live frames plus reopen and foreground resync are the only refresh
+    // paths, so the header carries no manual control.
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Refresh/i })).not.toBeInTheDocument();
+  });
+
+  it("refetches on run_started and run_completed frames", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    let runsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (!init?.method && url.startsWith("/runs")) {
+          runsCalls += 1;
+          return jsonResponse(runsPayload);
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(runsCalls).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const settledCalls = runsCalls;
+
+    // Frames are type-only wake-ups, so each lifecycle push refetches the
+    // same GET instead of patching rows from the frame.
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_started" });
+    await waitFor(() => {
+      expect(runsCalls).toBeGreaterThan(settledCalls);
+    });
+
+    const afterStartCalls = runsCalls;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await waitFor(() => {
+      expect(runsCalls).toBeGreaterThan(afterStartCalls);
+    });
+  });
+
+  it("refetches on socket reopen and foreground return", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    let runsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (!init?.method && url.startsWith("/runs")) {
+          runsCalls += 1;
+          return jsonResponse(runsPayload);
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    const view = render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(runsCalls).toBeGreaterThan(0));
+    const settledCalls = runsCalls;
+
+    const visibilitySpy = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(runsCalls).toBeGreaterThan(settledCalls);
+    });
+    visibilitySpy.mockRestore();
+
+    const afterForegroundCalls = runsCalls;
+    view.unmount();
+    resetSharedSocket();
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(runsCalls).toBeGreaterThan(afterForegroundCalls);
+    });
+  });
+
+  it("ignores unknown and unrelated frames without refetching", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    let runsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (!init?.method && url.startsWith("/runs")) {
+          runsCalls += 1;
+          return jsonResponse(runsPayload);
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const settledCalls = runsCalls;
+    expect(settledCalls).toBeGreaterThan(0);
+    // Only run lifecycle wake-ups belong here, so scheduler and settings
+    // pushes leave the audit list still alongside unknown types.
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduler_jobs_changed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "scheduled_sends_changed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "settings_changed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "goal_updated" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "definitely_unknown_xyz" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(runsCalls).toBe(settledCalls);
   });
 });

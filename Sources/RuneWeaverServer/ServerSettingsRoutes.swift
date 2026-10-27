@@ -148,6 +148,9 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // the boot supervisor uses, so both paths pre-authorize exactly the
         // same hosts and a service source added there is never skipped here.
         await ensureConfiguredServiceEgressCandidates(config: config, store: liveContext.policyStore)
+        // The saved file changes what Settings lists, so open tabs refetch
+        // instead of waiting for a manual refresh.
+        await liveContext.hub.broadcastSettingsChanged()
         // The bind and the Host middleware stay on the boot values: a
         // `[server]` save persists to the file and returns `requiresRestart`
         // without touching the live socket or middleware set.
@@ -555,7 +558,7 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
             filesConfig: live.files,
             ephemeralLedger: sharedLedger,
             securityConfig: config.security,
-            booking: SchedulerStoreBookingAdapter(store: context.scheduler)
+            booking: SchedulerStoreBookingAdapter(store: context.scheduler, hub: context.hub)
         ) {
             await reregisterPreservingToggle(tool, on: context)
         }
