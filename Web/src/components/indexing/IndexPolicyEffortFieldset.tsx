@@ -31,10 +31,11 @@ export default function IndexPolicyEffortFieldset({
       >
         {effortReality}
       </p>
-      <div role="radiogroup" aria-label="Indexing effort">
+      <div className="index-effort-options" role="radiogroup" aria-label="Indexing effort">
         {INDEX_EFFORT_OPTIONS.map((option) => (
-          <label key={option.id} className="toggle-label">
+          <label key={option.id} className="toggle-label index-effort-option">
             <input
+              className="index-effort-radio"
               type="radio"
               name="index-effort"
               value={option.id}
