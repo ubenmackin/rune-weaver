@@ -133,6 +133,7 @@ export default function TopNav({
   // Staged drawer trigger stays always visible (including zero, fetch failure, and reload) so
   // review never waits on the tool path.
   const normalizedStagedCount = normalizeBadgeCount(stagedFilesCount);
+  const hasPendingStagedFiles = normalizedStagedCount > 0;
 
   // Operator name for the profile block. The shared persona store owns the data flow: Settings
   // publishes on every load and save, so a rename lands here live.
@@ -600,26 +601,26 @@ export default function TopNav({
           ) : null}
         </button>
 
-        {/* Staged Changes Drawer Trigger — always visible in every state
-            (including zero, fetch failure, and reload) so the review path
-            never waits on the tool path. Clicking always delegates to the
-            upstream drawer wiring; at zero the drawer shows its existing
-            `No staged changes` empty state. Never auto-opens on tool_end. */}
+        {/* Staged Changes Drawer Trigger — icon-only, always visible, and lit only
+            while pending file reviews exist, mirroring the bell's active treatment.
+            Clicking delegates to the upstream drawer wiring at every count. */}
         <button
           type="button"
-          className="top-nav-staged-btn"
+          className={`icon-button top-nav-staged-btn ${hasPendingStagedFiles ? "active" : ""}`}
           data-testid="top-nav-staged-btn"
           onClick={onOpenStagedDrawer}
-          title={`${normalizedStagedCount} staged file change${normalizedStagedCount === 1 ? "" : "s"} waiting for review`}
-          aria-label={`Open staged changes drawer (${normalizedStagedCount} files)`}
+          title={
+            hasPendingStagedFiles
+              ? `${normalizedStagedCount} staged file change${normalizedStagedCount === 1 ? "" : "s"} waiting for review`
+              : "Staged changes"
+          }
+          aria-label={
+            hasPendingStagedFiles
+              ? `Open staged changes drawer, ${normalizedStagedCount} pending`
+              : "Open staged changes drawer"
+          }
         >
           <FileDiffIcon size={16} />
-          <span>Files</span>
-          <span
-            className={`top-nav-staged-badge ${normalizedStagedCount === 0 ? "is-zero" : ""}`}
-          >
-            {normalizedStagedCount}
-          </span>
         </button>
 
         {/* Profile Dropdown: click/keyboard driven with Escape to close and
