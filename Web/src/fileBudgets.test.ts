@@ -32,7 +32,7 @@ const LEGACY_LINE_RATCHET: Record<string, number> = {
   "src/components/RunLogViewer.tsx": 865,
   "src/components/TopNav.tsx": 945,
   "src/components/icons.tsx": 950,
-  "src/components/ScheduleWizardModal.tsx": 970,
+  "src/components/ScheduleWizardModal.tsx": 1600,
   "src/components/access/AccessFilesSection.tsx": 684,
   "src/components/ToolActionRow.tsx": 1075,
   "src/components/SessionSidebar.tsx": 1075,

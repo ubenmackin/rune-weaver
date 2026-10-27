@@ -350,6 +350,20 @@ extension ServerSchedulerWorker {
         if let mailbox = rule.trimmedMailbox {
             args["mailbox"] = mailbox
         }
+        // Field-scoped filters ride alongside the legacy query so one poll
+        // combines every non-empty predicate with AND downstream.
+        if let from = rule.trimmedFrom {
+            args["from"] = from
+        }
+        if let subject = rule.trimmedSubject {
+            args["subject"] = subject
+        }
+        if rule.unreadOnly {
+            args["unreadOnly"] = true
+        }
+        if let days = rule.clampedSinceDays {
+            args["sinceDays"] = days
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: args),
               let json = String(data: data, encoding: .utf8)
         else { return [] }

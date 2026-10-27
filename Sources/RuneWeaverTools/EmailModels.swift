@@ -3,44 +3,6 @@
 import Foundation
 import RuneWeaverCore
 
-/// Shared mailbox-name normalization for email args and envelopes.
-public enum EmailMailboxNormalization: Sendable {
-    /// Trims an optional mailbox, returning nil when omitted or blank.
-    /// - Parameter value: Raw mailbox value, if any.
-    /// - Returns: Trimmed mailbox, or nil when omitted or blank.
-    public static func trimmed(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// Normalizes a mailbox to a non-empty canonical value.
-    public static func normalizedMailbox(_ value: String?) -> String {
-        guard let trimmed = trimmed(value), !trimmed.isEmpty else { return "INBOX" }
-        return trimmed
-    }
-
-    /// Returns the first alias that is present and non-blank after trimming. Blank strings behave
-    /// as omitted so a valid later alias still wins.
-    public static func firstNonBlank(_ candidates: [String?]) -> String? {
-        for candidate in candidates {
-            guard let candidate else { continue }
-            if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                continue
-            }
-            return candidate
-        }
-        return nil
-    }
-
-    /// Variadic convenience over the array form.
-    /// - Parameter candidates: Aliases in priority order.
-    /// - Returns: First non-blank alias, or nil when all are omitted or blank.
-    public static func firstNonBlank(_ candidates: String?...) -> String? {
-        firstNonBlank(candidates)
-    }
-}
-
 /// Search arguments for the `email.search` tool.
 public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
@@ -57,6 +19,14 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public let since: String?
     /// Optional exclusive upper bound (`YYYY-MM-DD` local day or full ISO8601; nil means unbounded above).
     public let until: String?
+    /// Optional sender substring filter (nil means no sender scoping).
+    public let from: String?
+    /// Optional subject substring filter (nil means no subject scoping).
+    public let subject: String?
+    /// Whether to restrict the search to unread mail only.
+    public let unreadOnly: Bool
+    /// Optional relative lookback in days for `SINCE` scoping (nil means no date bound).
+    public let sinceDays: Int?
 
     /// Default hit count when the caller omits `limit`.
     public static let defaultLimit = 10
@@ -66,7 +36,19 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public static let allAccountsToken = "*"
 
     /// Memberwise initializer with limit clamping.
-    public init(account: String?, query: String, limit: Int = defaultLimit, mailbox: String? = nil, hasAttachment: Bool? = nil, since: String? = nil, until: String? = nil) {
+    public init(
+        account: String?,
+        query: String,
+        limit: Int = defaultLimit,
+        mailbox: String? = nil,
+        hasAttachment: Bool? = nil,
+        since: String? = nil,
+        until: String? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil
+    ) {
         self.account = account
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
@@ -74,6 +56,10 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         self.hasAttachment = hasAttachment
         self.since = EmailMailboxNormalization.trimmed(since)
         self.until = EmailMailboxNormalization.trimmed(until)
+        self.from = from
+        self.subject = subject
+        self.unreadOnly = unreadOnly
+        self.sinceDays = sinceDays
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -88,6 +74,12 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         case hasAttachmentsSnake = "has_attachments"
         case since
         case until
+        case from
+        case subject
+        case unreadOnly
+        case unreadOnlySnake = "unread_only"
+        case sinceDays
+        case sinceDaysSnake = "since_days"
     }
 
     /// Decodes arguments, trimming whitespace and clamping `limit`.
@@ -104,7 +96,26 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachmentsSnake)
         let rawSince = try container.decodeIfPresent(String.self, forKey: .since)
         let rawUntil = try container.decodeIfPresent(String.self, forKey: .until)
-        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox, hasAttachment: hasAttachment, since: rawSince, until: rawUntil)
+        let rawFrom = try container.decodeIfPresent(String.self, forKey: .from)
+        let rawSubject = try container.decodeIfPresent(String.self, forKey: .subject)
+        let unreadOnly = try container.decodeIfPresent(Bool.self, forKey: .unreadOnly)
+            ?? container.decodeIfPresent(Bool.self, forKey: .unreadOnlySnake)
+            ?? false
+        let sinceDays = try container.decodeIfPresent(Int.self, forKey: .sinceDays)
+            ?? container.decodeIfPresent(Int.self, forKey: .sinceDaysSnake)
+        self.init(
+            account: account,
+            query: query,
+            limit: rawLimit,
+            mailbox: mailbox,
+            hasAttachment: hasAttachment,
+            since: rawSince,
+            until: rawUntil,
+            from: rawFrom,
+            subject: rawSubject,
+            unreadOnly: unreadOnly,
+            sinceDays: sinceDays
+        )
     }
 
     /// Trimmed account nickname, or nil for omitted, blank, and `"*"` inputs.
@@ -138,6 +149,22 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Trimmed exclusive upper bound, or nil when omitted or blank (meaning unbounded above).
     public var trimmedUntil: String? {
         EmailMailboxNormalization.trimmed(until)
+    }
+
+    /// Trimmed sender filter, or nil when omitted or blank (meaning no sender scoping).
+    public var trimmedFrom: String? {
+        EmailMailboxNormalization.trimmed(from)
+    }
+
+    /// Trimmed subject filter, or nil when omitted or blank (meaning no subject scoping).
+    public var trimmedSubject: String? {
+        EmailMailboxNormalization.trimmed(subject)
+    }
+
+    /// Lookback days clamped to the shared `1...90` window, or nil when unbounded.
+    public var clampedSinceDays: Int? {
+        guard let sinceDays else { return nil }
+        return min(max(sinceDays, EmailPollRule.minSinceDays), EmailPollRule.maxSinceDays)
     }
 }
 
@@ -323,6 +350,19 @@ extension EmailSearchHit {
     public func matches(hasAttachment: Bool?) -> Bool {
         guard let hasAttachment else { return true }
         return (hasAttachments ?? ((attachmentCount ?? 0) > 0)) == hasAttachment
+    }
+
+    /// Whether this hit satisfies optional sender/subject substring filters.
+    /// Nil or blank filters match every hit; matching is case-insensitive so
+    /// local enforcement mirrors IMAP substring semantics.
+    public func matchesFieldScope(from: String?, subject: String?) -> Bool {
+        if let trimmed = EmailMailboxNormalization.trimmed(from), !trimmed.isEmpty {
+            guard self.from.range(of: trimmed, options: .caseInsensitive) != nil else { return false }
+        }
+        if let trimmed = EmailMailboxNormalization.trimmed(subject), !trimmed.isEmpty {
+            guard self.subject.range(of: trimmed, options: .caseInsensitive) != nil else { return false }
+        }
+        return true
     }
 }
 

@@ -19,6 +19,10 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
     public static let minLimit = 1
     /// Maximum hits fetched per poll. Shared bound for every poll-limit clamp site.
     public static let maxLimit = 50
+    /// Minimum lookback days for `sinceDays`. Shared bound for validation and clamp sites.
+    public static let minSinceDays = 1
+    /// Maximum lookback days for `sinceDays`. Shared bound for validation and clamp sites.
+    public static let maxSinceDays = 90
     /// Account nickname matching an `[email.accounts]` entry.
     public var account: String
     /// Free-text query for `email.search` (blank means most-recent).
@@ -29,6 +33,14 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
     public var pollIntervalSeconds: Int
     /// Maximum hits fetched per poll (clamped `minLimit...maxLimit`).
     public var limit: Int
+    /// Sender filter for `email.search` (blank means no sender scoping).
+    public var from: String
+    /// Subject filter for `email.search` (blank means no subject scoping).
+    public var subject: String
+    /// Whether to restrict the poll to unread mail only.
+    public var unreadOnly: Bool
+    /// Lookback days for `SINCE` scoping (nil means no date bound).
+    public var sinceDays: Int?
 
     /// Creates an email poll rule.
     public init(
@@ -36,13 +48,62 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
         query: String = "",
         mailbox: String? = nil,
         pollIntervalSeconds: Int = EmailPollRule.defaultPollIntervalSeconds,
-        limit: Int = EmailPollRule.defaultLimit
+        limit: Int = EmailPollRule.defaultLimit,
+        from: String = "",
+        subject: String = "",
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil
     ) {
         self.account = account
         self.query = query
         self.mailbox = mailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.limit = Self.clampedLimit(limit)
+        self.from = from
+        self.subject = subject
+        self.unreadOnly = unreadOnly
+        self.sinceDays = sinceDays
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case account
+        case query
+        case mailbox
+        case pollIntervalSeconds
+        case limit
+        case from
+        case subject
+        case unreadOnly
+        case sinceDays
+    }
+
+    /// Decodes a poll rule, defaulting new fields for legacy payloads.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        account = try container.decode(String.self, forKey: .account)
+        query = try container.decodeIfPresent(String.self, forKey: .query) ?? ""
+        mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        pollIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .pollIntervalSeconds) ?? Self.defaultPollIntervalSeconds
+        let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
+        limit = Self.clampedLimit(rawLimit)
+        from = try container.decodeIfPresent(String.self, forKey: .from) ?? ""
+        subject = try container.decodeIfPresent(String.self, forKey: .subject) ?? ""
+        unreadOnly = try container.decodeIfPresent(Bool.self, forKey: .unreadOnly) ?? false
+        sinceDays = try container.decodeIfPresent(Int.self, forKey: .sinceDays)
+    }
+
+    /// Encodes a poll rule including its structured filters.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(account, forKey: .account)
+        try container.encode(query, forKey: .query)
+        try container.encodeIfPresent(mailbox, forKey: .mailbox)
+        try container.encode(pollIntervalSeconds, forKey: .pollIntervalSeconds)
+        try container.encode(limit, forKey: .limit)
+        try container.encode(from, forKey: .from)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(unreadOnly, forKey: .unreadOnly)
+        try container.encodeIfPresent(sinceDays, forKey: .sinceDays)
     }
 
     /// Clamps a poll limit to the shared `minLimit...maxLimit` bounds.
@@ -53,6 +114,11 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
     /// Clamps a poll interval to the shared `minPollIntervalSeconds...maxPollIntervalSeconds` bounds.
     public static func clampedPollIntervalSeconds(_ value: Int) -> Int {
         min(max(value, minPollIntervalSeconds), maxPollIntervalSeconds)
+    }
+
+    /// Clamps lookback days to the shared `minSinceDays...maxSinceDays` bounds.
+    public static func clampedSinceDays(_ value: Int) -> Int {
+        min(max(value, minSinceDays), maxSinceDays)
     }
 
     /// Trimmed account nickname.
@@ -67,13 +133,35 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Trimmed sender filter, or nil when blank.
+    public var trimmedFrom: String? {
+        let trimmed = from.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Trimmed subject filter, or nil when blank.
+    public var trimmedSubject: String? {
+        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Nil means no date bound; otherwise clamped to the shared 1...90 window.
+    public var clampedSinceDays: Int? {
+        guard let sinceDays else { return nil }
+        return Self.clampedSinceDays(sinceDays)
+    }
+
     /// Builds the poll rule for stored job fields, when an account is set.
     public static func ruleForStoredFields(
         pollAccount: String?,
         pollQuery: String?,
         pollMailbox: String?,
         pollIntervalSeconds: Int?,
-        pollLimit: Int?
+        pollLimit: Int?,
+        pollFrom: String? = nil,
+        pollSubject: String? = nil,
+        pollUnreadOnly: Bool? = nil,
+        pollSinceDays: Int? = nil
     ) -> EmailPollRule? {
         let trimmedAccount = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmedAccount.isEmpty else { return nil }
@@ -82,7 +170,11 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
             query: pollQuery ?? "",
             mailbox: pollMailbox,
             pollIntervalSeconds: pollIntervalSeconds ?? EmailPollRule.defaultPollIntervalSeconds,
-            limit: pollLimit ?? EmailPollRule.defaultLimit
+            limit: pollLimit ?? EmailPollRule.defaultLimit,
+            from: pollFrom ?? "",
+            subject: pollSubject ?? "",
+            unreadOnly: pollUnreadOnly ?? false,
+            sinceDays: pollSinceDays
         )
     }
 
@@ -180,6 +272,8 @@ extension SchedulerConfigError {
                 "poll_interval_seconds"
             } else if detail.contains("poll_limit") {
                 "poll_limit"
+            } else if detail.contains("poll_since_days") {
+                "poll_since_days"
             } else if detail.contains("calendar_lead_time_minutes") {
                 "calendar_lead_time_minutes"
             } else if detail.contains("poll account") {
@@ -320,6 +414,17 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     /// Validates the job entry.
     /// - Throws: ``SchedulerConfigError`` when the entry is malformed.
     public func validate() throws {
+        try validateNameAndPrompt()
+        try validateTriggers()
+        try validatePoll()
+        try validateCalendarLeadTime()
+        try validateRules()
+    }
+}
+
+extension SchedulerJobConfig {
+    /// Name plus prompt presence for rule-less jobs.
+    private func validateNameAndPrompt() throws {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SchedulerConfigError.emptyName
         }
@@ -329,76 +434,95 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
                 throw SchedulerConfigError.emptyPrompt(job: name)
             }
         }
-        let hasCron = hasCronTrigger
-        let hasPoll = hasPollTrigger
-        let hasWatcher = hasWatcherTrigger
-        guard hasCron || hasPoll || hasWatcher else {
+    }
+
+    /// Trigger presence plus cron parsing.
+    private func validateTriggers() throws {
+        guard hasCronTrigger || hasPollTrigger || hasWatcherTrigger else {
             throw SchedulerConfigError.missingTrigger(job: name)
         }
-        if hasCron {
+        if hasCronTrigger {
             _ = try cronSchedule()
         }
-        if let poll {
-            guard !poll.trimmedAccount.isEmpty else {
-                throw SchedulerConfigError.invalidPoll(job: name, detail: "poll account must not be empty")
-            }
-            // Fail-closed polling cadence: faster than once a minute would
-            // turn every mailbox into a hot loop, while slower than a day
-            // starves arrival detection, so both edges reject.
-            let minInterval = EmailPollRule.minPollIntervalSeconds
-            let maxInterval = EmailPollRule.maxPollIntervalSeconds
-            guard (minInterval ... maxInterval).contains(poll.pollIntervalSeconds) else {
+    }
+
+    /// Poll account plus cadence bounds.
+    private func validatePoll() throws {
+        guard let poll else { return }
+        guard !poll.trimmedAccount.isEmpty else {
+            throw SchedulerConfigError.invalidPoll(job: name, detail: "poll account must not be empty")
+        }
+        let minInterval = EmailPollRule.minPollIntervalSeconds
+        let maxInterval = EmailPollRule.maxPollIntervalSeconds
+        guard (minInterval ... maxInterval).contains(poll.pollIntervalSeconds) else {
+            throw SchedulerConfigError.invalidPoll(
+                job: name,
+                detail: "poll_interval_seconds must be between \(minInterval) and \(maxInterval) (got \(poll.pollIntervalSeconds))"
+            )
+        }
+        guard (EmailPollRule.minLimit ... EmailPollRule.maxLimit).contains(poll.limit) else {
+            throw SchedulerConfigError.invalidPoll(
+                job: name,
+                detail: "poll_limit must be between \(EmailPollRule.minLimit) and \(EmailPollRule.maxLimit)"
+            )
+        }
+        if let days = poll.sinceDays {
+            guard (EmailPollRule.minSinceDays ... EmailPollRule.maxSinceDays).contains(days) else {
                 throw SchedulerConfigError.invalidPoll(
                     job: name,
-                    detail: "poll_interval_seconds must be between \(minInterval) and \(maxInterval) (got \(poll.pollIntervalSeconds))"
-                )
-            }
-            guard (EmailPollRule.minLimit ... EmailPollRule.maxLimit).contains(poll.limit) else {
-                throw SchedulerConfigError.invalidPoll(
-                    job: name,
-                    detail: "poll_limit must be between \(EmailPollRule.minLimit) and \(EmailPollRule.maxLimit)"
+                    detail: "poll_since_days must be between \(EmailPollRule.minSinceDays) and \(EmailPollRule.maxSinceDays) (got \(days))"
                 )
             }
         }
-        // A collapsed or far-future calendar window either always fires or
-        // sweeps months of meetings, so the lead time rejects outside 1...1440.
-        if let leadTime = calendarLeadTimeMinutes {
-            let minLeadTime = Self.minCalendarLeadTimeMinutes
-            let maxLeadTime = Self.maxCalendarLeadTimeMinutes
-            guard (minLeadTime ... maxLeadTime).contains(leadTime) else {
-                throw SchedulerConfigError.invalidPoll(
-                    job: name,
-                    detail: "calendar_lead_time_minutes must be between \(minLeadTime) and \(maxLeadTime) (got \(leadTime))"
-                )
-            }
+    }
+
+    /// Calendar lead-time window check.
+    private func validateCalendarLeadTime() throws {
+        // Collapsed or far-future windows either always fire or
+        // sweep months of meetings, so the lead time rejects outside bounds.
+        guard let leadTime = calendarLeadTimeMinutes else { return }
+        let minLeadTime = Self.minCalendarLeadTimeMinutes
+        let maxLeadTime = Self.maxCalendarLeadTimeMinutes
+        guard (minLeadTime ... maxLeadTime).contains(leadTime) else {
+            throw SchedulerConfigError.invalidPoll(
+                job: name,
+                detail: "calendar_lead_time_minutes must be between \(minLeadTime) and \(maxLeadTime) (got \(leadTime))"
+            )
         }
-        if let rules {
-            for rule in rules {
-                guard !rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "rule name must not be empty")
-                }
-                switch rule.action {
-                case let .agentPrompt(promptText):
-                    guard !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "prompt must not be empty")
-                    }
-                case let .directTool(toolName, _):
-                    let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmedTool.isEmpty else {
-                        throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "tool_name must not be empty")
-                    }
-                    // The zero-token path bypasses inference, so only the
-                    // narrowly-scoped mailbox and calendar mutations stay
-                    // eligible; anything else must run as a scoped agent turn.
-                    guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
-                        let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
-                        throw SchedulerConfigError.invalidRule(
-                            job: name,
-                            rule: rule.name,
-                            detail: "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
-                        )
-                    }
-                }
+    }
+
+    /// Rule names plus per-action shape.
+    private func validateRules() throws {
+        guard let rules else { return }
+        for rule in rules {
+            try validateRule(rule)
+        }
+    }
+
+    /// Single rule name plus action check.
+    private func validateRule(_ rule: EventRule) throws {
+        guard !rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "rule name must not be empty")
+        }
+        switch rule.action {
+        case let .agentPrompt(promptText):
+            guard !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "prompt must not be empty")
+            }
+        case let .directTool(toolName, _):
+            let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedTool.isEmpty else {
+                throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "tool_name must not be empty")
+            }
+            // Zero-token path stays narrowly scoped; anything else
+            // must run as a scoped agent turn.
+            guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
+                let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
+                throw SchedulerConfigError.invalidRule(
+                    job: name,
+                    rule: rule.name,
+                    detail: "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
+                )
             }
         }
     }
@@ -970,13 +1094,22 @@ public actor SchedulerEngine {
         }
 
         /// Builds the poll rule for this row, when an account is set.
-        package func makePollRule() -> EmailPollRule? {
+        package func makePollRule(
+            pollFrom: String? = nil,
+            pollSubject: String? = nil,
+            pollUnreadOnly: Bool? = nil,
+            pollSinceDays: Int? = nil
+        ) -> EmailPollRule? {
             EmailPollRule.ruleForStoredFields(
                 pollAccount: pollAccount,
                 pollQuery: pollQuery,
                 pollMailbox: pollMailbox,
                 pollIntervalSeconds: pollIntervalSeconds,
-                pollLimit: pollLimit
+                pollLimit: pollLimit,
+                pollFrom: pollFrom,
+                pollSubject: pollSubject,
+                pollUnreadOnly: pollUnreadOnly,
+                pollSinceDays: pollSinceDays
             )
         }
 
@@ -1009,34 +1142,50 @@ extension SchedulerJobConfig {
     #if canImport(SQLite3)
         /// Blocking SQLite read behind `persistedConfigs(from:)`.
         private static func persistedConfigsBlocking(from dbPath: String) -> [SchedulerJobConfig] {
+            guard let handle = openSchedulerStoreHandle(dbPath: dbPath) else { return [] }
+            defer { sqlite3_close(handle) }
+            migrateSchedulerStoreColumns(handle: handle)
+            return fetchSchedulerStoreConfigs(handle: handle)
+        }
+
+        /// Opens the scheduler store, logging open failures.
+        private static func openSchedulerStoreHandle(dbPath: String) -> OpaquePointer? {
             struct LoadError: Error {}
             let expanded = (dbPath as NSString).expandingTildeInPath
-            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
-            let handle: OpaquePointer
+            guard FileManager.default.fileExists(atPath: expanded) else { return nil }
             do {
                 guard let opened = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { _ in LoadError() }) else {
-                    return []
+                    return nil
                 }
-                handle = opened
+                return opened
             } catch {
                 RuneWeaverLog.stores.warning(
                     "SchedulerJobConfig: Failed opening scheduler store at \(dbPath): \(error.localizedDescription); falling back to config seed."
                 )
-                return []
+                return nil
             }
-            defer { sqlite3_close(handle) }
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN max_tool_iterations INTEGER;",
-                failure: { _ in LoadError() }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
-                failure: { _ in LoadError() }
-            )
-            // Watcher columns delegate to the single shared statement owner so
-            // server persistence and direct-core reads add identical columns.
+        }
+
+        /// Adds newer poll plus watcher columns when missing.
+        private static func migrateSchedulerStoreColumns(handle: OpaquePointer) {
+            struct LoadError: Error {}
+            let columns = [
+                "ALTER TABLE scheduler_jobs ADD COLUMN max_tool_iterations INTEGER;",
+                "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
+                "ALTER TABLE scheduler_jobs ADD COLUMN poll_from TEXT;",
+                "ALTER TABLE scheduler_jobs ADD COLUMN poll_subject TEXT;",
+                "ALTER TABLE scheduler_jobs ADD COLUMN poll_unread_only INTEGER;",
+                "ALTER TABLE scheduler_jobs ADD COLUMN poll_since_days INTEGER;"
+            ]
+            for sql in columns {
+                _ = try? SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: sql,
+                    failure: { _ in LoadError() }
+                )
+            }
+            // Watcher columns share one statement owner so server
+            // persistence and direct-core reads add identical columns.
             SchedulerJobConfig.applyWatcherColumnMigrations { statement in
                 _ = try? SQLiteHelpers.exec(
                     handle: handle,
@@ -1044,10 +1193,15 @@ extension SchedulerJobConfig {
                     failure: { _ in LoadError() }
                 )
             }
+        }
+
+        /// Reads ordered configs from an open store handle.
+        private static func fetchSchedulerStoreConfigs(handle: OpaquePointer) -> [SchedulerJobConfig] {
             let sql = """
             SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
                    poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
-                   watcher_source, rules, calendar_lead_time_minutes, calendar_names
+                   watcher_source, rules, calendar_lead_time_minutes, calendar_names,
+                   poll_from, poll_subject, poll_unread_only, poll_since_days
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -1061,34 +1215,46 @@ extension SchedulerJobConfig {
             var loaded: [SchedulerJobConfig] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let row = SchedulerJobRow.decode(statement, base: 0) else { continue }
-                let watcherRaw = SQLiteHelpers.columnText(statement, index: 11)
-                let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
-                let rulesRaw = SQLiteHelpers.columnText(statement, index: 12)
-                let rules: [EventRule]? = rulesRaw.flatMap { json in
-                    guard let data = json.data(using: .utf8) else { return nil }
-                    return try? JSONDecoder().decode([EventRule].self, from: data)
-                }
-                let leadTime = SQLiteHelpers.columnInt64(statement, index: 13).map { Int($0) }
-                let calNamesRaw = SQLiteHelpers.columnText(statement, index: 14)
-                let calendarNames: [String]? = calNamesRaw.flatMap { json in
-                    guard let data = json.data(using: .utf8) else { return nil }
-                    return try? JSONDecoder().decode([String].self, from: data)
-                }
-                loaded.append(SchedulerJobConfig(
-                    name: row.name,
-                    prompt: row.prompt,
-                    enabled: row.enabled,
-                    schedule: row.configSchedule,
-                    poll: row.makePollRule(),
-                    maxToolIterations: row.maxToolIterations,
-                    onToolLimit: row.onToolLimit,
-                    watcherSource: watcherSource,
-                    rules: rules,
-                    calendarLeadTimeMinutes: leadTime,
-                    calendarNames: calendarNames
-                ))
+                loaded.append(makeSchedulerStoreConfig(row: row, statement: statement))
             }
             return loaded
+        }
+
+        /// Builds one config from a decoded row plus watcher columns.
+        private static func makeSchedulerStoreConfig(row: SchedulerJobRow, statement: OpaquePointer?) -> SchedulerJobConfig {
+            let watcherRaw = SQLiteHelpers.columnText(statement, index: 11)
+            let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
+            let rules: [EventRule]? = decodeJSONColumn(SQLiteHelpers.columnText(statement, index: 12))
+            let leadTime = SQLiteHelpers.columnInt64(statement, index: 13).map { Int($0) }
+            let calendarNames: [String]? = decodeJSONColumn(SQLiteHelpers.columnText(statement, index: 14))
+            let pollFrom = SQLiteHelpers.columnText(statement, index: 15)
+            let pollSubject = SQLiteHelpers.columnText(statement, index: 16)
+            let pollUnreadOnly = (SQLiteHelpers.columnInt64(statement, index: 17) ?? 0) != 0
+            let pollSinceDays = SQLiteHelpers.columnInt64(statement, index: 18).map { Int($0) }
+            return SchedulerJobConfig(
+                name: row.name,
+                prompt: row.prompt,
+                enabled: row.enabled,
+                schedule: row.configSchedule,
+                poll: row.makePollRule(
+                    pollFrom: pollFrom,
+                    pollSubject: pollSubject,
+                    pollUnreadOnly: pollUnreadOnly,
+                    pollSinceDays: pollSinceDays
+                ),
+                maxToolIterations: row.maxToolIterations,
+                onToolLimit: row.onToolLimit,
+                watcherSource: watcherSource,
+                rules: rules,
+                calendarLeadTimeMinutes: leadTime,
+                calendarNames: calendarNames
+            )
+        }
+
+        /// Decodes a JSON text column into the expected model.
+        private static func decodeJSONColumn<T: Decodable>(_ raw: String?) -> T? {
+            guard let raw, let data = raw.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(T.self, from: data)
         }
     #endif
 }

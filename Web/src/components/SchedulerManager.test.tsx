@@ -134,7 +134,7 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/settings" && !init?.method) {
-          return jsonResponse({});
+          return jsonResponse({ emailAccounts: [{ name: "icloud", type: "imap", host: "mail.example.com", port: 993, username: "user" }] });
         }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [], count: 0 });
@@ -145,6 +145,7 @@ describe("SchedulerManager", () => {
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
         }
+        if (input.startsWith("/email/accounts/") && input.endsWith("/mailboxes") && !init?.method) return jsonResponse({ mailboxes: ["INBOX"], delimiter: "/" });
         bodies.push(String(init?.body ?? ""));
         return jsonResponse(
           job({
@@ -168,7 +169,12 @@ describe("SchedulerManager", () => {
     await user.type(screen.getByLabelText("Job Name"), "mail watcher");
     await user.click(screen.getByText("Email Event Watcher"));
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    // Step 2: poll configuration (account defaults to icloud, interval defaults to 300)
+    await screen.findByText("Configure Email Watcher");
+    await user.selectOptions(screen.getByLabelText("Mail Account"), "icloud");
+    await waitFor(() => {
+      expect(within(screen.getByLabelText("Mailbox") as HTMLElement).getAllByRole("option").map((o) => (o as HTMLOptionElement).value)).toContain("INBOX");
+    });
+    await user.selectOptions(screen.getByLabelText("Mailbox"), "INBOX");
     await user.click(screen.getByRole("button", { name: "Continue" }));
     // Step 3: prompt
     await user.type(

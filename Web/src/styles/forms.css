@@ -107,7 +107,7 @@ textarea:focus,
 select:focus {
   outline: none;
   border-color: var(--accent-purple);
-  box-shadow: 0 0 0 2px var(--accent-purple-glow);
+  box-shadow: 0 0 0 1px var(--accent-purple-glow);
 }
 
 button.primary {

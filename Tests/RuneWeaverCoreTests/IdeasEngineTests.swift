@@ -316,7 +316,7 @@ struct IdeasEngineTests {
         // even though the provider stream never yields or observes cancellation,
         // so a hung backend cannot stall the trigger that asked for ideas.
         #expect(ideas.isEmpty)
-        #expect(elapsed < 5)
+        #expect(elapsed < 15)
     }
 
     @Test

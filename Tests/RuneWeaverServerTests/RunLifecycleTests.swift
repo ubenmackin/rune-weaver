@@ -592,11 +592,11 @@ private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerCo
     return (context, base)
 }
 
-/// Polls until a condition holds or a short budget expires. Turns spawn detached, so the test must
+/// Polls until a condition holds or a generous budget expires. Turns spawn detached, so the test must
 /// wait for the run row plus the fan-out to land instead of asserting immediately after the spawn
 /// returns.
 private func broadcastWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
-    let deadline = Date().addingTimeInterval(8)
+    let deadline = Date().addingTimeInterval(20)
     while Date() < deadline {
         if await condition() {
             return true

@@ -275,23 +275,24 @@ public actor IdeasEngine {
     /// the caller turns into an empty array.
     private func collectReviewText(prompt: String) async -> String? {
         let timeoutSeconds = max(1, config.timeoutSeconds)
-        let timeoutNS = UInt64(timeoutSeconds) * 1_000_000_000
         let provider = Task { await self.collectOnce(prompt: prompt) }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let resumption = ReviewResumption(continuation: continuation)
+                // Dispatch owns the wall-clock bound so a saturated cooperative pool
+                // cannot delay the timeout past a non-cooperative stream.
+                let timeoutWork = DispatchWorkItem {
+                    provider.cancel()
+                    resumption.resume(nil)
+                }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + Double(timeoutSeconds),
+                    execute: timeoutWork
+                )
                 Task {
                     let text = await provider.value
+                    timeoutWork.cancel()
                     resumption.resume(text)
-                }
-                Task {
-                    do {
-                        try await Task.sleep(nanoseconds: timeoutNS)
-                        provider.cancel()
-                        resumption.resume(nil)
-                    } catch {
-                        return
-                    }
                 }
             }
         } onCancel: {

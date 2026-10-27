@@ -4,6 +4,12 @@ import Foundation
 import os
 import RuneWeaverCore
 
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
 /// Sendable box holding the timeout cancellation task.
 /// The caller thread stores the handle while the process termination handler
 /// cancels it on an arbitrary queue, so the handle stays behind an unfair lock.
@@ -474,17 +480,45 @@ extension BashTool {
         process: Process,
         timedOut: OSAllocatedUnfairLock<Bool>
     ) -> Task<Void, Never> {
-        Task {
-            let boundedTimeoutSeconds = min(max(timeoutSeconds, 1), 3600)
+        let boundedTimeoutSeconds = min(max(timeoutSeconds, 1), 3600)
+        // Dispatch fires the wall-clock bound even when the cooperative pool stalls,
+        // so a sleeping child cannot outlive its timeout under parallel test load.
+        let workItem = DispatchWorkItem {
+            if process.isRunning {
+                timedOut.withLock { $0 = true }
+                terminateProcessGroup(process)
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + boundedTimeoutSeconds,
+            execute: workItem
+        )
+        return Task {
             let nanoseconds = UInt64(boundedTimeoutSeconds * 1_000_000_000)
             do {
                 try await Task.sleep(nanoseconds: nanoseconds)
             } catch {
+                workItem.cancel()
                 return
             }
             if process.isRunning {
                 timedOut.withLock { $0 = true }
-                process.terminate()
+                terminateProcessGroup(process)
+            }
+        }
+    }
+
+    /// Terminates a runaway child plus its process group with SIGKILL escalation.
+    private static func terminateProcessGroup(_ process: Process) {
+        process.terminate()
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        _ = kill(pid, SIGTERM)
+        _ = kill(-pid, SIGTERM)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+            if kill(pid, 0) == 0 {
+                _ = kill(pid, SIGKILL)
+                _ = kill(-pid, SIGKILL)
             }
         }
     }

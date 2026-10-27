@@ -93,6 +93,209 @@ export function validatePollLimit(value: unknown): string | null {
   return null;
 }
 
+// Structured poll predicates combine with AND on the worker: Contains scans
+// subject/from/body, From/Subject pin headers, UnreadOnly gates UNSEEN, and
+// SinceDays bounds recency to SINCE <today-N>.
+export type PollPredicateKind =
+  | "contains"
+  | "from"
+  | "subject"
+  | "unread"
+  | "sinceDays";
+
+export interface PollPredicate {
+  kind: PollPredicateKind;
+  value?: string;
+  days?: number;
+}
+
+export const MAX_POLL_PREDICATES = 5;
+export const POLL_SINCE_DAYS_MIN = 1;
+export const POLL_SINCE_DAYS_MAX = 90;
+export const POLL_SINCE_PRESETS: readonly number[] = [1, 7, 30];
+
+export interface PollPredicatePayload {
+  pollContains: string | null;
+  pollFrom: string | null;
+  pollSubject: string | null;
+  pollUnreadOnly: boolean;
+  pollSinceDays: number | null;
+  pollQuery: string | null;
+}
+
+// Reads one optional poll string under both camelCase and snake_case keys,
+// so durable rows decode even before the engine adopts the new spelling.
+function readPollString(
+  record: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): string | null {
+  const raw =
+    typeof record[camelKey] === "string"
+      ? (record[camelKey] as string)
+      : typeof record[snakeKey] === "string"
+        ? (record[snakeKey] as string)
+        : null;
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : null;
+}
+
+// Builds the editor row list from one stored job. The server stores
+// Contains in pollQuery, so pollContains falls back to pollQuery when
+// absent; every non-empty predicate combines with AND on the worker.
+export function predicatesFromJob(job: SchedulerJob): PollPredicate[] {
+  if (!isRecord(job)) return [];
+  const record = job as unknown as Record<string, unknown>;
+  const structured: PollPredicate[] = [];
+  const containsDirect = readPollString(record, "pollContains", "poll_contains");
+  const containsLegacy = readPollString(record, "pollQuery", "poll_query");
+  const containsValue = containsDirect ?? containsLegacy;
+  if (containsValue) structured.push({ kind: "contains", value: containsValue });
+  const fromValue = readPollString(record, "pollFrom", "poll_from");
+  if (fromValue) structured.push({ kind: "from", value: fromValue });
+  const subjectValue = readPollString(record, "pollSubject", "poll_subject");
+  if (subjectValue) structured.push({ kind: "subject", value: subjectValue });
+  const unreadRaw = record["pollUnreadOnly"] ?? record["poll_unread_only"];
+  if (unreadRaw === true) structured.push({ kind: "unread" });
+  const sinceRaw = record["pollSinceDays"] ?? record["poll_since_days"];
+  if (typeof sinceRaw === "number" && Number.isFinite(sinceRaw)) {
+    structured.push({ kind: "sinceDays", days: sinceRaw });
+  }
+  return structured;
+}
+
+// Maps editor rows back to the save payload. The legacy pollQuery mirrors the
+// Contains value so older readers keep filtering on the same text.
+export function predicatesToPayload(
+  predicates: PollPredicate[] | null | undefined,
+): PollPredicatePayload {
+  let pollContains: string | null = null;
+  let pollFrom: string | null = null;
+  let pollSubject: string | null = null;
+  let pollUnreadOnly = false;
+  let pollSinceDays: number | null = null;
+  if (Array.isArray(predicates)) {
+    for (const predicate of predicates) {
+      if (!isRecord(predicate)) continue;
+      const kind = (predicate as PollPredicate).kind;
+      if (kind === "contains" && pollContains == null) {
+        const raw = (predicate as PollPredicate).value;
+        if (typeof raw === "string" && raw.trim()) pollContains = raw.trim();
+      } else if (kind === "from" && pollFrom == null) {
+        const raw = (predicate as PollPredicate).value;
+        if (typeof raw === "string" && raw.trim()) pollFrom = raw.trim();
+      } else if (kind === "subject" && pollSubject == null) {
+        const raw = (predicate as PollPredicate).value;
+        if (typeof raw === "string" && raw.trim()) pollSubject = raw.trim();
+      } else if (kind === "unread") {
+        pollUnreadOnly = true;
+      } else if (kind === "sinceDays" && pollSinceDays == null) {
+        const days = (predicate as PollPredicate).days;
+        if (typeof days === "number" && Number.isFinite(days)) {
+          pollSinceDays = days;
+        }
+      }
+    }
+  }
+  return {
+    pollContains,
+    pollFrom,
+    pollSubject,
+    pollUnreadOnly,
+    pollSinceDays,
+    pollQuery: pollContains,
+  };
+}
+
+// Fail-closed predicate validator: zero rows means match-all with rule
+// routing, so only non-empty lists can fail on blank values or bounds.
+export function validatePollPredicates(
+  predicates: PollPredicate[] | null | undefined,
+): string | null {
+  if (predicates == null) return null;
+  if (!Array.isArray(predicates)) return "Predicate 1: predicates are malformed.";
+  if (predicates.length === 0) return null;
+  if (predicates.length > MAX_POLL_PREDICATES) {
+    return `Too many predicates: at most ${MAX_POLL_PREDICATES} allowed.`;
+  }
+  // Each kind maps to one engine field, so duplicates would silently drop
+  // in the payload while the preview still shows AND; reject them here.
+  const seenKinds = new Set<string>();
+  for (let i = 0; i < predicates.length; i++) {
+    const label = `Predicate ${i + 1}`;
+    const predicate = predicates[i];
+    if (!predicate || !isRecord(predicate)) return `${label}: predicate is malformed.`;
+    const kind = (predicate as PollPredicate).kind;
+    if (kind === "unread") {
+      if (seenKinds.has(kind)) {
+        return `${label} (Unread-only): duplicate predicate; only one Unread-only allowed.`;
+      }
+      seenKinds.add(kind);
+      continue;
+    }
+    if (kind === "contains" || kind === "from" || kind === "subject") {
+      const name =
+        kind === "contains" ? "Contains" : kind === "from" ? "From" : "Subject";
+      if (seenKinds.has(kind)) {
+        return `${label} (${name}): duplicate predicate; only one ${name} allowed.`;
+      }
+      seenKinds.add(kind);
+      const raw = (predicate as PollPredicate).value;
+      if (typeof raw !== "string" || !raw.trim()) {
+        return `${label} (${name}): value must not be empty.`;
+      }
+      continue;
+    }
+    if (kind === "sinceDays") {
+      if (seenKinds.has(kind)) {
+        return `${label} (SinceDays): duplicate predicate; only one SinceDays allowed.`;
+      }
+      seenKinds.add(kind);
+      const days = (predicate as PollPredicate).days;
+      if (typeof days !== "number" || !Number.isSafeInteger(days)) {
+        return `${label} (SinceDays): days must be a whole number between ${POLL_SINCE_DAYS_MIN} and ${POLL_SINCE_DAYS_MAX}.`;
+      }
+      if (days < POLL_SINCE_DAYS_MIN || days > POLL_SINCE_DAYS_MAX) {
+        return `${label} (SinceDays): days must be between ${POLL_SINCE_DAYS_MIN} and ${POLL_SINCE_DAYS_MAX}.`;
+      }
+      continue;
+    }
+    return `${label}: unknown predicate kind.`;
+  }
+  return null;
+}
+
+// Renders rows as one AND sentence for the review step, so combined filters
+// read as the worker applies them.
+export function pollPredicatePreview(
+  predicates: PollPredicate[] | null | undefined,
+): string {
+  if (!Array.isArray(predicates) || predicates.length === 0) {
+    return "Match all mail";
+  }
+  const parts: string[] = [];
+  for (const predicate of predicates) {
+    if (!isRecord(predicate)) continue;
+    const row = predicate as PollPredicate;
+    if (row.kind === "contains" && typeof row.value === "string" && row.value.trim()) {
+      parts.push(`Contains "${row.value.trim()}"`);
+    } else if (row.kind === "from" && typeof row.value === "string" && row.value.trim()) {
+      parts.push(`From "${row.value.trim()}"`);
+    } else if (row.kind === "subject" && typeof row.value === "string" && row.value.trim()) {
+      parts.push(`Subject "${row.value.trim()}"`);
+    } else if (row.kind === "unread") {
+      parts.push("Unread only");
+    } else if (row.kind === "sinceDays" && typeof row.days === "number") {
+      parts.push(
+        row.days === 1 ? "Within last 1 day" : `Within last ${row.days} days`,
+      );
+    }
+  }
+  if (parts.length === 0) return "Match all mail";
+  return parts.join(" AND ");
+}
+
 // Per-source default for the direct-tool radio. Email and calendar each have a
 // dedicated allowlisted mutation; messages has none, so it falls back to the
 // first allowlisted entry rather than offering an unexecutable tool.
@@ -342,6 +545,11 @@ export interface SchedulerJob {
   enabled: boolean;
   pollAccount?: string | null;
   pollQuery?: string | null;
+  pollContains?: string | null;
+  pollFrom?: string | null;
+  pollSubject?: string | null;
+  pollUnreadOnly?: boolean | null;
+  pollSinceDays?: number | null;
   pollMailbox?: string | null;
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
@@ -403,6 +611,11 @@ export interface NewSchedulerJobInput {
   enabled?: boolean;
   pollAccount?: string | null;
   pollQuery?: string | null;
+  pollContains?: string | null;
+  pollFrom?: string | null;
+  pollSubject?: string | null;
+  pollUnreadOnly?: boolean | null;
+  pollSinceDays?: number | null;
   pollMailbox?: string | null;
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
@@ -420,10 +633,15 @@ export interface UpdateSchedulerJobInput {
   prompt?: string;
   enabled?: boolean;
   // Poll clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine): omitted (undefined)
-  // leaves the field alone, "" clears that poll string to null (blank → null normalization), and
-  // clearPoll clears the whole poll trigger (account, query, mailbox, interval, limit) before...
+  // or null leaves the field alone, "" clears that poll string to null (blank → null normalization),
+  // and clearPoll clears the whole poll trigger before re-applying non-nil fields in the same payload.
   pollAccount?: string | null;
   pollQuery?: string | null;
+  pollContains?: string | null;
+  pollFrom?: string | null;
+  pollSubject?: string | null;
+  pollUnreadOnly?: boolean | null;
+  pollSinceDays?: number | null;
   pollMailbox?: string | null;
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;

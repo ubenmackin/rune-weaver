@@ -2185,9 +2185,9 @@ private func makeDetachmentContext(provider: any LLMProvider) throws -> (ServerC
     return (context, base)
 }
 
-/// Polls an async condition until it holds or a short budget expires.
+/// Polls an async condition until it holds or a generous budget expires.
 private func detachmentWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
-    let deadline = Date().addingTimeInterval(8)
+    let deadline = Date().addingTimeInterval(20)
     while Date() < deadline {
         if await condition() {
             return true

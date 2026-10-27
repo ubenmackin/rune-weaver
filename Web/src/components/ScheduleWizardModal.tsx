@@ -1,26 +1,57 @@
 // Rune Weaver Dashboard — Guided creation wizard for recurring time-based and event-based scheduler jobs.
-
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   CALENDAR_LEAD_TIME_MINUTES_MAX,
   CALENDAR_LEAD_TIME_MINUTES_MIN,
   DEFAULT_POLL_INTERVAL_SECONDS,
+  MAX_POLL_PREDICATES,
   POLL_LIMIT_MAX,
   POLL_LIMIT_MIN,
+  POLL_SINCE_DAYS_MAX,
+  POLL_SINCE_DAYS_MIN,
+  POLL_SINCE_PRESETS,
   TOOL_ROUNDS_MAX,
   TOOL_ROUNDS_MIN,
+  getSettings,
   normalizeEventRule,
+  pollPredicatePreview,
+  predicatesFromJob,
+  predicatesToPayload,
   schedulerJobEffectiveMaxToolIterations,
   validateCalendarLeadTimeMinutes,
   validateEventRules,
   validatePollLimit,
+  validatePollPredicates,
   type EventRule,
   type NewSchedulerJobInput,
+  type PollPredicate,
   type SchedulerJob,
   type UpdateSchedulerJobInput,
 } from "../api";
+import {
+  calendarCacheAgeMs,
+  fetchCalendars,
+  fetchMailboxes,
+  mailboxCacheAgeMs,
+  readCachedCalendars,
+  readCachedMailboxes,
+  type CalendarLookup,
+} from "../api/lookups";
 import EventRuleBuilder from "./EventRuleBuilder";
+import InfoTip from "./InfoTip";
 import { CalendarIcon, ChatIcon, ClockIcon, CloseIcon, MailIcon } from "./icons";
+import {
+  CHECK_INTERVAL_MAX_SECONDS,
+  CHECK_INTERVAL_MIN_SECONDS,
+  CRON_PRESETS,
+  POLL_INTERVAL_PRESETS,
+  PROMPT_TEMPLATES,
+  effectiveCron,
+  formatCacheAge,
+  parsePollIntervalSeconds,
+  validateCheckInterval,
+} from "./scheduleWizardConfig";
+import type { TriggerType } from "./scheduleWizardConfig";
 
 interface ScheduleWizardModalProps {
   jobToEdit?: SchedulerJob | null;
@@ -31,79 +62,6 @@ interface ScheduleWizardModalProps {
   ) => Promise<void>;
   onClose: () => void;
 }
-
-type TriggerType = "cron" | "email" | "messages" | "calendar";
-
-interface CronPreset {
-  id: string;
-  label: string;
-  cron: string;
-  description: string;
-}
-
-const CRON_PRESETS: CronPreset[] = [
-  {
-    id: "15m",
-    label: "Every 15 Minutes",
-    cron: "*/15 * * * *",
-    description: "Fires repeatedly every 15 minutes throughout the day.",
-  },
-  {
-    id: "hourly",
-    label: "Hourly",
-    cron: "0 * * * *",
-    description: "Fires at the top of every hour.",
-  },
-  {
-    id: "daily-8am",
-    label: "Daily at 8:00 AM",
-    cron: "0 8 * * *",
-    description: "Fires once a day every morning at 8:00 AM local time.",
-  },
-  {
-    id: "weekdays-9am",
-    label: "Weekdays at 9:00 AM",
-    cron: "0 9 * * 1-5",
-    description: "Fires Monday through Friday at 9:00 AM.",
-  },
-  {
-    id: "weekly-mon",
-    label: "Weekly (Monday 8 AM)",
-    cron: "0 8 * * 1",
-    description: "Fires once per week every Monday morning at 8:00 AM.",
-  },
-  {
-    id: "custom",
-    label: "Custom Cron",
-    cron: "",
-    description: "Specify any standard 5-field cron expression.",
-  },
-];
-
-const POLL_INTERVAL_PRESETS = [60, 300, 900, 1800, 3600];
-
-const PROMPT_TEMPLATES = [
-  {
-    label: "Inbox Summary",
-    prompt:
-      "Summarize all new emails received since the last run, categorized by sender and importance.",
-  },
-  {
-    label: "Action Items Digest",
-    prompt:
-      "Scan incoming messages for required follow-ups, pending questions, or deadlines, and list them clearly.",
-  },
-  {
-    label: "Pre-Meeting Prep",
-    prompt:
-      "Review the attendees, agenda notes, and relevant recent history to generate a comprehensive pre-meeting brief.",
-  },
-  {
-    label: "System Status Brief",
-    prompt:
-      "Check recent system alerts and logs, and provide a brief status overview of service health.",
-  },
-];
 
 export default function ScheduleWizardModal({
   jobToEdit,
@@ -143,20 +101,42 @@ export default function ScheduleWizardModal({
   );
 
   // Poll / Watcher State
-  const [pollAccount, setPollAccount] = useState(jobToEdit?.pollAccount ?? "icloud");
-  const [pollMailbox, setPollMailbox] = useState(jobToEdit?.pollMailbox ?? "INBOX");
-  const [pollQuery, setPollQuery] = useState(jobToEdit?.pollQuery ?? "");
+  const [pollAccount, setPollAccount] = useState(jobToEdit?.pollAccount ?? "");
+  const [pollMailbox, setPollMailbox] = useState(jobToEdit?.pollMailbox ?? "");
+  const [predicates, setPredicates] = useState<PollPredicate[]>(() =>
+    jobToEdit ? predicatesFromJob(jobToEdit) : [],
+  );
   const [pollIntervalText, setPollIntervalText] = useState(
     String(jobToEdit?.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS),
   );
   const [pollLimit, setPollLimit] = useState<number>(jobToEdit?.pollLimit ?? 10);
 
+  // Lookup State (settings accounts, live mailboxes, live calendars).
+  const [emailAccountNames, setEmailAccountNames] = useState<string[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [mailboxes, setMailboxes] = useState<string[]>([]);
+  const [mailboxLoading, setMailboxLoading] = useState(false);
+  const [mailboxError, setMailboxError] = useState<string | null>(null);
+  const [mailboxStale, setMailboxStale] = useState(false);
+  const [mailboxStaleAgeMs, setMailboxStaleAgeMs] = useState<number | null>(null);
+  const [calendars, setCalendars] = useState<CalendarLookup[]>(() => {
+    try {
+      return readCachedCalendars() ?? [];
+    } catch {
+      return [];
+    }
+  });
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+  const [calendarStale, setCalendarStale] = useState(false);
+  const [calendarStaleAgeMs, setCalendarStaleAgeMs] = useState<number | null>(null);
+
   // Calendar State
   const [calendarLeadTimeMinutes, setCalendarLeadTimeMinutes] = useState<number>(
     jobToEdit?.calendarLeadTimeMinutes ?? 15,
   );
-  const [calendarNamesText, setCalendarNamesText] = useState<string>(
-    (jobToEdit?.calendarNames ?? []).join(", "),
+  const [selectedCalendars, setSelectedCalendars] = useState<string[]>(
+    jobToEdit?.calendarNames ?? [],
   );
 
   // Budget State
@@ -169,21 +149,171 @@ export default function ScheduleWizardModal({
     jobToEdit?.onToolLimit ?? "",
   );
 
-  // Strict decimal whole seconds; null means the input is not submittable.
-  function parsedPollIntervalSeconds(): number | null {
-    const trimmed = pollIntervalText.trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    const value = Number(trimmed);
-    if (!Number.isSafeInteger(value) || value <= 0) return null;
-    return value;
+  // Loads the sorted account names once so the watcher select mirrors settings.
+  useEffect(() => {
+    let cancelled = false;
+    setAccountsLoading(true);
+    getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        const raw = Array.isArray(settings.emailAccounts)
+          ? settings.emailAccounts
+          : [];
+        const names = raw
+          .map((entry) =>
+            typeof entry?.name === "string" ? entry.name.trim() : "",
+          )
+          .filter((entry) => entry.length > 0)
+          .sort((a, b) => a.localeCompare(b));
+        setEmailAccountNames(names);
+      })
+      .catch(() => {
+        if (!cancelled) setEmailAccountNames([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAccountsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Shared live-with-stale-cache mailbox fetch so the account effect
+  // and the Retry button follow one identical path.
+  const loadMailboxes = useCallback(
+    (account: string, isCancelled?: () => boolean) => {
+      setMailboxLoading(true);
+      setMailboxError(null);
+      fetchMailboxes(account)
+        .then((live) => {
+          if (isCancelled?.()) return;
+          setMailboxes(live);
+          setMailboxStale(false);
+          setMailboxStaleAgeMs(null);
+          setMailboxError(null);
+        })
+        .catch((failure) => {
+          if (isCancelled?.()) return;
+          const cached = readCachedMailboxes(account);
+          if (cached) {
+            setMailboxes(cached);
+            setMailboxStale(true);
+            setMailboxStaleAgeMs(mailboxCacheAgeMs(account));
+            setMailboxError(null);
+          } else {
+            setMailboxes([]);
+            setMailboxStale(false);
+            setMailboxStaleAgeMs(null);
+            setMailboxError(
+              failure instanceof Error
+                ? failure.message
+                : "Mailbox list is unavailable.",
+            );
+          }
+        })
+        .finally(() => {
+          if (!isCancelled?.()) setMailboxLoading(false);
+        });
+    },
+    [],
+  );
+
+  // Refetches mailboxes whenever the account changes; stale cache keeps the
+  // select usable while an uncached failure blocks advance.
+  useEffect(() => {
+    if (!pollAccount) {
+      setMailboxes([]);
+      setMailboxError(null);
+      setMailboxStale(false);
+      setMailboxStaleAgeMs(null);
+      setMailboxLoading(false);
+      return;
+    }
+    let cancelled = false;
+    loadMailboxes(pollAccount, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [pollAccount, loadMailboxes]);
+
+  function reloadMailboxes() {
+    const account = pollAccount;
+    if (!account) return;
+    loadMailboxes(account);
   }
 
-  function getEffectiveCron(): string {
-    if (selectedPreset === "custom") {
-      return customCron.trim();
-    }
-    const preset = CRON_PRESETS.find((p) => p.id === selectedPreset);
-    return preset?.cron ?? "0 8 * * *";
+  // Shared live-with-stale-cache calendar fetch so the watcher effect
+  // and the Retry button follow one identical path.
+  const loadCalendars = useCallback((isCancelled?: () => boolean) => {
+    setCalendarLoading(true);
+    setCalendarError(null);
+    fetchCalendars()
+      .then((live) => {
+        if (isCancelled?.()) return;
+        setCalendars(live);
+        setCalendarStale(false);
+        setCalendarStaleAgeMs(null);
+        setCalendarError(null);
+      })
+      .catch((failure) => {
+        if (isCancelled?.()) return;
+        const cached = readCachedCalendars();
+        if (cached) {
+          setCalendars(cached);
+          setCalendarStale(true);
+          setCalendarStaleAgeMs(calendarCacheAgeMs());
+          setCalendarError(null);
+        } else {
+          setCalendars([]);
+          setCalendarStale(false);
+          setCalendarStaleAgeMs(null);
+          setCalendarError(
+            failure instanceof Error
+              ? failure.message
+              : "Calendar list is unavailable.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!isCancelled?.()) setCalendarLoading(false);
+      });
+  }, []);
+
+  // Loads calendars when the calendar watcher opens; cached titles keep the
+  // list usable while an uncached failure blocks advance.
+  useEffect(() => {
+    if (triggerType !== "calendar") return;
+    let cancelled = false;
+    loadCalendars(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [triggerType, loadCalendars]);
+
+  function reloadCalendars() {
+    loadCalendars();
+  }
+
+  const hasNoAccounts = !accountsLoading && emailAccountNames.length === 0;
+
+  function handleAddPredicate() {
+    if (predicates.length >= MAX_POLL_PREDICATES) return;
+    setPredicates([...predicates, { kind: "contains", value: "" }]);
+  }
+
+  function handleRemovePredicate(index: number) {
+    setPredicates(predicates.filter((_, i) => i !== index));
+  }
+
+  function handlePredicateKindChange(index: number, kind: PollPredicate["kind"]) {
+    setPredicates(
+      predicates.map((row, i) => {
+        if (i !== index) return row;
+        if (kind === "unread") return { kind: "unread" };
+        if (kind === "sinceDays") return { kind: "sinceDays", days: 7 };
+        return { kind, value: typeof row.value === "string" ? row.value : "" };
+      }),
+    );
   }
 
   function handleNext() {
@@ -193,21 +323,67 @@ export default function ScheduleWizardModal({
         setError("Please enter a name for the job.");
         return;
       }
+      if (triggerType === "email" && hasNoAccounts) {
+        setError("Mail Account is unavailable. Configure a mail account in Settings first.");
+        return;
+      }
       setStep(2);
     } else if (step === 2) {
       if (triggerType === "cron") {
-        const cronStr = getEffectiveCron();
+        const cronStr = effectiveCron(selectedPreset, customCron);
         if (!cronStr) {
           setError("Please specify a valid cron schedule.");
           return;
         }
       } else if (triggerType === "email") {
         if (!pollAccount.trim()) {
-          setError("Please provide a mail account name (e.g. 'icloud' or '*').");
+          setError("Mail Account is required. Select an account.");
           return;
         }
-        if (parsedPollIntervalSeconds() == null) {
-          setError("Check Interval must be a positive whole number of seconds.");
+        // "*" polls every account, so blank means every mailbox and only
+        // a narrowed mailbox must prove membership in the union list.
+        const allAccounts = pollAccount.trim() === "*";
+        if (!allAccounts) {
+          if (mailboxLoading) {
+            setError("Mailbox list is still loading. Wait, then retry.");
+            return;
+          }
+          if (mailboxes.length === 0 && mailboxError) {
+            setError(`Mailbox list is unavailable for this account. ${mailboxError}`);
+            return;
+          }
+          if (!pollMailbox.trim()) {
+            setError("Mailbox is required. Select a mailbox.");
+            return;
+          }
+          if (mailboxes.length > 0 && !mailboxes.includes(pollMailbox.trim())) {
+            setError("Selected mailbox is no longer available. Choose a mailbox from the live list.");
+            return;
+          }
+        } else {
+          if (mailboxLoading) {
+            setError("Mailbox list is still loading. Wait, then retry.");
+            return;
+          }
+          if (pollMailbox.trim()) {
+            if (mailboxes.length === 0 && mailboxError) {
+              setError(`Mailbox list is unavailable for this account. ${mailboxError}`);
+              return;
+            }
+            if (mailboxes.length > 0 && !mailboxes.includes(pollMailbox.trim())) {
+              setError("Selected mailbox is no longer available. Choose a mailbox from the live list.");
+              return;
+            }
+          }
+        }
+        const predicateError = validatePollPredicates(predicates);
+        if (predicateError) {
+          setError(predicateError);
+          return;
+        }
+        const intervalError = validateCheckInterval(pollIntervalText);
+        if (intervalError) {
+          setError(intervalError);
           return;
         }
         // Fail-closed batch window pinned to the engine maxLimit so the
@@ -218,11 +394,20 @@ export default function ScheduleWizardModal({
           return;
         }
       } else if (triggerType === "messages") {
-        if (parsedPollIntervalSeconds() == null) {
-          setError("Check Interval must be a positive whole number of seconds.");
+        const intervalError = validateCheckInterval(pollIntervalText);
+        if (intervalError) {
+          setError(intervalError);
           return;
         }
       } else if (triggerType === "calendar") {
+        if (calendarLoading) {
+          setError("Calendars are still loading. Wait, then retry.");
+          return;
+        }
+        if (calendars.length === 0 && calendarError) {
+          setError(`Calendars are unavailable. ${calendarError}`);
+          return;
+        }
         // Fail-closed lead-time window so prep fires close enough to be
         // useful without sweeping months of meetings on a typo.
         const leadTimeError = validateCalendarLeadTimeMinutes(
@@ -232,8 +417,22 @@ export default function ScheduleWizardModal({
           setError(leadTimeError);
           return;
         }
-        if (parsedPollIntervalSeconds() == null) {
-          setError("Check Interval must be a positive whole number of seconds.");
+        // Stale edit titles never save: every selected calendar must
+        // still appear in the live list, or the step blocks fail-closed.
+        if (calendars.length > 0) {
+          const liveTitles = new Set(calendars.map((entry) => entry.title));
+          const unknown = selectedCalendars.filter((title) => !liveTitles.has(title));
+          if (unknown.length > 0) {
+            setError(`Selected calendar${unknown.length > 1 ? "s" : ""} no longer available: ${unknown.join(", ")}. Choose from the live list.`);
+            return;
+          }
+        } else if (selectedCalendars.length > 0) {
+          setError("Selected calendars are no longer available. Choose from the live list.");
+          return;
+        }
+        const intervalError = validateCheckInterval(pollIntervalText);
+        if (intervalError) {
+          setError(intervalError);
           return;
         }
       }
@@ -311,13 +510,87 @@ export default function ScheduleWizardModal({
           setSaving(false);
           return;
         }
+        if (calendars.length === 0 && calendarError) {
+          setError(`Calendars are unavailable. ${calendarError}`);
+          setSaving(false);
+          return;
+        }
+        if (calendars.length > 0) {
+          const liveTitles = new Set(calendars.map((entry) => entry.title));
+          const unknown = selectedCalendars.filter((title) => !liveTitles.has(title));
+          if (unknown.length > 0) {
+            setError(`Selected calendar${unknown.length > 1 ? "s" : ""} no longer available: ${unknown.join(", ")}. Choose from the live list.`);
+            setSaving(false);
+            return;
+          }
+        } else if (selectedCalendars.length > 0) {
+          setError("Selected calendars are no longer available. Choose from the live list.");
+          setSaving(false);
+          return;
+        }
+        const intervalError = validateCheckInterval(pollIntervalText);
+        if (intervalError) {
+          setError(intervalError);
+          setSaving(false);
+          return;
+        }
+      }
+      if (triggerType === "email") {
+        if (!pollAccount.trim()) {
+          setError("Mail Account is required. Select an account.");
+          setSaving(false);
+          return;
+        }
+        const allAccounts = pollAccount.trim() === "*";
+        if (!allAccounts) {
+          if (mailboxes.length === 0 && mailboxError) {
+            setError(`Mailbox list is unavailable for this account. ${mailboxError}`);
+            setSaving(false);
+            return;
+          }
+          if (!pollMailbox.trim()) {
+            setError("Mailbox is required. Select a mailbox.");
+            setSaving(false);
+            return;
+          }
+          if (mailboxes.length > 0 && !mailboxes.includes(pollMailbox.trim())) {
+            setError("Selected mailbox is no longer available. Choose a mailbox from the live list.");
+            setSaving(false);
+            return;
+          }
+        } else if (pollMailbox.trim()) {
+          if (mailboxes.length === 0 && mailboxError) {
+            setError(`Mailbox list is unavailable for this account. ${mailboxError}`);
+            setSaving(false);
+            return;
+          }
+          if (mailboxes.length > 0 && !mailboxes.includes(pollMailbox.trim())) {
+            setError("Selected mailbox is no longer available. Choose a mailbox from the live list.");
+            setSaving(false);
+            return;
+          }
+        }
+        const predicateError = validatePollPredicates(predicates);
+        if (predicateError) {
+          setError(predicateError);
+          setSaving(false);
+          return;
+        }
+      }
+      if (triggerType === "email" || triggerType === "messages" || triggerType === "calendar") {
+        const intervalError = validateCheckInterval(pollIntervalText);
+        if (intervalError) {
+          setError(intervalError);
+          setSaving(false);
+          return;
+        }
       }
       const canonicalRules = rules.map((rule) => normalizeEventRule(rule));
 
       if (triggerType === "cron") {
         const payload: NewSchedulerJobInput | UpdateSchedulerJobInput = {
           name: name.trim(),
-          schedule: getEffectiveCron(),
+          schedule: effectiveCron(selectedPreset, customCron),
           prompt: prompt.trim(),
           enabled,
           clearPoll: true,
@@ -329,9 +602,15 @@ export default function ScheduleWizardModal({
         };
         await onSave(payload, jobToEdit?.id);
       } else if (triggerType === "email") {
-        const pollIntervalSeconds = parsedPollIntervalSeconds();
-        if (pollIntervalSeconds == null) {
-          setError("Check Interval must be a positive whole number of seconds.");
+        const pollIntervalSeconds = parsePollIntervalSeconds(pollIntervalText);
+        if (
+          pollIntervalSeconds == null ||
+          pollIntervalSeconds < CHECK_INTERVAL_MIN_SECONDS ||
+          pollIntervalSeconds > CHECK_INTERVAL_MAX_SECONDS
+        ) {
+          setError(
+            `Check Interval must be between ${CHECK_INTERVAL_MIN_SECONDS} and ${CHECK_INTERVAL_MAX_SECONDS} seconds.`,
+          );
           setSaving(false);
           return;
         }
@@ -341,16 +620,25 @@ export default function ScheduleWizardModal({
           setSaving(false);
           return;
         }
+        const predicatePayload = predicatesToPayload(predicates);
         const payload: NewSchedulerJobInput | UpdateSchedulerJobInput = {
           name: name.trim(),
           schedule: "",
           prompt: prompt.trim(),
           enabled,
+          // Email edits reset the whole poll trigger first so removed rows
+          // clear instead of lingering; present rows re-apply below.
+          clearPoll: true,
           watcherSource: "email",
           rules: canonicalRules.length > 0 ? canonicalRules : null,
           pollAccount: pollAccount.trim(),
-          pollMailbox: pollMailbox.trim() || null,
-          pollQuery: pollQuery.trim() || null,
+          pollMailbox: pollMailbox.trim(),
+          pollContains: predicatePayload.pollContains,
+          pollFrom: predicatePayload.pollFrom,
+          pollSubject: predicatePayload.pollSubject,
+          pollUnreadOnly: predicatePayload.pollUnreadOnly,
+          pollSinceDays: predicatePayload.pollSinceDays,
+          pollQuery: predicatePayload.pollQuery,
           pollIntervalSeconds,
           pollLimit,
           maxToolIterations,
@@ -359,7 +647,8 @@ export default function ScheduleWizardModal({
         };
         await onSave(payload, jobToEdit?.id);
       } else if (triggerType === "messages") {
-        const pollIntervalSeconds = parsedPollIntervalSeconds() ?? 60;
+        const pollIntervalSeconds =
+          parsePollIntervalSeconds(pollIntervalText) ?? CHECK_INTERVAL_MIN_SECONDS;
         const payload: NewSchedulerJobInput | UpdateSchedulerJobInput = {
           name: name.trim(),
           schedule: "",
@@ -375,11 +664,8 @@ export default function ScheduleWizardModal({
         };
         await onSave(payload, jobToEdit?.id);
       } else if (triggerType === "calendar") {
-        const pollIntervalSeconds = parsedPollIntervalSeconds() ?? 60;
-        const calendarNames = calendarNamesText
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+        const pollIntervalSeconds =
+          parsePollIntervalSeconds(pollIntervalText) ?? CHECK_INTERVAL_MIN_SECONDS;
         const payload: NewSchedulerJobInput | UpdateSchedulerJobInput = {
           name: name.trim(),
           schedule: "",
@@ -388,7 +674,7 @@ export default function ScheduleWizardModal({
           watcherSource: "calendar",
           rules: canonicalRules.length > 0 ? canonicalRules : null,
           calendarLeadTimeMinutes,
-          calendarNames: calendarNames.length > 0 ? calendarNames : null,
+          calendarNames: selectedCalendars.length > 0 ? selectedCalendars : null,
           pollIntervalSeconds,
           clearPoll: true,
           maxToolIterations,
@@ -427,6 +713,8 @@ export default function ScheduleWizardModal({
       : budgetIsNonNumeric
       ? `Max tool rounds must be between ${TOOL_ROUNDS_MIN} and ${TOOL_ROUNDS_MAX}.`
       : `${budgetEffective} rounds (${onToolLimit === "park" ? "parks" : "synthesizes"})`;
+
+  const predicatePreview = pollPredicatePreview(predicates);
 
   return (
     <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
@@ -470,8 +758,8 @@ export default function ScheduleWizardModal({
           {/* STEP 1: Type & Name */}
           {step === 1 && (
             <div className="wizard-step">
-              <label className="form-label">
-                Job Name
+              <div className="form-label">
+                Job Name <InfoTip text="Name shown in the schedules list. Must not be empty." label="Naming guidance" />
                 <input
                   type="text"
                   aria-label="Job Name"
@@ -480,15 +768,17 @@ export default function ScheduleWizardModal({
                   onChange={(e) => setName(e.target.value)}
                   autoFocus
                 />
-              </label>
+              </div>
 
-              <div className="form-label mt-4">Select Trigger Type</div>
+              <div className="form-label mt-4">
+                <span>Select Trigger Type <InfoTip text="Time runs on a cron schedule. Watchers poll mail, messages, or calendars." label="Trigger guidance" /></span>
+              </div>
               <div className="trigger-card-grid">
-                <div
+                <button
+                  type="button"
                   className={`trigger-card ${triggerType === "cron" ? "selected" : ""}`}
                   onClick={() => setTriggerType("cron")}
-                  role="button"
-                  tabIndex={0}
+                  aria-pressed={triggerType === "cron"}
                 >
                   <div className="trigger-card-header">
                     <ClockIcon size={20} className="trigger-icon" />
@@ -498,29 +788,53 @@ export default function ScheduleWizardModal({
                     Runs automatically on a repeating timer, hourly, daily, or
                     custom cron schedule.
                   </p>
-                </div>
+                </button>
 
-                <div
-                  className={`trigger-card ${triggerType === "email" ? "selected" : ""}`}
-                  onClick={() => setTriggerType("email")}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="trigger-card-header">
-                    <MailIcon size={20} className="trigger-icon" />
-                    <strong>Email Event Watcher</strong>
+                {hasNoAccounts ? (
+                  <div
+                    className="trigger-card disabled"
+                    aria-disabled="true"
+                    data-disabled="true"
+                  >
+                    <div className="trigger-card-header">
+                      <MailIcon size={20} className="trigger-icon" />
+                      <strong>Email Event Watcher</strong>
+                      <InfoTip
+                        text="No mail accounts are configured. Add one in Settings to enable email watching."
+                        label="Unavailable watcher info"
+                      />
+                    </div>
+                    <p>
+                      Watches inbox for incoming emails and dispatches custom rules or
+                      agent actions.
+                    </p>
+                    <span className="muted text-xs">
+                      No mail accounts configured.
+                    </span>
                   </div>
-                  <p>
-                    Watches inbox for incoming emails and dispatches custom rules or
-                    agent actions.
-                  </p>
-                </div>
+                ) : (
+                  <button
+                    type="button"
+                    className={`trigger-card ${triggerType === "email" ? "selected" : ""}`}
+                    onClick={() => setTriggerType("email")}
+                    aria-pressed={triggerType === "email"}
+                  >
+                    <div className="trigger-card-header">
+                      <MailIcon size={20} className="trigger-icon" />
+                      <strong>Email Event Watcher</strong>
+                    </div>
+                    <p>
+                      Watches inbox for incoming emails and dispatches custom rules or
+                      agent actions.
+                    </p>
+                  </button>
+                )}
 
-                <div
+                <button
+                  type="button"
                   className={`trigger-card ${triggerType === "messages" ? "selected" : ""}`}
                   onClick={() => setTriggerType("messages")}
-                  role="button"
-                  tabIndex={0}
+                  aria-pressed={triggerType === "messages"}
                 >
                   <div className="trigger-card-header">
                     <ChatIcon size={20} className="trigger-icon" />
@@ -529,13 +843,13 @@ export default function ScheduleWizardModal({
                   <p>
                     Watches Apple Messages for new inbound texts or group chats.
                   </p>
-                </div>
+                </button>
 
-                <div
+                <button
+                  type="button"
                   className={`trigger-card ${triggerType === "calendar" ? "selected" : ""}`}
                   onClick={() => setTriggerType("calendar")}
-                  role="button"
-                  tabIndex={0}
+                  aria-pressed={triggerType === "calendar"}
                 >
                   <div className="trigger-card-header">
                     <CalendarIcon size={20} className="trigger-icon" />
@@ -544,7 +858,7 @@ export default function ScheduleWizardModal({
                   <p>
                     Monitors upcoming meetings with lead time for meeting prep and briefs.
                   </p>
-                </div>
+                </button>
               </div>
             </div>
           )}
@@ -557,24 +871,26 @@ export default function ScheduleWizardModal({
                 {CRON_PRESETS.map((preset) => {
                   const isSelected = selectedPreset === preset.id;
                   return (
-                    <div
+                    <button
                       key={preset.id}
+                      type="button"
                       className={`preset-card ${isSelected ? "selected" : ""}`}
                       onClick={() => setSelectedPreset(preset.id)}
+                      aria-pressed={isSelected}
                     >
                       <div className="preset-card-title">{preset.label}</div>
                       <div className="preset-card-desc">{preset.description}</div>
                       {preset.cron ? (
                         <div className="preset-cron-tag font-mono">{preset.cron}</div>
                       ) : null}
-                    </div>
+                    </button>
                   );
                 })}
               </div>
 
               {selectedPreset === "custom" && (
-                <label className="form-label mt-4">
-                  Custom Cron Expression
+                <div className="form-label mt-4">
+                  Custom Cron Expression <InfoTip text="Five-field cron: minute hour day month weekday." label="Cron format guidance" />
                   <input
                     type="text"
                     aria-label="Custom Cron Expression"
@@ -586,7 +902,7 @@ export default function ScheduleWizardModal({
                   <span className="muted text-xs">
                     5-field syntax: (minute hour day-of-month month day-of-week)
                   </span>
-                </label>
+                </div>
               )}
             </div>
           )}
@@ -595,42 +911,195 @@ export default function ScheduleWizardModal({
             <div className="wizard-step">
               <h4>Configure Email Watcher</h4>
               <div className="form-grid">
-                <label className="form-label">
-                  Mail Account
-                  <input
-                    type="text"
+                <div className="form-label">
+                  Mail Account <InfoTip text="Configured mail account to watch. Choose All accounts to poll every account." label="Account selection guidance" />
+                  <select
                     aria-label="Mail Account"
-                    placeholder="e.g. icloud"
                     value={pollAccount}
-                    onChange={(e) => setPollAccount(e.target.value)}
-                  />
-                </label>
+                    disabled={accountsLoading}
+                    onChange={(e) => {
+                      // Clearing the mailbox keeps a stale folder from
+                      // following the account switch.
+                      setPollAccount(e.target.value);
+                      setPollMailbox("");
+                    }}
+                    required
+                  >
+                    <option value="*">All accounts</option>
+                    {emailAccountNames.map((accountName) => (
+                      <option key={accountName} value={accountName}>
+                        {accountName}
+                      </option>
+                    ))}
+                  </select>
+                  {accountsLoading ? (
+                    <span className="muted text-xs">Loading accounts…</span>
+                  ) : null}
+                </div>
 
-                <label className="form-label">
-                  Mailbox
-                  <input
-                    type="text"
+                <div className="form-label">
+                  Mailbox <InfoTip text="Mailbox to poll. Required unless All accounts, where blank polls every mailbox." label="Folder selection guidance" />
+                  <select
                     aria-label="Mailbox"
-                    placeholder="INBOX"
                     value={pollMailbox}
+                    disabled={!pollAccount || mailboxLoading}
                     onChange={(e) => setPollMailbox(e.target.value)}
-                  />
-                </label>
+                    required={pollAccount.trim() !== "*"}
+                  >
+                    <option value="">{pollAccount.trim() === "*" ? "Every mailbox (all)" : "Select a mailbox…"}</option>
+                    {mailboxes.map((mailboxName) => (
+                      <option key={mailboxName} value={mailboxName}>
+                        {mailboxName}
+                      </option>
+                    ))}
+                  </select>
+                  {mailboxLoading ? (
+                    <span className="muted text-xs">Loading mailboxes…</span>
+                  ) : null}
+                  {mailboxStale ? (
+                    <span className="badge badge-amber">
+                      Stale cache {formatCacheAge(mailboxStaleAgeMs)}
+                    </span>
+                  ) : null}
+                  {mailboxStale || (mailboxError && mailboxes.length > 0) ? (
+                    <span className="muted text-xs">
+                      Showing cached mailboxes.{" "}
+                      <button type="button" className="ghost" onClick={reloadMailboxes}>
+                        Retry
+                      </button>
+                    </span>
+                  ) : null}
+                  {mailboxError && mailboxes.length === 0 ? (
+                    <span className="muted text-xs">
+                      {mailboxError}{" "}
+                      <button type="button" className="ghost" onClick={reloadMailboxes}>
+                        Retry
+                      </button>
+                    </span>
+                  ) : null}
+                </div>
+              </div>
 
-                <label className="form-label">
-                  Filter Query (optional)
-                  <input
-                    type="text"
-                    aria-label="Filter Query"
-                    placeholder="e.g. from:alerts or unread"
-                    value={pollQuery}
-                    onChange={(e) => setPollQuery(e.target.value)}
-                  />
-                </label>
+              <div className="form-label mt-4">
+                <span>
+                  Filter predicates <InfoTip text="Optional mail filters combined with AND. Leave empty to match all mail." label="Filter guidance" />
+                </span>
+                <div className="predicate-list">
+                  {predicates.map((predicate, index) => (
+                    <div key={index} className="row predicate-row">
+                      <select
+                        aria-label={`Predicate ${index + 1} operator`}
+                        value={predicate.kind}
+                        onChange={(e) =>
+                          handlePredicateKindChange(
+                            index,
+                            e.target.value as PollPredicate["kind"],
+                          )
+                        }
+                      >
+                        <option value="contains">Contains</option>
+                        <option value="from">From</option>
+                        <option value="subject">Subject</option>
+                        <option value="unread">Unread-only</option>
+                        <option value="sinceDays">Since-days</option>
+                      </select>
+                      {predicate.kind === "unread" ? null : predicate.kind ===
+                        "sinceDays" ? (
+                        <span className="row">
+                          <span className="template-pill-group">
+                            {POLL_SINCE_PRESETS.map((preset) => (
+                              <button
+                                key={preset}
+                                type="button"
+                                className="template-pill"
+                                aria-pressed={predicate.days === preset}
+                                onClick={() =>
+                                  setPredicates(
+                                    predicates.map((row, i) =>
+                                      i === index
+                                        ? { kind: "sinceDays", days: preset }
+                                        : row,
+                                    ),
+                                  )
+                                }
+                              >
+                                {preset}d
+                              </button>
+                            ))}
+                          </span>
+                          <input
+                            type="number"
+                            aria-label={`Predicate ${index + 1} days`}
+                            min={POLL_SINCE_DAYS_MIN}
+                            max={POLL_SINCE_DAYS_MAX}
+                            value={predicate.days ?? 7}
+                            onChange={(e) =>
+                              setPredicates(
+                                predicates.map((row, i) =>
+                                  i === index
+                                    ? {
+                                        kind: "sinceDays",
+                                        days: Number(e.target.value),
+                                      }
+                                    : row,
+                                ),
+                              )
+                            }
+                          />
+                        </span>
+                      ) : (
+                        <input
+                          type="text"
+                          aria-label={`Predicate ${index + 1} value`}
+                          placeholder={
+                            predicate.kind === "from"
+                              ? "e.g. alerts@example.com"
+                              : predicate.kind === "subject"
+                                ? "e.g. Invoice"
+                                : "e.g. invoice"
+                          }
+                          value={predicate.value ?? ""}
+                          onChange={(e) =>
+                            setPredicates(
+                              predicates.map((row, i) =>
+                                i === index
+                                  ? { ...row, value: e.target.value }
+                                  : row,
+                              ),
+                            )
+                          }
+                        />
+                      )}
+                      <button
+                        type="button"
+                        className="ghost"
+                        aria-label={`Remove predicate ${index + 1}`}
+                        onClick={() => handleRemovePredicate(index)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="row mt-2">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={handleAddPredicate}
+                    disabled={predicates.length >= MAX_POLL_PREDICATES}
+                  >
+                    Add predicate
+                  </button>
+                  <span className="muted text-xs">
+                    {predicates.length}/{MAX_POLL_PREDICATES} predicates. Preview: {predicatePreview}
+                  </span>
+                </div>
+              </div>
 
-                <label className="form-label">
-                  Check Interval (seconds)
-                  <div className="template-pill-group">
+              <div className="form-grid mt-4">
+                <div className="form-label">
+                  Check Interval <InfoTip text="Seconds between mailbox polls. Must be 60 to 86400." label="Email timing guidance" />
+                  <span className="template-pill-group">
                     {POLL_INTERVAL_PRESETS.map((preset) => (
                       <button
                         key={preset}
@@ -644,21 +1113,25 @@ export default function ScheduleWizardModal({
                           : preset >= 60
                           ? `${preset / 60}m`
                           : `${preset}s`}
-                      </button>
+                        </button>
                     ))}
-                  </div>
+                  </span>
                   <input
-                    type="text"
-                    inputMode="numeric"
+                    type="number"
                     aria-label="Check Interval"
+                    min={CHECK_INTERVAL_MIN_SECONDS}
+                    max={CHECK_INTERVAL_MAX_SECONDS}
                     placeholder="300"
                     value={pollIntervalText}
                     onChange={(e) => setPollIntervalText(e.target.value)}
                   />
-                </label>
+                  <span className="muted text-xs">
+                    Seconds between polls. Must be between {CHECK_INTERVAL_MIN_SECONDS} and {CHECK_INTERVAL_MAX_SECONDS} seconds.
+                  </span>
+                </div>
 
-                <label className="form-label">
-                  Batch Limit
+                <div className="form-label">
+                  Batch Limit <InfoTip text="Maximum emails per check, 1 to 50. Extra matches are skipped until the next check." label="Batch size guidance" />
                   <input
                     type="number"
                     aria-label="Batch Limit"
@@ -667,7 +1140,10 @@ export default function ScheduleWizardModal({
                     value={pollLimit}
                     onChange={(e) => setPollLimit(Number(e.target.value))}
                   />
-                </label>
+                  <span className="muted text-xs">
+                    Maximum emails per check, {POLL_LIMIT_MIN} to {POLL_LIMIT_MAX}. Extra matches are skipped until the next check.
+                  </span>
+                </div>
               </div>
 
               <EventRuleBuilder source="email" rules={rules} onChange={setRules} />
@@ -678,9 +1154,9 @@ export default function ScheduleWizardModal({
             <div className="wizard-step">
               <h4>Configure Messages Watcher</h4>
               <div className="form-grid">
-                <label className="form-label">
-                  Check Interval (seconds)
-                  <div className="template-pill-group">
+                <div className="form-label">
+                  Check Interval <InfoTip text="Seconds between Messages polls. Must be 60 to 86400." label="Messages timing guidance" />
+                  <span className="template-pill-group">
                     {POLL_INTERVAL_PRESETS.map((preset) => (
                       <button
                         key={preset}
@@ -696,19 +1172,20 @@ export default function ScheduleWizardModal({
                           : `${preset}s`}
                       </button>
                     ))}
-                  </div>
+                  </span>
                   <input
-                    type="text"
-                    inputMode="numeric"
+                    type="number"
                     aria-label="Check Interval"
+                    min={CHECK_INTERVAL_MIN_SECONDS}
+                    max={CHECK_INTERVAL_MAX_SECONDS}
                     placeholder="60"
                     value={pollIntervalText}
                     onChange={(e) => setPollIntervalText(e.target.value)}
                   />
                   <span className="muted text-xs">
-                    How frequently to poll macOS Messages for new arrivals.
+                    Seconds between polls. Must be between {CHECK_INTERVAL_MIN_SECONDS} and {CHECK_INTERVAL_MAX_SECONDS} seconds.
                   </span>
-                </label>
+                </div>
               </div>
 
               <EventRuleBuilder source="messages" rules={rules} onChange={setRules} />
@@ -719,8 +1196,8 @@ export default function ScheduleWizardModal({
             <div className="wizard-step">
               <h4>Configure Calendar Watcher</h4>
               <div className="form-grid">
-                <label className="form-label">
-                  Meeting Lead Time (minutes)
+                <div className="form-label">
+                  Meeting Lead Time <InfoTip text="Minutes before a meeting to trigger prep. Must be 5 to 120." label="Prep timing guidance" />
                   <input
                     type="number"
                     min={CALENDAR_LEAD_TIME_MINUTES_MIN}
@@ -733,31 +1210,96 @@ export default function ScheduleWizardModal({
                   <span className="muted text-xs">
                     Triggers pre-meeting actions this many minutes before the meeting begins.
                   </span>
-                </label>
+                </div>
 
-                <label className="form-label">
-                  Calendar Names (optional, comma-separated)
-                  <input
-                    type="text"
-                    placeholder="e.g. Work, Client Meetings"
-                    value={calendarNamesText}
-                    onChange={(e) => setCalendarNamesText(e.target.value)}
-                  />
-                  <span className="muted text-xs">
-                    Leave blank to search all available device calendars.
+                <div className="form-label">
+                  <span>
+                    Calendars <InfoTip text="Calendars to watch. Leave all unchecked to watch all calendars." label="Calendar selection guidance" />
                   </span>
-                </label>
+                  {calendarLoading ? (
+                    <span className="muted text-xs">Loading calendars…</span>
+                  ) : calendarError && calendars.length === 0 ? (
+                    <span className="muted text-xs">
+                      {calendarError}{" "}
+                      <button type="button" className="ghost" onClick={reloadCalendars}>
+                        Retry
+                      </button>
+                    </span>
+                  ) : calendars.length === 0 ? (
+                    <span className="muted text-xs">No calendars found.</span>
+                  ) : (
+                    <span className="calendar-checkbox-list">
+                      {calendars.map((calendar) => (
+                        <span key={calendar.id} className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            aria-label={calendar.title}
+                            checked={selectedCalendars.includes(calendar.title)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedCalendars([...selectedCalendars, calendar.title]);
+                              } else {
+                                setSelectedCalendars(
+                                  selectedCalendars.filter((title) => title !== calendar.title),
+                                );
+                              }
+                            }}
+                          />
+                          <span>{calendar.title}</span>
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                  {calendarStale ? (
+                    <span className="badge badge-amber">
+                      Stale cache {formatCacheAge(calendarStaleAgeMs)}
+                    </span>
+                  ) : null}
+                  {calendarStale ? (
+                    <span className="muted text-xs">
+                      Showing cached calendars.{" "}
+                      <button type="button" className="ghost" onClick={reloadCalendars}>
+                        Retry
+                      </button>
+                    </span>
+                  ) : null}
+                  <span className="muted text-xs">
+                    Leave all unchecked to watch all calendars.
+                  </span>
+                </div>
 
-                <label className="form-label">
-                  Check Interval (seconds)
+                <div className="form-label">
+                  Check Interval <InfoTip text="Seconds between calendar checks. Must be 60 to 86400." label="Calendar timing guidance" />
+                  <span className="template-pill-group">
+                    {POLL_INTERVAL_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className="template-pill"
+                        aria-pressed={pollIntervalText.trim() === String(preset)}
+                        onClick={() => setPollIntervalText(String(preset))}
+                      >
+                        {preset >= 3600
+                          ? `${preset / 3600}h`
+                          : preset >= 60
+                          ? `${preset / 60}m`
+                          : `${preset}s`}
+                      </button>
+                    ))}
+                  </span>
                   <input
-                    type="text"
-                    inputMode="numeric"
+                    type="number"
+                    aria-label="Check Interval"
+                    min={CHECK_INTERVAL_MIN_SECONDS}
+                    max={CHECK_INTERVAL_MAX_SECONDS}
                     placeholder="60"
                     value={pollIntervalText}
                     onChange={(e) => setPollIntervalText(e.target.value)}
                   />
-                </label>
+                  <span className="muted text-xs">
+                    Seconds between checks. Must be between {CHECK_INTERVAL_MIN_SECONDS} and {CHECK_INTERVAL_MAX_SECONDS} seconds.
+                  </span>
+                </div>
               </div>
 
               <EventRuleBuilder source="calendar" rules={rules} onChange={setRules} />
@@ -767,22 +1309,22 @@ export default function ScheduleWizardModal({
           {/* STEP 3: Agent Task Prompt */}
           {step === 3 && (
             <div className="wizard-step">
-              <label className="form-label">
+              <div className="form-label">
                 {rules.length > 0 ? (
-                  <>
-                    Fallback Agent Prompt (Optional)
+                  <span>
+                    Fallback Agent Prompt (Optional) <InfoTip text="Runs when an event matches no rule. Leave empty to ignore unmatched events." label="Fallback guidance" />
                     <span className="muted text-xs block font-normal mt-0.5">
                       Runs when an incoming event arrives but does not match any configured rule.
                       Leave empty to ignore unmatched events.
                     </span>
-                  </>
+                  </span>
                 ) : (
-                  <>
-                    Agent Task Instructions
+                  <span>
+                    Agent Task Instructions <InfoTip text="What the agent should do each time this schedule fires." label="Task guidance" />
                     <span className="muted text-xs block font-normal mt-0.5">
                       What should the agent do each time this schedule fires?
                     </span>
-                  </>
+                  </span>
                 )}
                 <textarea
                   rows={4}
@@ -796,13 +1338,13 @@ export default function ScheduleWizardModal({
                   onChange={(e) => setPrompt(e.target.value)}
                   autoFocus
                 />
-              </label>
+              </div>
 
               <details className="mt-3">
                 <summary>Advanced: tool budget</summary>
                 <div className="mt-2 space-y-2">
-                  <label className="form-label">
-                    Max tool rounds
+                  <div className="form-label">
+                    Max tool rounds <InfoTip text="Maximum tool rounds per run. Blank uses the schedule default." label="Budget guidance" />
                     <input
                       type="number"
                       aria-label="Max tool rounds (blank uses schedule default)"
@@ -812,9 +1354,9 @@ export default function ScheduleWizardModal({
                       value={maxToolRoundsText}
                       onChange={(e) => setMaxToolRoundsText(e.target.value)}
                     />
-                  </label>
-                  <label className="form-label">
-                    On tool limit
+                  </div>
+                  <div className="form-label">
+                    On tool limit <InfoTip text="What happens when the tool budget is exhausted. Park asks for approval." label="Limit handling guidance" />
                     <select
                       aria-label="On tool limit"
                       value={onToolLimit}
@@ -824,7 +1366,7 @@ export default function ScheduleWizardModal({
                       <option value="fail">Synthesize summary (fail)</option>
                       <option value="park">Park for approval (park)</option>
                     </select>
-                  </label>
+                  </div>
                 </div>
               </details>
 
@@ -844,14 +1386,18 @@ export default function ScheduleWizardModal({
                 </div>
               </div>
 
-              <label className="checkbox-row mt-4">
+              <div className="checkbox-row mt-4">
                 <input
                   type="checkbox"
+                  id="wizard-enable-schedule"
                   checked={enabled}
                   onChange={(e) => setEnabled(e.target.checked)}
                 />
-                <span>Enable this schedule immediately</span>
-              </label>
+                <label htmlFor="wizard-enable-schedule">
+                  <span>Enable this schedule immediately </span>
+                </label>
+                <InfoTip text="Turn on to run immediately after saving. Off saves paused." label="Enabling guidance" />
+              </div>
             </div>
           )}
 
@@ -880,14 +1426,30 @@ export default function ScheduleWizardModal({
                   <span className="review-label">Trigger:</span>
                   <span className="font-mono">
                     {triggerType === "cron"
-                      ? getEffectiveCron()
+                      ? effectiveCron(selectedPreset, customCron)
                       : triggerType === "email"
-                      ? `Watches ${pollAccount} (${pollMailbox}) every ${pollIntervalText.trim() || "…"}s`
+                      ? `Watches ${pollAccount || "…"} (${pollMailbox || (pollAccount.trim() === "*" ? "every mailbox" : "…")}) every ${pollIntervalText.trim() || "…"}s`
                       : triggerType === "messages"
                       ? `Watches Messages every ${pollIntervalText.trim() || "…"}s`
                       : `Watches Calendar (lead time ${calendarLeadTimeMinutes}m)`}
                   </span>
                 </div>
+                {triggerType === "email" ? (
+                  <div className="review-row">
+                    <span className="review-label">Filters:</span>
+                    <span>{predicatePreview}</span>
+                  </div>
+                ) : null}
+                {triggerType === "calendar" ? (
+                  <div className="review-row">
+                    <span className="review-label">Calendars:</span>
+                    <span>
+                      {selectedCalendars.length > 0
+                        ? selectedCalendars.join(", ")
+                        : "All calendars"}
+                    </span>
+                  </div>
+                ) : null}
                 {rules.length > 0 && (
                   <div className="review-row">
                     <span className="review-label">Rules:</span>

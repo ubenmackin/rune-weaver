@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for RunLogViewer listing and details view.
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import RunLogViewer from "./RunLogViewer";
@@ -772,7 +772,11 @@ describe("RunLogViewer", () => {
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
     await waitFor(() => expect(runsCalls).toBeGreaterThan(0));
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // Flush the coalesced refresh timer inside act so the refetch settles
+    // before the frame dispatch below.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
     const settledCalls = runsCalls;
 
     // Frames are type-only wake-ups, so each lifecycle push refetches the
@@ -783,7 +787,9 @@ describe("RunLogViewer", () => {
     });
 
     const afterStartCalls = runsCalls;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
     await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
     await waitFor(() => {
       expect(runsCalls).toBeGreaterThan(afterStartCalls);
@@ -816,14 +822,18 @@ describe("RunLogViewer", () => {
     const visibilitySpy = vi
       .spyOn(document, "visibilityState", "get")
       .mockReturnValue("visible");
-    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => {
+      fireEvent(document, new Event("visibilitychange"));
+    });
     await waitFor(() => {
       expect(runsCalls).toBeGreaterThan(settledCalls);
     });
     visibilitySpy.mockRestore();
 
     const afterForegroundCalls = runsCalls;
-    view.unmount();
+    act(() => {
+      view.unmount();
+    });
     resetSharedSocket();
     render(<RunLogViewer />);
     await waitFor(() => {
@@ -851,7 +861,9 @@ describe("RunLogViewer", () => {
       expect(screen.getByText("hello")).toBeInTheDocument();
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
     const settledCalls = runsCalls;
     expect(settledCalls).toBeGreaterThan(0);
     // Only run lifecycle wake-ups belong here, so scheduler and settings
@@ -861,7 +873,9 @@ describe("RunLogViewer", () => {
     await dispatchFrameOrThrow(capture.onMessage, { type: "settings_changed" });
     await dispatchFrameOrThrow(capture.onMessage, { type: "goal_updated" });
     await dispatchFrameOrThrow(capture.onMessage, { type: "definitely_unknown_xyz" });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
     expect(runsCalls).toBe(settledCalls);
   });
 });
