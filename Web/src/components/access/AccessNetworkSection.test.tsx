@@ -798,15 +798,14 @@ describe("AccessNetworkSection", () => {
     render(<AccessNetworkSection />);
 
     await waitForPaneLoaded();
-    expect(screen.getByTestId("policy-subtabs")).toBeDefined();
-    expect(screen.getByTestId("policy-subtabs")).toHaveClass("policy-tabs");
+    expect(screen.getByRole("tablist", { name: "Policy sections" })).toHaveClass("tab-bar");
     expect(screen.getByRole("tablist", { name: "Policy sections" })).toBeDefined();
     const networkTab = screen.getByTestId("policytab-network");
     const credentialsTab = screen.getByTestId("policytab-credentials");
     expect(screen.getByRole("tab", { name: "Network" })).toBeDefined();
     expect(screen.getByRole("tab", { name: "Credentials" })).toBeDefined();
     for (const tab of [networkTab, credentialsTab]) {
-      expect(tab).toHaveClass("policy-tab");
+      expect(tab).toHaveClass("tab-bar-tab");
       expect(tab).not.toHaveClass("settings-tab-btn");
     }
     expect(networkTab).toHaveClass("active");
@@ -841,9 +840,9 @@ describe("AccessNetworkSection", () => {
     await waitForPaneLoaded();
     const networkTab = screen.getByTestId("policytab-network");
     const credentialsTab = screen.getByTestId("policytab-credentials");
-    expect(screen.getByTestId("policy-subtabs")).toHaveClass("policy-tabs");
+    expect(screen.getByRole("tablist", { name: "Policy sections" })).toHaveClass("tab-bar");
     for (const tab of [networkTab, credentialsTab]) {
-      expect(tab).toHaveClass("policy-tab");
+      expect(tab).toHaveClass("tab-bar-tab");
       expect(tab).not.toHaveClass("settings-tab-btn");
     }
     expect(networkTab).toHaveClass("active");
@@ -903,12 +902,12 @@ describe("AccessNetworkSection", () => {
     render(<AccessNetworkSection />);
 
     await waitForPaneLoaded();
-    const subtabs = screen.getByTestId("policy-subtabs");
-    expect(subtabs).toHaveClass("policy-tabs");
+    const subtabs = screen.getByRole("tablist", { name: "Policy sections" });
+    expect(subtabs).toHaveClass("tab-bar");
     const tabButtons = within(subtabs).getAllByRole("tab");
     expect(tabButtons).toHaveLength(2);
     for (const tab of tabButtons) {
-      expect(tab).toHaveClass("policy-tab");
+      expect(tab).toHaveClass("tab-bar-tab");
       expect(tab).not.toHaveClass("settings-tab-btn");
     }
     expect(subtabs.querySelector(".settings-tab-btn")).toBeNull();

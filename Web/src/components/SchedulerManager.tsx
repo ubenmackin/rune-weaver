@@ -30,6 +30,7 @@ import {
 import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
 import RunDetailModal from "./RunDetailModal";
+import TabBar from "./TabBar";
 import ScheduleWizardModal from "./ScheduleWizardModal";
 import Modal from "./Modal";
 import {
@@ -75,6 +76,7 @@ export default function SchedulerManager() {
   const [sends, setSends] = useState<ScheduledSend[]>([]);
   const [sendsLoading, setSendsLoading] = useState(false);
   const [cancellingSendId, setCancellingSendId] = useState<string | null>(null);
+  const [schedulesView, setSchedulesView] = useState<"jobs" | "sends">("jobs");
 
   const refreshSends = useCallback(async () => {
     setSendsLoading(true);
@@ -85,10 +87,7 @@ export default function SchedulerManager() {
         .sort((a, b) => {
           const aMs = new Date(a.fireAt).getTime();
           const bMs = new Date(b.fireAt).getTime();
-          if (!Number.isFinite(aMs) && !Number.isFinite(bMs)) return 0;
-          if (!Number.isFinite(aMs)) return 1;
-          if (!Number.isFinite(bMs)) return -1;
-          return aMs - bMs;
+          return (Number.isFinite(aMs) ? aMs : Infinity) - (Number.isFinite(bMs) ? bMs : Infinity) || 0;
         });
       setSends(pending);
     } catch {
@@ -162,64 +161,37 @@ export default function SchedulerManager() {
     void refreshSends();
   }, [refreshSends]);
 
-  const handleSendsFrame = useCallback(
-    (frame: WSIncomingFrame) => {
-      if ((frame as { type?: string }).type === "run_completed") {
-        void refreshSends();
-      }
-    },
-    [refreshSends],
-  );
-
-  const handleSendsSocketOpen = useCallback(() => {
-    void refreshSends();
+  const handleSendsFrame = useCallback((frame: WSIncomingFrame) => {
+    if ((frame as { type?: string }).type === "run_completed") void refreshSends();
   }, [refreshSends]);
-
+  const handleSendsSocketOpen = useCallback(() => void refreshSends(), [refreshSends]);
   useSharedWebSocket(handleSendsFrame, undefined, handleSendsSocketOpen);
 
   useEffect(() => {
-    function handleVisibility() {
-      if (document.visibilityState === "visible") {
-        void refreshSends();
-      }
-    }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
+    const onVisible = () => { if (document.visibilityState === "visible") void refreshSends(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [refreshSends]);
 
   // Poll while a job is running to detect completion and refresh runs
   useEffect(() => {
     if (!runningJobId) return;
-
     const interval = setInterval(() => {
-      listRuns(RUN_LOG_POLL_LIMIT)
-        .then((res) => {
-          const isStillRunning = res.runs.some(
-            (r) => isActiveRunStatus(r.status) && r.jobID === runningJobId
-          );
-          if (!isStillRunning) {
-            setRunningJobId(null);
-            if (expandedRunsJobId) {
-              void fetchJobRuns(expandedRunsJobId);
-            }
-          }
-        })
-        .catch(() => {});
+      listRuns(RUN_LOG_POLL_LIMIT).then((res) => {
+        if (!res.runs.some((r) => isActiveRunStatus(r.status) && r.jobID === runningJobId)) {
+          setRunningJobId(null);
+          if (expandedRunsJobId) void fetchJobRuns(expandedRunsJobId);
+        }
+      }).catch(() => {});
     }, RUN_POLL_INTERVAL_MS);
-
     return () => clearInterval(interval);
   }, [runningJobId, expandedRunsJobId]);
 
   // Keep selected modal updated if its run changes
   useEffect(() => {
-    if (!selectedRun) return;
-    const currentList = selectedRun.jobID ? jobRuns[selectedRun.jobID] : undefined;
-    if (currentList) {
-      const updated = currentList.find((r) => r.id === selectedRun.id);
-      if (updated && (updated.status !== selectedRun.status || updated.response !== selectedRun.response)) {
-        setSelectedRun(updated);
-      }
-    }
+    if (!selectedRun?.jobID) return;
+    const updated = jobRuns[selectedRun.jobID]?.find((r) => r.id === selectedRun.id);
+    if (updated && (updated.status !== selectedRun.status || updated.response !== selectedRun.response)) setSelectedRun(updated);
   }, [jobRuns, selectedRun]);
 
   async function handleToggle(job: SchedulerJob) {
@@ -250,12 +222,7 @@ export default function SchedulerManager() {
       if (selectedRun?.jobID === job.id) {
         setSelectedRun(null);
       }
-      setJobRuns((prev) => {
-        if (!(job.id in prev)) return prev;
-        const next = { ...prev };
-        delete next[job.id];
-        return next;
-      });
+      setJobRuns((prev) => { if (!(job.id in prev)) return prev; const next = { ...prev }; delete next[job.id]; return next; });
       setPendingDelete(null);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Delete failed");
@@ -289,10 +256,7 @@ export default function SchedulerManager() {
     setNotice(null);
     try {
       const response = await runJobNow(job.id);
-      const preview =
-        response.text.length > 160
-          ? `${response.text.slice(0, 160)}…`
-          : response.text;
+      const preview = response.text.length > 160 ? `${response.text.slice(0, 160)}…` : response.text;
       setNotice(`Ran "${job.name}": ${preview || "Completed successfully"}`);
 
       // Refresh job history if open
@@ -364,7 +328,6 @@ export default function SchedulerManager() {
             <RefreshIcon size={14} className={loading ? "spin" : ""} />
             <span>{loading ? "Refreshing…" : "Refresh"}</span>
           </button>
-          <span className="muted text-sm">{jobs.length} jobs</span>
 
           <button
             type="button"
@@ -386,29 +349,39 @@ export default function SchedulerManager() {
         <p className="settings-field-hint">{`Each run uses ${schedulerDefault ?? DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS} consecutive tool rounds by default (per-job override below, range ${TOOL_ROUNDS_MIN}-${TOOL_ROUNDS_MAX}). Budget-exceeded runs synthesize a summary; only jobs with on_tool_limit set to park request continuation.`}</p>
       )}
 
+      <TabBar
+        tabs={[{ key: "jobs", label: "Automated jobs", count: jobs.length }, { key: "sends", label: "Scheduled sends", count: sendsLoading ? null : sends.length }]}
+        activeKey={schedulesView}
+        onSelect={(key) => setSchedulesView(key === "sends" ? "sends" : "jobs")}
+        ariaLabel="Schedules views"
+        idPrefix="schedules-tab"
+      />
+
       {error ? <p className="error">{error}</p> : null}
       {notice ? <div className="notice-banner">{notice}</div> : null}
 
-      {jobs.length === 0 && !loading ? (
-        <div className="empty-state-box">
-          <h3>No scheduled jobs yet</h3>
-          <p className="muted">
-            Automate recurring digests, event watchers (Email, Messages, Calendar), and background analysis.
-          </p>
-          <button
-            type="button"
-            className="primary mt-3"
-            onClick={() => {
-              setEditingJob(null);
-              setWizardOpen(true);
-            }}
-          >
-            Create Your First Schedule
-          </button>
-        </div>
-      ) : null}
+      {schedulesView === "jobs" ? (
+        <div role="tabpanel" id="panel-jobs" aria-labelledby="schedules-tab-jobs">
+          {jobs.length === 0 && !loading ? (
+            <div className="empty-state-box">
+              <h3>No scheduled jobs yet</h3>
+              <p className="muted">
+                Automate recurring digests, event watchers (Email, Messages, Calendar), and background analysis.
+              </p>
+              <button
+                type="button"
+                className="primary mt-3"
+                onClick={() => {
+                  setEditingJob(null);
+                  setWizardOpen(true);
+                }}
+              >
+                Create Your First Schedule
+              </button>
+            </div>
+          ) : null}
 
-      <div className="job-cards-list">
+          <div className="job-cards-list">
         {jobs.map((job) => {
           const watcherSource =
             job.watcherSource || (job.pollAccount ? "email" : undefined);
@@ -587,14 +560,8 @@ export default function SchedulerManager() {
               {isExpanded && (
                 <div className="embedded-history-drawer">
                   <h4>Past Runs for "{job.name}"</h4>
-                  {loadingRunsJobId === job.id && runsForThisJob.length === 0 ? (
-                    <p className="muted text-xs">Loading execution history…</p>
-                  ) : null}
-
-                  {runsForThisJob.length === 0 && loadingRunsJobId !== job.id ? (
-                    <p className="muted text-xs">
-                      No recorded runs yet for this job. Click "Run Now" to test.
-                    </p>
+                  {runsForThisJob.length === 0 ? (
+                    <p className="muted text-xs">{loadingRunsJobId === job.id ? "Loading execution history…" : 'No recorded runs yet for this job. Click "Run Now" to test.'}</p>
                   ) : null}
 
                   <div className="embedded-runs-list">
@@ -643,27 +610,23 @@ export default function SchedulerManager() {
             </div>
           );
         })}
-      </div>
+          </div>
+        </div>
+      ) : null}
 
-      <div className="scheduled-sends-section" aria-label="Scheduled sends">
-        <div className="panel-header-row">
-          <div>
-            <h2>Scheduled sends</h2>
+      {schedulesView === "sends" ? (
+        <div role="tabpanel" id="panel-sends" aria-labelledby="schedules-tab-sends">
+          <div className="scheduled-sends-section" aria-label="Scheduled sends">
             <p className="muted text-sm">
               Pending delayed sends booked through agent approvals. To change a
               send, cancel it here and ask the agent in chat to re-schedule it.
             </p>
-          </div>
-          <span className="muted text-sm">
-            {sendsLoading ? "Loading…" : `${sends.length} pending`}
-          </span>
-        </div>
 
-        {sends.length === 0 && !sendsLoading ? (
-          <p className="muted text-sm">No scheduled sends</p>
-        ) : null}
+            {sends.length === 0 && !sendsLoading ? (
+              <p className="muted text-sm">No scheduled sends</p>
+            ) : null}
 
-        <div className="scheduled-sends-list">
+            <div className="scheduled-sends-list">
           {sends.map((send) => {
             const fireMs = new Date(send.fireAt).getTime();
             const hasFireTime = Number.isFinite(fireMs);
@@ -717,8 +680,10 @@ export default function SchedulerManager() {
               </div>
             );
           })}
+            </div>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {/* Creation / Edit Wizard Modal */}
       {wizardOpen && (

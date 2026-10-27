@@ -15,6 +15,7 @@ import {
 import Modal from "../Modal";
 import { validateBindingHostEntry } from "../PolicyBindingModal";
 import { normalizeSecretKey } from "../StoreSecretModal";
+import TabBar from "../TabBar";
 import { CloseIcon } from "../icons";
 import { ToastStack } from "../Toast";
 import { useToastStack } from "../../hooks/useToastStack";
@@ -1294,35 +1295,17 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
       {draft ? (
         <>
           {!activeView ? (
-            <div
-              data-testid="policy-subtabs"
-              role="tablist"
-              aria-label="Policy sections"
-              className="policy-tabs"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={policySubTab === "network"}
-                aria-controls="policy-panel-network"
-                data-testid="policytab-network"
-                className={`policy-tab${policySubTab === "network" ? " active" : ""}`}
-                onClick={() => setPolicySubTab("network")}
-              >
-                Network
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={policySubTab === "credentials"}
-                aria-controls="policy-panel-credentials"
-                data-testid="policytab-credentials"
-                className={`policy-tab${policySubTab === "credentials" ? " active" : ""}`}
-                onClick={() => setPolicySubTab("credentials")}
-              >
-                Credentials
-              </button>
-            </div>
+            <TabBar
+              tabs={[
+                { key: "network", label: "Network", count: null, testId: "policytab-network" },
+                { key: "credentials", label: "Credentials", count: null, testId: "policytab-credentials" },
+              ]}
+              activeKey={policySubTab}
+              onSelect={(key) => setPolicySubTab(key === "credentials" ? "credentials" : "network")}
+              ariaLabel="Policy sections"
+              idPrefix="policy-tab"
+              panelIdPrefix="policy-panel"
+            />
           ) : null}
           {currentTab === "network" ? (
             <section

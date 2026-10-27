@@ -1,5 +1,6 @@
 // Rune Weaver Dashboard — Access settings pane shell.
 import { useEffect, useState } from "react";
+import TabBar from "./TabBar";
 import { AccessBashSection } from "./access/AccessBashSection";
 import { AccessFilesSection } from "./access/AccessFilesSection";
 import { AccessNetworkSection } from "./access/AccessNetworkSection";
@@ -28,7 +29,8 @@ const ACCESS_SECTIONS: AccessSectionEntry[] = [
 ];
 
 // One tabpanel rides every tab, because only the selected section mounts. The
-// shared id keeps the tab-to-panel wiring valid while the pane swaps bodies.
+// shared id keeps the tab-to-panel wiring valid while the pane swaps bodies:
+// every tab controls that one node, so no tab dangles.
 const ACCESS_PANEL_ID = "access-panel";
 
 export interface AccessPaneProps {
@@ -106,23 +108,21 @@ export default function AccessPane({ initialSection = "rules" }: AccessPaneProps
 
   return (
     <div className="access-pane" data-testid="access-pane">
-      <div className="access-tabs" role="tablist" aria-label="Access views">
-        {ACCESS_SECTIONS.map((entry) => (
-          <button
-            key={entry.key}
-            id={`access-tab-${entry.key}`}
-            type="button"
-            role="tab"
-            className={`access-tab${section === entry.key ? " active" : ""}`}
-            aria-selected={section === entry.key}
-            aria-controls={ACCESS_PANEL_ID}
-            data-testid={`access-tab-${entry.key}`}
-            onClick={() => setSection(entry.key)}
-          >
-            <span>{entry.label}</span>
-          </button>
-        ))}
-      </div>
+      <TabBar
+        tabs={ACCESS_SECTIONS.map((entry) => ({
+          key: entry.key,
+          label: entry.label,
+          count: null,
+        }))}
+        activeKey={section}
+        onSelect={(key) => {
+          if (isAccessSectionKey(key)) setSection(key);
+        }}
+        ariaLabel="Access views"
+        idPrefix="access-tab"
+        testIdPrefix="access-tab"
+        panelId={ACCESS_PANEL_ID}
+      />
       <div
         className="access-pane-body"
         id={ACCESS_PANEL_ID}

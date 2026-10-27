@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import indexingStyles from "../styles/indexing.css?raw";
-import memoryStyles from "../styles/memory.css?raw";
+import tabsStyles from "../styles/tabs.css?raw";
 
 // Plain stylesheet imports resolve to empty under the test transform, so the
 // raw text import pins the rules to their modular stylesheet owners.
@@ -62,10 +62,10 @@ describe("Index Status mobile layout", () => {
   });
 
   it("tightens the Memory tab bar on phones without shrinking the touch height", () => {
-    const phone = mediaBlocks(memoryStyles, 460);
-    expect(phone).toMatch(/\.memory-tab[\s\S]*?\{[^}]*white-space:\s*nowrap/);
-    expect(phone).toMatch(/\.memory-tab[\s\S]*?\{[^}]*font-size:\s*13px/);
+    const phone = mediaBlocks(tabsStyles, 460);
+    expect(phone).toMatch(/\.tab-bar-tab[\s\S]*?\{[^}]*white-space:\s*nowrap/);
+    expect(phone).toMatch(/\.tab-bar-tab[\s\S]*?\{[^}]*font-size:\s*13px/);
     expect(phone).not.toMatch(/min-height/);
-    expect(memoryStyles).toMatch(/\.access-tab\s*\{[^}]*min-height:\s*44px/);
+    expect(tabsStyles).toMatch(/\.tab-bar-tab\s*\{[^}]*min-height:\s*44px/);
   });
 });

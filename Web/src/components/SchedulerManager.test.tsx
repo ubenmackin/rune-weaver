@@ -66,7 +66,9 @@ describe("SchedulerManager", () => {
       expect(screen.getByText("morning digest")).toBeInTheDocument();
     });
     expect(screen.getByText("mail watcher")).toBeInTheDocument();
-    expect(screen.getByText("2 jobs")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Automated jobs (2)" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/watches icloud/)).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: "Run now" }).length,
@@ -97,7 +99,9 @@ describe("SchedulerManager", () => {
     );
     render(<SchedulerManager />);
     await waitFor(() => {
-      expect(screen.getByText("0 jobs")).toBeInTheDocument();
+      expect(
+        screen.getByRole("tab", { name: "Automated jobs (0)" }),
+      ).toBeInTheDocument();
     });
     await user.click(screen.getByRole("button", { name: "Create Schedule" }));
     await user.type(screen.getByLabelText("Job Name"), "morning digest");
@@ -155,7 +159,9 @@ describe("SchedulerManager", () => {
     );
     render(<SchedulerManager />);
     await waitFor(() => {
-      expect(screen.getByText("0 jobs")).toBeInTheDocument();
+      expect(
+        screen.getByRole("tab", { name: "Automated jobs (0)" }),
+      ).toBeInTheDocument();
     });
     await user.click(screen.getByRole("button", { name: "Create Schedule" }));
     await user.type(screen.getByLabelText("Job Name"), "mail watcher");
@@ -509,8 +515,14 @@ describe("SchedulerManager scheduled sends", () => {
     ]);
     render(<SchedulerManager />);
     await waitFor(() => {
-      expect(screen.getByText("Scheduled sends")).toBeInTheDocument();
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (2)" }),
+      ).toBeInTheDocument();
     });
+    expect(
+      screen.getByRole("tab", { name: "Automated jobs (0)" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Scheduled sends (2)" }));
     await waitFor(() => {
       expect(screen.getByText("sam@example.com")).toBeInTheDocument();
     });
@@ -544,6 +556,12 @@ describe("SchedulerManager scheduled sends", () => {
       }),
     ]);
     render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (0)" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Scheduled sends (0)" }));
     await waitFor(() => {
       expect(screen.getByText("No scheduled sends")).toBeInTheDocument();
     });
@@ -586,6 +604,12 @@ describe("SchedulerManager scheduled sends", () => {
     );
     render(<SchedulerManager />);
     await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (1)" }),
+      ).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("tab", { name: "Scheduled sends (1)" }));
+    await waitFor(() => {
       expect(screen.getByText("sam@example.com")).toBeInTheDocument();
     });
     await user.click(
@@ -606,6 +630,12 @@ describe("SchedulerManager scheduled sends", () => {
     installSocket();
     stubSchedulerFetch([send()]);
     render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (1)" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Scheduled sends (1)" }));
     await waitFor(() => {
       expect(screen.getByText("sam@example.com")).toBeInTheDocument();
     });
@@ -650,6 +680,12 @@ describe("SchedulerManager scheduled sends", () => {
       }),
     );
     const view = render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (1)" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Scheduled sends (1)" }));
     await waitFor(() => {
       expect(screen.getByText("sam@example.com")).toBeInTheDocument();
     });
@@ -707,6 +743,12 @@ describe("SchedulerManager scheduled sends", () => {
     );
     render(<SchedulerManager />);
     await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Scheduled sends (1)" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Scheduled sends (1)" }));
+    await waitFor(() => {
       expect(screen.getByText("sam@example.com")).toBeInTheDocument();
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
@@ -718,5 +760,61 @@ describe("SchedulerManager scheduled sends", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+  });
+
+  it("switches between jobs and sends tabs with shared header actions", async () => {
+    const user = userEvent.setup();
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse({ sends: [send()], count: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: "Automated jobs (1)" }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("tab", { name: "Scheduled sends (1)" }),
+    ).toBeInTheDocument();
+    // Jobs pane owns its tabpanel while sends stays unmounted.
+    expect(screen.getByText("morning digest")).toBeInTheDocument();
+    expect(screen.queryByText("sam@example.com")).not.toBeInTheDocument();
+    expect(document.getElementById("panel-jobs")).not.toBeNull();
+    expect(document.getElementById("panel-sends")).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Scheduled sends (1)" }));
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("morning digest")).not.toBeInTheDocument();
+    expect(document.getElementById("panel-sends")).not.toBeNull();
+    expect(document.getElementById("panel-jobs")).toBeNull();
+    // Shared header actions stay visible in both views with no standalone counts.
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create Schedule" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("1 jobs")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Automated jobs (1)" }));
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sam@example.com")).not.toBeInTheDocument();
   });
 });

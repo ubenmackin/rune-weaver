@@ -2,6 +2,7 @@
  * Single entrypoint importing domain-specific modular stylesheets. */
 
 @import "./styles/tokens.css";
+@import "./styles/tabs.css";
 @import "./styles/progress.css";
 @import "./styles/base.css";
 @import "./styles/session-sidebar.css";

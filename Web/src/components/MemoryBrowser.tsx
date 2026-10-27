@@ -18,11 +18,18 @@ import {
 import IndexingPanel from "./IndexingPanel";
 import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
+import TabBar from "./TabBar";
 import { CloseIcon, PlusIcon, SearchIcon, TrashIcon } from "./icons";
 
 // Inner memory views plus the indexing status view.
 export type MemoryInnerTab = "search" | "facts" | "episodes";
 export type MemoryTab = MemoryInnerTab | "indexing";
+
+// Fail-closed inner-tab guard: an unknown key falls back to search so the
+// pane never blanks while the tab bar falls back to its first tab.
+function isMemoryInnerTab(value: unknown): value is MemoryInnerTab {
+  return value === "search" || value === "facts" || value === "episodes";
+}
 
 export interface MemoryBrowserProps {
   view?: MemoryTab;
@@ -771,41 +778,21 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
           </div>
         ) : (
           <>
-            <div className="memory-tabs" role="tablist" aria-label="Memory views">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={renderTab === "search"}
-                aria-controls="memory-panel-search"
-                className={`memory-tab${renderTab === "search" ? " active" : ""}`}
-                onClick={() => selectInnerTab("search")}
-              >
-                Search
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={renderTab === "facts"}
-                aria-controls="memory-panel-facts"
-                className={`memory-tab${renderTab === "facts" ? " active" : ""}`}
-                onClick={() => selectInnerTab("facts")}
-              >
-                {factsTotalCount !== null ? `Facts (${factsTotalCount})` : "Facts"}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={renderTab === "episodes"}
-                aria-controls="memory-panel-episodes"
-                className={`memory-tab${renderTab === "episodes" ? " active" : ""}`}
-                onClick={() => selectInnerTab("episodes")}
-              >
-                {episodeCount !== null ? `Episodes (${episodeCount})` : "Episodes"}
-              </button>
-            </div>
+            <TabBar
+              tabs={[
+                { key: "search", label: "Search", count: null },
+                { key: "facts", label: "Facts", count: factsTotalCount },
+                { key: "episodes", label: "Episodes", count: episodeCount },
+              ]}
+              activeKey={renderTab}
+              onSelect={(key) => selectInnerTab(isMemoryInnerTab(key) ? key : "search")}
+              ariaLabel="Memory views"
+              idPrefix="memory-tab"
+              panelIdPrefix="memory-panel"
+            />
 
             {renderTab === "search" ? (
-              <div id="memory-panel-search" role="tabpanel" aria-label="Search">
+              <div id="memory-panel-search" role="tabpanel" aria-labelledby="memory-tab-search">
                 {searchError ? <p className="error">{searchError}</p> : null}
                 <div className="memory-search-section">
                   <h3>Search</h3>
@@ -889,7 +876,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             ) : null}
 
             {renderTab === "facts" ? (
-              <div id="memory-panel-facts" role="tabpanel" aria-label="Facts">
+              <div id="memory-panel-facts" role="tabpanel" aria-labelledby="memory-tab-facts">
                 {factsError ? (
                   <div className="row">
                     <p className="error">{factsError}</p>
@@ -1052,7 +1039,7 @@ export default function MemoryBrowser({ view, highlightRun, onRunStarted }: Memo
             ) : null}
 
             {renderTab === "episodes" ? (
-              <div id="memory-panel-episodes" role="tabpanel" aria-label="Episodes">
+              <div id="memory-panel-episodes" role="tabpanel" aria-labelledby="memory-tab-episodes">
                 {finderError ? (
                   <div className="row">
                     <p className="error">{finderError}</p>

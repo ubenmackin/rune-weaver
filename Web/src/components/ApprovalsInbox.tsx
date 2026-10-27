@@ -46,6 +46,7 @@ import BashTierLine from "./BashTierLine";
 import EphemeralTrustChip from "./EphemeralTrustChip";
 import { resolveEgressHost, resolveSandboxSummary } from "./InlineApprovalBanner";
 import Modal from "./Modal";
+import TabBar from "./TabBar";
 import { ApprovalsIcon, CloseIcon, RefreshIcon } from "./icons";
 
 // Deep link into the Settings → Access pane that owns standing rules.
@@ -78,6 +79,14 @@ interface ApprovalsInboxProps {
   sessionID?: string;
 }
 
+// Inbox views sharing one header row. Unknown keys fall back to pending so
+// the inbox never blanks.
+type InboxView = "pending" | "active-timed" | "history";
+
+function isInboxView(value: unknown): value is InboxView {
+  return value === "pending" || value === "active-timed" || value === "history";
+}
+
 export default function ApprovalsInbox({
   sessionID,
 }: ApprovalsInboxProps = {}) {
@@ -105,7 +114,7 @@ export default function ApprovalsInbox({
   // Three panes sharing one header row. Pending stays the default so the inbox
   // keeps opening on the decidable queue; Active-timed mirrors dated trust and
   // History swaps the groups for the durable decision log.
-  const [view, setView] = useState<"pending" | "active-timed" | "history">("pending");
+  const [view, setView] = useState<InboxView>("pending");
   // Timed count for the Active-timed tab label, settled from the rules route.
   const [activeTimedCount, setActiveTimedCount] = useState<number | null>(null);
 
@@ -820,52 +829,19 @@ export default function ApprovalsInbox({
           <span>Manage standing rules</span>
         </a>
       </div>
-      <div className="approvals-view-nav">
-        <div
-          role="tablist"
-          aria-label="Inbox views"
-          className="approvals-view-toggle"
-        >
-          <button
-            type="button"
-            role="tab"
-            id="inbox-tab-pending"
-            data-testid="inbox-view-pending"
-            aria-selected={view === "pending"}
-            aria-pressed={view === "pending"}
-            aria-controls="inbox-panel-pending"
-            onClick={() => setView("pending")}
-          >
-            {`Pending (${approvals.length})`}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            id="inbox-tab-active-timed"
-            data-testid="inbox-view-active-timed"
-            aria-selected={view === "active-timed"}
-            aria-pressed={view === "active-timed"}
-            aria-controls="inbox-panel-active-timed"
-            onClick={() => setView("active-timed")}
-          >
-            {activeTimedCount !== null
-              ? `Active-timed (${activeTimedCount})`
-              : "Active-timed"}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            id="inbox-tab-history"
-            data-testid="inbox-view-history"
-            aria-selected={view === "history"}
-            aria-pressed={view === "history"}
-            aria-controls="inbox-panel-history"
-            onClick={() => setView("history")}
-          >
-            History
-          </button>
-        </div>
-      </div>
+      <TabBar
+        tabs={[
+          { key: "pending", label: "Pending", count: approvals.length },
+          { key: "active-timed", label: "Active-timed", count: activeTimedCount },
+          { key: "history", label: "History", count: null },
+        ]}
+        activeKey={view}
+        onSelect={(key) => setView(isInboxView(key) ? key : "pending")}
+        ariaLabel="Inbox views"
+        idPrefix="inbox-tab"
+        testIdPrefix="inbox-view"
+        panelIdPrefix="inbox-panel"
+      />
 
       {view === "pending" ? (
         <div
