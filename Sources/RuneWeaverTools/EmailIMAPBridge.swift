@@ -140,6 +140,38 @@ public enum EmailIMAPValidation: Sendable {
             throw EmailIMAPError.validationFailed("Invalid mailbox: mailbox must not be empty")
         }
     }
+
+    /// Validates a relative lookback, rejecting out-of-range values.
+    /// - Parameter days: Candidate day count.
+    /// - Throws: `EmailIMAPError.validationFailed` when outside `1...90`.
+    public static func validateSinceDays(_ days: Int) throws {
+        guard (EmailPollRule.minSinceDays ... EmailPollRule.maxSinceDays).contains(days) else {
+            throw EmailIMAPError.validationFailed(
+                "Invalid sinceDays: sinceDays must be between \(EmailPollRule.minSinceDays) and \(EmailPollRule.maxSinceDays)"
+            )
+        }
+    }
+}
+
+/// Merges absolute and relative date bounds for structured mail search.
+enum StructuredSearchBounds: Sendable {
+    /// Folds a relative `sinceDays` lookback into an absolute window.
+    /// - Returns: Merged range, or nil when both sides stay unbounded.
+    static func effectiveRange(_ range: TemporalRange?, sinceDays: Int?) -> TemporalRange? {
+        guard let sinceDays else { return range }
+        let cutoffDay = Calendar.current.date(byAdding: .day, value: -sinceDays, to: Date()) ?? Date()
+        let cutoff = Calendar.current.startOfDay(for: cutoffDay)
+        let since: Date? = if let baseSince = range?.since {
+            max(baseSince, cutoff)
+        } else {
+            cutoff
+        }
+        let until = range?.until
+        if since == nil, until == nil {
+            return nil
+        }
+        return TemporalRange(since: since, until: until)
+    }
 }
 
 /// IMAP gateway used by the email tools.
@@ -192,6 +224,16 @@ public protocol EmailIMAPGateway: Sendable {
         range: TemporalRange?
     ) async throws -> [EmailSearchHit]
 
+    /// Searches one mailbox combining free text with field-scoped AND filters.
+    /// credentials: Resolved connection fields plus password.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        filters: EmailStructuredSearchFilters
+    ) async throws -> [EmailSearchHit]
+
     /// Fetches one message from one mailbox.
     func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
 
@@ -223,121 +265,6 @@ public protocol EmailIMAPGateway: Sendable {
         destination: String,
         markAsRead: Bool
     ) async throws -> EmailMoveResult
-}
-
-extension EmailIMAPGateway {
-    /// Default batch fetch shim for gateways that only implement individual fetch.
-    public func batchFetch(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        query: String,
-        limit: Int
-    ) async throws -> [EmailFullMessage] {
-        let hits = try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit)
-        var messages: [EmailFullMessage] = []
-        for hit in hits {
-            try await messages.append(fetch(credentials: credentials, mailbox: mailbox, messageID: hit.id))
-        }
-        return messages
-    }
-
-    /// Default attachment-filter shim for gateways that only implement base search.
-    /// Applies the filter locally so filtered callers never silently receive unfiltered hits.
-    public func search(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        query: String,
-        limit: Int,
-        hasAttachment: Bool?
-    ) async throws -> [EmailSearchHit] {
-        let hits = try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit)
-        return hits.filter { $0.matches(hasAttachment: hasAttachment) }
-    }
-
-    /// Default temporal shim routing through the combined filter so stubs without
-    /// IMAP date support still honor the window via local post-filtering.
-    public func search(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        query: String,
-        limit: Int,
-        since: Date?,
-        until: Date?
-    ) async throws -> [EmailSearchHit] {
-        try await search(
-            credentials: credentials,
-            mailbox: mailbox,
-            query: query,
-            limit: limit,
-            hasAttachment: nil,
-            range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil
-        )
-    }
-
-    /// Default combined shim for gateways that only implement the older shapes.
-    /// Reapplies the window locally with the shared date parser so day-granular
-    /// bridges still honor exact datetimes; undated hits only survive unbounded windows.
-    public func search(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        query: String,
-        limit: Int,
-        hasAttachment: Bool?,
-        range: TemporalRange?
-    ) async throws -> [EmailSearchHit] {
-        let hits = try await search(
-            credentials: credentials,
-            mailbox: mailbox,
-            query: query,
-            limit: limit,
-            hasAttachment: hasAttachment
-        )
-        guard let range, !range.isUnbounded else { return hits }
-        return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
-    }
-
-    /// Default search overload accepting separate `since` and `until` date bounds.
-    public func search(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        query: String,
-        limit: Int,
-        hasAttachment: Bool? = nil,
-        since: Date? = nil,
-        until: Date? = nil
-    ) async throws -> [EmailSearchHit] {
-        try await search(
-            credentials: credentials,
-            mailbox: mailbox,
-            query: query,
-            limit: limit,
-            hasAttachment: hasAttachment,
-            range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil
-        )
-    }
-
-    /// Default compatibility shim over the single required `mailboxListing`.
-    /// `mailboxListing` is the only required listing method so conformers cannot
-    /// satisfy the protocol with neither method and recurse between defaults.
-    public func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
-        try await mailboxListing(credentials: credentials).mailboxes
-    }
-
-    /// Default move that fails closed for gateways without move support.
-    public func move(
-        credentials _: ResolvedEmailCredentials,
-        mailbox _: String,
-        messageID _: String,
-        destination _: String,
-        markAsRead _: Bool
-    ) async throws -> EmailMoveResult {
-        throw EmailIMAPError.bridgeFailed("IMAP move not supported")
-    }
-
-    /// Default status that fails closed for gateways without STATUS support.
-    public func status(credentials _: ResolvedEmailCredentials, mailbox _: String) async throws -> EmailMailboxStatus {
-        throw EmailIMAPError.bridgeFailed("IMAP status not supported")
-    }
 }
 
 /// Resolves the best-effort Sent mailbox from a `LIST` result.
@@ -465,6 +392,14 @@ struct EmailIMAPBridgeRequest: Encodable {
     let since: String?
     /// IMAP `DD-Mon-YYYY` upper bound for `BEFORE` (search only, nil means unbounded above).
     let until: String?
+    /// Sender substring filter (search only, nil means no sender scoping).
+    let from: String?
+    /// Subject substring filter (search only, nil means no subject scoping).
+    let subject: String?
+    /// Whether to restrict the search to unread mail (search only).
+    let unreadOnly: Bool?
+    /// Relative lookback in days for `SINCE` (search only, nil means no bound).
+    let sinceDays: Int?
 
     /// Creates a search request.
     static func search(
@@ -474,7 +409,11 @@ struct EmailIMAPBridgeRequest: Encodable {
         mailbox: String = "INBOX",
         hasAttachment: Bool? = nil,
         since: Date? = nil,
-        until: Date? = nil
+        until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool? = nil,
+        sinceDays: Int? = nil
     ) -> Self {
         Self(
             op: "search",
@@ -492,7 +431,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: hasAttachment,
             since: since.map { TemporalFilter.imapDateString(from: $0) },
-            until: until.map { TemporalFilter.imapUntilDateString(from: $0) }
+            until: until.map { TemporalFilter.imapUntilDateString(from: $0) },
+            from: from,
+            subject: subject,
+            unreadOnly: unreadOnly,
+            sinceDays: sinceDays
         )
     }
 
@@ -514,7 +457,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -541,7 +488,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -568,7 +519,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -592,7 +547,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -627,7 +586,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: markAsRead,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -649,7 +612,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 
@@ -672,7 +639,11 @@ struct EmailIMAPBridgeRequest: Encodable {
             markAsRead: nil,
             hasAttachment: nil,
             since: nil,
-            until: nil
+            until: nil,
+            from: nil,
+            subject: nil,
+            unreadOnly: nil,
+            sinceDays: nil
         )
     }
 }
@@ -700,16 +671,15 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Searches one mailbox via the Python helper with attachment and temporal filters.
-    /// Date bounds ride as IMAP `DD-Mon-YYYY` `since`/`until` keys and are re-applied
-    /// exactly in Swift so day-granular IMAP results still honor full datetimes.
+    /// Searches one mailbox via the Python helper with attachment, temporal, and
+    /// field-scoped filters enforced as one IMAP AND. Date bounds ride as IMAP keys
+    /// and are re-applied exactly in Swift so day-granular hits stay exact.
     public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
         limit: Int,
-        hasAttachment: Bool?,
-        range: TemporalRange?
+        filters: EmailStructuredSearchFilters
     ) async throws -> [EmailSearchHit] {
         // Reject out-of-range limits before touching the subprocess so an unchecked
         // value can never reach the Python slice and widen the result window.
@@ -718,6 +688,17 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
         try EmailIMAPValidation.validateSearchQuery(query)
         try EmailIMAPValidation.validateMailbox(mailbox)
+        let trimmedFrom = filters.from?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedFrom, !trimmedFrom.isEmpty {
+            try EmailIMAPValidation.validateSearchQuery(trimmedFrom)
+        }
+        let trimmedSubject = filters.subject?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedSubject, !trimmedSubject.isEmpty {
+            try EmailIMAPValidation.validateSearchQuery(trimmedSubject)
+        }
+        if let days = filters.sinceDays {
+            try EmailIMAPValidation.validateSinceDays(days)
+        }
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = EmailIMAPBridgeRequest.search(
@@ -725,9 +706,13 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             query: effectiveQuery,
             limit: limit,
             mailbox: trimmedMailbox,
-            hasAttachment: hasAttachment,
-            since: range?.since,
-            until: range?.until
+            hasAttachment: filters.hasAttachment,
+            since: filters.range?.since,
+            until: filters.range?.until,
+            from: trimmedFrom,
+            subject: trimmedSubject,
+            unreadOnly: filters.unreadOnly ? true : nil,
+            sinceDays: filters.sinceDays
         )
         let data = try await run(request: request)
         do {
@@ -745,13 +730,38 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
                     attachments: $0.attachments
                 )
             }
-            guard let range, !range.isUnbounded else { return labeled }
-            return labeled.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
+            let effectiveRange = StructuredSearchBounds.effectiveRange(filters.range, sinceDays: filters.sinceDays)
+            let ranged: [EmailSearchHit] = if let effectiveRange, !effectiveRange.isUnbounded {
+                labeled.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: effectiveRange) }
+            } else {
+                labeled
+            }
+            return ranged.filter { $0.matchesFieldScope(from: trimmedFrom, subject: trimmedSubject) }
         } catch let error as EmailIMAPError {
             throw error
         } catch {
             throw EmailIMAPError.decodeFailed(error.localizedDescription)
         }
+    }
+
+    /// Searches one mailbox via the Python helper with attachment and temporal filters.
+    /// Date bounds ride as IMAP `DD-Mon-YYYY` `since`/`until` keys and are re-applied
+    /// exactly in Swift so day-granular IMAP results still honor full datetimes.
+    public func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?,
+        range: TemporalRange?
+    ) async throws -> [EmailSearchHit] {
+        try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            filters: EmailStructuredSearchFilters(hasAttachment: hasAttachment, range: range)
+        )
     }
 
     /// Searches one mailbox via the Python helper within an optional temporal window.

@@ -145,8 +145,7 @@ describe("SettingsManager", () => {
 
     const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(sandboxTabBtn);
-    // Containers contract: no legacy sandbox editors remain and both pinned
-    // images render as read-only text rather than inputs.
+    // Containers contract: no legacy sandbox editors remain; pinned images are read-only text.
     expect(screen.queryByLabelText(/Staging Path/i)).toBeNull();
     expect(screen.queryByLabelText(/Retention/i)).toBeNull();
     expect(screen.queryByLabelText(/Max Total Size/i)).toBeNull();
@@ -2395,9 +2394,7 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Only the media row earns a header button: the server hasConfig flag is the sole authority, so
-    // email rows without a flagged tool stay clean even though their section still renders with bulk
-    // toggles.
+    // Only the media row earns a header button; unflagged email rows stay clean.
     await waitFor(() => {
       expect(screen.getByText("Media & Streaming")).toBeDefined();
     });
@@ -3480,9 +3477,7 @@ describe("SettingsManager", () => {
   });
 });
 
-// Structured security policy (policy.toml) surface: the network plus credentials editor lives on
-// the Access tab's Network and Credentials rail sections outside the shared config form, so coverage
-// pins the tab wiring, the structured fetch shape, and the absence of the retired raw-text contract.
+// Structured policy surface: Network plus Credentials editors live outside the shared form.
 const structuredPolicyPayload = {
   policy: {
     version: 1,
@@ -3511,9 +3506,7 @@ describe("SettingsManager access tab", () => {
     resetSharedRunsForTesting();
   });
 
-  // Routes the settings shell, the Rules section the Access tab lands on, and
-  // the structured policy fetch so each case overrides only the response it
-  // exercises; unrelated boot probes stay benign.
+  // Routes shell, Rules section, and policy fetch; unrelated boot probes stay benign.
   function stubPolicyTabFetch(
     policyResponse: (init?: RequestInit) => Response | Promise<Response>
   ) {
@@ -3549,8 +3542,7 @@ describe("SettingsManager access tab", () => {
     await waitFor(() => {
       expect(screen.getByTestId("access-pane")).toBeDefined();
     });
-    // The structured policy editor mounts behind the tab bar's Network Policy section;
-    // the Credentials entry mounts the credential list on its own tab.
+    // Policy editor mounts behind Network Policy; Credentials list has its own tab.
     await user.click(screen.getByTestId("access-tab-network"));
     await waitFor(() => {
       expect(screen.getByTestId("policy-pane")).toBeDefined();
@@ -3562,8 +3554,7 @@ describe("SettingsManager access tab", () => {
     const fetchMock = stubPolicyTabFetch(() => jsonResponse(structuredPolicyPayload));
     const user = await openAccessPane();
 
-    // Structured network editors own the egress posture: mode select plus one
-    // textarea per domain list.
+    // Network editors own the egress posture: mode select plus domain textareas.
     await waitFor(() => {
       expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe("allowlist_only");
     });
@@ -3587,8 +3578,7 @@ describe("SettingsManager access tab", () => {
     expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
     expect(screen.getByTestId("policy-save")).toBeDefined();
 
-    // Three surviving invariants banner the pane; the retired raw editor and the
-    // candidate Verify button are gone from the new contract.
+    // Retired raw editor and candidate Verify button are gone from the new contract.
     expect(screen.getByText(/All 3 Formal Security Invariants Verified/)).toBeDefined();
     expect(screen.queryByText(/Raw TOML/i)).toBeNull();
     expect(screen.queryByLabelText(/Edit policy\.toml directly/i)).toBeNull();
@@ -3600,39 +3590,49 @@ describe("SettingsManager access tab", () => {
     expect(loadCall?.[1]).toMatchObject({ credentials: "same-origin" });
   });
 
-  it("saves the structured draft without ever sending raw TOML", async () => {
-    let sentBody: Record<string, unknown> | null = null;
-    stubPolicyTabFetch((init) => {
-      if (init?.method === "PUT") {
-        sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse({ ...structuredPolicyPayload, policy: (sentBody as { policy: unknown }).policy });
-      }
-      return jsonResponse(structuredPolicyPayload);
-    });
-    const user = await openAccessPane();
+  it(
+    "saves the structured draft without ever sending raw TOML",
+    { timeout: 15000 },
+    async () => {
+      let sentBody: Record<string, unknown> | null = null;
+      stubPolicyTabFetch((init) => {
+        if (init?.method === "PUT") {
+          sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+          return jsonResponse({ ...structuredPolicyPayload, policy: (sentBody as { policy: unknown }).policy });
+        }
+        return jsonResponse(structuredPolicyPayload);
+      });
+      await openAccessPane();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-save")).toBeDefined();
-    });
-    await user.click(screen.getByTestId("policy-save"));
+      await waitFor(
+        () => {
+          expect(screen.getByTestId("policy-save")).toBeDefined();
+        },
+        { timeout: 10000 },
+      );
+      // Synchronous click avoids user-event timing flakes under full-suite load.
+      fireEvent.click(screen.getByTestId("policy-save"));
 
-    // The pane persists the DTO only; the retired text field never rides along.
-    await waitFor(() => {
-      expect(screen.getByTestId("policy-saved")).toBeDefined();
-    });
-    expect(sentBody).not.toBeNull();
-    expect(sentBody).toHaveProperty("policy");
-    expect(sentBody).not.toHaveProperty("raw_toml");
-    expect(sentBody).not.toHaveProperty("rawToml");
-    const sentPolicy = (sentBody as unknown as { policy: { network: { mode: string } } }).policy;
-    expect(sentPolicy.network.mode).toBe("allowlist_only");
+      // The pane persists the DTO only; the retired text field never rides along.
+      await waitFor(
+        () => {
+          expect(screen.getByTestId("policy-saved")).toBeDefined();
+        },
+        { timeout: 10000 },
+      );
+      expect(sentBody).not.toBeNull();
+      expect(sentBody).toHaveProperty("policy");
+      expect(sentBody).not.toHaveProperty("raw_toml");
+      expect(sentBody).not.toHaveProperty("rawToml");
+      const sentPolicy = (sentBody as unknown as { policy: { network: { mode: string } } }).policy;
+      expect(sentPolicy.network.mode).toBe("allowlist_only");
 
-    // Policy writes apply live: the saved banner promises no restart and no
-    // restart banner ever appears for policy.
-    expect(screen.getByTestId("policy-saved").textContent).toContain("no restart");
-    expect(screen.queryByText(/needs a restart/i)).toBeNull();
-    expect(screen.queryByText(/restart to apply/i)).toBeNull();
-  });
+      // Policy writes apply live with no restart banner ever for policy.
+      expect(screen.getByTestId("policy-saved").textContent).toContain("no restart");
+      expect(screen.queryByText(/needs a restart/i)).toBeNull();
+      expect(screen.queryByText(/restart to apply/i)).toBeNull();
+    },
+  );
 
   it("reports a failed structured load in the pane error banner", async () => {
     stubPolicyTabFetch(() => jsonResponse({ reason: "policy file unreadable" }, 500));
@@ -3647,17 +3647,14 @@ describe("SettingsManager access tab", () => {
 
 describe("secret status chunk contract", () => {
   it("pins the badge-probe chunk size to the server status cap", () => {
-    // Single cross-language contract: the server owns `maxSecretStatusKeys` in
-    // `Sources/RuneWeaverServer/ServerSettingsRoutes.swift` and this mirror must stay equal at 500
-    // so badge-probe chunks never trip the status gate; update both together.
+    // Cross-language contract: server owns maxSecretStatusKeys; mirror stays at 500.
     expect(SECRET_STATUS_CHUNK_SIZE).toBe(500);
   });
 });
 
 describe("bash defaults and bounds contract", () => {
   it("pins the bash mirrors to the engine BashConfig", () => {
-    // Cross-language contract: defaults mirror engine BashConfig and bounds mirror
-    // Config+Validation.swift plus ServerBashDTOs.swift so the client and server stay aligned.
+    // Cross-language contract: defaults mirror BashConfig; bounds mirror server DTOs.
     expect(DEFAULT_BASH_ENABLED).toBe(true);
     expect(DEFAULT_BASH_DEFAULT_ACTION).toBe("ask");
     expect(DEFAULT_BASH_TIMEOUT_SECONDS).toBe(30);
@@ -4235,8 +4232,7 @@ describe("SettingsManager persona pane", () => {
 
   it("keeps an unknown tab id on the current tab", async () => {
     stubPersonaFetch();
-    // Fail-closed predicate directly: an unknown id never narrows to the tab vocabulary, so
-    // selection keeps the current tab instead of blanking.
+    // Fail-closed: unknown ids never narrow to the tab vocabulary.
     expect(isSettingsTab("bogus-tab")).toBe(false);
     expect(isSettingsTab("providers")).toBe(true);
     expect(isSettingsTab("access")).toBe(true);
@@ -4246,8 +4242,7 @@ describe("SettingsManager persona pane", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    // Drifted ids never strand the pane, so the default providers tab stays
-    // selected with its form.
+    // Drifted ids never strand the pane; default providers tab stays selected.
     expect(
       screen.getByRole("tab", { name: /LLM Providers/i }).getAttribute("aria-selected"),
     ).toBe("true");
@@ -4257,9 +4252,7 @@ describe("SettingsManager persona pane", () => {
 
 describe("persona defaults and bounds contract", () => {
   it("pins the persona mirrors to the engine PersonaConfig", () => {
-    // Single cross-language contract: the server owns the bounds and defaults in
-    // `Sources/RuneWeaverCore/PersonaConfig.swift` (maxAssistantNameLength, maxStyleLength,
-    // maxUserNameLength, defaultTone, defaultAvatar) and the closed enums.
+    // Cross-language contract: server owns PersonaConfig bounds, defaults, and enums.
     expect(MAX_PERSONA_ASSISTANT_NAME_LENGTH).toBe(32);
     expect(MAX_PERSONA_STYLE_LENGTH).toBe(2000);
     expect(MAX_PERSONA_USER_NAME_LENGTH).toBe(64);

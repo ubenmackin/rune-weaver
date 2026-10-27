@@ -1,0 +1,88 @@
+/* Rune Weaver Dashboard — universal infotip trigger and floating help bubble. */
+
+.infotip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.infotip-trigger:hover {
+  color: var(--text-main);
+}
+
+.infotip-trigger:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Open trigger lends its rect as the bubble anchor, so the portaled
+   bubble pins without any inline coordinates. */
+.infotip-trigger[data-open="true"] {
+  anchor-name: --infotip-anchor;
+}
+
+.infotip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.infotip-bubble {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  max-width: min(240px, calc(100vw - 16px));
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+/* Anchor-pinned placement for the portaled bubble; the data-placement
+   flip side stays on the class while coordinates stay in CSS. */
+@supports (position-anchor: --infotip-anchor) {
+  .infotip-bubble {
+    position-anchor: --infotip-anchor;
+    position-try-fallbacks: flip-block flip-inline;
+  }
+
+  .infotip-bubble--below {
+    top: anchor(bottom);
+    bottom: auto;
+    left: anchor(left);
+    right: auto;
+    margin-top: 8px;
+  }
+
+  .infotip-bubble--above {
+    top: auto;
+    bottom: anchor(top);
+    left: anchor(left);
+    right: auto;
+    margin-bottom: 8px;
+  }
+}
+
+/* Placement hooks for the portaled bubble; anchor coordinates arrive
+   from the trigger rect while the flip side stays on the class. */
+.infotip-bubble--below {
+  transform-origin: top left;
+}
+
+.infotip-bubble--above {
+  transform-origin: bottom left;
+}

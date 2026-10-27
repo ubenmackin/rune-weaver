@@ -8,6 +8,29 @@ import RuneWeaverCore
 /// Field and trigger validation split from the actor body. These operate on values only, so keeping
 /// them here leaves the isolated job state and mutation paths scannable in one place.
 extension SchedulerStore {
+    /// Bundled validation inputs so helpers stay small.
+    fileprivate struct ValidationRequest {
+        let name: String
+        let schedule: String
+        let prompt: String
+        let pollAccount: String?
+        let pollQuery: String?
+        let pollContains: String?
+        let pollMailbox: String?
+        let pollIntervalSeconds: Int?
+        let pollLimit: Int?
+        let pollFrom: String?
+        let pollSubject: String?
+        let pollUnreadOnly: Bool?
+        let pollSinceDays: Int?
+        let maxToolIterations: Int?
+        let onToolLimit: String?
+        let watcherSource: EventWatcherSource?
+        let rules: [EventRule]?
+        let calendarLeadTimeMinutes: Int?
+        let calendarNames: [String]?
+    }
+
     /// Validates required job fields plus trigger shape.
     static func validated(
         name: String,
@@ -15,9 +38,14 @@ extension SchedulerStore {
         prompt: String,
         pollAccount: String? = nil,
         pollQuery: String? = nil,
+        pollContains: String? = nil,
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
+        pollFrom: String? = nil,
+        pollSubject: String? = nil,
+        pollUnreadOnly: Bool? = nil,
+        pollSinceDays: Int? = nil,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil,
         watcherSource: EventWatcherSource? = nil,
@@ -25,35 +53,81 @@ extension SchedulerStore {
         calendarLeadTimeMinutes: Int? = nil,
         calendarNames: [String]? = nil
     ) throws {
+        let request = ValidationRequest(
+            name: name, schedule: schedule, prompt: prompt,
+            pollAccount: pollAccount, pollQuery: pollQuery, pollContains: pollContains, pollMailbox: pollMailbox,
+            pollIntervalSeconds: pollIntervalSeconds, pollLimit: pollLimit,
+            pollFrom: pollFrom, pollSubject: pollSubject,
+            pollUnreadOnly: pollUnreadOnly, pollSinceDays: pollSinceDays,
+            maxToolIterations: maxToolIterations, onToolLimit: onToolLimit,
+            watcherSource: watcherSource, rules: rules,
+            calendarLeadTimeMinutes: calendarLeadTimeMinutes, calendarNames: calendarNames
+        )
         try validateToolBudget(maxToolIterations: maxToolIterations, onToolLimit: onToolLimit)
-        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        try validateNameAndPrompt(request)
+        try validatePollAccountRequirements(request)
+        try validatePollFieldValues(request)
+        try validateDirectTools(request)
+        try validateViaSynthetic(request)
+    }
+
+    /// Name plus prompt presence for rule-less jobs.
+    private static func validateNameAndPrompt(_ request: ValidationRequest) throws {
+        guard !request.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SchedulerStoreError.invalidField("name must not be empty")
         }
-        let hasRules = !(rules ?? []).isEmpty
+        let hasRules = !(request.rules ?? []).isEmpty
         if !hasRules {
-            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw SchedulerStoreError.invalidField("prompt must not be empty")
             }
         }
-        let trimmedAccount = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmedAccount.isEmpty {
-            if pollQuery != nil {
-                throw SchedulerStoreError.invalidField("poll_query requires poll_account")
-            }
-            if pollMailbox != nil {
-                throw SchedulerStoreError.invalidField("poll_mailbox requires poll_account")
-            }
-            if pollIntervalSeconds != nil, watcherSource == nil {
-                throw SchedulerStoreError.invalidField("poll_interval_seconds requires poll_account")
-            }
-            if pollLimit != nil {
-                throw SchedulerStoreError.invalidField("poll_limit requires poll_account")
+    }
+
+    /// Poll fields requiring an account.
+    private static func validatePollAccountRequirements(_ request: ValidationRequest) throws {
+        let trimmedAccount = request.pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmedAccount.isEmpty else { return }
+        try requirePollAccountAbsent(request.pollQuery, field: "poll_query")
+        try requirePollAccountAbsent(request.pollContains, field: "poll_contains")
+        try requirePollAccountAbsent(request.pollMailbox, field: "poll_mailbox")
+        try requirePollAccountAbsent(request.pollLimit, field: "poll_limit")
+        try requirePollAccountAbsent(request.pollFrom, field: "poll_from")
+        try requirePollAccountAbsent(request.pollSubject, field: "poll_subject")
+        try requirePollAccountAbsent(request.pollSinceDays, field: "poll_since_days")
+        if let unread = request.pollUnreadOnly, unread {
+            throw SchedulerStoreError.invalidField("poll_unread_only requires poll_account")
+        }
+        if request.pollIntervalSeconds != nil, request.watcherSource == nil {
+            throw SchedulerStoreError.invalidField("poll_interval_seconds requires poll_account")
+        }
+    }
+
+    /// Single optional poll field requiring an account.
+    private static func requirePollAccountAbsent(_ value: some Any?, field: String) throws {
+        if value != nil {
+            throw SchedulerStoreError.invalidField("\(field) requires poll_account")
+        }
+    }
+
+    /// Bounds for poll text plus interval and calendar window.
+    private static func validatePollFieldValues(_ request: ValidationRequest) throws {
+        try validateNonEmpty(request.pollQuery, field: "poll_query")
+        try validateNonEmpty(request.pollContains, field: "poll_contains")
+        try validateNonEmpty(request.pollFrom, field: "poll_from")
+        try validateNonEmpty(request.pollSubject, field: "poll_subject")
+        if let days = request.pollSinceDays {
+            let minDays = EmailPollRule.minSinceDays
+            let maxDays = EmailPollRule.maxSinceDays
+            guard (minDays ... maxDays).contains(days) else {
+                throw SchedulerStoreError.invalidField(
+                    "poll_since_days must be between \(minDays) and \(maxDays) (got \(days))"
+                )
             }
         }
-        // Fail-closed bounds live here as well as in the shared config validation so the REST path
-        // rejects without depending on whether a watcher tick carries a poll account: messages and
-        // calendar watchers reuse the interval without an account, and the calendar window has no.
-        if let interval = pollIntervalSeconds {
+        // REST path rejects out-of-range cadence without depending
+        // on whether a watcher tick carries a poll account.
+        if let interval = request.pollIntervalSeconds {
             let minInterval = EmailPollRule.minPollIntervalSeconds
             let maxInterval = EmailPollRule.maxPollIntervalSeconds
             guard (minInterval ... maxInterval).contains(interval) else {
@@ -62,7 +136,7 @@ extension SchedulerStore {
                 )
             }
         }
-        if let leadTime = calendarLeadTimeMinutes {
+        if let leadTime = request.calendarLeadTimeMinutes {
             let minLeadTime = SchedulerJobConfig.minCalendarLeadTimeMinutes
             let maxLeadTime = SchedulerJobConfig.maxCalendarLeadTimeMinutes
             guard (minLeadTime ... maxLeadTime).contains(leadTime) else {
@@ -71,48 +145,71 @@ extension SchedulerStore {
                 )
             }
         }
-        // The zero-token path bypasses inference, so the store rejects unknown
-        // tools alongside the shared config validation; both gates share the
-        // single allowlist owner so they cannot drift.
-        if let rules {
-            for rule in rules {
-                if case let .directTool(toolName, _) = rule.action {
-                    let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmedTool.isEmpty else {
-                        throw SchedulerStoreError.invalidField(
-                            "job '\(name)' rule '\(rule.name)' is invalid: tool_name must not be empty"
-                        )
-                    }
-                    guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
-                        let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
-                        throw SchedulerStoreError.invalidField(
-                            "job '\(name)' rule '\(rule.name)' is invalid: "
-                                + "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
-                        )
-                    }
-                }
+    }
+
+    /// Optional text that must not be blank when present.
+    private static func validateNonEmpty(_ value: String?, field: String) throws {
+        if let value {
+            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SchedulerStoreError.invalidField("\(field) must not be empty")
             }
         }
-        let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
+    }
+
+    /// Direct-tool allowlist check for event rules.
+    private static func validateDirectTools(_ request: ValidationRequest) throws {
+        guard let rules = request.rules else { return }
+        for rule in rules {
+            try validateDirectTool(rule, jobName: request.name)
+        }
+    }
+
+    /// Single rule direct-tool check.
+    private static func validateDirectTool(_ rule: EventRule, jobName: String) throws {
+        guard case let .directTool(toolName, _) = rule.action else { return }
+        let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTool.isEmpty else {
+            throw SchedulerStoreError.invalidField(
+                "job '\(jobName)' rule '\(rule.name)' is invalid: tool_name must not be empty"
+            )
+        }
+        // Store rejects unknown tools alongside shared config
+        // validation; both gates share one allowlist owner.
+        guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
+            let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
+            throw SchedulerStoreError.invalidField(
+                "job '\(jobName)' rule '\(rule.name)' is invalid: "
+                    + "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
+            )
+        }
+    }
+
+    /// Cross-checks through the shared config validator.
+    private static func validateViaSynthetic(_ request: ValidationRequest) throws {
+        let scheduleValue: String? = EmailPollRule.configSchedule(from: request.schedule)
         let pollValue: EmailPollRule? = EmailPollRule.ruleForStoredFields(
-            pollAccount: pollAccount,
-            pollQuery: pollQuery,
-            pollMailbox: pollMailbox,
-            pollIntervalSeconds: pollIntervalSeconds,
-            pollLimit: pollLimit
+            pollAccount: request.pollAccount,
+            pollQuery: request.pollQuery ?? request.pollContains,
+            pollMailbox: request.pollMailbox,
+            pollIntervalSeconds: request.pollIntervalSeconds,
+            pollLimit: request.pollLimit,
+            pollFrom: request.pollFrom,
+            pollSubject: request.pollSubject,
+            pollUnreadOnly: request.pollUnreadOnly,
+            pollSinceDays: request.pollSinceDays
         )
         let synthetic = SchedulerJobConfig(
-            name: name,
-            prompt: prompt,
+            name: request.name,
+            prompt: request.prompt,
             enabled: true,
             schedule: scheduleValue,
             poll: pollValue,
-            maxToolIterations: maxToolIterations,
-            onToolLimit: onToolLimit,
-            watcherSource: watcherSource,
-            rules: rules,
-            calendarLeadTimeMinutes: calendarLeadTimeMinutes,
-            calendarNames: calendarNames
+            maxToolIterations: request.maxToolIterations,
+            onToolLimit: request.onToolLimit,
+            watcherSource: request.watcherSource,
+            rules: request.rules,
+            calendarLeadTimeMinutes: request.calendarLeadTimeMinutes,
+            calendarNames: request.calendarNames
         )
         do {
             try synthetic.validate()

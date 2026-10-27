@@ -16,11 +16,14 @@ public struct EmailSearchTool: Tool, Sendable {
             + "Pass mailbox to narrow to one folder; each hit labels its account and mailbox for email.read. "
             + "Pass hasAttachment (true/false) to filter for messages with or without attachments. "
             + "Pass since/until as YYYY-MM-DD local-day or full ISO8601 datetimes to bound the window (since inclusive, until exclusive). "
+            + "Pass from/subject to scope to sender/subject substrings, unreadOnly true for unread only, "
+            + "and sinceDays (1-90) for a recency bound; every filter combines with AND. "
             + "limit caps the merged total across every searched account and mailbox, not the count per source. "
             + "Attachment filtering scans the newest candidates first (up to five times the requested limit, minimum fifty per mailbox), "
             + "so older matches outside that newest window are not returned. "
             + "Returns matching message ids, headers, snippets, and mailboxes."
-    /// Function-calling contract for `account`, `query`, `limit`, `mailbox`, `since`, and `until`.
+    /// Function-calling contract for `account`, `query`, `limit`, `mailbox`, `since`, `until`,
+    /// plus the field-scoped `from`, `subject`, `unreadOnly`, and `sinceDays` filters.
     public let inputSchema =
         JSONSchema(
             rawValue: """
@@ -56,6 +59,24 @@ public struct EmailSearchTool: Tool, Sendable {
                 "until": {
                   "type": "string",
                   "description": "Optional exclusive upper bound YYYY-MM-DD local-day or full ISO8601 datetime"
+                },
+                "from": {
+                  "type": "string",
+                  "description": "Optional sender substring filter; combined with AND"
+                },
+                "subject": {
+                  "type": "string",
+                  "description": "Optional subject substring filter; combined with AND"
+                },
+                "unreadOnly": {
+                  "type": "boolean",
+                  "description": "Optional filter: true restricts to unread mail only"
+                },
+                "sinceDays": {
+                  "type": "integer",
+                  "description": "Optional recency bound in days (1-90); combined with AND",
+                  "minimum": 1,
+                  "maximum": 90
                 }
               },
               "required":["query"],
@@ -91,101 +112,42 @@ public struct EmailSearchTool: Tool, Sendable {
 
     /// Runs the search, resolving credentials at execution time.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-        // Smart raw pre-check plus decoded CR/LF validation before ANY account lookup or credential
-        // resolution so invalid input reports "Invalid search query" even when the password is
-        // missing.
-        if EmailIMAPValidation.containsEncodedCRLF(in: input.argumentsJSON) {
-            return .failure(
-                EmailIMAPError.validationFailed("Invalid search query: query must not contain CR or LF").localizedDescription,
-                callID: input.callID
-            )
-        }
-        let args: EmailSearchArgs
+        let plan: ValidatedSearchPlan
         do {
-            args = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(input.argumentsJSON.utf8))
-        } catch {
-            return .failure(
-                "Invalid email.search arguments: expected {\"query\": \"<text>\", \"account\": \"<name, omitted for all>\"}.",
-                callID: input.callID
-            )
-        }
-        // Fail fast on decoded injection before touching accounts or credentials so invalid input
-        // reports "Invalid search query" even when the password is missing. Checks the raw value
-        // first (before trimming) to mirror the bridge, then the trimmed value.
-        do {
-            try EmailIMAPValidation.validateSearchQuery(args.query)
+            plan = try validatedSearchPlan(argumentsJSON: input.argumentsJSON)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
-        }
-        // Fail fast on mailbox injection before touching accounts or
-        // credentials so invalid input reports "Invalid mailbox" even when
-        // the password is missing.
-        if let requestedMailbox = args.trimmedMailbox {
-            do {
-                try EmailIMAPValidation.validateMailbox(requestedMailbox)
-            } catch {
-                return .failure(error.localizedDescription, callID: input.callID)
-            }
-        }
-        // Parse the temporal window before any credential resolution so malformed
-        // bounds fail closed with the parse copy even when the password is missing.
-        // Blank behaves as omitted inside TemporalFilter, and inversion rejects.
-        let temporalRange: TemporalRange
-        do {
-            temporalRange = try TemporalFilter.parse(since: args.trimmedSince, until: args.trimmedUntil)
-        } catch {
-            return .failure(error.localizedDescription, callID: input.callID)
-        }
-        let sinceDate = temporalRange.since
-        let untilDate = temporalRange.until
-        let query = args.trimmedQuery
-        do {
-            try EmailIMAPValidation.validateSearchQuery(query)
-        } catch {
-            return .failure(error.localizedDescription, callID: input.callID)
-        }
-        // Wildcard/empty maps to ALL: a trimmed empty query or a lone "*" lists the most-recent
-        // messages instead of sending a literal TEXT "*" that matches nothing on iCloud
-        // (imap.mail.me.com:993).
-        let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
-        // Account selection happens only after every argument-validation gate has passed, so
-        // invalid input never triggers an account lookup or a credential read.
-        let resolvedAccounts: [EmailAccount]
-        if args.isAllAccountsRequest {
-            resolvedAccounts = emailConfig.accounts
-        } else {
-            let accountName = args.trimmedAccount ?? ""
-            guard let account = emailConfig.account(matching: accountName) else {
-                let available = emailConfig.accounts.map(\.name)
-                return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
-            }
-            resolvedAccounts = [account]
-        }
-        guard !resolvedAccounts.isEmpty else {
-            return .failure("No email accounts configured. Add an [[email.accounts]] entry to config.toml.", callID: input.callID)
         }
         // Gateway validation surfaces by localized copy; no case matching needed.
         do {
-            if resolvedAccounts.count == 1 {
+            if plan.accounts.count == 1 {
                 return try await singleAccountOutput(
-                    account: resolvedAccounts[0],
-                    requestedMailbox: args.trimmedMailbox,
-                    effectiveQuery: effectiveQuery,
-                    limit: args.limit,
-                    hasAttachment: args.hasAttachment,
-                    since: sinceDate,
-                    until: untilDate,
+                    account: plan.accounts[0],
+                    requestedMailbox: plan.mailbox,
+                    effectiveQuery: plan.effectiveQuery,
+                    limit: plan.limit,
+                    hasAttachment: plan.hasAttachment,
+                    since: plan.since,
+                    until: plan.until,
+                    from: plan.from,
+                    subject: plan.subject,
+                    unreadOnly: plan.unreadOnly,
+                    sinceDays: plan.sinceDays,
                     callID: input.callID
                 )
             }
             return try await multiAccountOutput(
-                accounts: resolvedAccounts,
-                effectiveQuery: effectiveQuery,
-                limit: args.limit,
-                hasAttachment: args.hasAttachment,
-                since: sinceDate,
-                until: untilDate,
-                requestedMailbox: args.trimmedMailbox,
+                accounts: plan.accounts,
+                effectiveQuery: plan.effectiveQuery,
+                limit: plan.limit,
+                hasAttachment: plan.hasAttachment,
+                since: plan.since,
+                until: plan.until,
+                requestedMailbox: plan.mailbox,
+                from: plan.from,
+                subject: plan.subject,
+                unreadOnly: plan.unreadOnly,
+                sinceDays: plan.sinceDays,
                 callID: input.callID
             )
         } catch {
@@ -195,6 +157,91 @@ public struct EmailSearchTool: Tool, Sendable {
 }
 
 extension EmailSearchTool {
+    /// Validated arguments plus resolved accounts for one search call.
+    private struct ValidatedSearchPlan: Sendable {
+        let mailbox: String?
+        let effectiveQuery: String
+        let limit: Int
+        let hasAttachment: Bool?
+        let since: Date?
+        let until: Date?
+        let from: String?
+        let subject: String?
+        let unreadOnly: Bool
+        let sinceDays: Int?
+        let accounts: [EmailAccount]
+    }
+
+    /// Validates raw arguments and resolves accounts before any dial.
+    private func validatedSearchPlan(argumentsJSON: String) throws -> ValidatedSearchPlan {
+        // Smart raw pre-check before ANY lookup so invalid input reports
+        // "Invalid search query" even when the password is missing.
+        if EmailIMAPValidation.containsEncodedCRLF(in: argumentsJSON) {
+            throw EmailIMAPError.validationFailed("Invalid search query: query must not contain CR or LF")
+        }
+        let args: EmailSearchArgs
+        do {
+            args = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(argumentsJSON.utf8))
+        } catch {
+            throw EmailIMAPError.validationFailed(
+                "Invalid email.search arguments: expected {\"query\": \"<text>\", \"account\": \"<name, omitted for all>\"}."
+            )
+        }
+        // Fail fast on decoded injection before touching accounts or
+        // credentials. Checks raw value first, then trimmed value.
+        try EmailIMAPValidation.validateSearchQuery(args.query)
+        if let requestedMailbox = args.trimmedMailbox {
+            try EmailIMAPValidation.validateMailbox(requestedMailbox)
+        }
+        // Parse temporal window before credential resolution so malformed
+        // bounds fail closed even when the password is missing.
+        let temporalRange = try TemporalFilter.parse(since: args.trimmedSince, until: args.trimmedUntil)
+        // Fail fast on field-scoped injection or recency before dial.
+        if let rawFrom = args.trimmedFrom, !rawFrom.isEmpty {
+            try EmailIMAPValidation.validateSearchQuery(rawFrom)
+        }
+        if let rawSubject = args.trimmedSubject, !rawSubject.isEmpty {
+            try EmailIMAPValidation.validateSearchQuery(rawSubject)
+        }
+        if let days = args.sinceDays {
+            try EmailIMAPValidation.validateSinceDays(days)
+        }
+        // Fold relative lookback into absolute window for local re-filtering.
+        let effectiveRange = StructuredSearchBounds.effectiveRange(temporalRange, sinceDays: args.sinceDays)
+        let query = args.trimmedQuery
+        try EmailIMAPValidation.validateSearchQuery(query)
+        // Wildcard/empty maps to ALL: empty or "*" lists most-recent
+        // instead of sending a literal TEXT "*" that iCloud ignores.
+        let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
+        // Account selection runs only after every validation gate passed.
+        let resolvedAccounts: [EmailAccount]
+        if args.isAllAccountsRequest {
+            resolvedAccounts = emailConfig.accounts
+        } else {
+            let accountName = args.trimmedAccount ?? ""
+            guard let account = emailConfig.account(matching: accountName) else {
+                throw EmailIMAPError.unknownAccount(name: accountName, available: emailConfig.accounts.map(\.name))
+            }
+            resolvedAccounts = [account]
+        }
+        guard !resolvedAccounts.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("No email accounts configured. Add an [[email.accounts]] entry to config.toml.")
+        }
+        return ValidatedSearchPlan(
+            mailbox: args.trimmedMailbox,
+            effectiveQuery: effectiveQuery,
+            limit: args.limit,
+            hasAttachment: args.hasAttachment,
+            since: effectiveRange?.since,
+            until: effectiveRange?.until,
+            from: args.trimmedFrom,
+            subject: args.trimmedSubject,
+            unreadOnly: args.unreadOnly,
+            sinceDays: args.sinceDays,
+            accounts: resolvedAccounts
+        )
+    }
+
     /// Reapplies the attachment filter locally so gateways that ignore it still honor the request.
     private func filteredByAttachment(_ hits: [EmailSearchHit], hasAttachment: Bool?) -> [EmailSearchHit] {
         hits.filter { $0.matches(hasAttachment: hasAttachment) }
@@ -209,17 +256,28 @@ extension EmailSearchTool {
         return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
     }
 
-    /// Applies the local attachment plus temporal re-filters and stamps the owning account and
-    /// canonical mailbox onto one mailbox's raw hits.
+    /// Reapplies the sender/subject filters locally so gateways that ignore them
+    /// still honor the request; unread scoping has no local signal and stays gateway-enforced.
+    private func filteredByFieldScope(_ hits: [EmailSearchHit], from: String?, subject: String?) -> [EmailSearchHit] {
+        hits.filter { $0.matchesFieldScope(from: from, subject: subject) }
+    }
+
+    /// Applies the local attachment, temporal, plus field-scoped re-filters and stamps
+    /// the owning account and canonical mailbox onto one mailbox's raw hits.
     private func labeledHits(
         _ hits: [EmailSearchHit],
         accountName: String,
         mailbox canonical: String,
         hasAttachment: Bool? = nil,
         since: Date? = nil,
-        until: Date? = nil
+        until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil
     ) -> [EmailSearchHit] {
-        filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
+        let attached = filteredByAttachment(hits, hasAttachment: hasAttachment)
+        let ranged = filteredByTemporal(attached, since: since, until: until)
+        let scoped = filteredByFieldScope(ranged, from: from, subject: subject)
+        return scoped.map {
             EmailSearchHit(
                 id: $0.id,
                 subject: $0.subject,
@@ -246,6 +304,10 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let credentials: ResolvedEmailCredentials
@@ -264,6 +326,10 @@ extension EmailSearchTool {
                 hasAttachment: hasAttachment,
                 since: since,
                 until: until,
+                from: from,
+                subject: subject,
+                unreadOnly: unreadOnly,
+                sinceDays: sinceDays,
                 accounts: [account.name],
                 failedAccounts: [],
                 callID: callID
@@ -277,6 +343,10 @@ extension EmailSearchTool {
             hasAttachment: hasAttachment,
             since: since,
             until: until,
+            from: from,
+            subject: subject,
+            unreadOnly: unreadOnly,
+            sinceDays: sinceDays,
             accounts: [account.name],
             failedAccounts: [],
             callID: callID
@@ -293,6 +363,10 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil,
         accounts: [String]? = nil,
         failedAccounts: [String]? = nil,
         callID: String
@@ -310,9 +384,14 @@ extension EmailSearchTool {
             mailbox: canonical,
             query: effectiveQuery,
             limit: limit,
-            hasAttachment: hasAttachment,
-            since: since,
-            until: until
+            filters: EmailStructuredSearchFilters(
+                hasAttachment: hasAttachment,
+                range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil,
+                from: from,
+                subject: subject,
+                unreadOnly: unreadOnly,
+                sinceDays: sinceDays
+            )
         )
         let labeled = labeledHits(
             hits,
@@ -320,7 +399,9 @@ extension EmailSearchTool {
             mailbox: canonical,
             hasAttachment: hasAttachment,
             since: since,
-            until: until
+            until: until,
+            from: from,
+            subject: subject
         )
         // Credential filter runs at the envelope boundary where agent-visible
         // content is built: headers stay visible while snippets redact. The
@@ -350,6 +431,10 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil,
         accounts: [String]? = nil,
         failedAccounts: [String]? = nil,
         callID: String
@@ -369,9 +454,14 @@ extension EmailSearchTool {
                     mailbox: box,
                     query: effectiveQuery,
                     limit: limit,
-                    hasAttachment: hasAttachment,
-                    since: since,
-                    until: until
+                    filters: EmailStructuredSearchFilters(
+                        hasAttachment: hasAttachment,
+                        range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil,
+                        from: from,
+                        subject: subject,
+                        unreadOnly: unreadOnly,
+                        sinceDays: sinceDays
+                    )
                 )
                 let labeled = labeledHits(
                     hits,
@@ -379,7 +469,9 @@ extension EmailSearchTool {
                     mailbox: box,
                     hasAttachment: hasAttachment,
                     since: since,
-                    until: until
+                    until: until,
+                    from: from,
+                    subject: subject
                 )
                 // Same envelope-boundary redaction as the single-mailbox path
                 // so fan-out hits cannot bypass the filter.
@@ -473,7 +565,11 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
-        requestedMailbox: String? = nil
+        requestedMailbox: String? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil
     ) async throws -> AccountSearchOutcome {
         // Catch cancellation that arrived before this child even started so a
         // cancelled call cannot keep dialing sibling accounts' credentials.
@@ -522,9 +618,14 @@ extension EmailSearchTool {
                     mailbox: canonical,
                     query: effectiveQuery,
                     limit: limit,
-                    hasAttachment: hasAttachment,
-                    since: since,
-                    until: until
+                    filters: EmailStructuredSearchFilters(
+                        hasAttachment: hasAttachment,
+                        range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil,
+                        from: from,
+                        subject: subject,
+                        unreadOnly: unreadOnly,
+                        sinceDays: sinceDays
+                    )
                 )
                 let labeled = labeledHits(
                     hits,
@@ -532,7 +633,9 @@ extension EmailSearchTool {
                     mailbox: canonical,
                     hasAttachment: hasAttachment,
                     since: since,
-                    until: until
+                    until: until,
+                    from: from,
+                    subject: subject
                 )
                 return searched(
                     groups: [labeled.map { $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter) }],
@@ -553,7 +656,11 @@ extension EmailSearchTool {
             limit: limit,
             hasAttachment: hasAttachment,
             since: since,
-            until: until
+            until: until,
+            from: from,
+            subject: subject,
+            unreadOnly: unreadOnly,
+            sinceDays: sinceDays
         )
     }
 
@@ -567,7 +674,11 @@ extension EmailSearchTool {
         limit: Int,
         hasAttachment: Bool? = nil,
         since: Date? = nil,
-        until: Date? = nil
+        until: Date? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil
     ) async throws -> AccountSearchOutcome {
         let nothingSearched = { (text: String) in
             AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: available, failureText: text)
@@ -590,9 +701,14 @@ extension EmailSearchTool {
                     mailbox: box,
                     query: effectiveQuery,
                     limit: limit,
-                    hasAttachment: hasAttachment,
-                    since: since,
-                    until: until
+                    filters: EmailStructuredSearchFilters(
+                        hasAttachment: hasAttachment,
+                        range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil,
+                        from: from,
+                        subject: subject,
+                        unreadOnly: unreadOnly,
+                        sinceDays: sinceDays
+                    )
                 )
                 let labeled = labeledHits(
                     hits,
@@ -600,7 +716,9 @@ extension EmailSearchTool {
                     mailbox: box,
                     hasAttachment: hasAttachment,
                     since: since,
-                    until: until
+                    until: until,
+                    from: from,
+                    subject: subject
                 )
                 groups.append(labeled.map { $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter) })
                 searchedFolders.append(box)
@@ -629,6 +747,10 @@ extension EmailSearchTool {
         since: Date? = nil,
         until: Date? = nil,
         requestedMailbox: String? = nil,
+        from: String? = nil,
+        subject: String? = nil,
+        unreadOnly: Bool = false,
+        sinceDays: Int? = nil,
         callID: String
     ) async throws -> ToolOutput {
         var outcomes: [IndexedAccountSearchOutcome] = []
@@ -642,7 +764,11 @@ extension EmailSearchTool {
                         hasAttachment: hasAttachment,
                         since: since,
                         until: until,
-                        requestedMailbox: requestedMailbox
+                        requestedMailbox: requestedMailbox,
+                        from: from,
+                        subject: subject,
+                        unreadOnly: unreadOnly,
+                        sinceDays: sinceDays
                     )
                     return IndexedAccountSearchOutcome(index: index, outcome: outcome)
                 }

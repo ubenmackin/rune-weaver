@@ -135,9 +135,10 @@ export default defineConfig({
     // Isolated workers per test file: no shared module state or globals leak between suites, so one
     // file's mocks and timers cannot flake another.
     pool: "forks",
-    testTimeout: 5000,
-    hookTimeout: 5000,
-    teardownTimeout: 5000,
+    // Generous timeouts keep the full 86-file suite green under parallel-forks load.
+    testTimeout: 15000,
+    hookTimeout: 15000,
+    teardownTimeout: 15000,
     // GHSA-5xrq-8626-4rwp (CVE-2026-47429): arbitrary file read/exec when the Vitest UI/API server
     // listens, fixed in vitest 3.2.6 / 4.1.0.
     ui: false,

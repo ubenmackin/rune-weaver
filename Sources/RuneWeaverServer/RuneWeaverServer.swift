@@ -155,6 +155,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSearchRoutes(app)
     registerBrowserRoutes(app)
     registerSettingsRoutes(app)
+    registerLookupRoutes(app)
     registerIndexRoutes(app)
     registerOnboardingRoutes(app)
     registerFileRoutes(app)

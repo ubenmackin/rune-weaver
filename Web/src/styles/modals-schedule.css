@@ -49,6 +49,15 @@
   margin-top: 8px;
 }
 
+/* Card picks are native buttons; reset UA button chrome so the
+   card visuals stay on the tokenized classes. */
+button.trigger-card,
+button.preset-card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
 .trigger-card {
   background: var(--bg-card);
   border: 2px solid var(--border-color);
@@ -434,4 +443,112 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #cfcfe0;
+}
+
+/* ==========================================================================
+   Compact Event Rule Rows & Rule Editor Modal
+   ========================================================================== */
+
+/* Scrolling column keeps long rule lists inside the wizard step. */
+.rule-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+}
+
+.rule-row-disabled {
+  opacity: 0.65;
+}
+
+.rule-index {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.rule-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+  flex-shrink: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rule-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.rule-stop-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--status-amber);
+  flex-shrink: 0;
+}
+
+.rule-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.rule-list-tip {
+  display: inline-flex;
+  margin-top: 8px;
+}
+
+.rule-editor-modal {
+  max-width: 560px;
+}
+
+.rule-editor-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rule-editor-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.rule-editor-action-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }

@@ -22,12 +22,22 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var pollAccount: String?
     /// Poll query for `email.search` (blank means most-recent).
     public var pollQuery: String?
+    /// Contains alias mirroring `pollQuery` for the dashboard editor.
+    public var pollContains: String?
     /// Poll mailbox (nil means every selectable mailbox).
     public var pollMailbox: String?
     /// Seconds between poll checks.
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll (nil means `EmailPollRule/defaultLimit`).
     public var pollLimit: Int?
+    /// Sender filter for `email.search` (nil means no sender scoping).
+    public var pollFrom: String?
+    /// Subject filter for `email.search` (nil means no subject scoping).
+    public var pollSubject: String?
+    /// Whether to restrict the poll to unread mail only.
+    public var pollUnreadOnly: Bool = false
+    /// Lookback days for `SINCE` scoping (nil means no date bound).
+    public var pollSinceDays: Int?
     /// Owner-set flag marking this job as the owner of an email-report run cursor.
     public var emailReportJob: Bool
     /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
@@ -49,6 +59,36 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     /// Calendar names to watch for calendar upcoming event trigger.
     public var calendarNames: [String]?
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case schedule
+        case prompt
+        case enabled
+        case pollAccount
+        case pollQuery
+        case pollContains
+        case pollContainsSnake = "poll_contains"
+        case pollQuerySnake = "poll_query"
+        case pollMailbox
+        case pollIntervalSeconds
+        case pollLimit
+        case pollFrom
+        case pollSubject
+        case pollUnreadOnly
+        case pollSinceDays
+        case emailReportJob
+        case maxToolIterations
+        case onToolLimit
+        case createdAt
+        case updatedAt
+        case lastSuccessfulRunEndedAt
+        case watcherSource
+        case rules
+        case calendarLeadTimeMinutes
+        case calendarNames
+    }
+
     /// Creates a scheduler job.
     public init(
         id: UUID = UUID(),
@@ -58,9 +98,14 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         enabled: Bool = true,
         pollAccount: String? = nil,
         pollQuery: String? = nil,
+        pollContains: String? = nil,
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
+        pollFrom: String? = nil,
+        pollSubject: String? = nil,
+        pollUnreadOnly: Bool = false,
+        pollSinceDays: Int? = nil,
         emailReportJob: Bool = false,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil,
@@ -78,10 +123,16 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.prompt = prompt
         self.enabled = enabled
         self.pollAccount = pollAccount
-        self.pollQuery = pollQuery
+        let resolvedQuery = pollQuery ?? pollContains
+        self.pollQuery = resolvedQuery
+        self.pollContains = pollContains ?? pollQuery
         self.pollMailbox = pollMailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit.map(EmailPollRule.clampedLimit)
+        self.pollFrom = pollFrom
+        self.pollSubject = pollSubject
+        self.pollUnreadOnly = pollUnreadOnly
+        self.pollSinceDays = pollSinceDays
         self.emailReportJob = emailReportJob
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
@@ -92,6 +143,70 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.rules = rules
         self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
         self.calendarNames = calendarNames
+    }
+
+    /// Decodes a job accepting `pollContains`/`poll_contains` as aliases for `pollQuery`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        schedule = try container.decode(String.self, forKey: .schedule)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        pollAccount = try container.decodeIfPresent(String.self, forKey: .pollAccount)
+        let directQuery = try container.decodeIfPresent(String.self, forKey: .pollQuery)
+            ?? container.decodeIfPresent(String.self, forKey: .pollQuerySnake)
+        let aliasContains = try container.decodeIfPresent(String.self, forKey: .pollContains)
+            ?? container.decodeIfPresent(String.self, forKey: .pollContainsSnake)
+        pollQuery = directQuery ?? aliasContains
+        pollContains = aliasContains ?? directQuery
+        pollMailbox = try container.decodeIfPresent(String.self, forKey: .pollMailbox)
+        pollIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .pollIntervalSeconds)
+        pollLimit = try container.decodeIfPresent(Int.self, forKey: .pollLimit)
+        pollFrom = try container.decodeIfPresent(String.self, forKey: .pollFrom)
+        pollSubject = try container.decodeIfPresent(String.self, forKey: .pollSubject)
+        pollUnreadOnly = try container.decodeIfPresent(Bool.self, forKey: .pollUnreadOnly) ?? false
+        pollSinceDays = try container.decodeIfPresent(Int.self, forKey: .pollSinceDays)
+        emailReportJob = try container.decodeIfPresent(Bool.self, forKey: .emailReportJob) ?? false
+        maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations)
+        onToolLimit = try container.decodeIfPresent(String.self, forKey: .onToolLimit)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        lastSuccessfulRunEndedAt = try container.decodeIfPresent(Date.self, forKey: .lastSuccessfulRunEndedAt)
+        watcherSource = try container.decodeIfPresent(EventWatcherSource.self, forKey: .watcherSource)
+        rules = try container.decodeIfPresent([EventRule].self, forKey: .rules)
+        calendarLeadTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .calendarLeadTimeMinutes)
+        calendarNames = try container.decodeIfPresent([String].self, forKey: .calendarNames)
+    }
+
+    /// Encodes a job mirroring `pollQuery` into `pollContains` for older readers.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(schedule, forKey: .schedule)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encodeIfPresent(pollAccount, forKey: .pollAccount)
+        try container.encodeIfPresent(pollQuery, forKey: .pollQuery)
+        try container.encodeIfPresent(pollContains ?? pollQuery, forKey: .pollContains)
+        try container.encodeIfPresent(pollMailbox, forKey: .pollMailbox)
+        try container.encodeIfPresent(pollIntervalSeconds, forKey: .pollIntervalSeconds)
+        try container.encodeIfPresent(pollLimit, forKey: .pollLimit)
+        try container.encodeIfPresent(pollFrom, forKey: .pollFrom)
+        try container.encodeIfPresent(pollSubject, forKey: .pollSubject)
+        try container.encode(pollUnreadOnly, forKey: .pollUnreadOnly)
+        try container.encodeIfPresent(pollSinceDays, forKey: .pollSinceDays)
+        try container.encode(emailReportJob, forKey: .emailReportJob)
+        try container.encodeIfPresent(maxToolIterations, forKey: .maxToolIterations)
+        try container.encodeIfPresent(onToolLimit, forKey: .onToolLimit)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(lastSuccessfulRunEndedAt, forKey: .lastSuccessfulRunEndedAt)
+        try container.encodeIfPresent(watcherSource, forKey: .watcherSource)
+        try container.encodeIfPresent(rules, forKey: .rules)
+        try container.encodeIfPresent(calendarLeadTimeMinutes, forKey: .calendarLeadTimeMinutes)
+        try container.encodeIfPresent(calendarNames, forKey: .calendarNames)
     }
 
     /// Whether the job has a cron trigger.
@@ -114,183 +229,19 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var pollRule: EmailPollRule? {
         EmailPollRule.ruleForStoredFields(
             pollAccount: pollAccount,
-            pollQuery: pollQuery,
+            pollQuery: pollQuery ?? pollContains,
             pollMailbox: pollMailbox,
             pollIntervalSeconds: pollIntervalSeconds,
-            pollLimit: pollLimit
+            pollLimit: pollLimit,
+            pollFrom: pollFrom,
+            pollSubject: pollSubject,
+            pollUnreadOnly: pollUnreadOnly,
+            pollSinceDays: pollSinceDays
         )
     }
 }
 
-/// Payload for `POST /scheduler/jobs`.
-public struct NewSchedulerJob: Sendable, Codable, Equatable {
-    /// Human-readable job name.
-    public let name: String
-    /// Cron-like schedule expression (empty for poll-only jobs).
-    public let schedule: String
-    /// Prompt executed when the job fires.
-    public let prompt: String
-    /// Whether the job fires. Defaults to true when omitted.
-    public var enabled: Bool?
-    /// Poll account nickname, when the job watches email arrival.
-    public var pollAccount: String?
-    /// Poll query for `email.search`.
-    public var pollQuery: String?
-    /// Poll mailbox (nil means every selectable mailbox).
-    public var pollMailbox: String?
-    /// Seconds between poll checks.
-    public var pollIntervalSeconds: Int?
-    /// Maximum hits fetched per poll.
-    public var pollLimit: Int?
-    /// Owner-set flag marking this job as the owner of an email-report run
-    /// cursor. Never inferred from job text.
-    public var emailReportJob: Bool?
-    /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
-    public var maxToolIterations: Int?
-    /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
-    public var onToolLimit: String?
-    /// Event watcher source (email, messages, or calendar).
-    public var watcherSource: EventWatcherSource?
-    /// Ordered event rules executed on incoming events.
-    public var rules: [EventRule]?
-    /// Lead time in minutes for calendar upcoming event trigger. Defaults to 15.
-    public var calendarLeadTimeMinutes: Int?
-    /// Calendar names to watch for calendar upcoming event trigger.
-    public var calendarNames: [String]?
-
-    /// Creates a new-job payload.
-    public init(
-        name: String,
-        schedule: String,
-        prompt: String,
-        enabled: Bool? = nil,
-        pollAccount: String? = nil,
-        pollQuery: String? = nil,
-        pollMailbox: String? = nil,
-        pollIntervalSeconds: Int? = nil,
-        pollLimit: Int? = nil,
-        emailReportJob: Bool? = nil,
-        maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil,
-        watcherSource: EventWatcherSource? = nil,
-        rules: [EventRule]? = nil,
-        calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil
-    ) {
-        self.name = name
-        self.schedule = schedule
-        self.prompt = prompt
-        self.enabled = enabled
-        self.pollAccount = pollAccount
-        self.pollQuery = pollQuery
-        self.pollMailbox = pollMailbox
-        self.pollIntervalSeconds = pollIntervalSeconds
-        self.pollLimit = pollLimit
-        self.emailReportJob = emailReportJob
-        self.maxToolIterations = maxToolIterations
-        self.onToolLimit = onToolLimit
-        self.watcherSource = watcherSource
-        self.rules = rules
-        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
-        self.calendarNames = calendarNames
-    }
-}
-
-/// Payload for `PUT /scheduler/jobs/:id`. Every field is optional.
-public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
-    /// New name, if renamed.
-    public var name: String?
-    /// New schedule, if rescheduled.
-    public var schedule: String?
-    /// New prompt, if changed.
-    public var prompt: String?
-    /// New enabled flag, if toggled.
-    public var enabled: Bool?
-    /// New poll account, if changed (`""` clears to nil).
-    public var pollAccount: String?
-    /// New poll query, if changed (`""` clears to nil).
-    public var pollQuery: String?
-    /// New poll mailbox, if changed (`""` clears to nil).
-    public var pollMailbox: String?
-    /// New poll interval, if changed. Omitted (nil) leaves the interval
-    /// alone; use `clearPoll: true` to clear it.
-    public var pollIntervalSeconds: Int?
-    /// New poll limit, if changed. Omitted (nil) leaves the limit
-    /// alone; use `clearPoll: true` to clear it.
-    public var pollLimit: Int?
-    /// New email-report flag, if changed. Omitted (nil) leaves the flag alone.
-    public var emailReportJob: Bool?
-    /// When true, clears the whole poll trigger to nil before applying
-    /// any non-nil poll fields in the same payload.
-    public var clearPoll: Bool?
-    /// New maximum tool iterations, if changed. Omitted (nil) leaves the
-    /// budget alone; use `clearToolBudget: true` to clear it to inherit (nil).
-    public var maxToolIterations: Int?
-    /// New action on tool limit ("fail" or "park"), if changed. Omitted (nil)
-    /// leaves the policy alone; `""` clears to nil, or use
-    /// `clearToolBudget: true` to clear it to inherit (nil).
-    public var onToolLimit: String?
-    /// When true, clears the whole tool budget to nil (inherit) before applying
-    /// any non-nil budget fields in the same payload.
-    public var clearToolBudget: Bool?
-    /// New event watcher source, if changed.
-    public var watcherSource: EventWatcherSource?
-    /// New event rules, if changed.
-    public var rules: [EventRule]?
-    /// New lead time in minutes for calendar watcher.
-    public var calendarLeadTimeMinutes: Int?
-    /// New calendar names for calendar watcher.
-    public var calendarNames: [String]?
-    /// When true, clears the event watcher source and settings.
-    public var clearWatcher: Bool?
-    /// When true, clears event rules.
-    public var clearRules: Bool?
-
-    /// Creates an update payload.
-    public init(
-        name: String? = nil,
-        schedule: String? = nil,
-        prompt: String? = nil,
-        enabled: Bool? = nil,
-        pollAccount: String? = nil,
-        pollQuery: String? = nil,
-        pollMailbox: String? = nil,
-        pollIntervalSeconds: Int? = nil,
-        pollLimit: Int? = nil,
-        clearPoll: Bool? = nil,
-        emailReportJob: Bool? = nil,
-        maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil,
-        clearToolBudget: Bool? = nil,
-        watcherSource: EventWatcherSource? = nil,
-        rules: [EventRule]? = nil,
-        calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil,
-        clearWatcher: Bool? = nil,
-        clearRules: Bool? = nil
-    ) {
-        self.name = name
-        self.schedule = schedule
-        self.prompt = prompt
-        self.enabled = enabled
-        self.pollAccount = pollAccount
-        self.pollQuery = pollQuery
-        self.pollMailbox = pollMailbox
-        self.pollIntervalSeconds = pollIntervalSeconds
-        self.pollLimit = pollLimit
-        self.clearPoll = clearPoll
-        self.emailReportJob = emailReportJob
-        self.maxToolIterations = maxToolIterations
-        self.onToolLimit = onToolLimit
-        self.clearToolBudget = clearToolBudget
-        self.watcherSource = watcherSource
-        self.rules = rules
-        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
-        self.calendarNames = calendarNames
-        self.clearWatcher = clearWatcher
-        self.clearRules = clearRules
-    }
-}
+// Scheduler job payloads live in `SchedulerJobPayloads.swift` beside this store.
 
 /// Failures raised by ``SchedulerStore`` validation.
 public enum SchedulerStoreError: Error, Sendable, Equatable {
@@ -329,18 +280,25 @@ public actor SchedulerStore {
             throw SchedulerStoreError.invalidField("Job limit reached (\(Self.maxJobs)). Delete existing jobs before creating new ones.")
         }
         let normalizedAccount = Self.normalizedOptional(input.pollAccount)
-        let normalizedQuery = Self.normalizedOptional(input.pollQuery)
+        let normalizedQuery = Self.normalizedOptional(input.pollQuery) ?? Self.normalizedOptional(input.pollContains)
         let normalizedMailbox = Self.normalizedOptional(input.pollMailbox)
         let normalizedOnToolLimit = Self.normalizedOptional(input.onToolLimit)
+        let normalizedFrom = Self.normalizedOptional(input.pollFrom)
+        let normalizedSubject = Self.normalizedOptional(input.pollSubject)
         try Self.validated(
             name: input.name,
             schedule: input.schedule,
             prompt: input.prompt,
             pollAccount: normalizedAccount,
             pollQuery: normalizedQuery,
+            pollContains: Self.normalizedOptional(input.pollContains),
             pollMailbox: normalizedMailbox,
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit,
+            pollFrom: input.pollFrom,
+            pollSubject: input.pollSubject,
+            pollUnreadOnly: input.pollUnreadOnly,
+            pollSinceDays: input.pollSinceDays,
             maxToolIterations: input.maxToolIterations,
             onToolLimit: normalizedOnToolLimit,
             watcherSource: input.watcherSource,
@@ -363,6 +321,10 @@ public actor SchedulerStore {
             pollMailbox: normalizedMailbox,
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit.map(EmailPollRule.clampedLimit),
+            pollFrom: normalizedFrom,
+            pollSubject: normalizedSubject,
+            pollUnreadOnly: input.pollUnreadOnly ?? false,
+            pollSinceDays: input.pollSinceDays,
             emailReportJob: input.emailReportJob ?? false,
             maxToolIterations: input.maxToolIterations,
             onToolLimit: normalizedOnToolLimit,
@@ -419,9 +381,14 @@ public actor SchedulerStore {
             prompt: existing.prompt,
             pollAccount: existing.pollAccount,
             pollQuery: existing.pollQuery,
+            pollContains: existing.pollContains,
             pollMailbox: existing.pollMailbox,
             pollIntervalSeconds: existing.pollIntervalSeconds,
             pollLimit: existing.pollLimit,
+            pollFrom: existing.pollFrom,
+            pollSubject: existing.pollSubject,
+            pollUnreadOnly: existing.pollUnreadOnly,
+            pollSinceDays: existing.pollSinceDays,
             maxToolIterations: existing.maxToolIterations,
             onToolLimit: existing.onToolLimit,
             watcherSource: existing.watcherSource,
@@ -443,6 +410,14 @@ public actor SchedulerStore {
     }
 
     private static func applyUpdates(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
+        applyCoreFields(to: &existing, from: input)
+        applyPollFields(to: &existing, from: input)
+        applyBudgetFields(to: &existing, from: input)
+        applyWatcherFields(to: &existing, from: input)
+    }
+
+    /// Schedule plus prompt plus enabled state.
+    private static func applyCoreFields(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
         if let schedule = input.schedule {
             existing.schedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -452,18 +427,37 @@ public actor SchedulerStore {
         if let enabled = input.enabled {
             existing.enabled = enabled
         }
+        if let emailReportJob = input.emailReportJob {
+            existing.emailReportJob = emailReportJob
+        }
+    }
+
+    /// Poll trigger fields plus the clear-poll reset.
+    private static func applyPollFields(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
         if input.clearPoll == true {
             existing.pollAccount = nil
             existing.pollQuery = nil
+            existing.pollContains = nil
             existing.pollMailbox = nil
             existing.pollIntervalSeconds = nil
             existing.pollLimit = nil
+            existing.pollFrom = nil
+            existing.pollSubject = nil
+            existing.pollUnreadOnly = false
+            existing.pollSinceDays = nil
         }
         if let pollAccount = input.pollAccount {
             existing.pollAccount = normalizedOptional(pollAccount)
         }
-        if let pollQuery = input.pollQuery {
-            existing.pollQuery = normalizedOptional(pollQuery)
+        // `pollContains` aliases `pollQuery` so dashboard saves stay filtering
+        // on the same text even when only one spelling arrives.
+        if let pollQuery = input.pollQuery ?? input.pollContains {
+            let normalized = normalizedOptional(pollQuery)
+            existing.pollQuery = normalized
+            existing.pollContains = normalized
+        } else if input.pollQuery != nil || input.pollContains != nil {
+            existing.pollQuery = nil
+            existing.pollContains = nil
         }
         if let pollMailbox = input.pollMailbox {
             existing.pollMailbox = normalizedOptional(pollMailbox)
@@ -474,9 +468,27 @@ public actor SchedulerStore {
         if let limit = input.pollLimit {
             existing.pollLimit = EmailPollRule.clampedLimit(limit)
         }
-        if let emailReportJob = input.emailReportJob {
-            existing.emailReportJob = emailReportJob
+        applyPollTextFields(to: &existing, from: input)
+    }
+
+    /// Sender plus subject plus flags for poll filters.
+    private static func applyPollTextFields(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
+        if let pollFrom = input.pollFrom {
+            existing.pollFrom = normalizedOptional(pollFrom)
         }
+        if let pollSubject = input.pollSubject {
+            existing.pollSubject = normalizedOptional(pollSubject)
+        }
+        if let pollUnreadOnly = input.pollUnreadOnly {
+            existing.pollUnreadOnly = pollUnreadOnly
+        }
+        if let pollSinceDays = input.pollSinceDays {
+            existing.pollSinceDays = pollSinceDays
+        }
+    }
+
+    /// Tool budget fields plus the clear-budget reset.
+    private static func applyBudgetFields(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
         if input.clearToolBudget == true {
             existing.maxToolIterations = nil
             existing.onToolLimit = nil
@@ -487,6 +499,10 @@ public actor SchedulerStore {
         if let onToolLimit = input.onToolLimit {
             existing.onToolLimit = normalizedOptional(onToolLimit)
         }
+    }
+
+    /// Watcher source plus rules plus calendar details.
+    private static func applyWatcherFields(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
         if input.clearWatcher == true {
             existing.watcherSource = nil
             existing.calendarLeadTimeMinutes = nil
@@ -652,6 +668,8 @@ extension SchedulerJob {
         let trimmedName = normalizedSchedulerJobName(config.name)
         let schedule = EmailPollRule.storedSchedule(from: config.schedule)
         let rawQuery = config.poll?.query.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawFrom = config.poll?.from.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawSubject = config.poll?.subject.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.init(
             id: id,
             name: trimmedName,
@@ -663,6 +681,10 @@ extension SchedulerJob {
             pollMailbox: config.poll?.trimmedMailbox,
             pollIntervalSeconds: config.poll?.pollIntervalSeconds,
             pollLimit: config.poll?.limit,
+            pollFrom: rawFrom.isEmpty ? nil : rawFrom,
+            pollSubject: rawSubject.isEmpty ? nil : rawSubject,
+            pollUnreadOnly: config.poll?.unreadOnly ?? false,
+            pollSinceDays: config.poll?.sinceDays,
             maxToolIterations: config.maxToolIterations,
             onToolLimit: config.onToolLimit,
             createdAt: createdAt,
@@ -725,6 +747,10 @@ extension SchedulerJobConfig {
                     poll_mailbox TEXT,
                     poll_interval_seconds INTEGER,
                     poll_limit INTEGER,
+                    poll_from TEXT,
+                    poll_subject TEXT,
+                    poll_unread_only INTEGER,
+                    poll_since_days INTEGER,
                     max_tool_iterations INTEGER,
                     on_tool_limit TEXT,
                     created_at REAL NOT NULL,
@@ -756,6 +782,26 @@ extension SchedulerJobConfig {
                 sql: "ALTER TABLE scheduler_jobs ADD COLUMN email_report_job INTEGER NOT NULL DEFAULT 0;",
                 failure: { SchedulerDBError(message: $0) }
             )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_from TEXT;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_subject TEXT;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_unread_only INTEGER;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_since_days INTEGER;",
+                failure: { SchedulerDBError(message: $0) }
+            )
             // Watcher columns delegate to the Core-owned statement list so the
             // additive migrations stay identical across persistence sites.
             SchedulerJobConfig.applyWatcherColumnMigrations { statement in
@@ -783,7 +829,8 @@ extension SchedulerJobConfig {
             SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
                    poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
                    created_at, updated_at, last_successful_run_ended_at, email_report_job,
-                   watcher_source, rules, calendar_lead_time_minutes, calendar_names
+                   watcher_source, rules, calendar_lead_time_minutes, calendar_names,
+                   poll_from, poll_subject, poll_unread_only, poll_since_days
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -825,6 +872,22 @@ extension SchedulerJobConfig {
                     guard let data = json.data(using: .utf8) else { return nil }
                     return try? JSONDecoder().decode([String].self, from: data)
                 }
+                // Blank strings predate normalization; folding them keeps
+                // legacy rows equivalent to omitted structured filters.
+                let rawFrom = SQLiteHelpers.columnText(statement, index: 20)
+                let rawSubject = SQLiteHelpers.columnText(statement, index: 21)
+                let normalizedFrom: String? = {
+                    guard let raw = rawFrom else { return nil }
+                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : trimmed
+                }()
+                let normalizedSubject: String? = {
+                    guard let raw = rawSubject else { return nil }
+                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : trimmed
+                }()
+                let unreadOnly = (SQLiteHelpers.columnInt64(statement, index: 22) ?? 0) != 0
+                let sinceDays = SQLiteHelpers.columnInt64(statement, index: 23).map { Int($0) }
 
                 loaded.append(SchedulerJob(
                     id: id,
@@ -837,6 +900,10 @@ extension SchedulerJobConfig {
                     pollMailbox: row.pollMailbox,
                     pollIntervalSeconds: row.pollIntervalSeconds,
                     pollLimit: row.pollLimit,
+                    pollFrom: normalizedFrom,
+                    pollSubject: normalizedSubject,
+                    pollUnreadOnly: unreadOnly,
+                    pollSinceDays: sinceDays,
                     emailReportJob: emailReportJob,
                     maxToolIterations: row.maxToolIterations,
                     onToolLimit: row.onToolLimit,
@@ -867,9 +934,10 @@ extension SchedulerJobConfig {
             INSERT INTO scheduler_jobs(
                 id, name, schedule, prompt, enabled, poll_account, poll_query,
                 poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at,
-                last_successful_run_ended_at, email_report_job, watcher_source, rules, calendar_lead_time_minutes, calendar_names
+                last_successful_run_ended_at, email_report_job, watcher_source, rules, calendar_lead_time_minutes, calendar_names,
+                poll_from, poll_subject, poll_unread_only, poll_since_days
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 schedule = excluded.schedule,
@@ -888,7 +956,11 @@ extension SchedulerJobConfig {
                 watcher_source = excluded.watcher_source,
                 rules = excluded.rules,
                 calendar_lead_time_minutes = excluded.calendar_lead_time_minutes,
-                calendar_names = excluded.calendar_names;
+                calendar_names = excluded.calendar_names,
+                poll_from = excluded.poll_from,
+                poll_subject = excluded.poll_subject,
+                poll_unread_only = excluded.poll_unread_only,
+                poll_since_days = excluded.poll_since_days;
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -930,6 +1002,10 @@ extension SchedulerJobConfig {
                 return String(data: data, encoding: .utf8)
             }
             SQLiteHelpers.bindText(statement, index: 20, value: calNamesJSON)
+            SQLiteHelpers.bindText(statement, index: 21, value: job.pollFrom)
+            SQLiteHelpers.bindText(statement, index: 22, value: job.pollSubject)
+            SQLiteHelpers.bindInt64(statement, index: 23, value: job.pollUnreadOnly ? 1 : 0)
+            SQLiteHelpers.bindInt64(statement, index: 24, value: job.pollSinceDays.map { Int64($0) })
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)

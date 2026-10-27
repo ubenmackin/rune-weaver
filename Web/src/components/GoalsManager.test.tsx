@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for GoalsManager.
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GoalsManager from "./GoalsManager";
@@ -809,20 +809,26 @@ describe("GoalsManager", () => {
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
     await waitFor(() => expect(listCalls).toBeGreaterThan(0));
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
     const settledCalls = listCalls;
 
     const visibilitySpy = vi
       .spyOn(document, "visibilityState", "get")
       .mockReturnValue("visible");
-    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => {
+      fireEvent(document, new Event("visibilitychange"));
+    });
     await waitFor(() => {
       expect(listCalls).toBeGreaterThan(settledCalls);
     });
     visibilitySpy.mockRestore();
 
     const afterForegroundCalls = listCalls;
-    view.unmount();
+    act(() => {
+      view.unmount();
+    });
     resetSharedSocket();
     render(<GoalsManager />);
     await waitFor(() => {
@@ -851,7 +857,9 @@ describe("GoalsManager", () => {
       expect(screen.getByText("field guide")).toBeInTheDocument();
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
     const settledCalls = listCalls;
     expect(settledCalls).toBeGreaterThan(0);
     // Frames are type-only wake-ups for their own surface, so scheduler and
@@ -874,7 +882,9 @@ describe("GoalsManager", () => {
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "definitely_unknown_xyz",
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
     expect(listCalls).toBe(settledCalls);
   });
 });
