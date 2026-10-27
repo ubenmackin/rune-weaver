@@ -166,7 +166,7 @@ describe("MemoryBrowser", () => {
     expect(screen.queryByText("Dog named Biscuit")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show Recent 20" })).toBeInTheDocument();
     // Blank facts search stays disabled so padding never fires an empty query.
-    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    const panel = screen.getByRole("tabpanel", { name: /Facts/ });
     expect(within(panel).getByRole("button", { name: "Search" })).toBeDisabled();
     // Tab entry fires no row fetch: counts stay settled without a second read.
     const factsCallsAfterEntry = fetchMock.mock.calls.filter(([url]) =>
@@ -870,7 +870,7 @@ describe("MemoryBrowser", () => {
     expect(screen.queryByText("No episodic turns match with current query")).not.toBeInTheDocument();
     expect(screen.queryByText(/turns shown/)).not.toBeInTheDocument();
     // Exactly one finder card with one session input feeding Preview.
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     expect(within(panel).getAllByLabelText("Session UUID")).toHaveLength(1);
     expect(within(panel).getByRole("button", { name: "Preview" })).toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "Show Recent" })).toBeInTheDocument();
@@ -937,7 +937,7 @@ describe("MemoryBrowser", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Session UUID")).toBeInTheDocument();
     });
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     // Blank session input disables only Preview so the whole-store path stays available.
     expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();
     await user.type(screen.getByLabelText("Session UUID"), "   ");
@@ -1204,7 +1204,7 @@ describe("MemoryBrowser", () => {
     // own empty copy (initial hint or windowed counts) without the recall
     // failure, so either copy proves isolation from the Search tab error.
     await waitFor(() => {
-      const panel = screen.getByRole("tabpanel", { name: "Facts" });
+      const panel = screen.getByRole("tabpanel", { name: /Facts/ });
       expect(
         within(panel).queryByText(/Search failed|500|nope/),
       ).not.toBeInTheDocument();
@@ -1275,7 +1275,7 @@ describe("MemoryBrowser", () => {
       ).toBeInTheDocument();
     });
     // Blank contents query disables its own Search so padding never fires.
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     expect(
       within(panel).getByRole("button", { name: "Search" }),
     ).toBeDisabled();
@@ -1689,7 +1689,7 @@ describe("MemoryBrowser", () => {
     const recentUrl = seen.find((entry) => entry.startsWith("/memory/episodes/recent"));
     expect(recentUrl).toBeDefined();
     expect(new URL(recentUrl as string, "http://localhost").searchParams.get("limit")).toBe("20");
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     expect(within(panel).getAllByText("Delete")).toHaveLength(20);
   });
 
@@ -1761,7 +1761,7 @@ describe("MemoryBrowser", () => {
       screen.getByLabelText("Search episodic contents"),
       "biscuit",
     );
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     await user.click(within(panel).getByRole("button", { name: "Search" }));
     await waitFor(() => {
       expect(screen.getByText(/boom|500/)).toBeInTheDocument();
@@ -1943,7 +1943,7 @@ describe("MemoryBrowser", () => {
       expect(screen.getByLabelText("Search facts")).toBeInTheDocument();
     });
     await user.type(screen.getByLabelText("Search facts"), "biscuit");
-    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    const panel = screen.getByRole("tabpanel", { name: /Facts/ });
     await user.click(within(panel).getByRole("button", { name: "Search" }));
     await waitFor(() => {
       expect(screen.getByText(/boom|500/)).toBeInTheDocument();
@@ -2009,7 +2009,7 @@ describe("MemoryBrowser", () => {
       expect(screen.getByText("Kept turn")).toBeInTheDocument();
     });
     await user.type(screen.getByLabelText("Search episodic contents"), "zzz");
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     await user.click(within(panel).getByRole("button", { name: "Search" }));
     await waitFor(() => {
       expect(screen.getByText(/boom|500/)).toBeInTheDocument();
@@ -2066,7 +2066,7 @@ describe("MemoryBrowser", () => {
       expect(screen.getByText("Kept fact")).toBeInTheDocument();
     });
     await user.type(screen.getByLabelText("Search facts"), "zzz");
-    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    const panel = screen.getByRole("tabpanel", { name: /Facts/ });
     await user.click(within(panel).getByRole("button", { name: "Search" }));
     await waitFor(() => {
       expect(screen.getByText(/boom|500/)).toBeInTheDocument();
@@ -2116,7 +2116,7 @@ describe("MemoryBrowser", () => {
     await waitFor(() => {
       expect(screen.getByText("Recent turn one")).toBeInTheDocument();
     });
-    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    const panel = screen.getByRole("tabpanel", { name: /Episodes/ });
     // Preview alone is blank-disabled; both danger controls ignore the blank
     // session input and gate on busy plus stored rows instead.
     expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();

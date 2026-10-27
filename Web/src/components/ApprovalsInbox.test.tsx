@@ -1438,7 +1438,7 @@ describe("ApprovalsInbox", () => {
     ).toHaveLength(1);
   });
 
-  it("defaults to Pending and swaps the groups for History on the segmented control", async () => {
+  it("defaults to Pending and swaps the groups for History on the tab bar", async () => {
     const user = userEvent.setup();
     const historyEntries = [
       {
@@ -1475,22 +1475,24 @@ describe("ApprovalsInbox", () => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
     // Pending is the default view.
-    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-selected", "false");
     expect(screen.getByTestId("inbox-view-pending")).toHaveTextContent("Pending (1)");
     expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
     // Tablist lives below the header row and above the per-view panels.
     const headerRow = container.querySelector(".panel-header-row");
-    const viewNav = container.querySelector(".approvals-view-nav");
+    const viewNav = container.querySelector(".tab-bar");
     expect(headerRow).not.toBeNull();
     expect(viewNav).not.toBeNull();
     expect(
       (headerRow as HTMLElement).compareDocumentPosition(viewNav as Node) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(screen.getByTestId("inbox-view-pending")).toHaveClass("tab-bar-tab");
+    expect(screen.getByTestId("inbox-view-pending")).toHaveClass("active");
     await user.click(screen.getByTestId("inbox-view-active-timed"));
-    expect(screen.getByTestId("inbox-view-active-timed")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("inbox-view-active-timed")).toHaveAttribute("aria-selected", "true");
     await waitFor(() => {
       expect(screen.getByTestId("approval-active-trust")).toBeInTheDocument();
     });
@@ -1498,8 +1500,8 @@ describe("ApprovalsInbox", () => {
     expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
     await user.click(screen.getByTestId("inbox-view-history"));
-    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute("aria-selected", "false");
     // History replaces the pending queue while the header row stays.
     await waitFor(() => {
       expect(screen.getByTestId("approval-history")).toBeInTheDocument();
