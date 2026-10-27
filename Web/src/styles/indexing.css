@@ -840,3 +840,121 @@
   padding-left: 20px;
   margin-bottom: 0;
 }
+
+/* ==========================================================================
+   Index Policy control stack
+   ========================================================================== */
+
+.index-policy-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.index-sources-fieldset,
+.index-effort-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.index-sources-fieldset legend,
+.index-effort-fieldset legend {
+  padding: 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.index-policy-section .toggle-label,
+.index-policy-section .index-effort-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  font-size: 13px;
+  color: var(--text-main);
+}
+
+.index-effort-fieldset .index-effort-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+  border: 2px solid var(--border-focus);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-purple);
+  transform: scale(0);
+  transition: transform 150ms ease;
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:checked {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 4px var(--accent-purple-glow);
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:checked::before {
+  transform: scale(1);
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:not(:disabled):hover {
+  border-color: var(--accent-purple);
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:disabled:hover {
+  border-color: var(--border-focus);
+  box-shadow: none;
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.index-effort-fieldset input[type="radio"].index-effort-radio:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Motion-sensitive users get no transition on the radio dot or ring. */
+@media (prefers-reduced-motion: reduce) {
+  .index-effort-fieldset input[type="radio"].index-effort-radio,
+  .index-effort-fieldset input[type="radio"].index-effort-radio::before {
+    transition: none;
+  }
+}
+
+/* High-contrast mode falls back to the native radio without the dot. */
+@media (forced-colors: active) {
+  .index-effort-fieldset input[type="radio"].index-effort-radio {
+    appearance: auto;
+  }
+
+  .index-effort-fieldset input[type="radio"].index-effort-radio::before {
+    display: none;
+  }
+}
