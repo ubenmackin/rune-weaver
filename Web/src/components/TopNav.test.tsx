@@ -759,7 +759,7 @@ describe("TopNav staged drawer trigger", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps the Files button plus zero badge visible and focusable at zero", () => {
+  it("keeps an icon-only trigger visible and focusable at zero", () => {
     // Always-visible contract: zero never hides the trigger, so review stays
     // reachable on fetch failure and reload while the drawer owns the
     // `No staged changes` empty state.
@@ -767,21 +767,18 @@ describe("TopNav staged drawer trigger", () => {
     renderStagedNav({ stagedFilesCount: 0 });
     const trigger = screen.getByTestId("top-nav-staged-btn");
     expect(trigger).toBeInTheDocument();
-    expect(trigger.textContent).toContain("Files");
-    expect(trigger.getAttribute("title")).toBe(
-      "0 staged file changes waiting for review"
-    );
-    expect(trigger.getAttribute("aria-label")).toBe(
-      "Open staged changes drawer (0 files)"
-    );
-    const badge = trigger.querySelector(".top-nav-staged-badge");
-    expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe("0");
-    // The zero badge keeps the shared class with a muted inline style so the
-    // trigger reads idle without disappearing.
-    expect(badge?.className).toContain("top-nav-staged-badge");
     expect(trigger.tagName).toBe("BUTTON");
     expect(trigger.hasAttribute("disabled")).toBe(false);
+    // Icon-only: no Files label and no count element anywhere inside the
+    // button; the glyph is the sole child.
+    expect(trigger.textContent).not.toContain("Files");
+    expect(document.querySelector(".top-nav-staged-badge")).toBeNull();
+    // Zero is idle: the shared icon-button primitive stays unlit.
+    expect(trigger.className).not.toContain("active");
+    expect(trigger.getAttribute("title")).toBe("Staged changes");
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Open staged changes drawer"
+    );
     trigger.focus();
     expect(document.activeElement).toBe(trigger);
   });
@@ -797,7 +794,7 @@ describe("TopNav staged drawer trigger", () => {
     expect(onOpenStagedDrawer).toHaveBeenCalledTimes(1);
   });
 
-  it("counts up the badge with pluralized title through the staged count", async () => {
+  it("lights the trigger and reads the pending copy through the staged count", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     const onOpenStagedDrawer = vi.fn();
@@ -806,17 +803,17 @@ describe("TopNav staged drawer trigger", () => {
       onOpenStagedDrawer,
     });
     const trigger = screen.getByTestId("top-nav-staged-btn");
-    expect(trigger.querySelector(".top-nav-staged-badge")?.textContent).toBe(
-      "2"
-    );
+    expect(trigger.className).toContain("active");
     expect(trigger.getAttribute("title")).toBe(
       "2 staged file changes waiting for review"
     );
     expect(trigger.getAttribute("aria-label")).toBe(
-      "Open staged changes drawer (2 files)"
+      "Open staged changes drawer, 2 pending"
     );
     await user.click(trigger);
     expect(onOpenStagedDrawer).toHaveBeenCalledTimes(1);
+    // Icon-only holds at every count: no badge element ever mounts.
+    expect(document.querySelector(".top-nav-staged-badge")).toBeNull();
 
     // Singular matches the drawer header (`1 file`): no trailing `s`.
     rerender(
@@ -831,28 +828,32 @@ describe("TopNav staged drawer trigger", () => {
       />
     );
     const singular = screen.getByTestId("top-nav-staged-btn");
-    expect(singular.querySelector(".top-nav-staged-badge")?.textContent).toBe(
-      "1"
-    );
+    expect(singular.className).toContain("active");
     expect(singular.getAttribute("title")).toBe(
       "1 staged file change waiting for review"
     );
+    expect(singular.getAttribute("aria-label")).toBe(
+      "Open staged changes drawer, 1 pending"
+    );
+    expect(document.querySelector(".top-nav-staged-badge")).toBeNull();
   });
 
   it("keeps a stable test id across zero and nonzero states", () => {
-    // Regression guard: visibility states share one test id so selectors and
-    // the `onCountChange` count-up path never fork the trigger.
+    // Regression guard: one test id serves both states so selectors and the
+    // count-up path never fork the trigger, while the lit class tracks the
+    // pending count live.
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     const { unmount } = renderStagedNav({ stagedFilesCount: 0 });
-    expect(screen.getByTestId("top-nav-staged-btn")).toBeInTheDocument();
+    expect(screen.getByTestId("top-nav-staged-btn").className).not.toContain(
+      "active"
+    );
     unmount();
     renderStagedNav({ stagedFilesCount: 3 });
-    expect(screen.getByTestId("top-nav-staged-btn")).toBeInTheDocument();
-    expect(
-      screen
-        .getByTestId("top-nav-staged-btn")
-        .querySelector(".top-nav-staged-badge")?.textContent
-    ).toBe("3");
+    const trigger = screen.getByTestId("top-nav-staged-btn");
+    expect(trigger.className).toContain("active");
+    expect(trigger.getAttribute("title")).toBe(
+      "3 staged file changes waiting for review"
+    );
   });
 });
 
