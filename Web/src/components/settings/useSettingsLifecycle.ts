@@ -11,6 +11,8 @@ import {
   parseServerAllowedHostsText,
   validateServerAllowedHosts,
 } from "../../api";
+import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
+import { isSettingsFormDirty } from "./useSettingsDirty";
 import { areServerAllowedHostsEqual } from "./settingsHelpers";
 import {
   hasAccessSectionLink,
@@ -51,6 +53,7 @@ export function useSettingsLifecycle({
   const [loading, setLoading] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [settingsNavQuery, setSettingsNavQuery] = useState("");
+  const [settingsStale, setSettingsStale] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
 
   // Hash-based tab sync
@@ -155,6 +158,7 @@ export function useSettingsLifecycle({
       formRef.current.populateForm(data);
       void refreshBootBind();
       void servicesRef.current.loadPluginsData();
+      setSettingsStale(false);
     } catch (failure) {
       saveRef.current.setError(
         failure instanceof ApiError ? failure.message : "Failed to load settings"
@@ -167,6 +171,54 @@ export function useSettingsLifecycle({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const clearSettingsStale = useCallback(() => {
+    setSettingsStale(false);
+  }, []);
+
+  // Dirty drafts are never clobbered: the frame marks stale when dirty,
+  // while foreground and reconnect refetch only when clean.
+  const handleSettingsChangedFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      if ((frame as { type?: string }).type !== "settings_changed") return;
+      if (isSettingsFormDirty(formRef.current)) {
+        setSettingsStale(true);
+        return;
+      }
+      setSettingsStale(false);
+      void refresh();
+    },
+    [refresh]
+  );
+
+  const handleReconnectRefresh = useCallback(() => {
+    if (isSettingsFormDirty(formRef.current)) return;
+    void refresh();
+  }, [refresh]);
+
+  useSharedWebSocket(
+    handleSettingsChangedFrame,
+    undefined,
+    handleReconnectRefresh
+  );
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      handleReconnectRefresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [handleReconnectRefresh]);
+
+  // A completed save reconciles drafts with stored settings, so a pending stale flag lapses.
+  const prevSavingRef = useRef(save.saving);
+  useEffect(() => {
+    if (prevSavingRef.current && !save.saving && !save.error) {
+      setSettingsStale(false);
+    }
+    prevSavingRef.current = save.saving;
+  }, [save.saving, save.error]);
 
   // Tab lifecycle effects
   useEffect(() => {
@@ -312,6 +364,8 @@ export function useSettingsLifecycle({
   return {
     loading,
     refresh,
+    settingsStale,
+    clearSettingsStale,
     settingsMenuOpen,
     setSettingsMenuOpen,
     settingsNavQuery,

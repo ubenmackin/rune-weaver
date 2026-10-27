@@ -283,6 +283,9 @@ private func recordResumedRun(
         // and still-parked outcomes keep the prior value so the next run rescans.
         if finalStatus == "ok", let jobID = awaiting.jobID, awaiting.kind == "scheduler" {
             await context.scheduler.recordSuccessfulRun(id: jobID)
+            // The resumed turn advanced the job cursor, so open dashboards
+            // refetch the job list like any other settled fire.
+            await context.hub.broadcastSchedulerJobsChanged()
         }
         if awaiting.kind == "goal", let goalID = awaiting.goalID {
             if finalStatus == "ok" || resumed.isBudgetExceeded {
@@ -350,7 +353,11 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
     jobs.post { req async throws -> SchedulerJob in
         let body = try req.content.decode(NewSchedulerJob.self)
         do {
-            return try await req.application.runeWeaver.scheduler.create(body)
+            let created = try await req.application.runeWeaver.scheduler.create(body)
+            // The new row changes what the Schedules panel lists, so open
+            // dashboards refetch instead of waiting for a manual refresh.
+            await req.application.runeWeaver.hub.broadcastSchedulerJobsChanged()
+            return created
         } catch let error as SchedulerStoreError {
             switch error {
             case let .invalidField(detail):
@@ -375,7 +382,11 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
         }
         let body = try req.content.decode(UpdateSchedulerJob.self)
         do {
-            return try await req.application.runeWeaver.scheduler.update(id: id, body)
+            let updated = try await req.application.runeWeaver.scheduler.update(id: id, body)
+            // Updates (including enable toggles) change what the Schedules
+            // panel lists, so open dashboards refetch instead of going stale.
+            await req.application.runeWeaver.hub.broadcastSchedulerJobsChanged()
+            return updated
         } catch let error as SchedulerStoreError {
             switch error {
             case let .invalidField(detail):
@@ -393,6 +404,9 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
         guard removed else {
             throw Abort(.notFound, reason: "Unknown job \(raw)")
         }
+        // Deletion changes what the Schedules panel lists, so open dashboards
+        // refetch instead of showing a phantom row.
+        await req.application.runeWeaver.hub.broadcastSchedulerJobsChanged()
         return .noContent
     }
 }
@@ -401,7 +415,13 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
 func registerSchedulerRunRoute(_ app: Application) {
     let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
     jobs.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.run)) { req async throws -> OrchestratorResponse in
-        try await handleSchedulerRun(req: req)
+        let response = try await handleSchedulerRun(req: req)
+        // Only a cursor-advancing fire rewrote the job row, so parked and
+        // budget-exceeded runs leave dashboards untouched.
+        if !response.isParked, !response.isBudgetExceeded {
+            await req.application.runeWeaver.hub.broadcastSchedulerJobsChanged()
+        }
+        return response
     }
 }
 

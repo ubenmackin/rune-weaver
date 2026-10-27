@@ -456,7 +456,7 @@ describe("SettingsManager search", () => {
     });
   });
 
-  it("keeps the global header Refresh as the only manual refresh", async () => {
+  it("carries no manual Refresh button on any settings surface", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -488,14 +488,13 @@ describe("SettingsManager search", () => {
         screen.getByTestId("search-health-text").textContent?.toLowerCase()
       ).toContain("reachable");
     });
-    // Pane-level refresh is gone; the global Settings header Refresh remains
-    // the single manual refresh so probes stay automatic otherwise.
+    // Probes stay automatic: pane and global headers carry no manual
+    // control, so live frames plus reopen and foreground resync converge.
     expect(
       screen.queryByRole("button", { name: "Refresh search health" })
     ).toBeNull();
-    const refreshButtons = screen.getAllByRole("button", { name: /Refresh/i });
-    expect(refreshButtons).toHaveLength(1);
-    expect(refreshButtons[0].textContent).toMatch(/Refresh/);
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Refresh/i })).not.toBeInTheDocument();
   });
 
   it("renders the pull-timeout cached-retry banner once with collapsed diagnostics", async () => {

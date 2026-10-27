@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for GoalsManager.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GoalsManager from "./GoalsManager";
@@ -359,7 +359,10 @@ describe("GoalsManager", () => {
           listCalls += 1;
           return listCalls === 1
             ? jsonResponse({ goals: [goal()], count: 1 })
-            : jsonResponse({ goals: [goal({ title: "updated pursuit" })], count: 1 });
+            : jsonResponse({
+                goals: [goal({ title: "updated pursuit" })],
+                count: 1,
+              });
         }
         return jsonResponse({});
       }),
@@ -369,13 +372,18 @@ describe("GoalsManager", () => {
       expect(screen.getByText("field guide")).toBeInTheDocument();
     });
     await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    // Frames carry no row data the list trusts: the push only wakes a
+    // full GET, so a divergent frame title never renders.
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "goal_updated",
-      goal: goal({ title: "updated pursuit" }),
+      goal: goal({ title: "frame-injected title" }),
     });
     await waitFor(() => {
       expect(screen.getByText("updated pursuit")).toBeInTheDocument();
     });
+    expect(
+      screen.queryByText("frame-injected title"),
+    ).not.toBeInTheDocument();
   });
 
   it("refreshes the ideas list when an idea_proposed proactive frame arrives", async () => {
@@ -761,5 +769,112 @@ describe("GoalsManager", () => {
     });
     await user.click(screen.getByRole("button", { name: "Open Settings" }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries no manual Refresh button and converges through live frames alone", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ goals: [goal()], count: 1 })),
+    );
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    // Live frames plus reopen and foreground resync are the only refresh
+    // paths, so the header carries no manual control.
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Refresh/i })).not.toBeInTheDocument();
+  });
+
+  it("refetches the list on socket reopen and foreground return", async () => {
+    const capture = installSocket();
+    let listCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          listCalls += 1;
+          return jsonResponse({ goals: [goal()], count: 1 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const view = render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await waitFor(() => expect(listCalls).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const settledCalls = listCalls;
+
+    const visibilitySpy = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThan(settledCalls);
+    });
+    visibilitySpy.mockRestore();
+
+    const afterForegroundCalls = listCalls;
+    view.unmount();
+    resetSharedSocket();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThan(afterForegroundCalls);
+    });
+  });
+
+  it("ignores unrelated frames without refetching", async () => {
+    const capture = installSocket();
+    let listCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          listCalls += 1;
+          return jsonResponse({ goals: [goal()], count: 1 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const settledCalls = listCalls;
+    expect(settledCalls).toBeGreaterThan(0);
+    // Frames are type-only wake-ups for their own surface, so scheduler and
+    // settings pushes leave the goals list still.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "scheduler_jobs_changed",
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "scheduled_sends_changed",
+    });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "settings_changed" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_started" });
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    // Malformed goal pushes drop without a refetch instead of failing.
+    await dispatchFrameOrThrow(capture.onMessage, { type: "goal_updated" });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "goal_updated",
+      goal: { id: "", title: "", status: "" },
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "definitely_unknown_xyz",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(listCalls).toBe(settledCalls);
   });
 });

@@ -237,18 +237,32 @@ public actor ServerSchedulerWorker {
             }
         }
 
+        // A settled job fire rewrote scheduler rows, so open dashboards refetch
+        // the job list; evaluations that fired nothing changed no rows.
+        if results.contains(where: \.fired) {
+            await hub.broadcastSchedulerJobsChanged()
+        }
+
         // Scheduled sends ride the same tick but take no orchestrator turn:
         // each due send claims exactly once and replays the approved bytes, so
         // a slow fire never stacks a second replay on the next tick.
+        let didSettleSends: Bool
         do {
-            try await fireDueScheduledSends(now: now)
+            didSettleSends = try await fireDueScheduledSends(now: now)
         } catch is CancellationError {
             // Cancellation stops further scheduled sends this tick and is preserved for the outer
             // loop; the claimed row stays `sending` until its replay settles or a later boot
             // reconciles it, so nothing double-sends.
             await logger?("Scheduled send fire cancelled.")
+            didSettleSends = true
         } catch {
             await logger?("Scheduled send fire failed: \(error.localizedDescription)")
+            didSettleSends = false
+        }
+        // A settled send rewrote send rows, so open dashboards refetch the send
+        // list; a tick that settled nothing leaves panels untouched.
+        if didSettleSends {
+            await hub.broadcastScheduledSendsChanged()
         }
 
         // The nightly-or-catch-up index trigger rides the same tick: the coordinator selects

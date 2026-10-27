@@ -11,7 +11,7 @@ import { clearWizardState } from "./onboarding/wizardStorage";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
-import { MenuIcon, RefreshIcon } from "./icons";
+import { MenuIcon } from "./icons";
 import { SettingsModals } from "./settings/SettingsModals";
 import SettingsSidenav from "./settings/SettingsSidenav";
 import { SettingsFormPanels } from "./settings/SettingsFormPanels";
@@ -137,6 +137,8 @@ export default function SettingsManager({
   const {
     loading,
     refresh,
+    settingsStale,
+    clearSettingsStale,
     settingsMenuOpen,
     setSettingsMenuOpen,
     settingsNavQuery,
@@ -237,15 +239,6 @@ export default function SettingsManager({
           >
             <span>Replay setup</span>
           </button>
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void refresh()}
-            disabled={loading || save.saving}
-          >
-            <RefreshIcon size={14} className={loading ? "spin" : ""} />
-            <span>{loading ? "Refreshing…" : "Refresh"}</span>
-          </button>
         </div>
       </div>
 
@@ -255,6 +248,33 @@ export default function SettingsManager({
           <code>{form.settings.configPath}</code>
         </div>
       )}
+
+      {settingsStale ? (
+        <div
+          className="notice-banner"
+          role="status"
+          data-testid="settings-stale-banner"
+        >
+          <span>Settings changed elsewhere</span>
+          <div className="row">
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              disabled={loading || save.saving}
+              onClick={() => void refresh()}
+            >
+              <span>Reload</span>
+            </button>
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => clearSettingsStale()}
+            >
+              <span>Keep mine</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {save.error &&
         !(

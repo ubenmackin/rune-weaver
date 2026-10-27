@@ -114,6 +114,8 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     } else {
         await context.toolBus.disableTool(named: name)
     }
+    // The persisted toggle changes what Settings lists, so open tabs refetch.
+    await context.hub.broadcastSettingsChanged()
     let isEnabled = await context.toolBus.isToolEnabled(named: name)
     return buildToolInfo(for: tool, isEnabled: isEnabled, recordByPluginID: recordByPluginID)
 }
