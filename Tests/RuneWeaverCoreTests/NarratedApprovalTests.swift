@@ -83,6 +83,81 @@ private func makeParkedGatedTool(name: String, output: String) -> ParkedApproval
     ParkedApprovalTool(name: name, output: output, permissionLevel: .requiresApproval)
 }
 
+/// Hands off between two overlapping sibling executions in either arrival order:
+/// the gated call suspends until the sibling call releases it or already ran.
+private final class PairedExecutionGate: Sendable {
+    private struct GateState: Sendable {
+        var waiting: CheckedContinuation<Void, Never>?
+        var siblingRan = false
+    }
+
+    /// Guards the state below.
+    private let state: OSAllocatedUnfairLock<GateState>
+
+    init() {
+        state = OSAllocatedUnfairLock(initialState: GateState())
+    }
+
+    /// Suspends until the sibling execution runs, unless it already has.
+    func waitForSibling() async {
+        if state.withLock({ $0.siblingRan }) {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            let alreadyRan = state.withLock { s -> Bool in
+                if s.siblingRan {
+                    return true
+                }
+                s.waiting = continuation
+                return false
+            }
+            if alreadyRan {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Releases a waiting sibling, or marks the handoff for one arriving later.
+    func releaseSibling() {
+        state.withLock { s in
+            s.siblingRan = true
+            s.waiting?.resume()
+            s.waiting = nil
+        }
+    }
+}
+
+/// Fixture gated tool whose designated call blocks until its sibling call executes.
+private struct PairedGatingTool: Tool, Sendable {
+    /// Registered tool name.
+    let name: String
+    /// Canned outcome text.
+    let output: String
+    /// Call ID that suspends until the sibling call runs.
+    let blockingCallID: String
+    /// Handoff between the paired executions.
+    let pairGate: PairedExecutionGate
+    /// Permission level under test.
+    let permissionLevel: PermissionLevel
+    /// Human-readable description.
+    var description: String {
+        "Fixture stub for \(name)."
+    }
+
+    /// Empty-object schema.
+    let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+
+    /// Blocks the designated call until the sibling runs, then returns canned output.
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        if input.callID == blockingCallID {
+            await pairGate.waitForSibling()
+        } else {
+            pairGate.releaseSibling()
+        }
+        return .success(output, callID: input.callID)
+    }
+}
+
 @Suite("Narrated Gated Approvals")
 struct NarratedApprovalTests {
     @Test
@@ -708,6 +783,79 @@ struct StructuredResumeTests {
         let history = await conversations.history(for: sessionID)
         #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_batch1" })
         #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_batch2" })
+        let syntheses = history.filter { $0.role == .assistant && $0.content == synthesis }
+        #expect(syntheses.count == 1)
+    }
+
+    @Test
+    func `Concurrent sibling resumes synthesize once with both actions retained`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        let pairGate = PairedExecutionGate()
+        await bus.register(tool: PairedGatingTool(
+            name: "stub.write",
+            output: "write-ok",
+            blockingCallID: "call_struct_overlap1",
+            pairGate: pairGate,
+            permissionLevel: .requiresApproval
+        ))
+        let gated1 = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/a"}"#, callID: "call_struct_overlap1")
+        let gated2 = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/b"}"#, callID: "call_struct_overlap2")
+        let synthesis = "Both overlapping writes complete."
+        let llm = StructuredResumeLLM(rounds: [
+            StructuredResumeRound("", [gated1, gated2]),
+            StructuredResumeRound(synthesis)
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Write both", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 2)
+        let pending = await queue.list()
+        guard let firstRequest = pending.first(where: { $0.input.callID == "call_struct_overlap1" }),
+              let secondRequest = pending.first(where: { $0.input.callID == "call_struct_overlap2" })
+        else {
+            Issue.record("Expected both filed structured approvals")
+            return
+        }
+        #expect(llm.chatCallCount() == 1)
+        #expect(await queue.decide(id: firstRequest.id, approved: true) == true)
+        #expect(await queue.decide(id: secondRequest.id, approved: true) == true)
+        // The first sibling's tool suspends until the second resume executes its
+        // own tool, forcing both resumes to overlap in time.
+        async let firstResume = orchestrator.resumeNarratedApproval(id: firstRequest.id, approved: true)
+        async let secondResume = orchestrator.resumeNarratedApproval(id: secondRequest.id, approved: true)
+        let (firstResponse, secondResponse) = try await (firstResume, secondResume)
+        let responses = [firstResponse, secondResponse].compactMap(\.self)
+        // One parked-turn call plus exactly one synthesis round.
+        #expect(llm.chatCallCount() == 2)
+        let finished = responses.filter { $0.isParked == false }
+        let deferred = responses.filter { $0.isParked == true }
+        #expect(finished.count == 1)
+        #expect(deferred.count == 1)
+        guard let final = finished.first, let parkedResponse = deferred.first else {
+            Issue.record("Expected one finished and one deferred sibling response")
+            return
+        }
+        #expect(final.sessionID == sessionID)
+        #expect(final.text == synthesis)
+        #expect(final.toolActions.count == 2)
+        #expect(final.toolActions.contains { $0.callID == "call_struct_overlap1" && $0.result?.content.contains("write-ok") == true })
+        #expect(final.toolActions.contains { $0.callID == "call_struct_overlap2" && $0.result?.content.contains("write-ok") == true })
+        #expect(parkedResponse.sessionID == sessionID)
+        #expect(!parkedResponse.text.contains("Waiting for 0 more"))
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_overlap1" })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_overlap2" })
         let syntheses = history.filter { $0.role == .assistant && $0.content == synthesis }
         #expect(syntheses.count == 1)
     }

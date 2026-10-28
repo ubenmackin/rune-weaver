@@ -398,12 +398,13 @@ struct BashBoundsKillReasonTests {
     func `Sleep past the wall watchdog reports a wall timeout`() async throws {
         let base = try makeBashBoundsTempBase()
         defer { removeBashBoundsTempBase(base) }
-        // Sleep accrues almost no CPU time, so the one-second wall watchdog
-        // ends it while the generous CPU budget stays untouched.
+        // Sleep accrues almost no CPU time, so the one-second wall watchdog ends
+        // it while the generous CPU budget stays untouched; the long runway keeps
+        // the kill deterministic when timer delivery lags under parallel test load.
         let tool = makeBashBoundsTool(bashConfig: allowAllBashConfig(), base: base)
         let input = ToolInput(
             toolName: "bash.exec",
-            argumentsJSON: #"{"command":"sleep 5","timeoutSeconds":1}"#
+            argumentsJSON: #"{"command":"sleep 12","timeoutSeconds":1}"#
         )
         let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
         #expect(output.isError)
@@ -485,7 +486,7 @@ struct BashBoundsKillReasonTests {
         // A valid per-call timeout still wins over the stored default.
         let sleepInput = ToolInput(
             toolName: "bash.exec",
-            argumentsJSON: #"{"command":"sleep 5","timeoutSeconds":1}"#
+            argumentsJSON: #"{"command":"sleep 12","timeoutSeconds":1}"#
         )
         let sleepOutput = try await tool.execute(
             input: sleepInput,

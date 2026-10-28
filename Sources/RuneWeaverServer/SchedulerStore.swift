@@ -624,42 +624,6 @@ public actor SchedulerStore {
             jobs = Self.seedInMemory(from: config)
         #endif
     }
-
-    /// Replaces the runtime registry with `config.toml [[scheduler.jobs]]`.
-    public func sync(from config: SchedulerConfig) {
-        var byName: [String: SchedulerJob] = [:]
-        for job in jobs.values {
-            let key = normalizedSchedulerJobName(job.name)
-            if byName[key] == nil {
-                byName[key] = job
-            }
-        }
-        var seen: Set<String> = []
-        var fresh: [UUID: SchedulerJob] = [:]
-        for entry in config.jobs {
-            let trimmedName = normalizedSchedulerJobName(entry.name)
-            guard !seen.contains(trimmedName) else { continue }
-            seen.insert(trimmedName)
-            if let existing = byName[trimmedName] {
-                var kept = SchedulerJob(from: entry, id: existing.id, createdAt: existing.createdAt)
-                kept.updatedAt = Date()
-                kept.lastSuccessfulRunEndedAt = existing.lastSuccessfulRunEndedAt
-                // The email-report flag is owner state with no config spelling,
-                // so a resync carries it forward like the run cursor.
-                kept.emailReportJob = existing.emailReportJob
-                fresh[kept.id] = kept
-            } else {
-                let job = SchedulerJob(from: entry)
-                fresh[job.id] = job
-            }
-        }
-        jobs = fresh
-    }
-
-    /// Exports the runtime registry as a config section for persistence.
-    public func toSchedulerConfig() async -> SchedulerConfig {
-        await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
-    }
 }
 
 extension SchedulerJob {
@@ -694,32 +658,6 @@ extension SchedulerJob {
             calendarLeadTimeMinutes: config.calendarLeadTimeMinutes,
             calendarNames: config.calendarNames
         )
-    }
-
-    /// Converts this runtime job to a `config.toml` entry.
-    public func toJobConfig() -> SchedulerJobConfig {
-        let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
-        let pollValue: EmailPollRule? = pollRule
-        return SchedulerJobConfig(
-            name: name,
-            prompt: prompt,
-            enabled: enabled,
-            schedule: scheduleValue,
-            poll: pollValue,
-            maxToolIterations: maxToolIterations,
-            onToolLimit: onToolLimit,
-            watcherSource: watcherSource,
-            rules: rules,
-            calendarLeadTimeMinutes: calendarLeadTimeMinutes,
-            calendarNames: calendarNames
-        )
-    }
-}
-
-extension SchedulerJobConfig {
-    /// Creates a config entry from a runtime job.
-    public init(from job: SchedulerJob) {
-        self = job.toJobConfig()
     }
 }
 

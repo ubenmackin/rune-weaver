@@ -58,7 +58,7 @@ public actor VoicePipeline {
         }
         guard let executable = resolveWhisperBinary() else {
             throw VoicePipelineError.modelUnavailable(
-                "No Whisper binary found. Install whisper.cpp and set WHISPER_BINARY (Phase 6 setup)."
+                "No Whisper binary found. Install whisper.cpp and set the WHISPER_BINARY environment variable."
             )
         }
         let inputURL: URL
@@ -69,10 +69,17 @@ public actor VoicePipeline {
         } catch {
             throw VoicePipelineError.transcriptionFailed("Could not stage audio: \(error.localizedDescription)")
         }
-        defer { try? FileManager.default.removeItem(at: inputURL) }
+        // Whisper writes the transcript beside the staged input; reading the
+        // file verifies success rather than trusting stdout.
+        let outputBase = inputURL.deletingPathExtension().path
+        let transcriptURL = URL(fileURLWithPath: outputBase + ".txt")
+        defer {
+            try? FileManager.default.removeItem(at: inputURL)
+            try? FileManager.default.removeItem(at: transcriptURL)
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["--no-prints", "--output-txt", "--output-file", "-", inputURL.path]
+        process.arguments = ["--no-prints", "--output-txt", "--output-file", outputBase, inputURL.path]
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.standardOutput = outputPipe
@@ -130,15 +137,25 @@ public actor VoicePipeline {
         if Task.isCancelled {
             throw CancellationError()
         }
-        let (outputData, errorData) = pipeBuffers.drain()
+        let (_, errorData) = pipeBuffers.drain()
         guard status == 0 else {
             let detail = String(data: errorData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown error"
             throw VoicePipelineError.transcriptionFailed("Whisper failed: \(detail)")
         }
 
-        return String(data: outputData, encoding: .utf8)?
+        // Exit 0 does not guarantee output: a missing or empty transcript file
+        // fails closed with the stderr tail rather than an empty answer.
+        let stderrTail = String(data: errorData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let transcriptFile = try? String(contentsOf: transcriptURL, encoding: .utf8)
+        guard let transcript = transcriptFile,
+              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            let suffix = stderrTail.isEmpty ? "" : ": \(stderrTail)"
+            throw VoicePipelineError.transcriptionFailed("Whisper wrote no transcript\(suffix)")
+        }
+        return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Synthesizes text to audio via the macOS `say` command.

@@ -350,7 +350,12 @@ export async function getHealth(): Promise<HealthResponse> {
   // and older engines with neither degrade to the fallback constant via the resolver.
   const { data, headers } = await fetchJsonWithHeaders<HealthResponse>("/health");
   if (isAuthenticatedHealth(data)) {
+    // A restored HttpOnly cookie is invisible to JavaScript, so this probe is
+    // the only observable proof of an unauthenticated to authenticated flip;
+    // already-authenticated polls and unauthenticated payloads stay silent.
+    const wasAuthenticated = isSessionAuthenticated();
     sessionAuthenticated = true;
+    if (!wasAuthenticated) notifyAuthState();
   }
   const fromBody = parseMaxConcurrentChatTurns(data.maxConcurrentChatTurns as unknown);
   if (fromBody != null) {

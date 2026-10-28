@@ -36,8 +36,13 @@ public actor WSSocketBox: WSConnectionSocket {
     }
 }
 
-/// Serializes outbound frames for one WebSocket connection.
+/// Serializes outbound frames for one WebSocket connection. Delivery is FIFO in
+/// call order: every send awaits its predecessor on the same socket before writing,
+/// and a caller cancelled while queued skips its frame without overtaking later ones.
 private actor WSSendQueue {
+    /// Last enqueued send; each new send chains onto it so delivery stays FIFO.
+    private var tail: Task<Void, Never>?
+
     /// Sends one frame through the queue, best-effort with timeout.
     @discardableResult
     func send(
@@ -46,12 +51,27 @@ private actor WSSendQueue {
         timeoutNanoseconds: UInt64 = 1_000_000_000,
         ignoreCallerCancellation: Bool = false
     ) async -> Bool {
-        await wsSendWithTimeout(
-            text,
-            to: box,
-            timeoutNanoseconds: timeoutNanoseconds,
-            ignoreCallerCancellation: ignoreCallerCancellation
-        )
+        // Enqueue is synchronous, so call order equals queue order.
+        let previous = tail
+        let work = Task { [previous, box] in
+            if let previous {
+                _ = await previous.value
+            }
+            return await wsSendWithTimeout(
+                text,
+                to: box,
+                timeoutNanoseconds: timeoutNanoseconds,
+                ignoreCallerCancellation: ignoreCallerCancellation
+            )
+        }
+        tail = Task { _ = await work.value }
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            if !ignoreCallerCancellation {
+                work.cancel()
+            }
+        }
     }
 }
 
@@ -406,6 +426,11 @@ private func wsSendWithTimeout(
     timeoutNanoseconds: UInt64 = 1_000_000_000,
     ignoreCallerCancellation: Bool = false
 ) async -> Bool {
+    // A caller already cancelled while queued skips its frame entirely: the send
+    // task must never exist, or the cancelled frame still lands on the socket.
+    if !ignoreCallerCancellation, Task.isCancelled {
+        return false
+    }
     let gate = WSSendGate()
     let sendTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
     let timeoutTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)

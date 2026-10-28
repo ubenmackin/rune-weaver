@@ -1074,7 +1074,7 @@ private actor ServerRunnerActor {
         do {
             try await app.execute()
         } catch {
-            print("[RuneWeaverApp] Server terminated: \(error)")
+            RuneWeaverLog.app.error("[RuneWeaverApp] Server terminated: \(error)")
         }
     }
 

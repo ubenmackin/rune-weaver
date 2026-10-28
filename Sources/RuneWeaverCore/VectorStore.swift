@@ -79,9 +79,10 @@ public actor VectorStore {
         self.configuredDimension = dimension
         self.dimension = dimension
         let loaded = Self.loadBestEffort(directoryPath: directoryPath)
-        self.facts = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+        self.facts = Self.indexedByID(loaded, directoryPath: directoryPath)
         if self.dimension == nil {
-            let widths = Set(loaded.map(\.embedding.count).filter { $0 > 0 })
+            // Width derives from the deduplicated set so dropped duplicates cannot skew the value.
+            let widths = Set(self.facts.values.map(\.embedding.count).filter { $0 > 0 })
             self.dimension = widths.count == 1 ? widths.first : nil
         }
     }
@@ -266,7 +267,8 @@ public actor VectorStore {
 
     /// Reloads facts from disk, replacing memory.
     public func reload() {
-        facts = Dictionary(uniqueKeysWithValues: Self.loadBestEffort(directoryPath: directoryPath).map { ($0.id, $0) })
+        let loaded = Self.loadBestEffort(directoryPath: directoryPath)
+        facts = Self.indexedByID(loaded, directoryPath: directoryPath)
         if let configuredDimension {
             dimension = configuredDimension
             return
@@ -368,6 +370,22 @@ public actor VectorStore {
         } catch {
             throw VectorStoreError.persistenceFailed("Could not read vector store: \(error.localizedDescription)")
         }
+    }
+
+    /// Indexes loaded facts by id, keeping the last occurrence when an id repeats.
+    /// - Parameter directoryPath: Store directory the facts were decoded from.
+    /// - Returns: One fact per id; dropped duplicates are counted and warned.
+    private static func indexedByID(_ loaded: [StoredFact], directoryPath _: String) -> [UUID: StoredFact] {
+        var indexed: [UUID: StoredFact] = [:]
+        indexed.reserveCapacity(loaded.count)
+        var droppedDuplicates = 0
+        for fact in loaded where indexed.updateValue(fact, forKey: fact.id) != nil {
+            droppedDuplicates += 1
+        }
+        if droppedDuplicates > 0 {
+            RuneWeaverLog.memory.warning("VectorStore: dropped \(droppedDuplicates) duplicate fact id(s) from facts.json")
+        }
+        return indexed
     }
 
     /// Persists the in-memory snapshot off the actor executor.

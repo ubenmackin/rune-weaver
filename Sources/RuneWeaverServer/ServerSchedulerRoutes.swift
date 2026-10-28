@@ -440,13 +440,16 @@ private func handleSchedulerRun(req: Request) async throws -> OrchestratorRespon
     guard await context.runLock.tryAcquire(id: id, name: job.name) else {
         // Skipped runs create no conversation, so the audit entry stays
         // untagged instead of inventing an orphan session for filtering.
-        await context.runs.append(
+        let skipped = await context.runs.append(
             kind: "scheduler",
             status: "skipped",
             message: "Skipped '\(job.name)': already running",
             jobID: id,
             sessionID: nil
         )
+        // The request answers conflict, but the skip row is still a run write
+        // and must reach dashboards instead of landing silently.
+        await context.hub.broadcastRun(skipped)
         throw Abort(.conflict, reason: "Job \(raw) is already running")
     }
     // The single-flight lock is held for the whole turn and released with a structured await on

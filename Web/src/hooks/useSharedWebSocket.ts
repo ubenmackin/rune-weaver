@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
+  isSessionAuthenticated,
   isValidToolIDs,
   parseRecallDiagnostics,
   parseToolProgress,
@@ -549,18 +550,24 @@ class SharedWebSocketClient {
       };
 
       ws.onmessage = (event) => {
+        let data: WSIncomingFrame;
         try {
           // Parse as unknown first so arbitrary payloads stay untyped until
           // the discriminated guard below proves the shape; malformed frames
           // drop at the hub instead of flowing into typed view handlers.
           const parsed: unknown = JSON.parse(event.data);
           if (!isWSIncomingFrame(parsed)) return;
-          const data: WSIncomingFrame = parsed;
-          for (const listener of this.listeners) {
-            listener(data);
-          }
+          data = parsed;
         } catch {
-          // Ignore non-JSON
+          // Non-JSON payloads stay silently ignored.
+          return;
+        }
+        for (const listener of this.listeners) {
+          try {
+            listener(data);
+          } catch {
+            // One failing listener must not starve the rest.
+          }
         }
       };
 
@@ -642,6 +649,9 @@ class SharedWebSocketClient {
     // An idle close must stay closed: only a live subscriber justifies the
     // next dial, so an unsubscribed shutdown never re-arms itself here.
     if (!this.hasSubscribers()) return;
+    // A logged-out client stops redialing until an auth transition re-arms
+    // the dial; otherwise a rejected upgrade would loop against the engine.
+    if (!isSessionAuthenticated()) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.hasSubscribers()) {

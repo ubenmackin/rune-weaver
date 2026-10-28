@@ -1794,6 +1794,45 @@ describe("owner bearer auth client", () => {
     expect(isAuthenticatedHealth(null)).toBe(false);
     expect(isAuthenticatedHealth(undefined)).toBe(false);
   });
+
+  it("announces exactly one auth transition on the first authenticated health probe", async () => {
+    // A restored HttpOnly cookie is invisible to JavaScript, so the first
+    // authenticated /health response is the only observable proof of the
+    // transition; later polls must not re-announce it.
+    const transitions: boolean[] = [];
+    const unsubscribe = subscribeAuthState((authenticated) =>
+      transitions.push(authenticated),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ status: "ok", engine: "Rune Weaver", version: "0.1.0" }),
+      ),
+    );
+    await getHealth();
+    expect(isSessionAuthenticated()).toBe(true);
+    expect(transitions).toEqual([true]);
+    await getHealth();
+    expect(transitions).toEqual([true]);
+    unsubscribe();
+  });
+
+  it("never announces a transition for an unauthenticated health payload", async () => {
+    // A minimal liveness object proves the probe never cleared the owner
+    // gate, so the state must not flip and subscribers must hear nothing.
+    const transitions: boolean[] = [];
+    const unsubscribe = subscribeAuthState((authenticated) =>
+      transitions.push(authenticated),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ status: "ok" })),
+    );
+    await getHealth();
+    expect(isSessionAuthenticated()).toBe(false);
+    expect(transitions).toEqual([]);
+    unsubscribe();
+  });
 });
 
 describe("host parity contract", () => {

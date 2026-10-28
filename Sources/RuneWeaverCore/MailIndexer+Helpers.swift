@@ -327,7 +327,9 @@ extension MailIndexer {
             }
         }
         if dirtyCheckpoints {
-            try await checkpoints.flush()
+            try await degradeCheckpointWrite {
+                try await checkpoints.flush()
+            }
         }
     }
 
@@ -367,15 +369,11 @@ extension MailIndexer {
             mailbox: context.mailbox,
             messageID: message.id
         )
-        let isUnchanged: Bool
-        if let preloaded = preloadedFingerprints {
-            // In-memory content-hash plus extract-status comparison; a missing
-            // entry counts as changed, never unchanged.
-            let stored = preloaded[externalID]
-            isUnchanged = stored?.contentHash == contentHash && stored?.extractStatus != .failed
-        } else {
-            isUnchanged = try await !(store.needsReindex(source: .mail, externalID: externalID, contentHash: contentHash))
-        }
+        let isUnchanged = try await resolveMailUnchanged(
+            externalID: externalID,
+            contentHash: contentHash,
+            preloadedFingerprints: preloadedFingerprints
+        )
         if isUnchanged {
             outcome.unchanged = true
             return PreparedMailMessage(
@@ -443,6 +441,33 @@ extension MailIndexer {
             indicesToEmbed: indicesToEmbed,
             textsToEmbed: textsToEmbed
         )
+    }
+
+    /// Resolves whether the stored fingerprint already matches this message.
+    /// preloadedFingerprints: Page-scoped bulk fingerprints, or nil when the preload failed.
+    private func resolveMailUnchanged(
+        externalID: String,
+        contentHash: String,
+        preloadedFingerprints: [String: DocStoredFingerprint]?
+    ) async throws -> Bool {
+        if let preloaded = preloadedFingerprints {
+            // In-memory content-hash plus extract-status comparison; a missing
+            // entry counts as changed, never unchanged.
+            let stored = preloaded[externalID]
+            return stored?.contentHash == contentHash && stored?.extractStatus != .failed
+        }
+        do {
+            return try await !(store.needsReindex(source: .mail, externalID: externalID, contentHash: contentHash))
+        } catch let cancel as CancellationError {
+            throw cancel
+        } catch {
+            // A failed lookup cannot verify the stored body, so the message
+            // processes rather than skipping on an unverifiable guess.
+            RuneWeaverLog.stores.warning(
+                "MailIndexer: failed to look up the stored fingerprint for '\(externalID)'; processing the message: \(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     private struct MailPromptSlice {

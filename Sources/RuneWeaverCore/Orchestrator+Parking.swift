@@ -24,6 +24,10 @@ extension Orchestrator {
         guard let parked = takeParkedNarratedApproval(id: id) else {
             return nil
         }
+        // Counted for the whole resume so overlapping sibling decisions defer
+        // synthesis; the defer covers return, throw, and cancellation alike.
+        markParkedResumeStarted(batchID: parked.batchID)
+        defer { markParkedResumeFinished(batchID: parked.batchID) }
         if let queue = approvalQueue {
             _ = await queue.takeEarlyDecision(id: id)
         }
@@ -309,7 +313,9 @@ extension Orchestrator {
             await onEvent?(.warning(warning))
         }
         let remaining = remainingPendingActions(inBatch: batchID)
-        if !remaining.isEmpty {
+        // The default of 1 treats a missing entry as this resume alone, so the
+        // last in-flight resume synthesizes and overlapping siblings stay parked.
+        if !remaining.isEmpty || parkedBatchActiveResumes[batchID, default: 1] > 1 {
             return await pendingParkedResponse(
                 PendingParkedContext(
                     parked: parked,
@@ -405,14 +411,18 @@ extension Orchestrator {
         let parked = context.parked
         let buffered = parkedExecutedActions(forBatch: parked.batchID)
         let noun = context.remaining.count == 1 ? "approval" : "approvals"
+        // The empty-remaining case is a concurrent deferral, not a progress
+        // report, so it echoes the decision text instead of a zero countdown.
         let progress: String = if context.newAction != nil {
             parkedBatchProgressMessage(
                 toolName: parked.toolCall.toolName,
                 remainingCount: context.remaining.count,
                 approved: context.approved
             )
-        } else {
+        } else if !context.remaining.isEmpty {
             "\(context.baseText) Waiting for \(context.remaining.count) more \(noun)."
+        } else {
+            context.baseText
         }
         await context.onEvent?(.textDelta(progress))
         return OrchestratorResponse(

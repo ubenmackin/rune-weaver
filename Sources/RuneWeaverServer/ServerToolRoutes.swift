@@ -192,7 +192,7 @@ func registerToolRoutes(_ app: Application) {
             argumentsJSON: call.argumentsJSON,
             result: result
         )
-        await context.runs.append(
+        let entry = await context.runs.append(
             kind: "tool",
             status: result.isError ? "error" : "ok",
             message: call.toolName,
@@ -200,6 +200,9 @@ func registerToolRoutes(_ app: Application) {
             toolActions: [action],
             durationMs: Int(Date().timeIntervalSince(startTime) * 1000)
         )
+        // No silent run writes: the settled row reaches dashboards now instead
+        // of surfacing only after the next run-history poll.
+        await context.hub.broadcastRun(entry)
         return result
     }
 }

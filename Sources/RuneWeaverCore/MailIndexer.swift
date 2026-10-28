@@ -135,7 +135,18 @@ public actor MailIndexer {
                     runDate: runDate,
                     attachmentCap: attachmentCap
                 )
-                try await indexMailbox(context: context, cursor: &cursor, reporter: reporter)
+                do {
+                    try await indexMailbox(context: context, cursor: &cursor, reporter: reporter)
+                } catch let cancel as CancellationError {
+                    throw cancel
+                } catch {
+                    // One broken mailbox must not abort the pass: the fresh path never
+                    // advanced its watermark, so the next run retries the failed page.
+                    cursor.report.warnings.append(
+                        "Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)"
+                    )
+                    continue
+                }
             }
         }
         // Retire on complete runs only: a cancelled pass, a budget-capped pass, or a halted pass
@@ -406,6 +417,21 @@ public actor MailIndexer {
             offset = end
         }
     }
+
+    /// Degrades a failed checkpoint persistence to a logged warning so one unwritable sidecar
+    /// file never aborts the run; in-memory watermarks stay authoritative until the next flush.
+    /// Cancellation still propagates so cooperative shutdown stays immediate.
+    func degradeCheckpointWrite(_ operation: () async throws -> Void) async throws {
+        do {
+            try await operation()
+        } catch let cancel as CancellationError {
+            throw cancel
+        } catch {
+            RuneWeaverLog.stores.warning(
+                "MailIndexer: checkpoint persist failed; run continues and the next flush retries: \(error.localizedDescription)"
+            )
+        }
+    }
 }
 
 // MARK: - Streaming backfill
@@ -540,12 +566,14 @@ extension MailIndexer {
 
             if watermark == 0, let highest = numericUIDs.max() {
                 watermark = highest
-                try await checkpoints.record(
-                    account: context.account.name,
-                    mailbox: context.mailbox,
-                    watermark: watermark,
-                    contentHash: nil
-                )
+                try await degradeCheckpointWrite {
+                    try await checkpoints.record(
+                        account: context.account.name,
+                        mailbox: context.mailbox,
+                        watermark: highest,
+                        contentHash: nil
+                    )
+                }
             }
 
             let sortedPage = page.sorted { Self.uid(of: $0.id) < Self.uid(of: $1.id) }
@@ -558,20 +586,24 @@ extension MailIndexer {
             )
 
             if lowest <= 1 || (page.count < Self.pageLimit && lowest <= 1) {
-                try await checkpoints.recordBackfillFloor(
-                    account: context.account.name,
-                    mailbox: context.mailbox,
-                    floor: nil
-                )
+                try await degradeCheckpointWrite {
+                    try await checkpoints.recordBackfillFloor(
+                        account: context.account.name,
+                        mailbox: context.mailbox,
+                        floor: nil
+                    )
+                }
                 break
             }
 
             currentBeforeUID = lowest
-            try await checkpoints.recordBackfillFloor(
-                account: context.account.name,
-                mailbox: context.mailbox,
-                floor: lowest
-            )
+            try await degradeCheckpointWrite {
+                try await checkpoints.recordBackfillFloor(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    floor: lowest
+                )
+            }
         }
     }
 
@@ -585,10 +617,14 @@ extension MailIndexer {
               let window = MailIndexTiling.window(beforeUID: current),
               window.lower > 1
         else {
-            try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: nil)
+            try await degradeCheckpointWrite {
+                try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: nil)
+            }
             return nil
         }
-        try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: window.lower)
+        try await degradeCheckpointWrite {
+            try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: window.lower)
+        }
         return window.lower
     }
 

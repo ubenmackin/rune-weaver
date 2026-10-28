@@ -817,12 +817,14 @@ private func reclaimOrphanedContainers(config: ContainersConfig, approvals: Appr
 
 /// Installs the live approval prompt path as the backstop for direct bus executions. Broadcasts
 /// each filed request and waits with a timeout, keeping the bus wiring single-sourced for boot.
-private func installLiveApprovalHandler(
+/// Module-internal so boot tests can install a bounded handler; production callers take the default.
+func installLiveApprovalHandler(
     bus: ToolBus,
     approvals: ApprovalQueue,
     hub: WSHub,
     workspaceStore: WorkspaceStore,
-    onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
+    onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?,
+    decisionTimeoutSeconds: Double = ApprovalQueue.defaultDecisionTimeoutSeconds
 ) async {
     let handlerApprovals = approvals
     let handlerHub = hub
@@ -850,7 +852,9 @@ private func installLiveApprovalHandler(
         if let onApprovalRequested {
             await onApprovalRequested(request)
         }
-        let decision = await handlerApprovals.waitForDecision(id: request.id)
+        // A timeout denies fail-closed while the inbox entry stays filed, so an
+        // owner can still triage the request instead of the call hanging forever.
+        let decision = await handlerApprovals.waitForDecision(id: request.id, timeoutSeconds: decisionTimeoutSeconds)
         return decision.approved
     }
 }

@@ -102,11 +102,22 @@ extension ServerSchedulerWorker {
         sender: String? = nil,
         subject: String? = nil
     ) -> String {
+        // Each value lands as a complete JSON string literal so event text can
+        // never terminate a string or add object keys; a quoted template slot is
+        // consumed because the fragment already carries its own quotes.
+        let values: [(placeholder: String, value: String)] = [
+            ("{{id}}", eventID),
+            ("{{sender}}", sender ?? ""),
+            ("{{subject}}", subject ?? ""),
+            ("{{account}}", account ?? "")
+        ]
         var resolved = template
-            .replacingOccurrences(of: "{{id}}", with: eventID)
-            .replacingOccurrences(of: "{{sender}}", with: sender ?? "")
-            .replacingOccurrences(of: "{{subject}}", with: subject ?? "")
-            .replacingOccurrences(of: "{{account}}", with: account ?? "")
+        for (placeholder, value) in values {
+            let fragment = Self.jsonEscapedFragment(value)
+            resolved = resolved
+                .replacingOccurrences(of: "\"\(placeholder)\"", with: fragment)
+                .replacingOccurrences(of: placeholder, with: fragment)
+        }
 
         if let data = resolved.data(using: .utf8),
            var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -130,6 +141,17 @@ extension ServerSchedulerWorker {
             }
         }
         return resolved
+    }
+
+    /// Wraps a value as one JSON string literal by serializing a single-element
+    /// array and dropping the enclosing brackets, so quotes and backslashes in
+    /// event text stay escaped inside the substituted arguments.
+    private static func jsonEscapedFragment(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let fragment = String(data: data, encoding: .utf8),
+              fragment.hasPrefix("["), fragment.hasSuffix("]")
+        else { return "" }
+        return String(fragment.dropFirst().dropLast())
     }
 
     /// Executes a direct tool action bypassing LLM inference.

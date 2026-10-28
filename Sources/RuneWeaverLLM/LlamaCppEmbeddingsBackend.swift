@@ -81,55 +81,9 @@ public final class LlamaCppEmbeddingsBackend: EmbeddingsBackend, @unchecked Send
             return vectors
         }
 
-        if let supervisor {
-            do {
-                try await supervisor.ensureRunning()
-            } catch {
-                RuneWeaverLog.stores.error("LlamaCppEmbeddingsBackend: supervisor failed to ensure running: \(error.localizedDescription)")
-                throw error
-            }
-        }
-
         let requestBody = EmbeddingRequestPayload(input: texts, model: modelID)
         let jsonData = try JSONEncoder().encode(requestBody)
-
-        let responseData: Data
-        if let socketPath {
-            let expandedPath = (socketPath as NSString).expandingTildeInPath
-            try Task.checkCancellation()
-            // Socket I/O blocks for seconds, so it stays off the actor on a
-            // detached task; cancellation propagates cooperatively so a stopped
-            // index run aborts the in-flight request instead of waiting it out.
-            let socketTask = Task.detached {
-                try Self.sendHTTPRequestOverUnixSocket(
-                    socketPath: expandedPath,
-                    path: "/v1/embeddings",
-                    body: jsonData
-                )
-            }
-            do {
-                responseData = try await withTaskCancellationHandler {
-                    try await socketTask.value
-                } onCancel: {
-                    socketTask.cancel()
-                }
-            } catch {
-                socketTask.cancel()
-                throw error
-            }
-        } else if let httpURL {
-            var request = URLRequest(url: httpURL.appendingPathComponent("v1/embeddings"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = jsonData
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode < 200 || http.statusCode >= 300 {
-                throw EmbeddingsError.embeddingFailed
-            }
-            responseData = data
-        } else {
-            throw EmbeddingsError.unavailable
-        }
+        let responseData = try await sendEmbeddingRequest(jsonData: jsonData)
 
         let parsed: EmbeddingResponsePayload
         do {
@@ -186,12 +140,26 @@ public final class LlamaCppEmbeddingsBackend: EmbeddingsBackend, @unchecked Send
         return rawImageData
     }
 
-    /// Dispatches an encoded JSON embedding request over unix domain socket or HTTP.
+    /// Sole dispatch owner for embedding requests: ensures the supervised server
+    /// is running, then sends the encoded payload over the unix socket with an
+    /// HTTP endpoint fallback.
     private func sendEmbeddingRequest(jsonData: Data) async throws -> Data {
+        if let supervisor {
+            do {
+                try await supervisor.ensureRunning()
+            } catch {
+                RuneWeaverLog.stores.error("LlamaCppEmbeddingsBackend: supervisor failed to ensure running: \(error.localizedDescription)")
+                throw error
+            }
+        }
+
         if let socketPath {
             let expandedPath = (socketPath as NSString).expandingTildeInPath
             try Task.checkCancellation()
-            let imageSocketTask = Task.detached {
+            // Socket I/O blocks for seconds, so it stays off the actor on a
+            // detached task; cancellation propagates cooperatively so a stopped
+            // index run aborts the in-flight request instead of waiting it out.
+            let socketTask = Task.detached {
                 try Self.sendHTTPRequestOverUnixSocket(
                     socketPath: expandedPath,
                     path: "/v1/embeddings",
@@ -200,12 +168,12 @@ public final class LlamaCppEmbeddingsBackend: EmbeddingsBackend, @unchecked Send
             }
             do {
                 return try await withTaskCancellationHandler {
-                    try await imageSocketTask.value
+                    try await socketTask.value
                 } onCancel: {
-                    imageSocketTask.cancel()
+                    socketTask.cancel()
                 }
             } catch {
-                imageSocketTask.cancel()
+                socketTask.cancel()
                 throw error
             }
         }
@@ -277,15 +245,7 @@ public final class LlamaCppEmbeddingsBackend: EmbeddingsBackend, @unchecked Send
             return vec
         }
 
-        if let supervisor {
-            do {
-                try await supervisor.ensureRunning()
-            } catch {
-                RuneWeaverLog.stores.error("LlamaCppEmbeddingsBackend: supervisor failed to ensure running: \(error.localizedDescription)")
-                throw error
-            }
-        }
-
+        // Bounded read precedes dispatch, so an oversized image never spins up the server.
         let rawImageData = try await readBoundedImageData(at: imageURL)
         let base64String = rawImageData.base64EncodedString()
         let mimeType = Self.imageMIMEType(for: imageURL)

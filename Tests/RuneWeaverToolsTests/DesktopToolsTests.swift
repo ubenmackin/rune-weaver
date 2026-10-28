@@ -556,6 +556,75 @@ struct DesktopToolsTests {
         #expect(output.content.contains("Batch too large"))
     }
 
+    // MARK: - UTF-16 typing units and scroll delta bounds
+
+    #if canImport(CoreGraphics) && canImport(AppKit)
+        @Test
+        func `unicodeCodeUnits maps an emoji to a surrogate pair and ASCII to one unit`() {
+            // Non-BMP scalars must post as UTF-16 surrogate pairs; a raw 32-bit
+            // scalar value truncated to 16 bits traps inside CGEvent posting.
+            let emoji = DesktopControlBridge.unicodeCodeUnits(for: "🎉")
+            #expect(emoji.count == 2)
+            #expect(emoji == [0xD83C, 0xDF89])
+            #expect(DesktopControlBridge.unicodeCodeUnits(for: "a") == [0x61])
+        }
+    #endif
+
+    @Test
+    func `validateScrollDeltas accepts deltas at the posting bound`() throws {
+        try DesktopControlBridge.validateScrollDeltas([
+            .typeText(text: "unaffected"),
+            .scroll(deltaX: 100_000, deltaY: -100_000)
+        ])
+    }
+
+    @Test
+    func `validateScrollDeltas rejects oversized deltas with the offending index`() {
+        do {
+            try DesktopControlBridge.validateScrollDeltas([
+                .delay(milliseconds: 10),
+                .scroll(deltaX: 0, deltaY: -100_001)
+            ])
+            Issue.record("Oversized scroll delta must fail preflight")
+        } catch let error as DesktopControlError {
+            guard case let .actionFailed(index, reason) = error else {
+                Issue.record("Expected actionFailed, got \(error)")
+                return
+            }
+            #expect(index == 1)
+            #expect(reason.contains("100001"))
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
+    @Test
+    func `Oversized scroll deltas fail preflight before any dispatch`() async throws {
+        // The bound must refuse through executeBatch itself, before CGEvent work,
+        // even when Accessibility is fully granted.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let live = DesktopControlBridge(accessibilityAccess: { true })
+        do {
+            _ = try await live.executeBatch(
+                actions: [.scroll(deltaX: 150_001, deltaY: 0)],
+                scaleX: 1.0,
+                scaleY: 1.0,
+                blockedApps: []
+            )
+            Issue.record("Oversized scroll delta must be refused in preflight")
+        } catch let error as DesktopControlError {
+            guard case let .actionFailed(index, reason) = error else {
+                Issue.record("Expected actionFailed, got \(error)")
+                return
+            }
+            #expect(index == 0)
+            #expect(reason.contains("150001"))
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
     @Test
     func `Both tools expose valid JSON Schema documents`() throws {
         let screenshot = DesktopScreenshotTool(captureBridge: StubDesktopCaptureBridge())

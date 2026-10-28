@@ -301,6 +301,8 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     public static let maxDelayMs = 5000
     /// Maximum characters allowed in a single type_text action.
     public static let maxTypeTextLength = 2000
+    /// Maximum absolute scroll delta accepted per axis in a scroll action.
+    public static let maxScrollDelta = 100_000
     /// Maximum allowed scale factor from screenshot to native coordinates.
     static let maxScaleFactor: Double = 100.0
     /// Maximum allowed coordinate value in screenshot pixel space.
@@ -335,6 +337,23 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     /// Extracts explicit HTTP/HTTPS URLs present in text.
     public static func extractURLs(from text: String) -> [String] {
         ApprovalQueue.extractLinkURLs(from: text)
+    }
+
+    /// Refuses scroll actions whose per-axis delta exceeds the posting bound so
+    /// oversized values fail in preflight instead of trapping in the Int32 cast.
+    nonisolated static func validateScrollDeltas(_ actions: [DesktopAction]) throws {
+        for (index, action) in actions.enumerated() {
+            guard case let .scroll(deltaX, deltaY) = action else { continue }
+            // Both directions are compared directly; abs(Int.min) would trap.
+            let bound = Self.maxScrollDelta
+            if deltaX > bound || deltaX < -bound || deltaY > bound || deltaY < -bound {
+                throw DesktopControlError.actionFailed(
+                    index: index,
+                    reason: "Scroll delta (dx: \(deltaX), dy: \(deltaY)):"
+                        + " absolute value must be at most \(Self.maxScrollDelta)"
+                )
+            }
+        }
     }
 
     public func executeBatch(
@@ -389,6 +408,7 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 + "must be finite, positive, and at most \(Self.maxScaleFactor)"
             throw DesktopControlError.actionFailed(index: 0, reason: reason)
         }
+        try Self.validateScrollDeltas(actions)
         try await screenBatchURLs(actions: actions, sessionID: sessionID, declaredHosts: declaredHosts)
     }
 
@@ -796,7 +816,9 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 let modStr = modifiers.isEmpty ? "" : " with \(modifiers.map(\.rawValue).joined(separator: "+"))"
                 return ("Pressed \(key)\(modStr)", nil)
             case let .scroll(deltaX, deltaY):
-                performScroll(deltaX: Int32(deltaX), deltaY: Int32(deltaY))
+                // Preflight bounds deltas far below Int32.range; clamping is
+                // defense-in-depth for callers that bypass preflight.
+                performScroll(deltaX: Int32(clamping: deltaX), deltaY: Int32(clamping: deltaY))
                 return ("Scrolled (dx: \(deltaX), dy: \(deltaY))", nil)
             case let .delay(delayMs):
                 let clamped = min(max(0, delayMs), Self.maxDelayMs)
@@ -981,6 +1003,13 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             mouseUp.post(tap: .cghidEventTap)
         }
 
+        /// UTF-16 code units for one character, the encoding CGEvent's Unicode
+        /// string API expects. Surrogate pairs keep non-BMP scalars intact where
+        /// a raw 32-bit scalar value truncated to 16 bits would trap at post time.
+        static func unicodeCodeUnits(for character: Character) -> [UniChar] {
+            Array(String(character).utf16)
+        }
+
         /// Types a string by posting keyboard events for each character.
         /// Checks the shared stop flag and task cancellation every character
         /// so a long `type_text` aborts mid-action instead of running out.
@@ -990,10 +1019,8 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 if await DesktopControlMonitor.shared.shouldAbort() {
                     throw DesktopControlError.emergencyStopped
                 }
-                let unicodeScalar = Array(character.unicodeScalars)
-                guard unicodeScalar.first != nil else { continue }
-                let codeUnits = unicodeScalar.map { UniChar($0.value) }
-                guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { continue }
+                let codeUnits = Self.unicodeCodeUnits(for: character)
+                guard !codeUnits.isEmpty, let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { continue }
                 down.keyboardSetUnicodeString(
                     stringLength: codeUnits.count,
                     unicodeString: codeUnits
@@ -1094,13 +1121,12 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         /// Posts a single bare character via Unicode events. The bare path never carries modifiers,
         /// so flags stay empty; a half-posted pair throws instead of reporting a completed press.
         private func postUnicodeCharacter(_ character: Character) throws {
-            let scalars = Array(character.unicodeScalars)
-            guard !scalars.isEmpty else {
+            let codeUnits = Self.unicodeCodeUnits(for: character)
+            guard !codeUnits.isEmpty else {
                 throw DesktopControlError.actionFailed(
                     index: 0, reason: "Unmappable character for key_press"
                 )
             }
-            let codeUnits = scalars.map { UniChar($0.value) }
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
                 throw DesktopControlError.actionFailed(
                     index: 0, reason: "Failed to post key-down event"
