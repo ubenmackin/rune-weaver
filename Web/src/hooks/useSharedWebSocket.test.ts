@@ -1,8 +1,8 @@
 // Rune Weaver Dashboard — Direct tests for the shared WebSocket client's
-// `tool_progress` inbound guard.
+// inbound guard, auth-gated reconnect, and listener isolation.
 
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resetSharedSocket,
   useSharedWebSocket,
@@ -192,5 +192,90 @@ describe("shared WebSocket tool_progress guard", () => {
     });
     await waitFor(() => expect(result.current.isOpen()).toBe(true));
     unmount();
+  });
+});
+
+describe("shared WebSocket auth-gated reconnect and listener isolation", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    clearAuthToken();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    clearAuthToken();
+  });
+
+  it("does not redial after a close while unauthenticated", async () => {
+    vi.useFakeTimers();
+    const { instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const { unmount } = renderHook(() => useSharedWebSocket(() => {}));
+    // connect() stays unguarded, so a mounted view's explicit subscription
+    // dials exactly once even before any credential exists.
+    expect(instances.length).toBe(1);
+    await act(async () => {
+      instances[0].close();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(3100);
+    });
+    expect(instances.length).toBe(1);
+    unmount();
+  });
+
+  it("dials exactly once when authentication transitions to true", async () => {
+    vi.useFakeTimers();
+    const { instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const { unmount } = renderHook(() => useSharedWebSocket(() => {}));
+    expect(instances.length).toBe(1);
+    await act(async () => {
+      instances[0].close();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(3100);
+    });
+    expect(instances.length).toBe(1);
+    await act(async () => {
+      setAuthToken("fresh-owner-token");
+    });
+    // The auth transition announcing a login is what re-arms the blocked
+    // dial, so exactly one fresh upgrade must follow the silent window.
+    expect(instances.length).toBe(2);
+    unmount();
+  });
+
+  it("delivers a frame to later listeners when an earlier one throws", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    const fromThrowing: WSIncomingFrame[] = [];
+    const fromSurvivor: WSIncomingFrame[] = [];
+    renderHook(() =>
+      useSharedWebSocket((frame) => {
+        fromThrowing.push(frame);
+        throw new Error("first listener failed");
+      }),
+    );
+    renderHook(() => useSharedWebSocket((frame) => fromSurvivor.push(frame)));
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await dispatchFrameOrThrow(capture.onMessage, validFrame);
+    expect(fromThrowing).toHaveLength(1);
+    expect(fromSurvivor).toHaveLength(1);
+    expect(fromSurvivor[0]).toMatchObject({
+      type: "tool_progress",
+      callID: "call-1",
+    });
+  });
+
+  it("silently ignores a non-JSON payload without invoking listeners", async () => {
+    const { capture, received } = await mountSharedSocket();
+    await act(async () => {
+      capture.onMessage?.({ data: "not json at all {{" } as MessageEvent);
+    });
+    expect(received).toHaveLength(0);
   });
 });

@@ -170,6 +170,33 @@ describe("runsFingerprint", () => {
     const seconds = frozenCopy(baseRun({ timestamp: 1714564800 }));
     expect(runsFingerprint([iso])).toBe(runsFingerprint([seconds]));
   });
+
+  it("keeps message newlines distinct from row boundaries", () => {
+    const embedded = [
+      frozenCopy(
+        baseRun({
+          message: "a\n\nrun-2\njob-2\nsession-2\nchat\nok\nb",
+        }),
+      ),
+    ];
+    const asRows = [
+      frozenCopy(baseRun({ message: "a" })),
+      frozenCopy(baseRun({ message: "b" })),
+    ];
+    expect(runsFingerprint(embedded)).not.toBe(runsFingerprint(asRows));
+  });
+
+  it("keeps pipe characters inside fields distinct from field boundaries", () => {
+    const pipeInToolName = [
+      frozenCopy(baseRun({ toolActions: [baseAction({ toolName: "a|b" })] })),
+    ];
+    const pipeInCallID = [
+      frozenCopy(baseRun({ toolActions: [baseAction({ callID: "call-1|a" })] })),
+    ];
+    expect(runsFingerprint(pipeInToolName)).not.toBe(
+      runsFingerprint(pipeInCallID),
+    );
+  });
 });
 
 describe("shared runs stillness", () => {

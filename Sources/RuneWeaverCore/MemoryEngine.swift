@@ -296,6 +296,9 @@ public actor MemoryEngine {
                 source: .episodic,
                 metadata: ["id": episode.id.uuidString, "session_id": sessionID.uuidString, "role": role.rawValue]
             )
+        } catch is CancellationError {
+            // A stopped turn must surface as cancellation, never as a store failure.
+            throw CancellationError()
         } catch {
             throw MemoryEngineError.episodicFailed(error.localizedDescription)
         }

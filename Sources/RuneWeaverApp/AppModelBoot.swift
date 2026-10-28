@@ -52,13 +52,13 @@ extension AppModel {
     }
 
     /// Loads persisted conversations best-effort for menu-bar resume. A read failure starts fresh
-    /// but surfaces through the console so missing history is never mistaken for an empty account.
+    /// but is logged so missing history is never mistaken for an empty account.
     func loadBootConversations(config: RuneWeaverConfig) async -> ConversationManager {
         let conversations = ConversationManager(episodesDBPath: config.memory.episodesDBPath)
         do {
             try await conversations.loadAll()
         } catch {
-            print("[RuneWeaverApp] Could not load conversation history; starting fresh: \(error)")
+            RuneWeaverLog.app.warning("[RuneWeaverApp] Could not load conversation history; starting fresh: \(error)")
         }
         return conversations
     }
@@ -202,7 +202,6 @@ extension AppModel {
             // serving a supervisor-less `api.request`.
             let reason = error.localizedDescription
             RuneWeaverLog.app.error("Security policy rejected at boot: \(reason)")
-            print("[RuneWeaverApp] Security policy rejected at boot: \(reason)")
             exit(1)
         }
         let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(

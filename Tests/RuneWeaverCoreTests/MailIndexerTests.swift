@@ -706,6 +706,46 @@ private struct CancellableSessionGateway: MailIndexGateway {
     }
 }
 
+/// Gateway double whose message fetch throws CancellationError deterministically, proving the
+/// mailbox loop rethrows cancellation instead of degrading it to a skip.
+private struct CancellingMailGateway: MailIndexGateway {
+    /// Mailboxes reported before the failing fetch.
+    let mailboxNames: [String]
+
+    /// Creates a cancelling gateway.
+    /// - Parameter mailboxNames: Mailboxes reported by the stub.
+    init(mailboxNames: [String]) {
+        self.mailboxNames = mailboxNames
+    }
+
+    /// Returns the canned mailbox list.
+    func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+        mailboxNames
+    }
+
+    /// Throws cancellation for every page request.
+    func messages(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        limit _: Int,
+        mode _: MailFetchMode,
+        beforeUID _: Int?
+    ) async throws -> [MailIndexMessage] {
+        throw CancellationError()
+    }
+
+    /// Never serves attachment bytes; the cancellation test uses attachment-free mail.
+    func attachment(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int,
+        mode _: MailFetchMode
+    ) async throws -> MailIndexAttachmentData {
+        throw StubGatewayError.missingAttachment
+    }
+}
+
 // MARK: - Helpers
 
 /// Creates an isolated temporary base directory.
@@ -2797,6 +2837,143 @@ struct MailIndexerTests {
 
             let stats = try await store.stats()
             #expect(stats.documents == 120)
+        }
+    }
+
+    @Test
+    func `Checkpoint flush failure degrades to a warning and both mailboxes still index`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        // A regular file blocks the checkpoint directory so every sidecar persist fails.
+        let blocker = base.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let checkpoints = MailIndexCheckpointStore(path: blocker.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RecordingSessionGateway(
+                    mailboxNames: ["INBOX", "Archive"],
+                    perMailbox: [
+                        "INBOX": [makeMessage(id: "1", body: "flush fault inbox body unique")],
+                        "Archive": [makeMessage(id: "1", body: "flush fault archive body unique")]
+                    ],
+                    recorder: recorder
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            // The unwritable sidecar degrades to the logged warning: the run
+            // completes and the later mailbox still indexes instead of aborting.
+            #expect(report.messagesSeen == 2)
+            #expect(report.messagesIndexed == 2)
+            #expect(report.warnings.isEmpty)
+        }
+
+        let stats = try await store.stats()
+        #expect(stats.documents == 2)
+    }
+
+    @Test
+    func `Failing needsReindex lookup processes the message instead of skipping it`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        // A regular file blocks the database directory so every store call fails.
+        let blocker = base.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let store = DocIndexStore(dbPath: blocker.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let indexer = makeIndexer(gateway: StubMailGateway(messages: []), store: store, checkpoints: checkpoints)
+        let context = MailIndexer.MailboxContext(
+            account: testAccount,
+            mailbox: "INBOX",
+            credentials: MailIndexCredentials(
+                accountName: "mailtest",
+                host: "imap.example.com",
+                port: 993,
+                username: "user@example.com",
+                password: "test-secret"
+            ),
+            window: MailVectorWindow(token: "2y"),
+            runDate: Date(),
+            attachmentCap: 20 * 1_048_576
+        )
+
+        var seen: Set<String> = []
+        let prepared = try await indexer.prepareMailMessage(
+            message: makeMessage(id: "1", body: "lookup fault body unique"),
+            context: context,
+            seenBatchHashes: &seen,
+            preloadedFingerprints: nil
+        )
+        // The unverifiable stored body processes rather than skipping.
+        #expect(!prepared.outcome.unchanged)
+        #expect(prepared.document != nil)
+    }
+
+    @Test
+    func `Store write failure skips one mailbox and later mailboxes continue`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        // A regular file blocks the database directory so every store write fails.
+        let blocker = base.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let store = DocIndexStore(dbPath: blocker.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RecordingSessionGateway(
+                    mailboxNames: ["INBOX", "Archive"],
+                    perMailbox: [
+                        "INBOX": [makeMessage(id: "1", body: "store fault inbox body unique")],
+                        "Archive": [makeMessage(id: "1", body: "store fault archive body unique")]
+                    ],
+                    recorder: recorder
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            // Each broken mailbox degrades to one skip warning; the loop
+            // continues so the later mailbox is attempted too.
+            #expect(report.messagesIndexed == 0)
+            #expect(report.warnings.count == 2)
+            #expect(report.warnings[0].contains("Skipped mailbox 'mailtest/INBOX'"))
+            #expect(report.warnings[1].contains("Skipped mailbox 'mailtest/Archive'"))
+        }
+
+        // Both session brackets closed, proving the loop continued past the failure.
+        let opens = await recorder.opensSnapshot()
+        let closes = await recorder.closesSnapshot()
+        #expect(opens.count == 2)
+        #expect(closes.count == 2)
+    }
+
+    @Test
+    func `Gateway cancellation propagates instead of skipping the mailbox`() async {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+
+        await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: CancellingMailGateway(mailboxNames: ["INBOX", "Archive"]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            do {
+                _ = try await indexer.run()
+                Issue.record("Expected CancellationError from the failing fetch")
+            } catch is CancellationError {
+                // Cancellation rethrows out of the mailbox loop instead of degrading to a skip.
+            } catch {
+                Issue.record("Expected CancellationError, got \(error)")
+            }
         }
     }
 }

@@ -424,12 +424,6 @@ func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, hub: WSH
         await hub.broadcastApproval(request)
         return
     }
-    if case .toolProgress = event {
-        if let frameText = wsEventFrameText(event, sessionID: sessionID) {
-            Task { await hub.broadcast(text: frameText) }
-        }
-        return
-    }
     if let frameText = wsEventFrameText(event, sessionID: sessionID) {
         await hub.broadcast(text: frameText)
     }

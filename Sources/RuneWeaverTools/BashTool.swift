@@ -481,15 +481,16 @@ extension BashTool {
         timedOut: OSAllocatedUnfairLock<Bool>
     ) -> Task<Void, Never> {
         let boundedTimeoutSeconds = min(max(timeoutSeconds, 1), 3600)
-        // Dispatch fires the wall-clock bound even when the cooperative pool stalls,
-        // so a sleeping child cannot outlive its timeout under parallel test load.
+        // Dispatch at user-initiated QoS fires the wall-clock bound even when the
+        // cooperative pool and utility-QoS lanes are saturated, so a sleeping child
+        // cannot outlive its timeout under parallel test load.
         let workItem = DispatchWorkItem {
             if process.isRunning {
                 timedOut.withLock { $0 = true }
                 terminateProcessGroup(process)
             }
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + boundedTimeoutSeconds,
             execute: workItem
         )

@@ -131,9 +131,15 @@ private func handlePutSettings(req: Request) async throws -> Response {
                 throw Abort(.internalServerError, reason: "Saved bash policy did not round-trip; refusing to update live tools.")
             }
         }
-        try config.save(to: url)
+        // Fail-closed pre-save probe: resolve the LLM swap before the file persists so a rejected
+        // provider set leaves both the durable file and the live engines on the stored generation.
+        var llmSwap: LiveLLMSwap?
         if llmChanged {
-            try await reloadLiveLLM(config: config, context: liveContext)
+            llmSwap = try await prepareLiveLLMSwap(config: config, context: liveContext)
+        }
+        try config.save(to: url)
+        if let swap = llmSwap {
+            await applyLiveLLMSwap(swap, context: liveContext)
         }
         await applyLiveOrchestratorTuning(body: body, context: liveContext)
         await applyLiveRecallBudgets(body: body, config: config, context: liveContext)
@@ -297,9 +303,18 @@ private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
     }
 }
 
-/// Live-reloads the active LLM provider into the live orchestrator, goal engine, fanout, and
-/// context without a restart.
-func reloadLiveLLM(config: RuneWeaverConfig, context: ServerContext) async throws {
+/// Prepared LLM swap held between pre-save preparation and post-save application: the selected
+/// provider plus its derived server URLs. Preparation never mutates live state.
+struct LiveLLMSwap: Sendable {
+    /// Provider the merged config selects for serving turns.
+    let provider: any LLMProvider
+    /// De-duplicated provider server URLs feeding the SSRF loopback exemption.
+    let serverURLs: [String]
+}
+
+/// Resolves the provider set for a merged `[llm]` section without touching live state, so a
+/// rejected selection throws before the caller persists the config file.
+func prepareLiveLLMSwap(config: RuneWeaverConfig, context: ServerContext) async throws -> LiveLLMSwap {
     var keysByEntry: [String: String] = [:]
     for (entryName, entry) in config.llm.providers {
         guard let envVar = entry.apiKeyEnv, !envVar.isEmpty else { continue }
@@ -313,17 +328,22 @@ func reloadLiveLLM(config: RuneWeaverConfig, context: ServerContext) async throw
     guard let selected = LLMProviderFactory.selectProvider(named: nil, from: providers, config: config.llm) else {
         throw Abort(.badRequest, reason: "No enabled LLM provider is configured; enable at least one [llm.providers.*] entry matching [llm] default_provider.")
     }
-    await context.orchestrator.updateLanguageProvider(selected)
-    context.servingLLM = selected
-    await context.goalEngine.updateLLM(selected)
-    await context.fanOut.updateReviewer(selected)
+    return LiveLLMSwap(provider: selected, serverURLs: LLMOrigins.serverURLs(from: config.llm))
+}
+
+/// Applies a prepared provider swap to the live orchestrator, goal engine, fan-out reviewer,
+/// ideas engine, and egress supervisor without a restart.
+func applyLiveLLMSwap(_ swap: LiveLLMSwap, context: ServerContext) async {
+    await context.orchestrator.updateLanguageProvider(swap.provider)
+    context.servingLLM = swap.provider
+    await context.goalEngine.updateLLM(swap.provider)
+    await context.fanOut.updateReviewer(swap.provider)
     if let ideas = context.ideasEngine {
-        await ideas.updateLLM(selected)
+        await ideas.updateLLM(swap.provider)
     }
-    let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
-    context.llmServerURLs = appLLMOrigins
+    context.llmServerURLs = swap.serverURLs
     if let live = context.egressSupervisor {
-        await live.updateLLMServerURLs(appLLMOrigins)
+        await live.updateLLMServerURLs(swap.serverURLs)
     }
 }
 

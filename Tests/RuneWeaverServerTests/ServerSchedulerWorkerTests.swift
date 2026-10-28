@@ -90,6 +90,48 @@ private struct CancellingSchedulerEmbedder: EmbeddingsBackend, Sendable {
     }
 }
 
+private actor StringBox {
+    var value: String
+    init(_ value: String) {
+        self.value = value
+    }
+
+    func set(_ value: String) {
+        self.value = value
+    }
+
+    func get() -> String {
+        value
+    }
+}
+
+private actor ArgumentCapture {
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        values.append(value)
+    }
+
+    func get() -> [String] {
+        values
+    }
+}
+
+private struct CapturingStubTool: Tool, Sendable {
+    let name: String
+    let description = "Stub"
+    let permissionLevel = PermissionLevel.readOnly
+    var inputSchema: JSONSchema {
+        JSONSchema(rawValue: #"{"type":"object"}"#)
+    }
+
+    let handler: @Sendable (ToolInput) async -> ToolOutput
+
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        await handler(input)
+    }
+}
+
 @Suite("Server Scheduler Worker")
 struct ServerSchedulerWorkerTests {
     private func makeWorker(
@@ -446,5 +488,114 @@ struct ServerSchedulerWorkerTests {
         let logged = await runs.list(limit: 10)
         #expect(logged.count == 1)
         #expect(logged.first?.status == "cancelled")
+    }
+
+    @Test
+    func `Direct tool subject placeholder cannot reshape the arguments object`() async throws {
+        let toolBus = ToolBus()
+        let searchPayload = StringBox(
+            #"{"messages":[{"id":"seed-0","subject":"Hello","from":"a@b.com","snippet":"","mailbox":"INBOX"}]}"#
+        )
+        await toolBus.register(tool: CapturingStubTool(name: "email.search") { input in
+            await .success(searchPayload.get(), callID: input.callID)
+        })
+        let moves = ArgumentCapture()
+        await toolBus.register(tool: CapturingStubTool(name: "email.move") { input in
+            await moves.append(input.argumentsJSON)
+            return .success(#"{"success":true}"#, callID: input.callID)
+        })
+
+        let (worker, scheduler, _, tempDir) = try await makeWorker(toolBus: toolBus)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        _ = try await scheduler.create(NewSchedulerJob(
+            name: "subject move watcher",
+            schedule: "",
+            prompt: "",
+            pollAccount: "personal",
+            pollIntervalSeconds: 60,
+            watcherSource: EventWatcherSource.email,
+            rules: [EventRule(
+                name: "Move on arrival",
+                condition: EventRuleCondition(),
+                action: .directTool(
+                    toolName: "email.move",
+                    argumentsJSON: #"{"subject":"{{subject}}","mailbox":"INBOX"}"#
+                ),
+                stopProcessing: true
+            )]
+        ))
+
+        // First tick baselines the mailbox; the second sees the new message.
+        _ = await worker.tick(now: Date())
+        await searchPayload.set(
+            #"{"messages":[{"id":"seed-0","subject":"Hello","from":"a@b.com","snippet":"","mailbox":"INBOX"},{"id":"m-1","subject":"x\",\"mailbox\":\"Trash","from":"boss@corp.com","snippet":"","mailbox":"INBOX"}]}"#
+        )
+        let results = await worker.tick(now: Date().addingTimeInterval(65))
+        #expect(results.count == 1)
+        #expect(results.first?.fired == true)
+
+        let captured = await moves.get()
+        #expect(captured.count == 1)
+        let data = try #require(captured.first?.data(using: .utf8))
+        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["subject"] as? String == "x\",\"mailbox\":\"Trash")
+        #expect(object["mailbox"] as? String == "INBOX")
+    }
+
+    @Test
+    func `Direct tool subject placeholder substitutes an ordinary subject cleanly`() async throws {
+        let toolBus = ToolBus()
+        let searchPayload = StringBox(
+            #"{"messages":[{"id":"seed-0","subject":"Hello","from":"a@b.com","snippet":"","mailbox":"INBOX"}]}"#
+        )
+        await toolBus.register(tool: CapturingStubTool(name: "email.search") { input in
+            await .success(searchPayload.get(), callID: input.callID)
+        })
+        let moves = ArgumentCapture()
+        await toolBus.register(tool: CapturingStubTool(name: "email.move") { input in
+            await moves.append(input.argumentsJSON)
+            return .success(#"{"success":true}"#, callID: input.callID)
+        })
+
+        let (worker, scheduler, _, tempDir) = try await makeWorker(toolBus: toolBus)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        _ = try await scheduler.create(NewSchedulerJob(
+            name: "digest move watcher",
+            schedule: "",
+            prompt: "",
+            pollAccount: "personal",
+            pollIntervalSeconds: 60,
+            watcherSource: EventWatcherSource.email,
+            rules: [EventRule(
+                name: "Move on arrival",
+                condition: EventRuleCondition(),
+                action: .directTool(
+                    toolName: "email.move",
+                    argumentsJSON: #"{"subject":"{{subject}}","mailbox":"INBOX"}"#
+                ),
+                stopProcessing: true
+            )]
+        ))
+
+        _ = await worker.tick(now: Date())
+        await searchPayload.set(
+            #"{"messages":[{"id":"seed-0","subject":"Hello","from":"a@b.com","snippet":"","mailbox":"INBOX"},{"id":"m-1","subject":"Weekly status digest","from":"boss@corp.com","snippet":"","mailbox":"INBOX"}]}"#
+        )
+        let results = await worker.tick(now: Date().addingTimeInterval(65))
+        #expect(results.count == 1)
+        #expect(results.first?.fired == true)
+
+        let captured = await moves.get()
+        #expect(captured.count == 1)
+        let data = try #require(captured.first?.data(using: .utf8))
+        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["subject"] as? String == "Weekly status digest")
+        #expect(object["mailbox"] as? String == "INBOX")
+        // The unchanged required-field backfill re-parses the escaped result
+        // and still fills id plus account for email.move.
+        #expect(object["id"] as? String == "m-1")
+        #expect(object["account"] as? String == "personal")
     }
 }

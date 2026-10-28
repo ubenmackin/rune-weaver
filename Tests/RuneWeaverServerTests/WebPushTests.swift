@@ -253,4 +253,125 @@ struct WebPushTests {
         #expect(result.errors.count == 1)
         #expect(result.errors[0].contains("HTTP 400: BadJwtToken"))
     }
+
+    /// Transport stub capturing outbound requests for body and audience assertions.
+    private actor CapturingPushTransport: WebPushTransport {
+        let status: Int
+        private(set) var requests: [URLRequest] = []
+
+        init(status: Int = 201) {
+            self.status = status
+        }
+
+        func send(request: URLRequest) async throws -> (data: Data, httpStatus: Int) {
+            requests.append(request)
+            return (Data(), status)
+        }
+    }
+
+    @Test
+    func `Oversized notification body is truncated to one record and still delivers`() async throws {
+        let tempDB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("push-size-test-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: tempDB) }
+
+        let store = PushSubscriptionStore(dbPath: tempDB)
+        let deviceKey = P256.KeyAgreement.PrivateKey()
+        let deviceP256 = WebPushKeys.base64URL(deviceKey.publicKey.x963Representation)
+        let deviceAuth = WebPushKeys.base64URL(SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) })
+        let record = try await store.save(
+            endpoint: "https://web.push.apple.com/test-endpoint",
+            p256dh: deviceP256,
+            auth: deviceAuth
+        )
+
+        let transport = CapturingPushTransport()
+        let vapid = WebPushKeys(privateKey: P256.Signing.PrivateKey())
+        let configBox = NotificationsConfigBox(NotificationsConfig(pushContact: "operator@volcrypt.com"))
+        let sender = WebPushSender(
+            vapidKeys: vapid,
+            subscriptions: store,
+            transport: transport,
+            notificationsBox: configBox
+        )
+
+        // ~21KB body must be truncated to fit a single RFC 8291 record before encryption.
+        let payload = WebPushSender.PushPayload(
+            title: "Run completed",
+            body: String(repeating: "Lorem ipsum dolor sit amet consectetur. ", count: 540),
+            url: "/#runs"
+        )
+
+        let boundedJSON = try WebPushSender.singleRecordPayload(payload)
+        #expect(boundedJSON.count <= WebPushSender.singleRecordPlaintextLimit)
+
+        let result = try await sender.send(to: record, payload: payload)
+        #expect(result.delivered)
+        #expect(result.status == 201)
+
+        let requests = await transport.requests
+        let bodyCount = try #require(requests.first?.httpBody?.count)
+        // Wire body is the 86-byte RFC 8188 header plus one record (plaintext + delimiter + 16-byte tag).
+        #expect(bodyCount <= 86 + WebPushSender.recordSizeBytes)
+    }
+
+    @Test
+    func `Huge title throws payloadTooLarge without pruning the subscription`() async throws {
+        let tempDB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("push-huge-test-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: tempDB) }
+
+        let store = PushSubscriptionStore(dbPath: tempDB)
+        let deviceKey = P256.KeyAgreement.PrivateKey()
+        let deviceP256 = WebPushKeys.base64URL(deviceKey.publicKey.x963Representation)
+        let deviceAuth = WebPushKeys.base64URL(SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) })
+        let record = try await store.save(
+            endpoint: "https://web.push.apple.com/test-endpoint",
+            p256dh: deviceP256,
+            auth: deviceAuth
+        )
+
+        let transport = CapturingPushTransport()
+        let vapid = WebPushKeys(privateKey: P256.Signing.PrivateKey())
+        let configBox = NotificationsConfigBox(NotificationsConfig(pushContact: "operator@volcrypt.com"))
+        let sender = WebPushSender(
+            vapidKeys: vapid,
+            subscriptions: store,
+            transport: transport,
+            notificationsBox: configBox
+        )
+
+        // Fixed overhead alone (title JSON with an empty body) exceeds the record, so no truncation can help.
+        let payload = WebPushSender.PushPayload(
+            title: String(repeating: "A", count: WebPushSender.singleRecordPlaintextLimit + 1),
+            body: "will not fit"
+        )
+
+        await #expect(throws: PushSubscriptionError.self) {
+            try await sender.send(to: record, payload: payload)
+        }
+        #expect(await transport.requests.isEmpty)
+
+        let remaining = await store.allSubscriptions()
+        #expect(remaining.count == 1)
+        #expect(remaining.first?.id == record.id)
+    }
+
+    @Test
+    func `VAPID audience includes explicit non-default ports and omits default ports`() throws {
+        let explicitPort = try #require(URL(string: "https://h.example:8443/push"))
+        #expect(WebPushSender.audience(for: explicitPort) == "https://h.example:8443")
+
+        let defaultPort = try #require(URL(string: "https://h.example:443/push"))
+        #expect(WebPushSender.audience(for: defaultPort) == "https://h.example")
+
+        let noPort = try #require(URL(string: "https://h.example/push"))
+        #expect(WebPushSender.audience(for: noPort) == "https://h.example")
+
+        let httpExplicit = try #require(URL(string: "http://h.example:8080/push"))
+        #expect(WebPushSender.audience(for: httpExplicit) == "http://h.example:8080")
+
+        let httpDefault = try #require(URL(string: "http://h.example:80/push"))
+        #expect(WebPushSender.audience(for: httpDefault) == "http://h.example")
+    }
 }

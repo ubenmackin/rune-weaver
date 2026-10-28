@@ -37,6 +37,7 @@ public struct PushSubscriptionRecord: Sendable, Equatable {
 public enum PushSubscriptionError: LocalizedError, Sendable {
     case invalidEndpoint(String)
     case invalidKeys
+    case payloadTooLarge
     case databaseUnavailable
 
     public var errorDescription: String? {
@@ -45,6 +46,8 @@ public enum PushSubscriptionError: LocalizedError, Sendable {
             "Push endpoint rejected by security policy (SSRF prevention): \(endpoint)"
         case .invalidKeys:
             "Client subscription encryption keys (p256dh or auth) are invalid."
+        case .payloadTooLarge:
+            "Notification payload exceeds the single-record Web Push size limit."
         case .databaseUnavailable:
             "Subscriptions database is unavailable."
         }

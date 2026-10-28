@@ -12,6 +12,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearAuthToken, setAuthToken } from "../api";
 import ApprovalHistory from "./ApprovalHistory";
 import { jsonResponse } from "../test-utils/http";
 import {
@@ -498,9 +499,14 @@ describe("ApprovalHistory socket reopen refresh", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+    // The shared client re-arms its backoff dial only while authenticated, so
+    // the reopen scenario runs under an adopted owner credential and restores
+    // the logged-out state afterwards.
+    setAuthToken("owner-token");
   });
 
   afterEach(() => {
+    clearAuthToken();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     resetSharedSocket();

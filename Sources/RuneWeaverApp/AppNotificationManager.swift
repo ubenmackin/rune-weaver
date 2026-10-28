@@ -55,7 +55,7 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
         registerCategories(center: center)
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
             if let error {
-                print("[AppNotificationManager] Notification authorization error: \(error.localizedDescription)")
+                RuneWeaverLog.app.warning("[AppNotificationManager] Notification authorization error: \(error.localizedDescription)")
             }
         }
     }
@@ -109,7 +109,7 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
                 try await UNUserNotificationCenter.current().add(notificationRequest)
             }
         } catch {
-            print("[AppNotificationManager] Failed to post approval attention notification: \(error.localizedDescription)")
+            RuneWeaverLog.app.warning("[AppNotificationManager] Failed to post approval attention notification: \(error.localizedDescription)")
         }
     }
 
@@ -173,7 +173,7 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
                 try await UNUserNotificationCenter.current().add(notificationRequest)
             }
         } catch {
-            print("[AppNotificationManager] Failed to post scheduler notification: \(error.localizedDescription)")
+            RuneWeaverLog.app.warning("[AppNotificationManager] Failed to post scheduler notification: \(error.localizedDescription)")
         }
     }
 

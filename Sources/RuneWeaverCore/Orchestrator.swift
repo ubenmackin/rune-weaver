@@ -30,6 +30,10 @@ public actor Orchestrator {
     /// Executed gated actions buffered per parked batch while siblings stay pending.
     /// Mutated only through the buffer/take helpers so a batch never half-clears.
     private(set) var parkedBatchExecutedActions: [UUID: [ToolAction]] = [:]
+    /// In-flight resume count per parked batch, keyed by batch identifier.
+    /// Mutated only through the mark helpers so overlapping sibling resumes
+    /// defer synthesis until exactly one remains.
+    private(set) var parkedBatchActiveResumes: [UUID: Int] = [:]
     /// Cumulative billed tokens tracked per session.
     /// Mutated only through `accumulateSessionTokens(_:for:)` and the session
     /// removal helpers so eviction order and non-negative invariants hold.
@@ -197,36 +201,6 @@ public actor Orchestrator {
     /// Strict registry executed turns run against for the turn-loop extension.
     var strictContainerRegistry: StrictTurnRegistry? {
         strictRegistry
-    }
-
-    // MARK: - Parked state mutation
-
-    /// Removes and returns one parked approval so a resume decision owns that
-    /// request exactly once instead of racing a second decision.
-    func takeParkedNarratedApproval(id: UUID) -> ParkedNarratedApproval? {
-        parkedNarratedApprovals.removeValue(forKey: id)
-    }
-
-    /// Files one parked approval under its request identifier.
-    func storeParkedNarratedApproval(_ parked: ParkedNarratedApproval, id: UUID) {
-        parkedNarratedApprovals[id] = parked
-    }
-
-    /// Buffers one already-executed gated action while its batch siblings stay pending.
-    func bufferParkedExecutedAction(_ action: ToolAction, forBatch batchID: UUID) {
-        parkedBatchExecutedActions[batchID, default: []].append(action)
-    }
-
-    /// Buffered executed actions for one parked batch, empty when none landed yet.
-    func parkedExecutedActions(forBatch batchID: UUID) -> [ToolAction] {
-        parkedBatchExecutedActions[batchID] ?? []
-    }
-
-    /// Takes and clears buffered executed actions for one parked batch.
-    func takeParkedExecutedActions(forBatch batchID: UUID) -> [ToolAction] {
-        let buffered = parkedBatchExecutedActions[batchID] ?? []
-        parkedBatchExecutedActions.removeValue(forKey: batchID)
-        return buffered
     }
 
     /// Processes one user input through the full loop.
@@ -493,6 +467,7 @@ public actor Orchestrator {
         clearSessionTokens()
         parkedNarratedApprovals.removeAll()
         parkedBatchExecutedActions.removeAll()
+        parkedBatchActiveResumes.removeAll()
     }
 
     /// Clears one session's history and drops its billed total together.
@@ -505,6 +480,56 @@ public actor Orchestrator {
     public func clearSessionTokens() {
         sessionTokensBySession.removeAll()
         sessionTokenOrder.removeAll()
+    }
+}
+
+// MARK: - Parked state mutation
+
+/// Holds the parked narration and batch resume helpers so the actor body
+/// stays within its length budget while parked state keeps mutating only
+/// through these single-writer helpers.
+extension Orchestrator {
+    /// Removes and returns one parked approval so a resume decision owns that
+    /// request exactly once instead of racing a second decision.
+    func takeParkedNarratedApproval(id: UUID) -> ParkedNarratedApproval? {
+        parkedNarratedApprovals.removeValue(forKey: id)
+    }
+
+    /// Files one parked approval under its request identifier.
+    func storeParkedNarratedApproval(_ parked: ParkedNarratedApproval, id: UUID) {
+        parkedNarratedApprovals[id] = parked
+    }
+
+    /// Buffers one already-executed gated action while its batch siblings stay pending.
+    func bufferParkedExecutedAction(_ action: ToolAction, forBatch batchID: UUID) {
+        parkedBatchExecutedActions[batchID, default: []].append(action)
+    }
+
+    /// Buffered executed actions for one parked batch, empty when none landed yet.
+    func parkedExecutedActions(forBatch batchID: UUID) -> [ToolAction] {
+        parkedBatchExecutedActions[batchID] ?? []
+    }
+
+    /// Takes and clears buffered executed actions for one parked batch.
+    func takeParkedExecutedActions(forBatch batchID: UUID) -> [ToolAction] {
+        let buffered = parkedBatchExecutedActions[batchID] ?? []
+        parkedBatchExecutedActions.removeValue(forKey: batchID)
+        return buffered
+    }
+
+    /// Marks one in-flight resume for a parked batch, counting from zero.
+    func markParkedResumeStarted(batchID: UUID) {
+        parkedBatchActiveResumes[batchID, default: 0] += 1
+    }
+
+    /// Marks one in-flight resume finished, dropping the batch entry at zero.
+    func markParkedResumeFinished(batchID: UUID) {
+        let remaining = parkedBatchActiveResumes[batchID, default: 0] - 1
+        if remaining <= 0 {
+            parkedBatchActiveResumes.removeValue(forKey: batchID)
+        } else {
+            parkedBatchActiveResumes[batchID] = remaining
+        }
     }
 }
 

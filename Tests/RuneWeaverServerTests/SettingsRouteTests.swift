@@ -1658,8 +1658,9 @@ struct SettingsRouteTests {
         try merged.validate()
         #expect(merged.llm.defaultProvider == "after")
 
-        // Drives the same live-reload path the settings save uses.
-        try await reloadLiveLLM(config: merged, context: context)
+        // Drives the same prepare/apply path the settings save uses.
+        let swap = try await prepareLiveLLMSwap(config: merged, context: context)
+        await applyLiveLLMSwap(swap, context: context)
         let live = await orchestrator.modelInfo
         #expect(live.name == "live-reload-after")
         #expect(live.provider == "after")

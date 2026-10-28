@@ -990,7 +990,20 @@ extension ConversationManager {
         let startIndex = hasSystemPrompt ? 1 : 0
         let dropCount = session.messages.count - keep
 
-        let evicted = Array(session.messages[startIndex ..< (startIndex + dropCount)])
+        var evicted = Array(session.messages[startIndex ..< (startIndex + dropCount)])
+        var kept = Array(session.messages.suffix(keep - (hasSystemPrompt ? 1 : 0)))
+        if let systemPrompt {
+            kept.insert(systemPrompt, at: 0)
+        }
+        // Invariant: kept history (after any leading .system message) must never
+        // start with orphan .tool messages whose assistant call was evicted.
+        let preserveFirstSystem = kept.first?.role == .system
+        let checkIndex = preserveFirstSystem ? 1 : 0
+        while checkIndex < kept.count, kept[checkIndex].role == .tool {
+            let orphan = kept.remove(at: checkIndex)
+            evicted.append(orphan)
+        }
+
         let summary = summarizer(evicted)
 
         let joinedSummary = [session.summary, summary]
@@ -1005,10 +1018,6 @@ extension ConversationManager {
             joinedSummary
         }
 
-        var kept = Array(session.messages.suffix(keep - (hasSystemPrompt ? 1 : 0)))
-        if let systemPrompt {
-            kept.insert(systemPrompt, at: 0)
-        }
         session.messages = kept
 
         session.updatedAt = Date()
@@ -1158,6 +1167,14 @@ extension ConversationManager {
                     kept.append(session.messages[messageIndex])
                     messageIndex += 1
                 }
+            }
+
+            // Invariant: kept history (after any leading .system message) must never
+            // start with orphan .tool messages whose assistant call was evicted.
+            let checkIndex = preserveFirstSystem ? 1 : 0
+            while checkIndex < kept.count, kept[checkIndex].role == .tool {
+                let orphan = kept.remove(at: checkIndex)
+                evicted.append(orphan)
             }
 
             if !evicted.isEmpty {

@@ -260,6 +260,69 @@ public struct WebPushSender: Sendable {
         return result
     }
 
+    /// RFC 8188 single-record budget: record size (4096) minus the 1-byte terminal delimiter and 16-byte AEAD tag.
+    public static let recordSizeBytes = 4096
+    public static let singleRecordPlaintextLimit = recordSizeBytes - 17
+
+    /// Encodes the payload JSON bounded to one RFC 8291 record, truncating `body` by characters when needed.
+    /// - Throws: `PushSubscriptionError.payloadTooLarge` when even an empty body cannot fit the record.
+    public static func singleRecordPayload(
+        _ payload: PushPayload,
+        encoder: JSONEncoder = JSONEncoder()
+    ) throws -> Data {
+        let full = try encoder.encode(payload)
+        if full.count <= singleRecordPlaintextLimit {
+            return full
+        }
+
+        // Fixed overhead measured with an empty body decides whether any truncation can help.
+        let emptyBody = try encoder.encode(PushPayload(title: payload.title, body: "", url: payload.url, tag: payload.tag))
+        guard emptyBody.count <= singleRecordPlaintextLimit else {
+            throw PushSubscriptionError.payloadTooLarge
+        }
+
+        // Binary-search the longest body prefix that fits; encoded length never shrinks as a Character is added.
+        let characters = Array(payload.body)
+        var low = 0
+        var high = characters.count
+        while low < high {
+            let mid = (low + high + 1) / 2
+            let candidate = PushPayload(
+                title: payload.title,
+                body: String(characters.prefix(mid)),
+                url: payload.url,
+                tag: payload.tag
+            )
+            if try encoder.encode(candidate).count <= singleRecordPlaintextLimit {
+                low = mid
+            } else {
+                high = mid - 1
+            }
+        }
+        return try encoder.encode(PushPayload(
+            title: payload.title,
+            body: String(characters.prefix(low)),
+            url: payload.url,
+            tag: payload.tag
+        ))
+    }
+
+    /// Builds the RFC 8292 audience origin (`scheme://host`), appending the port only when non-default.
+    public static func audience(for url: URL) -> String {
+        let scheme = url.scheme?.lowercased() ?? "https"
+        var origin = "\(scheme)://\(url.host ?? "")"
+        // VAPID audiences must match the gateway origin exactly: default ports are implied, others are not.
+        let defaultPort: Int? = switch scheme {
+        case "https": 443
+        case "http": 80
+        default: nil
+        }
+        if let port = url.port, port != defaultPort {
+            origin += ":\(port)"
+        }
+        return origin
+    }
+
     /// Dispatches an encrypted push alert to one subscriber. Returns false if the subscription expired and was pruned.
     public func send(
         to subscription: PushSubscriptionRecord,
@@ -275,7 +338,8 @@ public struct WebPushSender: Sendable {
             throw WebPushKeysError.missingSubject
         }
 
-        let jsonPayload = try JSONEncoder().encode(payload)
+        // Sizing happens before the encrypt path so an oversized payload throws without pruning the subscription.
+        let jsonPayload = try Self.singleRecordPayload(payload)
         let encryptedBody: Data
         do {
             encryptedBody = try Self.encryptPayload(
@@ -292,8 +356,7 @@ public struct WebPushSender: Sendable {
         guard let host = url.host else {
             return PushSendResult(delivered: false, status: 400, errorBody: "Missing host in endpoint URL")
         }
-        let audience = "\(url.scheme ?? "https")://\(host)"
-        let jwt = try vapidKeys.signJWT(audience: audience, subject: subject)
+        let jwt = try vapidKeys.signJWT(audience: Self.audience(for: url), subject: subject)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

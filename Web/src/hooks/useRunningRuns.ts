@@ -78,14 +78,15 @@ function fingerprintField(value: unknown): string {
   return text === "" ? "" : text;
 }
 
-// Builds the equality key for one frozen snapshot in incoming order with no sorting.
+// Builds the equality key for one frozen snapshot in incoming order with no sorting. JSON of a
+// nested array is delimiter-proof: field content carrying "|" or newlines cannot masquerade as a
+// row, field, or action boundary the way a joined-string key allowed.
 export function runsFingerprint(
   runs: ReadonlyArray<FrozenRunLogEntry>,
 ): string {
-  return runs
-    .map((run) => {
-      const actions = run.toolActions ?? [];
-      const actionKeys = actions.map((action) => {
+  return JSON.stringify(
+    runs.map((run) => {
+      const actions = (run.toolActions ?? []).map((action) => {
         const resultContent =
           action.result === null || action.result === undefined
             ? ""
@@ -102,9 +103,8 @@ export function runsFingerprint(
           fingerprintField(action.roundIndex),
           resultContent,
           resultError,
-        ].join("|");
+        ];
       });
-      const actionsSection = actionKeys.join("|");
       return [
         fingerprintField(run.id),
         fingerprintField(run.jobID),
@@ -116,10 +116,10 @@ export function runsFingerprint(
         fingerprintField(run.response),
         fingerprintField(run.totalTokens),
         fingerprintField(run.durationMs),
-        actionsSection,
-      ].join("\n");
-    })
-    .join("\n\n");
+        actions,
+      ];
+    }),
+  );
 }
 
 function publishRuns(

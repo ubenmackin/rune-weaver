@@ -122,6 +122,39 @@ struct LlamaCppEmbeddingsBackendTests {
     }
 
     @Test
+    func `embedImage triggers supervisor startup through the shared dispatch path`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let testFile = tempDir.appendingPathComponent("tiny.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: testFile)
+
+        let supervisorCalled = OSAllocatedUnfairLock(initialState: false)
+        let supervisor = LlamaEmbeddingSupervisor(
+            modelPath: tempDir.appendingPathComponent("embeddinggemma-2-Q8_0.gguf").path,
+            socketPath: tempDir.appendingPathComponent("test.sock").path,
+            pidPath: tempDir.appendingPathComponent("test.pid").path,
+            logPath: tempDir.appendingPathComponent("test.log").path,
+            testRunner: {
+                supervisorCalled.withLock { $0 = true }
+            }
+        )
+
+        let backend = LlamaCppEmbeddingsBackend(
+            socketPath: tempDir.appendingPathComponent("test.sock").path,
+            supervisor: supervisor
+        )
+
+        do {
+            _ = try await backend.embedImage(at: testFile)
+        } catch {
+            // expected socket connection failure after read and dispatch succeed
+        }
+        #expect(supervisorCalled.withLock { $0 } == true)
+    }
+
+    @Test
     func `EmbeddingsBackendFactory produces backend with supervisor`() {
         let backend = EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: "local",
