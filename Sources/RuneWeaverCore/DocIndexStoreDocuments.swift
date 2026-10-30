@@ -570,7 +570,7 @@ extension DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocumentsWithChunks(entries, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         return result
     }
 }

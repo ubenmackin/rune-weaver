@@ -24,6 +24,12 @@ import os
             set { docIndexChunkFailureLock.withLock { $0 = newValue } }
         }
 
+        /// Batched ID lookup width so large hit sets never build one giant IN clause.
+        private static let chunkFetchBatchSize = 500
+
+        /// Cap on LIKE patterns so long queries cannot fan out into unbounded scans.
+        private static let maxLikePatterns = 50
+
         /// Inserts chunk rows inside the caller's transaction.
         static func insertChunkRows(documentID: UUID, chunks: [IndexedChunk], handle: OpaquePointer?) throws {
             guard !chunks.isEmpty else { return }
@@ -115,7 +121,8 @@ import os
             }
         }
 
-        /// Full-text search over chunk text with a LIKE fallback.
+        /// Full-text search over chunk text with prefix matching on salient tokens.
+        /// Bounded reads gate every source on parent event time with NULLs excluded.
         static func searchKeyword(query: String, limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,47 +131,45 @@ import os
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
-            // Windowed reads share the vector pool's windowed ceiling so the
-            // keyword leg and the vector leg widen together; unbounded reads
-            // keep the plain per-read cap.
             let maxLimit = (since != nil || until != nil) ? maxVectorWindowResults : maxResults
             let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxLimit))
-            if since == nil, until == nil {
-                var statement: OpaquePointer?
-                let sql = """
-                SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector
-                FROM indexed_chunks_fts JOIN indexed_chunks c ON c.rowid = indexed_chunks_fts.rowid
-                WHERE indexed_chunks_fts MATCH ? ORDER BY rank, c.rowid DESC LIMIT ?;
-                """
-                if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
-                    SQLiteHelpers.bindText(statement, index: 1, value: ftsEscaped(trimmed))
-                    sqlite3_bind_int(statement, 2, clamped)
-                    var results: [IndexedChunk] = []
-                    var step = sqlite3_step(statement)
-                    while step == SQLITE_ROW {
-                        if let chunk = readChunk(statement) {
-                            results.append(chunk)
-                        }
-                        step = sqlite3_step(statement)
+            guard clamped > 0 else { return [] }
+            let ftsQuery = ftsEscaped(trimmed)
+            if !ftsQuery.isEmpty {
+                do {
+                    let ftsHits = try searchFTSChunks(handle: handle, ftsQuery: ftsQuery, limit: clamped, since: since, until: until)
+                    if !ftsHits.isEmpty {
+                        return ftsHits
                     }
-                    let succeeded = (step == SQLITE_DONE)
-                    sqlite3_finalize(statement)
-                    if succeeded, !results.isEmpty {
-                        return results
-                    }
-                    // Fall through to the LIKE scan when FTS succeeds empty or errors
-                    // after prepare, so stemming gaps and token mismatches still recall
-                    // literal matches.
-                } else if statement != nil {
-                    sqlite3_finalize(statement)
+                } catch let error as CancellationError {
+                    throw error
+                } catch let error as DocIndexError {
+                    // Persistence failures fail closed so corruption never masquerades as a syntax miss.
+                    RuneWeaverLog.stores.warning("DocIndexStore: FTS search failed: \(error)")
+                    throw error
+                } catch {
+                    // Syntax-only fallback keeps one bad token from failing the read.
+                    RuneWeaverLog.stores.warning("DocIndexStore: FTS query failed, falling back to LIKE: \(error)")
                 }
-                return try likeSearch(query: trimmed, limit: clamped, handle: handle)
             }
+            return try searchLIKEChunks(handle: handle, query: trimmed, limit: clamped, since: since, until: until)
+        }
+
+        /// FTS5 keyword scan. Unbounded reads hit the porter table only; dated reads
+        /// join the parent so every source honors `mtime` with NULLs excluded.
+        private static func searchFTSChunks(handle: OpaquePointer?, ftsQuery: String, limit: Int32, since: Date?, until: Date?) throws -> [IndexedChunk] {
             var statement: OpaquePointer?
+            let bounded = since != nil || until != nil
             var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector "
                 + "FROM indexed_chunks_fts JOIN indexed_chunks c ON c.rowid = indexed_chunks_fts.rowid "
-                + "JOIN indexed_documents d ON d.id = c.document_id "
-                + "WHERE indexed_chunks_fts MATCH ?"
+            if bounded {
+                sql += "JOIN indexed_documents d ON d.id = c.document_id "
+            }
+            sql += "WHERE indexed_chunks_fts MATCH ?"
+            if bounded {
+                // Explicit NULL guard so undated rows never slip into a dated window.
+                sql += " AND d.mtime IS NOT NULL"
+            }
             if since != nil {
                 sql += " AND d.mtime >= ?"
             }
@@ -172,119 +177,101 @@ import os
                 sql += " AND d.mtime < ?"
             }
             sql += " ORDER BY rank, c.rowid DESC LIMIT ?;"
-            if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
-                var bindIndex: Int32 = 1
-                SQLiteHelpers.bindText(statement, index: bindIndex, value: ftsEscaped(trimmed))
-                bindIndex += 1
-                let range = TemporalRange(since: since, until: until)
-                let bounds = TemporalFilter.unixBounds(for: range)
-                if let lower = bounds.since {
-                    sqlite3_bind_double(statement, bindIndex, lower)
-                    bindIndex += 1
-                }
-                if let upper = bounds.until {
-                    sqlite3_bind_double(statement, bindIndex, upper)
-                    bindIndex += 1
-                }
-                sqlite3_bind_int(statement, bindIndex, clamped)
-                var results: [IndexedChunk] = []
-                var step = sqlite3_step(statement)
-                while step == SQLITE_ROW {
-                    if let chunk = readChunk(statement) {
-                        results.append(chunk)
-                    }
-                    step = sqlite3_step(statement)
-                }
-                let succeeded = (step == SQLITE_DONE)
-                sqlite3_finalize(statement)
-                if succeeded, !results.isEmpty {
-                    return results
-                }
-                // Fall through to the bounded LIKE scan when FTS succeeds empty
-                // or errors after prepare, so the dated window still applies to
-                // literal matches.
-            } else if statement != nil {
-                sqlite3_finalize(statement)
-            }
-            return try likeSearch(query: trimmed, limit: clamped, handle: handle, since: since, until: until)
-        }
-
-        /// Token-overlap LIKE scan used when FTS returns nothing.
-        private static func likeSearch(query: String, limit: Int32, handle: OpaquePointer?, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
-            let maxLikePatterns = 50
-            let salient = Tokenization.salientTokens(from: query)
-            let tokens = Array(salient.prefix(maxLikePatterns - 1))
-            guard !tokens.isEmpty else { return [] }
-            var patterns = ["%\(likeEscaped(query))%"]
-            for token in tokens {
-                let pattern = "%\(likeEscaped(token))%"
-                if !patterns.contains(where: { $0.caseInsensitiveCompare(pattern) == .orderedSame }) {
-                    patterns.append(pattern)
-                }
-                if patterns.count >= maxLikePatterns {
-                    break
-                }
-            }
-            let conditions = patterns.map { _ in "chunk_text LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
-            if since == nil, until == nil {
-                let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
-                    + "WHERE (\(conditions)) ORDER BY rowid DESC LIMIT ?;"
-                var statement: OpaquePointer?
-                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                    throw DocIndexError.persistenceFailed("Could not prepare keyword search")
-                }
-                defer { sqlite3_finalize(statement) }
-                for (index, pattern) in patterns.enumerated() {
-                    SQLiteHelpers.bindText(statement, index: Int32(index + 1), value: pattern)
-                }
-                sqlite3_bind_int(statement, Int32(patterns.count + 1), limit)
-                var results: [IndexedChunk] = []
-                while sqlite3_step(statement) == SQLITE_ROW {
-                    if let chunk = readChunk(statement) {
-                        results.append(chunk)
-                    }
-                }
-                return results
-            }
-            let boundedConditions = patterns.map { _ in "c.chunk_text LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
-            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
-                + "JOIN indexed_documents d ON d.id = c.document_id "
-                + "WHERE (\(boundedConditions))"
-            if since != nil {
-                sql += " AND d.mtime >= ?"
-            }
-            if until != nil {
-                sql += " AND d.mtime < ?"
-            }
-            sql += " ORDER BY c.rowid DESC LIMIT ?;"
-            var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                if statement != nil {
+                    sqlite3_finalize(statement)
+                }
                 throw DocIndexError.persistenceFailed("Could not prepare keyword search")
             }
             defer { sqlite3_finalize(statement) }
             var bindIndex: Int32 = 1
-            for pattern in patterns {
-                SQLiteHelpers.bindText(statement, index: bindIndex, value: pattern)
-                bindIndex += 1
-            }
-            let likeRange = TemporalRange(since: since, until: until)
-            let likeBounds = TemporalFilter.unixBounds(for: likeRange)
-            if let lower = likeBounds.since {
+            SQLiteHelpers.bindText(statement, index: bindIndex, value: ftsQuery)
+            bindIndex += 1
+            let range = TemporalRange(since: since, until: until)
+            let bounds = TemporalFilter.unixBounds(for: range)
+            if let lower = bounds.since {
                 sqlite3_bind_double(statement, bindIndex, lower)
                 bindIndex += 1
             }
-            if let upper = likeBounds.until {
+            if let upper = bounds.until {
                 sqlite3_bind_double(statement, bindIndex, upper)
                 bindIndex += 1
             }
             sqlite3_bind_int(statement, bindIndex, limit)
             var results: [IndexedChunk] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
                 if let chunk = readChunk(statement) {
                     results.append(chunk)
                 }
+                step = sqlite3_step(statement)
+            }
+            guard step == SQLITE_DONE else {
+                // SQLITE_ERROR here means the MATCH query itself was rejected;
+                // other codes signal corruption and must fail closed.
+                if let handle, sqlite3_errcode(handle) == SQLITE_ERROR {
+                    let message = sqlite3_errmsg(handle).map { String(cString: $0) } ?? "unknown FTS error"
+                    RuneWeaverLog.stores.warning("DocIndexStore: FTS syntax failed, falling back to LIKE: \(message)")
+                    return []
+                }
+                throw DocIndexError.persistenceFailed("Could not read keyword results")
             }
             return results
+        }
+
+        /// Fetches chunks by their UUIDs in batched lookups.
+        static func chunks(ids: Set<UUID>, dbPath: String) throws -> [UUID: IndexedChunk] {
+            guard !ids.isEmpty else { return [:] }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [:] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+
+            var results: [UUID: IndexedChunk] = [:]
+            results.reserveCapacity(ids.count)
+
+            let idArray = Array(ids)
+            for start in stride(from: 0, to: idArray.count, by: chunkFetchBatchSize) {
+                let end = min(start + chunkFetchBatchSize, idArray.count)
+                let batch = Array(idArray[start ..< end])
+                let fetched = try fetchChunkBatch(batch, handle: handle)
+                for chunk in fetched {
+                    results[chunk.id] = chunk
+                }
+            }
+            return results
+        }
+
+        /// Fetches one ID batch with per-batch finalization.
+        private static func fetchChunkBatch(_ batch: [UUID], handle: OpaquePointer?) throws -> [IndexedChunk] {
+            let placeholders = batch.map { _ in "?" }.joined(separator: ",")
+            let sql = """
+            SELECT id, document_id, ordinal, chunk_text, embedding, is_vector
+            FROM indexed_chunks WHERE id IN (\(placeholders));
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                if statement != nil {
+                    sqlite3_finalize(statement)
+                }
+                throw DocIndexError.persistenceFailed("Could not prepare chunk fetch by IDs")
+            }
+            defer { sqlite3_finalize(statement) }
+            for (offset, id) in batch.enumerated() {
+                SQLiteHelpers.bindText(statement, index: Int32(offset + 1), value: id.uuidString)
+            }
+            var rows: [IndexedChunk] = []
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
+                if let chunk = readChunk(statement) {
+                    rows.append(chunk)
+                }
+                step = sqlite3_step(statement)
+            }
+            guard step == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not read chunk fetch by IDs")
+            }
+            return rows
         }
 
         /// Reads chunks carrying an embedding, bounded by `limit`.
@@ -397,7 +384,7 @@ import os
             )
         }
 
-        /// Escapes LIKE metacharacters so literal text never acts as a wildcard.
+        /// Escapes LIKE wildcards so literal fragments never act as patterns.
         private static func likeEscaped(_ query: String) -> String {
             var escaped = query.replacingOccurrences(of: "\\", with: "\\\\")
             escaped = escaped.replacingOccurrences(of: "%", with: "\\%")
@@ -405,11 +392,95 @@ import os
             return escaped
         }
 
-        /// Escapes user text into a safe FTS5 phrase query.
+        /// Builds LIKE patterns with the full query first so exact phrases stay contiguous.
+        private static func likePatterns(for query: String) -> [String] {
+            var patterns = ["%\(likeEscaped(query))%"]
+            // Bound upfront so duplicate-heavy queries never scan the full token list.
+            let salient = Array(Tokenization.salientTokens(from: query).prefix(maxLikePatterns - 1))
+            for token in salient {
+                let pattern = "%\(likeEscaped(token))%"
+                let duplicated = patterns.contains { $0.caseInsensitiveCompare(pattern) == .orderedSame }
+                if !duplicated {
+                    patterns.append(pattern)
+                }
+                guard patterns.count < maxLikePatterns else { break }
+            }
+            return patterns
+        }
+
+        /// LIKE fragment scan carrying sub-token queries with every-source gating.
+        private static func searchLIKEChunks(handle: OpaquePointer?, query: String, limit: Int32, since: Date?, until: Date?) throws -> [IndexedChunk] {
+            let patterns = likePatterns(for: query)
+            guard !patterns.isEmpty else { return [] }
+            let bounded = since != nil || until != nil
+            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
+            if bounded {
+                sql += "JOIN indexed_documents d ON d.id = c.document_id "
+            }
+            let conditions = patterns.map { _ in "c.chunk_text LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
+            sql += "WHERE (\(conditions))"
+            if bounded {
+                // Explicit NULL guard so undated rows never slip into a dated window.
+                sql += " AND d.mtime IS NOT NULL"
+            }
+            if since != nil {
+                sql += " AND d.mtime >= ?"
+            }
+            if until != nil {
+                sql += " AND d.mtime < ?"
+            }
+            sql += " ORDER BY c.rowid DESC LIMIT ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                if statement != nil {
+                    sqlite3_finalize(statement)
+                }
+                throw DocIndexError.persistenceFailed("Could not prepare keyword search")
+            }
+            defer { sqlite3_finalize(statement) }
+            var bindIndex: Int32 = 1
+            for pattern in patterns {
+                SQLiteHelpers.bindText(statement, index: bindIndex, value: pattern)
+                bindIndex += 1
+            }
+            let range = TemporalRange(since: since, until: until)
+            let bounds = TemporalFilter.unixBounds(for: range)
+            if let lower = bounds.since {
+                sqlite3_bind_double(statement, bindIndex, lower)
+                bindIndex += 1
+            }
+            if let upper = bounds.until {
+                sqlite3_bind_double(statement, bindIndex, upper)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, limit)
+            var results: [IndexedChunk] = []
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
+                if let chunk = readChunk(statement) {
+                    results.append(chunk)
+                }
+                step = sqlite3_step(statement)
+            }
+            guard step == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not read keyword results")
+            }
+            return results
+        }
+
+        /// Escapes user text into a safe FTS5 query with prefix matching for salient terms.
+        /// Star stays outside the quotes so quoted terms keep valid prefix syntax.
         private static func ftsEscaped(_ query: String) -> String {
-            let tokens = Tokenization.salientTokens(from: query)
-            guard !tokens.isEmpty else { return "\"\"" }
-            let phrases = tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
+            // Cap MATCH terms like LIKE patterns so pasted documents cannot blow up the parser.
+            let tokens = Array(Tokenization.salientTokens(from: query).prefix(maxLikePatterns))
+            guard !tokens.isEmpty else { return "" }
+            let phrases = tokens.map { token in
+                let sanitized = token.replacingOccurrences(of: "\"", with: "\"\"")
+                if token.count >= 3 {
+                    return "\"\(sanitized)\"*"
+                }
+                return "\"\(sanitized)\""
+            }
             return phrases.joined(separator: " OR ")
         }
 

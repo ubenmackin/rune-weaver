@@ -226,29 +226,31 @@ private func registerIndexResetRoute(_ app: Application) {
         struct ResetQuery: Decodable {
             let source: String?
         }
-        let query: ResetQuery?
+        let query: ResetQuery
         do {
             query = try req.query.decode(ResetQuery.self)
         } catch {
             RuneWeaverLog.server.debug("ServerIndexRoutes: failed to decode ResetQuery: \(error.localizedDescription)")
-            query = nil
+            throw Abort(.badRequest, reason: "Invalid reset query: 'source' must be one of files, mail, messages, calendars, reminders, all.")
         }
-        if let rawSource = query?.source?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-           !rawSource.isEmpty, rawSource != "all"
-        {
+        if let rawSource = query.source?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !rawSource.isEmpty, rawSource != "all" {
             guard let source = IndexSource(rawValue: rawSource) else {
                 throw Abort(.badRequest, reason: "Unknown index source '\(rawSource)'. Supported sources: files, mail, messages, calendars, reminders.")
             }
             _ = try await store.clearSource(
                 source,
                 mailCheckpointPath: context.indexMailCheckpointPath,
-                messagesStatePath: context.indexMessagesStatePath
+                messagesStatePath: context.indexMessagesStatePath,
+                calendarsStatePath: context.indexCalendarsStatePath,
+                remindersStatePath: context.indexRemindersStatePath
             )
             return IndexResetResponse(reset: true)
         }
         try await store.reset(
             mailCheckpointPath: context.indexMailCheckpointPath,
-            messagesStatePath: context.indexMessagesStatePath
+            messagesStatePath: context.indexMessagesStatePath,
+            calendarsStatePath: context.indexCalendarsStatePath,
+            remindersStatePath: context.indexRemindersStatePath
         )
         if let coordinator = context.indexCoordinator {
             do {
@@ -679,6 +681,16 @@ private func activeEmbeddingBackend(from context: ServerContext) -> String {
     return MemoryConfig.embeddingBackendLocal
 }
 
+/// Reports the embedding acceleration token for the current build: Metal where
+/// Accelerate is available, CPU fallback where vector math runs scalar loops.
+private func embeddingsAccelerationToken() -> String {
+    #if canImport(Accelerate)
+        "Apple Silicon Metal GPU"
+    #else
+        "CPU"
+    #endif
+}
+
 /// Registers local embedding status and lifecycle routes behind `/embeddings`.
 func registerEmbeddingsRoutes(_ app: Application) {
     let embeddings = app.grouped(PathComponent.constant(ServerPaths.embeddings))
@@ -698,8 +710,8 @@ func registerEmbeddingsRoutes(_ app: Application) {
             status: status,
             stage: stage,
             model: modelName,
-            dimensions: 768,
-            acceleration: "Apple Silicon Metal GPU",
+            dimensions: AcceleratedVectorMath.dimension,
+            acceleration: embeddingsAccelerationToken(),
             endpoint: socketPath,
             isRunning: isRunning,
             error: lastError
@@ -728,8 +740,8 @@ func registerEmbeddingsRoutes(_ app: Application) {
             status: status,
             stage: stage,
             model: modelName,
-            dimensions: 768,
-            acceleration: "Apple Silicon Metal GPU",
+            dimensions: AcceleratedVectorMath.dimension,
+            acceleration: embeddingsAccelerationToken(),
             endpoint: socketPath,
             isRunning: isRunning,
             error: lastError

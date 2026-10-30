@@ -10,7 +10,7 @@ public enum IndexSource: String, Sendable, Codable, CaseIterable, Equatable {
     case mail
     /// Chat/message transcripts.
     case messages
-    /// Calendar event occurrences.
+    /// Calendar event occurrences, keyed as rawID at startISO when dated.
     case calendars
     /// Reminder rows.
     case reminders

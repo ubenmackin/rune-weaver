@@ -136,9 +136,8 @@ export interface ScopeDraft {
   text: string;
 }
 
-// Scope choices one card offers. Egress resolves only the dialed host and its
-// widenable base, so wider scopes would store nothing and fail closed; they are
-// offered only when the request names no egress host.
+// Egress offers only the dialed host plus its widenable base: wider scopes
+// would store nothing and fail closed at the engine.
 export function scopeChoicesFor(request: PermissionRequest): ScopeChoice[] {
   const egressHost = resolveEgressHost(request);
   if (!egressHost) return ["thisTarget", "allTargets", "custom"];
@@ -147,9 +146,8 @@ export function scopeChoicesFor(request: PermissionRequest): ScopeChoice[] {
     : ["thisTarget"];
 }
 
-// Constrains a stored choice to what the card offers: enrichment can add an
-// egress host the prior choice cannot express, so fall back to the request's
-// own target instead of shipping a scope the engine would refuse.
+// Enrichment can add an egress host the stored choice cannot express,
+// so fall back to this target instead of shipping a refused scope.
 export function effectiveScopeChoice(
   request: PermissionRequest,
   stored: ScopeChoice | undefined,

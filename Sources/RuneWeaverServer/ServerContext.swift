@@ -203,6 +203,12 @@ public final class ServerContext: Sendable {
     /// `indexMessagesStatePath` so a test-wired reset can never delete the
     /// operator's live checkpoint either.
     public let indexMailCheckpointPath: String
+    /// Persisted calendars state the index reset route clears, mirroring
+    /// the messages watermark so scoped resets stay hermetic under test.
+    public let indexCalendarsStatePath: String
+    /// Persisted reminders state the index reset route clears, mirroring
+    /// the messages watermark so scoped resets stay hermetic under test.
+    public let indexRemindersStatePath: String
 
     /// Owner bearer verifier, or nil for the no-auth loopback posture.
     public let auth: ServerAuth?
@@ -298,6 +304,8 @@ public final class ServerContext: Sendable {
         indexStore: DocIndexStore? = nil,
         indexMessagesStatePath: String = MessagesIndexer.defaultStatePath,
         indexMailCheckpointPath: String = MailIndexCheckpointStore.defaultPath,
+        indexCalendarsStatePath: String = CalendarIndexer.defaultStatePath,
+        indexRemindersStatePath: String = RemindersIndexer.defaultStatePath,
         servingLLM: any LLMProvider? = nil,
         auth: ServerAuth? = nil,
         browserGateway: any BrowserPlaywrightGateway? = nil,
@@ -416,6 +424,8 @@ public final class ServerContext: Sendable {
         self.liveIndexBox = OSAllocatedUnfairLock(initialState: LiveIndexPair(store: indexStore, coordinator: indexCoordinator))
         self.indexMessagesStatePath = indexMessagesStatePath
         self.indexMailCheckpointPath = indexMailCheckpointPath
+        self.indexCalendarsStatePath = indexCalendarsStatePath
+        self.indexRemindersStatePath = indexRemindersStatePath
         self.auth = auth
         self.browserGateway = browserGateway
         self.searchTransport = searchTransport
@@ -481,7 +491,8 @@ extension ServerContext {
     /// Resolves the sovereign ledger over the primary episode ledger file, so the copy corroborates
     /// live truth; an injected instance wins untouched for tests.
     static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String, secrets: SecretsManager? = nil) -> SovereignLedger {
-        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath), secrets: secrets ?? SecretsManager())
+        // Tests default to an isolated fallback so contexts never touch the login Keychain.
+        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath), secrets: SecretsManager.resolving(secrets))
     }
 
     /// Resolves the fan-out engine sharing the orchestrator and run log.

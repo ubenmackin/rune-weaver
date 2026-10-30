@@ -29,7 +29,8 @@ public enum Tokenization: Sendable {
         "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't", "you",
         "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves",
         // Conversational query fillers
-        "trying", "figure", "tell", "help", "know", "find", "search", "looking", "please"
+        "trying", "figure", "tell", "help", "know", "find", "search", "looking", "please",
+        "show"
     ]
 
     /// Extracts salient (non-stop, non-noise) tokens in query order.
@@ -55,5 +56,27 @@ public enum Tokenization: Sendable {
         let substring = content.range(of: query, options: .caseInsensitive) != nil
         guard overlap > 0 || substring else { return nil }
         return overlap * 2 + (substring ? 1 : 0)
+    }
+}
+
+/// Canonical forward-looking markers, matched word-boundary outside the stop list.
+public enum FutureIntent: Sendable {
+    /// Words marking forward-looking intent.
+    public static let tokens = ["next", "upcoming", "following"]
+
+    /// Narrowed forward-intent check so spatial "next to" never reads as temporal.
+    /// Bare markers still count, preserving dated and undated future windows.
+    public static func isFutureIntent(in query: String) -> Bool {
+        let words = query.lowercased().split { !$0.isLetter }.map(String.init)
+        guard !words.isEmpty else { return false }
+        for (index, word) in words.enumerated() {
+            guard tokens.contains(word) else { continue }
+            // Spatial "next to <place>" names a location, not a date window.
+            if word == "next", index + 1 < words.count, words[index + 1] == "to" {
+                continue
+            }
+            return true
+        }
+        return false
     }
 }

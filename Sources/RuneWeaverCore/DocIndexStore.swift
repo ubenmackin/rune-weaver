@@ -23,6 +23,11 @@ public actor DocIndexStore {
     /// How long a status snapshot stays reusable before the next poll re-reads the persisted row.
     public static let statsCacheTTLSeconds: TimeInterval = 60
 
+    /// Canonical calendars sidecar path, mirroring the Tools indexer default.
+    public static let defaultCalendarsStatePath = "~/.runeweaver/index/calendars-state.json"
+    /// Canonical reminders sidecar path, mirroring the Tools indexer default.
+    public static let defaultRemindersStatePath = "~/.runeweaver/index/reminders-state.json"
+
     /// Cached aggregate snapshot plus when it was taken, in clock time.
     private var cachedStatus: (snapshot: DocIndexStatusSnapshot, at: Date)?
 
@@ -86,12 +91,17 @@ public actor DocIndexStore {
         return snapshot
     }
 
-    /// Clears the status cache and advances the write generation.
-    func invalidateStatusCache() {
+    /// Clears the status cache and advances the write generation, then awaits vector
+    /// invalidation so the next search reloads fresh vectors instead of racing a Task.
+    func invalidateStatusCache() async {
         cachedStatus = nil
         statusGeneration &+= 1
         aggregatesDirty = true
+        await AcceleratedVectorIndex.shared.invalidate()
     }
+
+    // Sidecar reset helpers live in `DocIndexStoreReset` so this file stays
+    // within the file-length and type-body budgets with no behavior change.
 
     /// Reads the persisted aggregate snapshot without running any content scan. Runs on the
     /// interactive lane so warm polls never queue behind indexing work.
@@ -111,7 +121,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocument(document, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         return result
     }
 
@@ -122,7 +132,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertChunks(documentID: documentID, chunks: chunks, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         return result
     }
 
@@ -137,7 +147,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocumentWithChunks(document: document, chunks: chunks, runID: runID, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         return result
     }
 
@@ -149,7 +159,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.deleteDocument(id: id, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         return result
     }
 
@@ -203,30 +213,6 @@ public actor DocIndexStore {
         }
     }
 
-    /// Full-text search over chunk text, optionally restricted to a dated window on the parent
-    /// document event time. query: Raw search text.
-    public func searchKeyword(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
-        let dbPath = self.dbPath
-        // Canonicalize the dated window through the shared temporal type so
-        // since stays inclusive and until stays exclusive by construction.
-        let range = TemporalRange(since: since, until: until)
-        return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath, since: range.since, until: range.until)
-        }
-    }
-
-    /// Reads chunks that carry an embedding for the semantic path, optionally restricted to a dated
-    /// window.
-    public func chunkVectors(limit: Int = 100, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
-        let dbPath = self.dbPath
-        // Canonicalize the dated window through the shared temporal type so
-        // since stays inclusive and until stays exclusive by construction.
-        let range = TemporalRange(since: since, until: until)
-        return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
-        }
-    }
-
     /// Serves a frozen aggregate projection from the persisted single row, repairing only when
     /// absent.
     private func persistedSnapshotOrRefresh<T>(make: (DocIndexStatusSnapshot) -> T) async throws -> T {
@@ -251,8 +237,9 @@ public actor DocIndexStore {
         return try await make(refreshAggregates())
     }
 
-    /// Refreshes the persisted aggregates, keeping the prior row on failure.
-    private func refreshAggregatesIgnoringFailure() async {
+    /// Refreshes the persisted aggregates, keeping the prior row on failure. Internal so the
+    /// reset extension in its own file can persist route-driven clears with no run-end refresh.
+    func refreshAggregatesIgnoringFailure() async {
         do {
             _ = try await refreshAggregates()
         } catch {
@@ -303,7 +290,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.prune(before: cutoff, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         // Route-driven deletes leave no run to refresh the persisted rows, so
         // refresh here to keep dashboard reads fresh without waiting for the
         // next indexing pass. A failed refresh keeps the previous row.
@@ -318,7 +305,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.retireUnseenFiles(runID: runID, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         // Retired files change the persisted counts with no run-end refresh to
         // follow, so persist fresh aggregates now. A failure keeps prior rows.
         await refreshAggregatesIgnoringFailure()
@@ -333,7 +320,7 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.retireMailboxes(mailboxes: mailboxes, dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         // Retired mailboxes change the persisted counts with no run-end refresh
         // to follow, so persist fresh aggregates now. A failure keeps prior rows.
         await refreshAggregatesIgnoringFailure()
@@ -347,65 +334,6 @@ public actor DocIndexStore {
         return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.mailContentHashes(mailboxes: mailboxes, dbPath: dbPath)
         }
-    }
-
-    /// Clears every document, chunk, and search-index entry, plus incremental mail checkpoints and
-    /// messages watermarks.
-    public func reset(
-        mailCheckpointPath: String,
-        messagesStatePath: String
-    ) async throws {
-        let dbPath = self.dbPath
-        try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.reset(dbPath: dbPath)
-        }
-        do {
-            try MailIndexCheckpointStore.reset(path: mailCheckpointPath)
-        } catch {
-            RuneWeaverLog.stores.error("DocIndexStore: failed to reset MailIndexCheckpointStore: \(error.localizedDescription)")
-        }
-        do {
-            try MessagesIndexer.resetWatermark(statePath: messagesStatePath)
-        } catch {
-            RuneWeaverLog.stores.error("DocIndexStore: failed to reset MessagesIndexer watermark: \(error.localizedDescription)")
-        }
-        invalidateStatusCache()
-        // A full clear leaves no run to refresh the persisted rows, so persist
-        // the emptied aggregates now. A failure keeps the previous row.
-        await refreshAggregatesIgnoringFailure()
-    }
-
-    /// Clears documents and chunks for a specific source (e.g. `.mail`), preserving all other
-    /// indexed sources.
-    @discardableResult
-    public func clearSource(
-        _ source: IndexSource,
-        mailCheckpointPath: String? = nil,
-        messagesStatePath: String? = nil
-    ) async throws -> Int {
-        let dbPath = self.dbPath
-        let removed = try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.clearSource(source: source.rawValue, dbPath: dbPath)
-        }
-        if source == .mail {
-            do {
-                try MailIndexCheckpointStore.reset(path: mailCheckpointPath ?? MailIndexCheckpointStore.defaultPath)
-            } catch {
-                RuneWeaverLog.stores.error("DocIndexStore: failed to reset MailIndexCheckpointStore: \(error.localizedDescription)")
-            }
-        }
-        if source == .messages {
-            do {
-                try MessagesIndexer.resetWatermark(statePath: messagesStatePath ?? MessagesIndexer.defaultStatePath)
-            } catch {
-                RuneWeaverLog.stores.error("DocIndexStore: failed to reset MessagesIndexer watermark: \(error.localizedDescription)")
-            }
-        }
-        invalidateStatusCache()
-        // A source clear changes the persisted counts with no run-end refresh to
-        // follow, so persist fresh aggregates now. A failure keeps prior rows.
-        await refreshAggregatesIgnoringFailure()
-        return removed
     }
 
     /// Current on-disk and logical size breakdown.
@@ -443,12 +371,67 @@ public actor DocIndexStore {
         let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reclaim(dbPath: dbPath)
         }
-        invalidateStatusCache()
+        await invalidateStatusCache()
         // VACUUM rewrites page layout so the persisted full-text size shifts
         // even when document counts do not; persist fresh aggregates now.
         // A failure keeps the previous row.
         await refreshAggregatesIgnoringFailure()
         return result
+    }
+}
+
+// MARK: - Search & Vector Retrieval
+
+extension DocIndexStore {
+    /// Full-text search over chunk text, optionally restricted to a dated window on the parent
+    /// document event time. query: Raw search text.
+    public func searchKeyword(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
+        let dbPath = self.dbPath
+        // Canonicalize the dated window through the shared temporal type so
+        // since stays inclusive and until stays exclusive by construction.
+        let range = TemporalRange(since: since, until: until)
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath, since: range.since, until: range.until)
+        }
+    }
+
+    /// Reads chunks that carry an embedding for the semantic path, optionally restricted to a dated
+    /// window.
+    public func chunkVectors(limit: Int = 100, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
+        let dbPath = self.dbPath
+        // Canonicalize the dated window through the shared temporal type so
+        // since stays inclusive and until stays exclusive by construction.
+        let range = TemporalRange(since: since, until: until)
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
+        }
+    }
+
+    /// Reads chunks by their unique identifiers.
+    public func chunks(ids: Set<UUID>) async throws -> [UUID: IndexedChunk] {
+        guard !ids.isEmpty else { return [:] }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.chunks(ids: ids, dbPath: dbPath)
+        }
+    }
+
+    /// Evaluates `queryVector` against all loaded vectors using hardware acceleration.
+    public func searchAcceleratedVectors(
+        queryVector: [Float],
+        zGate: Double = AcceleratedVectorMath.defaultZGate,
+        limit: Int = AcceleratedVectorIndex.defaultSearchLimit,
+        since: Date? = nil,
+        until: Date? = nil
+    ) async throws -> [AcceleratedVectorIndex.ScoredVectorHit] {
+        try await AcceleratedVectorIndex.shared.ensureLoaded(dbPath: dbPath)
+        return try await AcceleratedVectorIndex.shared.search(
+            queryVector: queryVector,
+            zGate: zGate,
+            limit: limit,
+            since: since,
+            until: until
+        )
     }
 }
 
@@ -473,39 +456,6 @@ extension DocIndexStore {
             defer { sqlite3_close(handle) }
             try SQLiteDocIndexStore.writeEmbeddingMeta(handle: handle, modelID: modelID, dimension: dimension)
         }
-    }
-
-    /// Verifies that the store's embedded vectors match the active embedder's dimension.
-    public func ensureEmbeddingDimensionMatch(
-        activeModelID: String,
-        activeDimension: Int,
-        mailCheckpointPath: String,
-        messagesStatePath: String
-    ) async throws -> Bool {
-        let meta = try await readEmbeddingMeta()
-        if let storedDimension = meta.dimension, storedDimension != activeDimension {
-            RuneWeaverLog.stores.warning(
-                "DocIndexStore: embedding dimension mismatch (stored: \(storedDimension), active: \(activeDimension)); triggering re-index reset."
-            )
-            try await reset(mailCheckpointPath: mailCheckpointPath, messagesStatePath: messagesStatePath)
-            try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
-            return true
-        }
-        if meta.dimension == nil {
-            let stats = try await SQLiteSerialIO.run(lane: .indexing) {
-                try DocIndexStoreIO.fastStats(dbPath: self.dbPath)
-            }
-            if stats.vectorChunks > 0 {
-                RuneWeaverLog.stores.warning(
-                    "DocIndexStore: unversioned vector chunks detected without dimension metadata; resetting to dimension \(activeDimension)."
-                )
-                try await reset(mailCheckpointPath: mailCheckpointPath, messagesStatePath: messagesStatePath)
-                try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
-                return true
-            }
-            try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
-        }
-        return false
     }
 }
 
@@ -626,6 +576,15 @@ enum DocIndexStoreIO {
         #if canImport(SQLite3)
             let range = TemporalRange(since: since, until: until)
             return try SQLiteDocIndexStore.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads chunks by their unique identifiers.
+    static func chunks(ids: Set<UUID>, dbPath: String) throws -> [UUID: IndexedChunk] {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.chunks(ids: ids, dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif

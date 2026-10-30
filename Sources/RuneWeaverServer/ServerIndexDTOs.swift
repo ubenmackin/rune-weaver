@@ -1059,7 +1059,7 @@ public struct EmbeddingsStatusResponse: Content, Equatable {
     public let stage: String?
     /// Configured GGUF model file name.
     public let model: String
-    /// Embedding vector dimensionality (768 for EmbeddingGemma 2).
+    /// Embedding vector dimensionality for EmbeddingGemma 2.
     public let dimensions: Int
     /// Hardware acceleration type (`"Apple Silicon Metal GPU"`).
     public let acceleration: String
@@ -1075,7 +1075,7 @@ public struct EmbeddingsStatusResponse: Content, Equatable {
         status: String,
         stage: String? = nil,
         model: String,
-        dimensions: Int = 768,
+        dimensions: Int = AcceleratedVectorMath.dimension,
         acceleration: String = "Apple Silicon Metal GPU",
         endpoint: String,
         isRunning: Bool,

@@ -66,7 +66,11 @@ public struct CalendarIndexState: Sendable, Codable, Equatable {
 /// Indexes calendar event occurrences into the document index.
 public actor CalendarIndexer {
     /// Default location of the persisted known-identifier file.
-    public static let defaultStatePath = "~/.runeweaver/index/calendars-state.json"
+    /// Mirrors the Core canonical path so the two never diverge.
+    public static var defaultStatePath: String {
+        DocIndexStore.defaultCalendarsStatePath
+    }
+
     /// Default per-series occurrence cap.
     public static let defaultOccurrenceCap = 500
     /// Default fetch lookback in calendar years.
@@ -220,34 +224,82 @@ extension CalendarIndexer {
         var endISO: String?
         /// Owning calendar identifier.
         var calendarID: String?
+        /// Displayed calendar name shown in the chunk header.
+        var calendarName: String?
+        /// Rendered occurrence time shown in the chunk header.
+        var occurrenceTime: String?
         /// Whether the event spans all day.
         var isAllDay: Bool
     }
+
+    /// Chunk shape revision forcing one refresh of pre-contextual rows.
+    static let calendarChunkShapeVersion = "v3"
 
     /// Stable content hash gating re-indexing of an unchanged occurrence.
     /// - Parameter fingerprint: Hash inputs for one occurrence.
     /// - Returns: Lowercase SHA-256 digest.
     static func contentHash(for fingerprint: CalendarContentFingerprint) -> String {
+        // Version plus canonical fields so display renames and time
+        // rendering changes re-index instead of leaving stale headers.
         let joined = [
+            Self.calendarChunkShapeVersion,
             fingerprint.title,
             NormalizedText.value(fingerprint.notes) ?? "",
             NormalizedText.value(fingerprint.location) ?? "",
             fingerprint.startISO ?? "",
             fingerprint.endISO ?? "",
             fingerprint.calendarID ?? "",
+            fingerprint.calendarName ?? "",
+            fingerprint.occurrenceTime ?? "",
             fingerprint.isAllDay ? "true" : "false"
         ].joined(separator: "\n")
         let digest = SHA256.hash(data: Data(joined.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func chunkText(title: String, notes: String?, location: String?) -> String {
-        var parts: [String] = [title]
+    /// Renders one occurrence for the chunk header in device time.
+    /// Device zone is intentional for owner readability; the rendered
+    /// string participates in the fingerprint so drift re-embeds.
+    static func formatOccurrenceTime(startDate: Date?, endDate: Date?, isAllDay: Bool) -> String? {
+        guard let startDate else { return nil }
+        if isAllDay {
+            let day = SharedDateFormatters.posixString(from: startDate, format: "EEEE, MMMM d, yyyy")
+            return "\(day) (All day)"
+        }
+        let startStr = SharedDateFormatters.posixString(from: startDate, format: "EEEE, MMMM d, yyyy 'at' h:mm a")
+        guard let endDate else { return startStr }
+        if Calendar.current.isDate(startDate, inSameDayAs: endDate) {
+            let endStr = SharedDateFormatters.posixString(from: endDate, format: "h:mm a")
+            return "\(startStr) – \(endStr)"
+        }
+        let endStr = SharedDateFormatters.posixString(from: endDate, format: "EEEE, MMMM d, yyyy 'at' h:mm a")
+        return "\(startStr) – \(endStr)"
+    }
+
+    /// Single owner of calendar chunk shape: Date then Calendar then Event.
+    /// Absent occurrenceTime or calendarName omits its line so untimed
+    /// rows stay searchable without placeholder noise.
+    static func chunkText(
+        title: String,
+        notes: String?,
+        location: String?,
+        calendarName: String? = nil,
+        occurrenceTime: String? = nil
+    ) -> String {
+        var headerParts: [String] = []
+        if let occurrenceTime, !occurrenceTime.isEmpty {
+            headerParts.append("Date: \(occurrenceTime)")
+        }
+        if let calendarName, !calendarName.isEmpty {
+            headerParts.append("Calendar: \(calendarName)")
+        }
+        headerParts.append("Event: \(title)")
+        var parts: [String] = [headerParts.joined(separator: "\n")]
         if let clean = NormalizedText.value(notes) {
-            parts.append(clean)
+            parts.append("Notes:\n\(clean)")
         }
         if let clean = NormalizedText.value(location) {
-            parts.append(clean)
+            parts.append("Location: \(clean)")
         }
         return parts.joined(separator: "\n\n")
     }
@@ -317,13 +369,18 @@ extension CalendarIndexer {
         pendings.reserveCapacity(selected.count)
         for event in selected {
             try Task.checkCancellation()
+            let startISO = event.startDate.map { TemporalFilter.isoString(from: $0) }
+            let endISO = event.endDate.map { TemporalFilter.isoString(from: $0) }
             guard let rawID = NormalizedText.value(event.identifier), !rawID.contains("\0") else {
+                // Corrupt identifiers still count as live so a bad fetch
+                // never prunes a previously indexed document.
+                if let fallback = NormalizedText.value(event.identifier) {
+                    liveIDs.insert(startISO.map { "\(fallback)@\($0)" } ?? fallback)
+                }
                 report.scanned += 1
                 report.skipped += 1
                 continue
             }
-            let startISO = event.startDate.map { TemporalFilter.isoString(from: $0) }
-            let endISO = event.endDate.map { TemporalFilter.isoString(from: $0) }
             let externalID = startISO.map { "\(rawID)@\($0)" } ?? rawID
             // Tracked before content skips so an untitled or NUL row still
             // counts as live and never prunes a previously indexed document.
@@ -338,7 +395,23 @@ extension CalendarIndexer {
                 report.skipped += 1
                 continue
             }
+            // Overlong title or notes fail closed to skip while staying live.
+            guard title.count <= TemporalFilter.gatewayMaxTitleChars else {
+                report.scanned += 1
+                report.skipped += 1
+                continue
+            }
+            if let notes = event.notes, notes.count > TemporalFilter.gatewayMaxNotesChars {
+                report.scanned += 1
+                report.skipped += 1
+                continue
+            }
             let calendar = event.calendarIdentifier.flatMap { calendarsByID[$0] }
+            let occurrenceTime = Self.formatOccurrenceTime(
+                startDate: event.startDate,
+                endDate: event.endDate,
+                isAllDay: event.isAllDay
+            )
             let fingerprint = CalendarContentFingerprint(
                 title: title,
                 notes: event.notes,
@@ -346,6 +419,8 @@ extension CalendarIndexer {
                 startISO: startISO,
                 endISO: endISO,
                 calendarID: event.calendarIdentifier,
+                calendarName: calendar?.title,
+                occurrenceTime: occurrenceTime,
                 isAllDay: event.isAllDay
             )
             let contentHash = Self.contentHash(for: fingerprint)
@@ -356,7 +431,13 @@ extension CalendarIndexer {
                 report.skipped += 1
                 continue
             }
-            let chunkText = Self.chunkText(title: title, notes: event.notes, location: event.location)
+            let chunkText = Self.chunkText(
+                title: title,
+                notes: event.notes,
+                location: event.location,
+                calendarName: calendar?.title,
+                occurrenceTime: occurrenceTime
+            )
             var metadata: [String: String] = [:]
             if let name = calendar?.title, !name.isEmpty {
                 metadata["calendarName"] = name
@@ -389,19 +470,26 @@ extension CalendarIndexer {
     }
 
     /// Embeds and upserts pending calendar documents in a single SQLite transaction.
+    /// Dimension resets stay single-flight in the coordinator before stages.
     private func upsertPendings(_ pendings: [CalendarPending], runID: String, report: inout CalendarIndexReport) async throws {
         guard !pendings.isEmpty else { return }
-        // A reset triggered by a dimension mismatch may fail while other source
-        // stages run concurrently; the pass then degrades to keyword-only.
-        if let embedder, let dim = await embedder.dimension {
-            _ = try? await index.ensureEmbeddingDimensionMatch(
-                activeModelID: embedder.modelID,
-                activeDimension: dim,
-                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
-                messagesStatePath: MessagesIndexer.defaultStatePath
-            )
+        // Resets must run single-flight before stages; this stage never resets.
+        // A mismatch degrades to keyword-only so racing stages stay intact.
+        var dimensionMismatch = false
+        if let embedder, let dim = await embedder.dimension,
+           let stored = try? await index.readEmbeddingMeta(),
+           let storedDim = stored.dimension, storedDim != dim
+        {
+            dimensionMismatch = true
         }
-        let vectors = try await embeddings(for: pendings.map(\.chunkText))
+        let textsToEmbed = pendings.map { pending in
+            EmbeddingGemmaPrompts.document(title: pending.document.displayName, text: pending.chunkText)
+        }
+        let vectors: [[Float]] = if dimensionMismatch {
+            Array(repeating: [], count: textsToEmbed.count)
+        } else {
+            try await embeddings(for: textsToEmbed)
+        }
         var entries: [DocBatchUpsertEntry] = []
         entries.reserveCapacity(pendings.count)
         var vectorCount = 0

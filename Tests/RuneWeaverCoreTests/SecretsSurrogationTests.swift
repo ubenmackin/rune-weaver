@@ -104,6 +104,11 @@ private func clearDNS() {
     ApiSSRFGuard.testDNSResolver = nil
 }
 
+/// Isolated in-memory vault so surrogate tests never touch the login keychain.
+private func makeSurrogateTestSecrets() -> SecretsManager {
+    SecretsManager(service: "com.runeweaver.test.surrogate.\(UUID().uuidString)", inMemory: true)
+}
+
 /// Decoded preview envelope for dry-run assertions.
 private struct SurrogatePreviewEnvelope: Decodable {
     let status: String
@@ -115,7 +120,7 @@ private struct SurrogatePreviewEnvelope: Decodable {
 struct SurrogateIssuanceTests {
     @Test
     func `Surrogate carries the key as a reference without reading secrets`() throws {
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let reference = try secrets.surrogate(for: "MY_API_KEY")
         #expect(reference == "rwsecret:MY_API_KEY")
         #expect(SecretsManager.containsSurrogate(reference))
@@ -132,7 +137,7 @@ struct SurrogateIssuanceTests {
     @Test
     func `Surrogate reflects live rotation instead of storing a copy`() async throws {
         let key = "RW_TEST_ROTATING_KEY"
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let reference = try secrets.surrogate(for: key)
         try await surrogateEnvGate.withCredential(envVar: key, value: "first-value") {
             let first = try await secrets.resolveSurrogate(reference)
@@ -150,7 +155,7 @@ struct SurrogateResolutionTests {
     @Test
     func `Exact surrogate resolves through the live environment`() async throws {
         let key = "RW_TEST_SURROGATE_ROUNDTRIP"
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         try await surrogateEnvGate.withCredential(envVar: key, value: "live-secret-abc-123") {
             let reference = try secrets.surrogate(for: key)
             let resolvedSurrogate = try await secrets.resolveSurrogate(reference)
@@ -163,7 +168,7 @@ struct SurrogateResolutionTests {
     @Test
     func `Embedded surrogate resolves inside a header value`() async throws {
         let key = "RW_TEST_SURROGATE_EMBEDDED"
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         try await surrogateEnvGate.withCredential(envVar: key, value: "live-secret-abc-123") {
             let outcome = try await secrets.resolveValueContainingSurrogates("Bearer rwsecret:\(key)")
             #expect(outcome.resolved == "Bearer live-secret-abc-123")
@@ -173,7 +178,7 @@ struct SurrogateResolutionTests {
 
     @Test
     func `Unknown surrogate throws a typed error naming the key`() async {
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let missing = "RW_TEST_DEFINITELY_MISSING_SURROGATE_KEY"
         unsetenv(missing)
         do {
@@ -229,7 +234,7 @@ struct SurrogateResolutionTests {
 
     @Test
     func `Plain env names keep the historical nil-when-absent shape`() async throws {
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let missing = "RW_TEST_DEFINITELY_ABSENT_PLAIN_KEY"
         unsetenv(missing)
         #expect(try await secrets.resolve(missing) == nil)
@@ -253,7 +258,7 @@ struct ApiSurrogateTransportTests {
                 credentials: credentials
             )
         )
-        return OutboundEgressSupervisor(policyStore: store, secrets: SecretsManager(), browserConfig: BrowserConfig())
+        return OutboundEgressSupervisor(policyStore: store, secrets: makeSurrogateTestSecrets(), browserConfig: BrowserConfig())
     }
 
     @Test
@@ -340,7 +345,7 @@ struct ApiSurrogateTransportTests {
 struct SurrogateRedactionTests {
     @Test
     func `Resolved values sweep out of echoed output`() {
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let swept = secrets.redactResolved(
             "server echoed live-secret-abc-123 back",
             secrets: ["live-secret-abc-123"]
@@ -351,7 +356,7 @@ struct SurrogateRedactionTests {
 
     @Test
     func `Longest secret sweeps first so overlaps leave nothing behind`() {
-        let secrets = SecretsManager()
+        let secrets = makeSurrogateTestSecrets()
         let swept = secrets.redactResolved(
             "token live-secret-abc-123",
             secrets: ["live-secret-abc-123", "live-secret"]
@@ -398,5 +403,30 @@ struct SurrogateAllowlistTests {
                 return
             }
         }
+    }
+}
+
+@Suite("Hermetic Defaults")
+struct HermeticDefaultsTests {
+    @Test
+    func `process resolves nil to an isolated in-memory fallback`() async {
+        #expect(SecretsManager.isTestProcess)
+        let fallback = SecretsManager.resolving(nil)
+        #expect(await fallback.inMemory)
+        #expect(await fallback.service.hasPrefix("com.runeweaver.test.fallback."))
+    }
+
+    @Test
+    func `Explicit secrets win over the test fallback`() async {
+        let explicit = SecretsManager(service: "com.runeweaver.test.explicit.\(UUID().uuidString)", inMemory: true)
+        let resolved = SecretsManager.resolving(explicit)
+        #expect(await resolved.service == explicit.service)
+        #expect(await resolved.inMemory)
+    }
+
+    @Test
+    func `Default signer stays in-memory in tests`() async {
+        let signer = EnclaveHMACSigner()
+        #expect(await signer.secrets.inMemory)
     }
 }
