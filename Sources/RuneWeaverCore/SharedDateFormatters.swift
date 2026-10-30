@@ -29,6 +29,18 @@ public enum SharedDateFormatters: Sendable {
         return formatter.date(from: string)
     }
 
+    /// Formats a date with a POSIX formatter for one format.
+    /// - Parameters: date value, format string, zone for device-local rendering.
+    public static func posixString(from date: Date, format: String, timeZone: TimeZone = .current) -> String {
+        // Fresh instance keeps POSIX rendering single-source without sharing
+        // mutable formatter state across threads.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        return formatter.string(from: date)
+    }
+
     /// Parses a timestamp as ISO-8601 with fractional seconds.
     /// - Parameter string: Candidate date string.
     /// - Returns: Parsed date, or nil when the string does not match.

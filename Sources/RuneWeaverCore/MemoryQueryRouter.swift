@@ -235,10 +235,8 @@ public enum MemoryQueryRouter: Sendable {
 
     /// Bare future window `[now, now+60-days)` for `next`, `following`, or `upcoming`.
     private static func bareFutureRange(currentDate: Date, lowered: String) -> TemporalRange? {
-        let isBare = LiveSearchGuidance.containsWord("next", in: lowered)
-            || LiveSearchGuidance.containsWord("upcoming", in: lowered)
-            || LiveSearchGuidance.containsWord("following", in: lowered)
-        guard isBare else { return nil }
+        // Narrowed intent check so spatial "next to" never opens a date window.
+        guard FutureIntent.isFutureIntent(in: lowered) else { return nil }
         let calendar = gregorianCalendar()
         guard let sixtyOut = calendar.date(byAdding: .day, value: 60, to: currentDate) else { return nil }
         return TemporalRange(since: currentDate, until: sixtyOut)

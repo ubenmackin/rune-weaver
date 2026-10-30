@@ -133,9 +133,8 @@ func applyApprovalDecision(
         displayTarget: pending.displayTarget,
         decidedAt: Date()
     ))
-    // The brake clears only on an explicit owner Resume: approving the brake card releases every
-    // parked turn with fresh counters, while denying it leaves the park exactly as the owner left
-    // it.
+    // The brake clears only on explicit owner Resume: approving releases every
+    // parked turn with fresh counters, while denying leaves the park untouched.
     if effectiveApproved, pending.toolName == BehaviorWatchdog.brakeCardToolName {
         await context.watchdog.resume()
         if let pulse {

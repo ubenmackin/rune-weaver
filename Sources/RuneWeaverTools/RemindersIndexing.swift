@@ -56,7 +56,10 @@ public struct RemindersIndexState: Sendable, Codable, Equatable {
 /// while present; only identifiers absent from the live fetch are pruned.
 public actor RemindersIndexer {
     /// Default location of the persisted known-identifier file.
-    public static let defaultStatePath = "~/.runeweaver/index/reminders-state.json"
+    /// Mirrors the Core canonical path so the two never diverge.
+    public static var defaultStatePath: String {
+        DocIndexStore.defaultRemindersStatePath
+    }
 
     /// Live reminder lists plus rows, read per call and never cached.
     private let store: any ReminderStore

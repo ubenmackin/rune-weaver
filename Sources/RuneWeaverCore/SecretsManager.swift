@@ -304,6 +304,40 @@ public actor SecretsManager {
     }
 }
 
+/// Test-process fallback stays beside the manager so resolvers share one hermetic default.
+extension SecretsManager {
+    /// True inside XCTest or swift-testing; resolvers use it to stay hermetic.
+    public static var isTestProcess: Bool {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return true
+        }
+        if ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil {
+            return true
+        }
+        if NSClassFromString("XCTestCase") != nil || NSClassFromString("XCTest") != nil {
+            return true
+        }
+        let name = ProcessInfo.processInfo.processName
+        if name.range(of: "test", options: .caseInsensitive) != nil {
+            return true
+        }
+        return ProcessInfo.processInfo.arguments.contains { $0.contains(".xctest") || $0.contains("swift-testing") }
+    }
+
+    /// Isolated in-memory vault for test-process defaults.
+    public static func testFallback() -> SecretsManager {
+        SecretsManager(service: "com.runeweaver.test.fallback.\(UUID().uuidString)", inMemory: true)
+    }
+
+    /// Explicit instance wins; tests get an isolated fallback, prod gets Keychain.
+    public static func resolving(_ explicit: SecretsManager?) -> SecretsManager {
+        if let explicit {
+            return explicit
+        }
+        return isTestProcess ? testFallback() : SecretsManager()
+    }
+}
+
 /// Surrogate references stay beside the manager so Keychain reads keep one owner.
 extension SecretsManager {
     // MARK: - Surrogates (agent-visible references)

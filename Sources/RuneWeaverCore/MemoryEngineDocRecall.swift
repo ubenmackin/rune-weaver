@@ -97,11 +97,10 @@ extension MemoryEngine {
         // Widen both scans beyond the returned page so a strong match is not crowded out by
         // common-name flooding.
         let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
-        let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
-        // Keyword reads at the vector width so flooding cannot starve it, and windowed reads lift
-        // the store clamp to the same `maxVectorWindowResults` ceiling the vector pool uses, so a
-        // dated keyword leg never reads narrower than the vector leg beside it.
-        let keywordLimit = vectorLimit
+        // Both legs read at one shared width so flooding cannot starve either side.
+        // Floor keeps small pools useful; ceiling respects the tier cap.
+        let width = min(max(pool * Self.docPoolWidthMultiplier, Self.docVectorWidthFloor), Self.maxPerTierResults)
+        let keywordLimit = width
         let keyword: [IndexedChunk]
         do {
             keyword = try await docIndexStore.searchKeyword(query: trimmed, limit: keywordLimit, since: since, until: until)
@@ -111,16 +110,47 @@ extension MemoryEngine {
             RuneWeaverLog.memory.warning("MemoryEngine: searchKeyword failed: \(error.localizedDescription)")
             keyword = []
         }
-        let vectors: [IndexedChunk]
-        do {
-            vectors = try await docIndexStore.chunkVectors(limit: vectorLimit, since: since, until: until)
-        } catch is CancellationError {
-            return []
-        } catch {
-            RuneWeaverLog.memory.warning("MemoryEngine: chunkVectors failed: \(error.localizedDescription)")
-            vectors = []
-        }
         let queryEmbedding = (embedding?.isEmpty == false) ? embedding : nil
+        var vectors: [IndexedChunk] = []
+        if let queryEmbedding {
+            if queryEmbedding.count == AcceleratedVectorMath.dimension {
+                do {
+                    let hits = try await docIndexStore.searchAcceleratedVectors(
+                        queryVector: queryEmbedding,
+                        zGate: Self.docVectorZGate,
+                        limit: width,
+                        since: since,
+                        until: until
+                    )
+                    if !hits.isEmpty {
+                        let hitChunkIDs = Set(hits.map(\.chunkID))
+                        let fetched = try await docIndexStore.chunks(ids: hitChunkIDs)
+                        for hit in hits {
+                            if let chunk = fetched[hit.chunkID] {
+                                vectors.append(chunk)
+                            }
+                        }
+                    }
+                } catch is CancellationError {
+                    return []
+                } catch {
+                    RuneWeaverLog.memory.warning("MemoryEngine: searchAcceleratedVectors failed: \(error.localizedDescription)")
+                }
+            } else {
+                // Mismatched widths fall back to a windowed scan scoring same-dim
+                // rows only; other widths stay keyword-only.
+                do {
+                    let fallback = try await docIndexStore.chunkVectors(limit: width, since: since, until: until)
+                    let sameDim = fallback.filter { $0.embedding.count == queryEmbedding.count }
+                    vectors = sameDim.isEmpty ? [] : sameDim
+                } catch is CancellationError {
+                    return []
+                } catch {
+                    RuneWeaverLog.memory.warning("MemoryEngine: chunkVectors failed: \(error.localizedDescription)")
+                    vectors = []
+                }
+            }
+        }
         let candidates = Self.docIndexCandidates(keyword: keyword, vectors: vectors, queryEmbedding: queryEmbedding)
         guard !candidates.isEmpty else { return [] }
         let stats: IndexStats?
@@ -316,6 +346,28 @@ extension MemoryEngine {
     /// Contiguous salient-phrase bonus in the doc-index rerank.
     private static let docIndexPhraseWeight = 0.1
 
+    /// Z-score gate for the accelerated vector leg, sharing the canonical default so recall
+    /// and the vector index never diverge on the threshold.
+    private static let docVectorZGate = AcceleratedVectorMath.defaultZGate
+
+    /// Floor for the shared keyword/vector read width so small pools still scan usefully.
+    private static let docVectorWidthFloor = 500
+
+    /// Multiplier widening the tier pool into the shared read width.
+    private static let docPoolWidthMultiplier = 10
+
+    /// Closeness gain for future calendar docs, decaying to zero across the window.
+    private static let futureClosenessGain = 0.20
+
+    /// Flat demotion for past calendar docs under future intent.
+    private static let pastCalendarPenalty = 0.30
+
+    /// Window in days over which the future closeness gain decays to zero.
+    private static let futureClosenessWindowDays = 30.0
+
+    /// Seconds per day converting event-time deltas to whole-day closeness.
+    private static let secondsPerDay = 86400.0
+
     /// Reciprocal-rank score for one list rank, zero when absent.
     private static func rrfScore(rank: Int?) -> Double {
         guard let rank else { return 0 }
@@ -337,8 +389,9 @@ extension MemoryEngine {
             return (docIndexRRFK + 1.0) / (docIndexRRFK + Double(rank))
         }
         var scoredVectors: [(chunk: IndexedChunk, cosine: Double)] = []
-        if let queryEmbedding, !queryEmbedding.isEmpty {
+        if let queryEmbedding {
             for chunk in vectors {
+                guard chunk.embedding.count == queryEmbedding.count else { continue }
                 let cosine = VectorStore.cosineSimilarity(queryEmbedding, chunk.embedding)
                 guard cosine > 0 else { continue }
                 scoredVectors.append((chunk: chunk, cosine: min(max(cosine, 0), 1)))
@@ -405,10 +458,15 @@ extension MemoryEngine {
         salient: [String],
         documents: [UUID: IndexedDocument] = [:],
         indexAsOf: Date?,
-        episodicWeight: Double = episodicTierWeight
+        episodicWeight: Double = episodicTierWeight,
+        now: Date = Date()
     ) -> [MemoryResult] {
         let total = candidates.count
         let watermark = indexAsOf.map { indexWatermark($0) }
+        let loweredQuery = query.lowercased()
+        // Narrowed intent so spatial "next to" never earns the calendar bonus.
+        let isFutureIntent = FutureIntent.isFutureIntent(in: loweredQuery)
+        let nowSec = now.timeIntervalSince1970
         let scored = candidates.map { candidate -> MemoryResult in
             let base = docIndexBaseWeight * max(candidate.keywordScore, candidate.vectorScore)
             let overlap = docIndexOverlap(queryTokens: queryTokens, chunkText: candidate.chunk.text)
@@ -417,8 +475,19 @@ extension MemoryEngine {
             let phrase = hasContiguousPhraseMatch(salient: salient, chunkText: candidate.chunk.text) ? 1.0 : 0.0
             let displayName = documents[candidate.chunk.documentID]?.displayName
             let entity = hasEntityNameMatch(queryTokens: queryTokens, displayName: displayName) ? 1.0 : 0.0
-            let bonus = docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
+            var bonus = docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
                 + docIndexEntityNameWeight * entity + docIndexPhraseWeight * phrase
+            if isFutureIntent, let doc = documents[candidate.chunk.documentID], doc.source == .calendars, let mtime = doc.mtime {
+                let deltaSeconds = mtime.timeIntervalSince1970 - nowSec
+                if deltaSeconds >= 0 {
+                    let daysAhead = deltaSeconds / secondsPerDay
+                    let closeness = max(0.0, futureClosenessGain
+                        * (1.0 - min(daysAhead, futureClosenessWindowDays) / futureClosenessWindowDays))
+                    bonus += closeness
+                } else {
+                    bonus -= pastCalendarPenalty
+                }
+            }
             let fused = min(max(base + bonus + candidate.rrf, 0.0), 1.0)
             var metadata: [String: String] = [
                 "id": candidate.chunk.id.uuidString,

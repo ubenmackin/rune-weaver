@@ -181,7 +181,8 @@ public struct EnclaveHMACSigner: SovereignSigner {
         secrets: SecretsManager? = nil
     ) {
         self.identity = identity
-        self.secrets = secrets ?? SecretsManager()
+        // Tests default to an isolated fallback so no test touches the login Keychain.
+        self.secrets = SecretsManager.resolving(secrets)
     }
 
     public func preloadIfNeeded() async throws {
@@ -459,7 +460,8 @@ public actor SovereignLedger {
         self.episodeStore = episodeStore
         self.sovereignCopyPath = sovereignCopyPath
         self.checkpointPath = checkpointPath
-        let resolvedSecrets = secrets ?? SecretsManager()
+        // Tests default to an isolated fallback so ceremonies stay hermetic.
+        let resolvedSecrets = SecretsManager.resolving(secrets)
         self.secrets = resolvedSecrets
         if let signer {
             self.signer = signer

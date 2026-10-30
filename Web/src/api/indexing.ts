@@ -52,9 +52,10 @@ export function pruneIndex(before: string | number): Promise<IndexPruneResponse>
   });
 }
 
-// Clears the index store; the route fails instead of claiming a partial clear.
-export function resetIndex(): Promise<IndexResetResponse> {
-  return fetchJson<IndexResetResponse>("/index/reset", {
+// Clears the index store (or a single source); the route fails instead of claiming a partial clear.
+export function resetIndex(source?: string): Promise<IndexResetResponse> {
+  const query = source ? `?source=${encodeURIComponent(source)}` : "";
+  return fetchJson<IndexResetResponse>(`/index/reset${query}`, {
     method: "POST",
     body: JSON.stringify({}),
   });
