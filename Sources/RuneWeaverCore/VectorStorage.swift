@@ -89,6 +89,7 @@ public actor AcceleratedVectorIndex {
         let documentID: UUID
         let mtime: Double?
         let source: IndexSource
+        let modality: VectorModality
         let blob: Data
     }
 
@@ -97,6 +98,7 @@ public actor AcceleratedVectorIndex {
     private var rowDocumentID: [UUID] = []
     private var rowMTime: [Double?] = []
     private var rowSource: [IndexSource] = []
+    private var rowModality: [VectorModality] = []
     private var isLoaded = false
     private var loadedDBPath: String?
     private var lastLoadedAt: Date?
@@ -121,6 +123,7 @@ public actor AcceleratedVectorIndex {
         rowDocumentID = []
         rowMTime = []
         rowSource = []
+        rowModality = []
         isLoaded = false
         loadedDBPath = nil
         lastLoadedAt = nil
@@ -181,6 +184,7 @@ public actor AcceleratedVectorIndex {
             rowDocumentID.reserveCapacity(staged.count)
             rowMTime.reserveCapacity(staged.count)
             rowSource.reserveCapacity(staged.count)
+            rowModality.reserveCapacity(staged.count)
             var row = 0
             for stagedRow in staged {
                 // Cooperative cancel keeps a large decode from pinning the actor.
@@ -192,6 +196,7 @@ public actor AcceleratedVectorIndex {
                 rowDocumentID.append(stagedRow.documentID)
                 rowMTime.append(stagedRow.mtime)
                 rowSource.append(stagedRow.source)
+                rowModality.append(stagedRow.modality)
                 row += 1
             }
             // Every blob malformed means an empty matrix, not a scored one.
@@ -250,7 +255,7 @@ public actor AcceleratedVectorIndex {
             }
             staged.reserveCapacity(totalVectors)
             let sql = """
-            SELECT c.id, c.document_id, d.mtime, d.source, c.embedding
+            SELECT c.id, c.document_id, d.mtime, d.source, c.embedding, d.mime
             FROM indexed_chunks c
             LEFT JOIN indexed_documents d ON d.id = c.document_id
             WHERE c.is_vector = 1 AND c.embedding IS NOT NULL
@@ -279,12 +284,21 @@ public actor AcceleratedVectorIndex {
                 else {
                     continue
                 }
+                let mime = SQLiteHelpers.columnText(statement, index: 5)?.lowercased() ?? ""
+                let modality: VectorModality = if mime.hasPrefix("image/") {
+                    .image
+                } else if mime.hasPrefix("audio/") {
+                    .audio
+                } else {
+                    .text
+                }
                 let copied = Data(bytes: blobPtr, count: blobBytes)
                 staged.append(StagedVectorRow(
                     chunkID: chunkID,
                     documentID: docID,
                     mtime: mtime,
                     source: source,
+                    modality: modality,
                     blob: copied
                 ))
             }
@@ -344,6 +358,7 @@ public actor AcceleratedVectorIndex {
         public let zScore: Double
         public let mtime: Double?
         public let source: IndexSource
+        public let modality: VectorModality
     }
 
     /// Evaluates `queryVector` against all loaded vectors using `vDSP_mmul`, computes Z-scores,
@@ -400,7 +415,7 @@ public actor AcceleratedVectorIndex {
         }
         try Task.checkCancellation()
 
-        let zScores = AcceleratedVectorMath.meaningScores(rawScores)
+        let zScores = AcceleratedVectorMath.modalityCenteredMeaningScores(rawScores, modalities: rowModality)
         var qualifying: [CandidateMatch] = []
         qualifying.reserveCapacity(min(effectiveLimit * 2, total))
 
@@ -412,13 +427,18 @@ public actor AcceleratedVectorIndex {
             try Task.checkCancellation()
             let zScore = zScores[row]
             if zScore >= zGate {
-                // Bounded recall excludes NULL mtime on every source, matching keyword gating.
+                // Bounded recall gates calendar items to future event bounds, while
+                // past documents/mail discussing future events remain recallable.
                 if isBounded {
-                    guard let mtime = rowMTime[row] else { continue }
-                    if let sinceSec, mtime < sinceSec {
-                        continue
-                    }
-                    if let untilSec, mtime >= untilSec {
+                    if rowSource[row] == .calendars {
+                        guard let mtime = rowMTime[row] else { continue }
+                        if let sinceSec, mtime < sinceSec {
+                            continue
+                        }
+                        if let untilSec, mtime >= untilSec {
+                            continue
+                        }
+                    } else if let untilSec, let mtime = rowMTime[row], mtime >= untilSec {
                         continue
                     }
                 }
@@ -441,7 +461,8 @@ public actor AcceleratedVectorIndex {
                 cosine: item.cosine,
                 zScore: item.zScore,
                 mtime: rowMTime[idx],
-                source: rowSource[idx]
+                source: rowSource[idx],
+                modality: rowModality[idx]
             ))
         }
 

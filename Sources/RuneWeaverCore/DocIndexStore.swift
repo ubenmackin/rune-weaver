@@ -177,7 +177,7 @@ public actor DocIndexStore {
     public func documents(ids: Set<UUID>) async throws -> [UUID: IndexedDocument] {
         guard !ids.isEmpty else { return [:] }
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        return try await SQLiteSerialIO.run(lane: .interactive) {
             try DocIndexStoreIO.documents(ids: ids, dbPath: dbPath)
         }
     }
@@ -390,7 +390,7 @@ extension DocIndexStore {
         // Canonicalize the dated window through the shared temporal type so
         // since stays inclusive and until stays exclusive by construction.
         let range = TemporalRange(since: since, until: until)
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        return try await SQLiteSerialIO.run(lane: .interactive) {
             try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         }
     }
@@ -402,7 +402,7 @@ extension DocIndexStore {
         // Canonicalize the dated window through the shared temporal type so
         // since stays inclusive and until stays exclusive by construction.
         let range = TemporalRange(since: since, until: until)
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        return try await SQLiteSerialIO.run(lane: .interactive) {
             try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         }
     }
@@ -411,7 +411,7 @@ extension DocIndexStore {
     public func chunks(ids: Set<UUID>) async throws -> [UUID: IndexedChunk] {
         guard !ids.isEmpty else { return [:] }
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        return try await SQLiteSerialIO.run(lane: .interactive) {
             try DocIndexStoreIO.chunks(ids: ids, dbPath: dbPath)
         }
     }

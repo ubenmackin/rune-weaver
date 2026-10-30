@@ -6,6 +6,12 @@ import Foundation
     import Accelerate
 #endif
 
+public enum VectorModality: String, CaseIterable, Sendable {
+    case text
+    case image
+    case audio
+}
+
 public enum AcceleratedVectorMath {
     /// Canonical embedding width; all vector legs must reference this.
     public static let dimension = 768
@@ -13,6 +19,8 @@ public enum AcceleratedVectorMath {
     public static let zScoreFloor = 0.02
     /// Default Z-gate applied when callers omit a threshold.
     public static let defaultZGate = 2.0
+    /// Minimum samples required for a modality to establish its own independent baseline.
+    public static let minModalitySamples = 20
 
     /// Converts `count` float16s into float32s using vImage.
     public static func floats(fromHalf source: UnsafePointer<Float16>, count: Int, to destination: UnsafeMutablePointer<Float>) {
@@ -74,6 +82,54 @@ public enum AcceleratedVectorMath {
                 scores[rowIndex] = sum
             }
         #endif
+    }
+
+    /// Computes the average score of each modality for this query. Modalities with fewer
+    /// than `minModalitySamples` take the corpus-wide average.
+    public static func modalityMeans(_ scores: [Float], _ modalities: [VectorModality]) -> [VectorModality: Double] {
+        var sumByModality: [VectorModality: Double] = [:]
+        var countByModality: [VectorModality: Int] = [:]
+        for index in scores.indices {
+            let modality = index < modalities.count ? modalities[index] : .text
+            sumByModality[modality, default: 0] += Double(scores[index])
+            countByModality[modality, default: 0] += 1
+        }
+        let totalCount = countByModality.values.reduce(0, +)
+        let totalSum = sumByModality.values.reduce(0, +)
+        let overallMean = totalSum / Double(max(totalCount, 1))
+        var means: [VectorModality: Double] = [:]
+        for modality in VectorModality.allCases {
+            if let count = countByModality[modality], count >= minModalitySamples {
+                means[modality] = (sumByModality[modality] ?? 0) / Double(count)
+            } else {
+                means[modality] = overallMean
+            }
+        }
+        return means
+    }
+
+    /// Modality-centered meaning scores directly from DigUp: each vector's cosine similarity minus
+    /// the average of its modality (text, image, audio), in standard deviations of all centered scores together.
+    public static func modalityCenteredMeaningScores(_ scores: [Float], modalities: [VectorModality]) -> [Double] {
+        guard !scores.isEmpty else { return [] }
+        let means = modalityMeans(scores, modalities)
+        var centered = [Double](repeating: 0, count: scores.count)
+        var sumCentered: Double = 0
+        for index in scores.indices {
+            let modality = index < modalities.count ? modalities[index] : .text
+            let diff = Double(scores[index]) - (means[modality] ?? 0)
+            centered[index] = diff
+            sumCentered += diff
+        }
+        let count = Double(scores.count)
+        let mean = sumCentered / max(count, 1)
+        var sqDiffSum: Double = 0
+        for diff in centered {
+            let delta = diff - mean
+            sqDiffSum += delta * delta
+        }
+        let deviation = max((sqDiffSum / max(count, 1)).squareRoot(), zScoreFloor)
+        return centered.map { ($0 - mean) / deviation }
     }
 
     /// Computes per-corpus Z-scores: (score - mean) / deviation.
