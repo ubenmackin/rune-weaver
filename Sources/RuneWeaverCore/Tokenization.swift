@@ -30,7 +30,9 @@ public enum Tokenization: Sendable {
         "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves",
         // Conversational query fillers
         "trying", "figure", "tell", "help", "know", "find", "search", "looking", "please",
-        "show"
+        "show", "file", "files", "photo", "photos", "picture", "pictures", "image", "images",
+        "screenshot", "screenshots", "video", "videos", "pdf", "pdfs", "document", "documents",
+        "recording", "next", "upcoming", "following", "event", "events"
     ]
 
     /// Extracts salient (non-stop, non-noise) tokens in query order.

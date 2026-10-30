@@ -195,11 +195,12 @@ extension MemoryEngine {
     /// Keyword matches against profile facts and preferences.
     private func profileResults(query: String, limit: Int) -> [MemoryResult] {
         guard limit > 0 else { return [] }
-        let queryTokens = Tokenization.tokenize(query)
+        let salient = Tokenization.salientTokens(from: query)
+        let queryTokens = Set(salient)
         guard !queryTokens.isEmpty else { return [] }
         var results: [MemoryResult] = []
         for fact in profile.facts {
-            let contentTokens = Tokenization.tokenize(fact.content)
+            let contentTokens = Set(Tokenization.salientTokens(from: fact.content))
             guard let raw = Tokenization.keywordScore(
                 queryTokens: queryTokens,
                 contentTokens: contentTokens,
@@ -215,7 +216,7 @@ extension MemoryEngine {
         }
         for preference in profile.preferences {
             let haystack = "\(preference.key) \(preference.value)"
-            let contentTokens = Tokenization.tokenize(haystack)
+            let contentTokens = Set(Tokenization.salientTokens(from: haystack))
             guard let raw = Tokenization.keywordScore(
                 queryTokens: queryTokens,
                 contentTokens: contentTokens,

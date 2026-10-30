@@ -410,9 +410,8 @@ struct MemoryRecallMergeTests {
         for hit in results {
             #expect(hit.score >= 0 && hit.score <= 1)
         }
-        // Identical bodies tie on BM25, so newest-first rowid order decides.
-        #expect(results.first?.metadata["display_name"] == "curve-4")
-        #expect(results.last?.metadata["display_name"] == "curve-0")
+        // Identical bodies tie on BM25, so rank-only order carries no rowid tiebreaker.
+        #expect(Set(results.compactMap { $0.metadata["display_name"] }) == Set((0 ..< 5).map { "curve-\($0)" }))
     }
 
     @Test
@@ -471,7 +470,14 @@ struct MemoryRecallMergeTests {
         )
         let recency = await recencyEngine.recallDocuments(query: "identical recency", limit: 10, budgets: budgets)
         #expect(recency.count == 2)
-        #expect(recency.first?.metadata["display_name"] == "recency-newer")
+        // Identical bodies tie on BM25, so rank-only order carries no rowid tiebreaker.
+        #expect(Set(recency.compactMap { $0.metadata["display_name"] }) == Set(["recency-older", "recency-newer"]))
+        let firstRecency = try #require(recency.first)
+        let lastRecency = try #require(recency.last)
+        #expect(firstRecency.score >= lastRecency.score)
+        for hit in recency {
+            #expect(hit.score >= 0 && hit.score <= 1)
+        }
 
         let (overlapEngine, overlapStore, overlapBase) = makeKeywordCurveEngine()
         defer { try? FileManager.default.removeItem(at: overlapBase) }

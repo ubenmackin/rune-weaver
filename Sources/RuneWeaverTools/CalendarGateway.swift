@@ -839,11 +839,11 @@ extension ProductionCalendarGateway {
 
     /// Live EventKit backing for both gateways, and the only store access path. Reads calendars
     /// live per call, never cached, and maps EK values onto the Store/Reminder seams.
-    public final class LiveEventKitStore: EventKitStore, Sendable {
-        public init() {}
+    public final class LiveEventKitStore: EventKitStore, @unchecked Sendable {
+        private let eventStore: EKEventStore
 
-        public convenience init(eventStore _: EKEventStore) {
-            self.init()
+        public init(eventStore: EKEventStore = EKEventStore()) {
+            self.eventStore = eventStore
         }
 
         // MARK: CalendarStore
@@ -867,12 +867,11 @@ extension ProductionCalendarGateway {
         public func requestAccess() async throws -> Bool {
             // Retained for the explicit owner-driven enable path; gateways
             // never call this and only read authorizationStatus() fail-closed.
-            try await EKEventStore().requestFullAccessToEvents()
+            try await eventStore.requestFullAccessToEvents()
         }
 
         public func calendars() throws -> [StoreCalendar] {
-            let eventStore = EKEventStore()
-            return eventStore.calendars(for: .event).map {
+            eventStore.calendars(for: .event).map {
                 StoreCalendar(
                     identifier: $0.calendarIdentifier,
                     title: $0.title,
@@ -886,7 +885,6 @@ extension ProductionCalendarGateway {
         }
 
         public func events(matching predicate: CalendarFetchPredicate) throws -> [StoreEvent] {
-            let eventStore = EKEventStore()
             let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
             let nsPredicate = eventStore.predicateForEvents(
                 withStart: predicate.start,
@@ -909,7 +907,6 @@ extension ProductionCalendarGateway {
         }
 
         public func event(withIdentifier identifier: String) throws -> StoreEvent? {
-            let eventStore = EKEventStore()
             guard let ekEvent = eventStore.event(withIdentifier: identifier) else { return nil }
             return StoreEvent(
                 identifier: ekEvent.eventIdentifier,
@@ -925,7 +922,6 @@ extension ProductionCalendarGateway {
         }
 
         public func save(_ event: StoreEvent) throws -> StoreEvent {
-            let eventStore = EKEventStore()
             let ekEvent: EKEvent = if let identifier = event.identifier,
                                       !identifier.isEmpty,
                                       let existing = eventStore.event(withIdentifier: identifier)
@@ -970,7 +966,6 @@ extension ProductionCalendarGateway {
         }
 
         public func remove(_ event: StoreEvent, span: CalendarSpan) throws {
-            let eventStore = EKEventStore()
             guard let identifier = event.identifier,
                   !identifier.isEmpty,
                   let ekEvent = eventStore.event(withIdentifier: identifier)
@@ -1001,12 +996,11 @@ extension ProductionCalendarGateway {
         }
 
         public func requestReminderAccess() async throws -> Bool {
-            try await EKEventStore().requestFullAccessToReminders()
+            try await eventStore.requestFullAccessToReminders()
         }
 
         public func reminderCalendars() throws -> [EventKitReminderCalendar] {
-            let eventStore = EKEventStore()
-            return eventStore.calendars(for: .reminder).map {
+            eventStore.calendars(for: .reminder).map {
                 EventKitReminderCalendar(
                     identifier: $0.calendarIdentifier,
                     title: $0.title,
@@ -1019,7 +1013,6 @@ extension ProductionCalendarGateway {
             matching predicate: EventKitReminderPredicate,
             completion: @escaping @Sendable ([EventKitReminder]?) -> Void
         ) {
-            let eventStore = EKEventStore()
             let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
             let nsPredicate = eventStore.predicateForReminders(in: ekCalendars.isEmpty ? nil : ekCalendars)
             _ = eventStore.fetchReminders(matching: nsPredicate) { ekReminders in
@@ -1043,7 +1036,6 @@ extension ProductionCalendarGateway {
         }
 
         public func reminder(withIdentifier identifier: String) -> EventKitReminder? {
-            let eventStore = EKEventStore()
             guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
                 return nil
             }
@@ -1051,7 +1043,6 @@ extension ProductionCalendarGateway {
         }
 
         public func save(_ reminder: EventKitReminder) throws -> EventKitReminder {
-            let eventStore = EKEventStore()
             let ekReminder: EKReminder = if reminder.identifier.isEmpty {
                 EKReminder(eventStore: eventStore)
             } else if let existing = eventStore.calendarItem(withIdentifier: reminder.identifier) as? EKReminder {
@@ -1087,7 +1078,6 @@ extension ProductionCalendarGateway {
         }
 
         public func removeReminder(withIdentifier identifier: String) throws {
-            let eventStore = EKEventStore()
             guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
                 return
             }

@@ -37,17 +37,18 @@ private func augustMid() throws -> Date {
     return try #require(range.since)
 }
 
-/// Stores one document with a single chunk. store: Index to write through.
+/// Stores one document with a single chunk. Calendars rows gate the window.
 @discardableResult
 private func storeTemporalDoc(
     in store: DocIndexStore,
+    source: IndexSource = .files,
     externalID: String,
     text: String,
     mtime: Date?,
     embedding: [Float] = []
 ) async throws -> IndexedDocument {
     let document = try await store.upsertDocument(IndexedDocument(
-        source: .files,
+        source: source,
         externalID: externalID,
         displayName: externalID,
         mtime: mtime,
@@ -178,8 +179,22 @@ struct MemoryTemporalTests {
         let unbounded = try await store.searchKeyword(query: "temporalwindowtoken harbor", limit: 10)
         #expect(unbounded.count == 2)
 
-        let julyOnly = try await store.searchKeyword(
+        // Bounded reads keep past files recallable; only calendars gate on mtime.
+        let boundedFiles = try await store.searchKeyword(
             query: "temporalwindowtoken harbor",
+            limit: 10,
+            since: window.since,
+            until: window.until
+        )
+        #expect(boundedFiles.count == 2)
+
+        // Calendar occurrences gate strictly to [since, until).
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "july-cal", text: "harbor calendarwindowtoken july voyage", mtime: july)
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "august-cal", text: "harbor calendarwindowtoken august voyage", mtime: august)
+        let unboundedCals = try await store.searchKeyword(query: "calendarwindowtoken", limit: 10)
+        #expect(unboundedCals.count == 2)
+        let julyOnly = try await store.searchKeyword(
+            query: "calendarwindowtoken",
             limit: 10,
             since: window.since,
             until: window.until
@@ -189,24 +204,26 @@ struct MemoryTemporalTests {
     }
 
     @Test
-    func `Keyword LIKE fallback honors the mtime window`() async throws {
+    func `Keyword fragment without fallback returns empty`() async throws {
         let (_, store, _, base) = makeTemporalEngine()
         defer { try? FileManager.default.removeItem(at: base) }
         let window = try julyWindow()
         let july = try julyMid()
         let august = try augustMid()
-        // Whole-token FTS cannot match the fragment, so the LIKE scan carries the query.
-        try await storeTemporalDoc(in: store, externalID: "july-like", text: "hello world lighthouse beacon july", mtime: july)
-        try await storeTemporalDoc(in: store, externalID: "august-like", text: "hello world lighthouse beacon august", mtime: august)
+        // Interior fragments miss prefix BM25 and no table scan fills the gap.
+        try await storeTemporalDoc(in: store, externalID: "july-frag", text: "hello world lighthouse beacon july", mtime: july)
+        try await storeTemporalDoc(in: store, externalID: "august-frag", text: "hello world lighthouse beacon august", mtime: august)
 
-        let julyOnly = try await store.searchKeyword(
-            query: "ello wor",
+        // Interior substrings only: LIKE would match, prefix BM25 must not.
+        let unbounded = try await store.searchKeyword(query: "ello orld", limit: 10)
+        #expect(unbounded.isEmpty)
+        let bounded = try await store.searchKeyword(
+            query: "ello orld",
             limit: 10,
             since: window.since,
             until: window.until
         )
-        #expect(julyOnly.count == 1)
-        #expect(julyOnly.first?.text.contains("july") == true)
+        #expect(bounded.isEmpty)
     }
 
     @Test
@@ -240,15 +257,28 @@ struct MemoryTemporalTests {
         let unbounded = try await store.searchKeyword(query: "nullwindowtoken harbor", limit: 10)
         #expect(unbounded.count == 2)
 
-        // A dated query cannot honestly place the undated row, so it stays out.
+        // Files rows stay recallable without an event date under a bound.
         let bounded = try await store.searchKeyword(
             query: "nullwindowtoken harbor",
             limit: 10,
             since: window.since,
             until: window.until
         )
-        #expect(bounded.count == 1)
-        #expect(bounded.first?.text.contains("dated") == true)
+        #expect(bounded.count == 2)
+
+        // Calendar rows without an event date cannot satisfy the window.
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "dated-cal", text: "harbor nullcalendarwindowtoken dated voyage", mtime: july)
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "undated-cal", text: "harbor nullcalendarwindowtoken undated voyage", mtime: nil)
+        let unboundedCals = try await store.searchKeyword(query: "nullcalendarwindowtoken", limit: 10)
+        #expect(unboundedCals.count == 2)
+        let boundedCals = try await store.searchKeyword(
+            query: "nullcalendarwindowtoken",
+            limit: 10,
+            since: window.since,
+            until: window.until
+        )
+        #expect(boundedCals.count == 1)
+        #expect(boundedCals.first?.text.contains("dated") == true)
 
         let boundedVectors = try await store.chunkVectors(limit: 10, since: window.since, until: window.until)
         // The dated row above is keyword-only, so the bounded vector pool holds
@@ -307,8 +337,9 @@ struct MemoryTemporalTests {
         let window = try julyWindow()
         let july = try julyMid()
         let august = try augustMid()
-        try await storeTemporalDoc(in: store, externalID: "july-recall", text: "harbor julyrecalltoken july festival", mtime: july)
-        try await storeTemporalDoc(in: store, externalID: "august-recall", text: "harbor julyrecalltoken august festival", mtime: august)
+        // Calendar-scoped bounds keep past files recallable, so July-only uses calendars.
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "july-recall", text: "harbor julyrecalltoken july festival", mtime: july)
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "august-recall", text: "harbor julyrecalltoken august festival", mtime: august)
         try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyrecalltoken july harbor walk", timestamp: july))
         try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyrecalltoken august harbor walk", timestamp: august))
 
@@ -377,8 +408,9 @@ struct MemoryTemporalTests {
         let window = try julyWindow()
         let july = try julyMid()
         let august = try augustMid()
-        try await storeTemporalDoc(in: store, externalID: "july-vacation", text: "harbor julyvacationtoken july vacation festival", mtime: july)
-        try await storeTemporalDoc(in: store, externalID: "august-vacation", text: "harbor julyvacationtoken august vacation festival", mtime: august)
+        // Calendar-scoped bounds keep past files recallable, so July-only uses calendars.
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "july-vacation", text: "harbor julyvacationtoken july vacation festival", mtime: july)
+        try await storeTemporalDoc(in: store, source: .calendars, externalID: "august-vacation", text: "harbor julyvacationtoken august vacation festival", mtime: august)
         try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyvacationtoken july vacation walk", timestamp: july))
         try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyvacationtoken august vacation walk", timestamp: august))
 

@@ -446,7 +446,8 @@ struct RemindersIndexingTests {
             since: dueSince,
             until: dueUntil
         )
-        #expect(boundedDateless.isEmpty)
+        // Calendar-scoped bounds exempt non-calendar sources, so dateless reminders stay recallable.
+        #expect(boundedDateless.count == 1)
         let boundedDated = try await docs.searchKeyword(
             query: "pineapplealpha",
             limit: 10,
