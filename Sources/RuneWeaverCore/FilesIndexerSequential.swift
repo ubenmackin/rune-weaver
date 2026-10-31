@@ -437,7 +437,7 @@ extension FilesIndexer {
             mtime: pending.modificationDate,
             sizeBytes: Int64(pending.byteCount),
             contentHash: pending.contentHash,
-            mime: nil,
+            mime: MediaTextExtractor.mimeType(for: filename),
             extractStatus: Self.effectiveImageStatus(extraction: pending.extraction, visualSucceeded: visualSucceeded),
             indexedAt: Date()
         )
@@ -604,7 +604,12 @@ extension FilesIndexer {
                     )
                 }
             }
-
+            // Avoid new socket work once the run stopped.
+            if isCancelled || cancelBox.isSet || Task.isCancelled {
+                isCancelled = true
+                cancelBox.set()
+                return (nil, false)
+            }
             do {
                 let texts = FilesVectorPolicy.cappedEmbeddingTexts(
                     extraction.chunks.map { chunk in

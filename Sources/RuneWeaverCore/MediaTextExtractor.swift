@@ -115,6 +115,29 @@ public struct MediaTextExtractor: Sendable {
         return supportedVideoExtensions.contains(ext)
     }
 
+    /// Resolves canonical MIME type for allowlisted media by extension.
+    /// Returns nil for non-allowlisted extensions so callers never invent a list.
+    public static func mimeType(for fileName: String) -> String? {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg": return "image/jpeg"
+        case "png": return "image/png"
+        case "webp": return "image/webp"
+        case "heic": return "image/heic"
+        case "heif": return "image/heif"
+        case "tiff", "tif": return "image/tiff"
+        case "mp3": return "audio/mpeg"
+        case "m4a": return "audio/mp4"
+        case "wav": return "audio/wav"
+        case "aac": return "audio/aac"
+        case "flac": return "audio/flac"
+        case "mp4": return "video/mp4"
+        case "mov": return "video/quicktime"
+        case "m4v": return "video/x-m4v"
+        default: return nil
+        }
+    }
+
     #if canImport(Vision)
         /// Bounds Vision OCR to 2 concurrent passes so the Neural Engine stays fair.
         private actor VisionOCRThrottle {
@@ -226,7 +249,9 @@ public struct MediaTextExtractor: Sendable {
 
         #if canImport(Vision)
             return try await ocrThrottle.withPermit {
-                try await withCheckedThrowingContinuation { continuation in
+                // Skip Vision work once cancelled so permits recycle promptly.
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
                     visionDispatchQueue.async {
                         do {
                             let text = try performVisionOCR(imageData: imageData)
@@ -246,6 +271,9 @@ public struct MediaTextExtractor: Sendable {
     /// - Parameter videoURL: Local URL to the video file.
     /// - Returns: Temporary `.m4a` file URL when an audio track was exported, or `nil`.
     public static func extractAudioTrack(from videoURL: URL) async -> URL? {
+        if Task.isCancelled {
+            return nil
+        }
         #if canImport(AVFoundation)
             let asset = AVURLAsset(url: videoURL)
             guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty, let session = AVAssetExportSession(
@@ -272,6 +300,9 @@ public struct MediaTextExtractor: Sendable {
     /// - Parameter fileURL: Local URL to inspect.
     /// - Returns: `true` when at least one `.audio` track can be loaded by `AVFoundation`.
     public static func hasAudioTrack(fileURL: URL) async -> Bool {
+        if Task.isCancelled {
+            return false
+        }
         #if canImport(AVFoundation)
             let asset = AVURLAsset(url: fileURL)
             guard let tracks = try? await asset.loadTracks(withMediaType: .audio) else {

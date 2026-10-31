@@ -362,6 +362,10 @@ extension FilesIndexer {
                 inFlight += 1
             }
             batchState.workers = max(1, workers)
+            // Cancelled drains signal workers so the group cannot wait on hung extraction.
+            if isCancelled || cancelBox.isSet || Task.isCancelled {
+                group.cancelAll()
+            }
             for await result in group {
                 inFlight -= 1
                 await handleStagedWorkerResult(result, batchState: &batchState, counters: &counters)
@@ -722,7 +726,7 @@ extension FilesIndexer {
                 mtime: item.modificationDate,
                 sizeBytes: Int64(item.byteCount),
                 contentHash: item.contentHash,
-                mime: nil,
+                mime: MediaTextExtractor.mimeType(for: item.resolved.filename),
                 extractStatus: Self.effectiveImageStatus(
                     extraction: item.extraction,
                     visualSucceeded: item.visualSucceeded
@@ -912,6 +916,10 @@ extension FilesIndexer {
                     return (range, vectors)
                 }
             }
+            // Cancelled embedding drains signal sub-batches so one hung request cannot stall the flush.
+            if flag.isSet || Task.isCancelled {
+                group.cancelAll()
+            }
             while let (range, vectors) = await group.next() {
                 for (idx, vec) in zip(range, vectors) {
                     allVectors[idx] = vec
@@ -974,6 +982,9 @@ extension FilesIndexer {
         cancelBox: IndexCancellationFlag,
         expectedDimension: Int?
     ) async -> [[Float]]? {
+        if cancelBox.isSet || Task.isCancelled {
+            return nil
+        }
         do {
             let rawVectors: [[Float]]
             if let embeddingsPool {
