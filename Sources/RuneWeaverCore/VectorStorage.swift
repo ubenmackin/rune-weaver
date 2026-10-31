@@ -147,7 +147,7 @@ public actor AcceleratedVectorIndex {
     }
 
     /// Reloads vectors from `indexed_chunks` in SQLite into contiguous Float16 storage.
-    /// Blocking SQLite runs on the indexing lane; actor state mutates only after the hop.
+    /// Blocking SQLite runs on the interactive lane; actor state mutates only after the hop.
     public func reload(dbPath: String) async throws {
         try Task.checkCancellation()
         release()
@@ -157,7 +157,7 @@ public actor AcceleratedVectorIndex {
             let staged: [StagedVectorRow]
             do {
                 let path = expanded
-                staged = try await SQLiteSerialIO.run(lane: .indexing) {
+                staged = try await SQLiteSerialIO.run(lane: .interactive) {
                     try Self.loadStagedRowsBlocking(dbPath: path)
                 }
             } catch is CancellationError {
@@ -222,22 +222,19 @@ public actor AcceleratedVectorIndex {
     #if canImport(SQLite3)
         /// Collects vector rows off the actor; malformed and orphan rows are skipped here.
         private static func loadStagedRowsBlocking(dbPath: String) throws -> [StagedVectorRow] {
-            try Task.checkCancellation()
             let expanded = (dbPath as NSString).expandingTildeInPath
             // Missing database reads as an empty matrix so recall fails closed.
             guard FileManager.default.fileExists(atPath: expanded) else {
                 return []
             }
-            let handle: OpaquePointer?
-            do {
-                handle = try SQLiteDocIndexStore.open(dbPath: dbPath)
-            } catch {
-                return []
-            }
-            guard let handle else {
+            // Read-only open avoids DDL writes so interactive reads never contend with indexing writes.
+            guard let handle = try? SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: DocIndexError.storeUnavailable) else {
                 return []
             }
             defer { sqlite3_close(handle) }
+            guard (try? SQLiteHelpers.exec(handle: handle, sql: "PRAGMA query_only = ON;", failure: DocIndexError.persistenceFailed)) != nil else {
+                return []
+            }
             let dim = AcceleratedVectorMath.dimension
             let expectedBytes = dim * MemoryLayout<Float>.stride
             var staged: [StagedVectorRow] = []
@@ -255,7 +252,7 @@ public actor AcceleratedVectorIndex {
             }
             staged.reserveCapacity(totalVectors)
             let sql = """
-            SELECT c.id, c.document_id, d.mtime, d.source, c.embedding, d.mime
+            SELECT c.id, c.document_id, d.mtime, d.source, c.embedding, d.mime, d.path, d.display_name
             FROM indexed_chunks c
             LEFT JOIN indexed_documents d ON d.id = c.document_id
             WHERE c.is_vector = 1 AND c.embedding IS NOT NULL
@@ -285,9 +282,18 @@ public actor AcceleratedVectorIndex {
                     continue
                 }
                 let mime = SQLiteHelpers.columnText(statement, index: 5)?.lowercased() ?? ""
-                let modality: VectorModality = if mime.hasPrefix("image/") {
+                let path = SQLiteHelpers.columnText(statement, index: 6) ?? ""
+                let displayName = SQLiteHelpers.columnText(statement, index: 7) ?? ""
+                // Either name may carry the extension when the other is empty or extensionless.
+                let isImage = MediaTextExtractor.isImageFile(fileName: path)
+                    || MediaTextExtractor.isImageFile(fileName: displayName)
+                let isAudioOrVideo = MediaTextExtractor.isAudioOrVideoFile(fileName: path)
+                    || MediaTextExtractor.isAudioOrVideoFile(fileName: displayName)
+                let modality: VectorModality = if mime.hasPrefix("image/") || isImage {
                     .image
-                } else if mime.hasPrefix("audio/") {
+                } else if mime.hasPrefix("audio/") || mime.hasPrefix("video/")
+                    || isAudioOrVideo
+                {
                     .audio
                 } else {
                     .text

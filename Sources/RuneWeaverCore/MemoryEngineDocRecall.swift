@@ -89,6 +89,9 @@ extension MemoryEngine {
         budgets: RecallBudgets = RecallBudgets()
     ) async -> [MemoryResult] {
         guard limit > 0, let docIndexStore else { return [] }
+        if Task.isCancelled {
+            return []
+        }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let clampedBudgets = budgets.clamped()
@@ -347,6 +350,16 @@ extension MemoryEngine {
     /// Contiguous salient-phrase bonus in the doc-index rerank.
     private static let docIndexPhraseWeight = 0.1
 
+    /// Calendar scale keeping pre-closeness at 0.80 so the 0.20 gain peaks at 1.0.
+    private static let calendarBaseScale = 0.80
+
+    /// Image-vector weight scoring visual matches directly; 1.05 lifts a 0.74 cosine
+    /// near 0.90 with recency plus RRF while leaving headroom for bonuses.
+    private static let docIndexImageVectorWeight = 1.05
+
+    /// Ceiling for calendar pre-closeness so near and far dates share one baseline.
+    private static let docIndexPreClosenessCap = 0.80
+
     /// Z-score gate for the accelerated vector leg, sharing the canonical default so recall
     /// and the vector index never diverge on the threshold.
     private static let docVectorZGate = AcceleratedVectorMath.defaultZGate
@@ -381,6 +394,9 @@ extension MemoryEngine {
         vectors: [IndexedChunk],
         queryEmbedding: [Float]?
     ) -> [DocIndexCandidate] {
+        if Task.isCancelled {
+            return []
+        }
         var keywordRanks: [UUID: Int] = [:]
         for (rank, chunk) in keyword.enumerated() where keywordRanks[chunk.id] == nil {
             keywordRanks[chunk.id] = rank + 1
@@ -462,34 +478,66 @@ extension MemoryEngine {
         episodicWeight: Double = episodicTierWeight,
         now: Date = Date()
     ) -> [MemoryResult] {
+        if Task.isCancelled {
+            return []
+        }
         let total = candidates.count
+        // One formatter per recall avoids per-hit allocation without sharing state.
+        let formatter = ISO8601DateFormatter()
         let watermark = indexAsOf.map { indexWatermark($0) }
         let loweredQuery = query.lowercased()
         // Narrowed intent so spatial "next to" never earns the calendar bonus.
         let isFutureIntent = FutureIntent.isFutureIntent(in: loweredQuery)
         let nowSec = now.timeIntervalSince1970
         let scored = candidates.map { candidate -> MemoryResult in
-            let base = docIndexBaseWeight * max(candidate.keywordScore, candidate.vectorScore)
+            let isImage = documents[candidate.chunk.documentID].map { doc in
+                (doc.mime?.lowercased().hasPrefix("image/") ?? false)
+                    || (doc.path.map { MediaTextExtractor.isImageFile(fileName: $0) } ?? false)
+                    || MediaTextExtractor.isImageFile(fileName: doc.displayName)
+            } ?? false
+            let base: Double = if isImage, candidate.vectorScore > 0 {
+                max(docIndexImageVectorWeight * candidate.vectorScore, docIndexBaseWeight * candidate.keywordScore)
+            } else {
+                docIndexBaseWeight * max(candidate.keywordScore, candidate.vectorScore)
+            }
             let overlap = docIndexOverlap(queryTokens: queryTokens, chunkText: candidate.chunk.text)
             let recency = docIndexRecency(order: candidate.order, total: total)
             let exact = hasExactNameOrPathMatch(query: query, chunkText: candidate.chunk.text) ? 1.0 : 0.0
             let phrase = hasContiguousPhraseMatch(salient: salient, chunkText: candidate.chunk.text) ? 1.0 : 0.0
             let displayName = documents[candidate.chunk.documentID]?.displayName
             let entity = hasEntityNameMatch(queryTokens: queryTokens, displayName: displayName) ? 1.0 : 0.0
-            var bonus = docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
-                + docIndexEntityNameWeight * entity + docIndexPhraseWeight * phrase
-            if isFutureIntent, let doc = documents[candidate.chunk.documentID], doc.source == .calendars, let mtime = doc.mtime {
+            let bonus: Double = if isImage {
+                // Visual matches score directly; text overlap must not drag down image vectors.
+                docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
+                    + docIndexEntityNameWeight * entity + docIndexPhraseWeight * phrase
+            } else {
+                docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
+                    + docIndexEntityNameWeight * entity + docIndexPhraseWeight * phrase
+            }
+            let isCalendar = documents[candidate.chunk.documentID]?.source == .calendars
+            let effectiveBase = isCalendar ? base * calendarBaseScale : base
+            let effectiveBonus = isCalendar ? bonus * calendarBaseScale : bonus
+            var calendarAdjustment = 0.0
+            if isFutureIntent, isCalendar, let doc = documents[candidate.chunk.documentID], let mtime = doc.mtime {
                 let deltaSeconds = mtime.timeIntervalSince1970 - nowSec
                 if deltaSeconds >= 0 {
                     let daysAhead = deltaSeconds / secondsPerDay
                     let closeness = max(0.0, futureClosenessGain
                         * (1.0 - min(daysAhead, futureClosenessWindowDays) / futureClosenessWindowDays))
-                    bonus += closeness
+                    calendarAdjustment += closeness
                 } else {
-                    bonus -= pastCalendarPenalty
+                    calendarAdjustment -= pastCalendarPenalty
                 }
             }
-            let fused = min(max(base + bonus + candidate.rrf, 0.0), 1.0)
+            let rawPreCloseness = effectiveBase + effectiveBonus + candidate.rrf
+            // Cap keeps calendar pre-closeness at 0.80 so closeness alone decides nearness.
+            let preCloseness: Double = if isCalendar {
+                rawPreCloseness.isNaN ? 0.0 : min(rawPreCloseness, docIndexPreClosenessCap)
+            } else {
+                rawPreCloseness
+            }
+            let unclamped = preCloseness + calendarAdjustment
+            let fused: Double = unclamped.isNaN ? 0.0 : min(max(unclamped, 0.0), 1.0)
             var metadata: [String: String] = [
                 "id": candidate.chunk.id.uuidString,
                 "document_id": candidate.chunk.documentID.uuidString,
@@ -508,7 +556,7 @@ extension MemoryEngine {
                     metadata["message_id"] = messageID
                 }
                 if let mtime = doc.mtime {
-                    metadata["date"] = indexWatermark(mtime)
+                    metadata["date"] = formatter.string(from: mtime)
                 }
             }
             if let watermark {
@@ -595,8 +643,21 @@ extension MemoryEngine {
         return false
     }
 
-    /// Deterministic doc-chunk order: document, then position within it, then id.
+    /// Deterministic doc-chunk order: calendar dates, then document, then position, then id.
+    /// Calendars sort before other sources so mixed comparisons stay transitive.
     private static func docIndexResultOrder(_ lhs: MemoryResult, _ rhs: MemoryResult) -> Bool {
+        let lhsIsCalendar = lhs.metadata["document_source"] == "calendars"
+        let rhsIsCalendar = rhs.metadata["document_source"] == "calendars"
+        if lhsIsCalendar != rhsIsCalendar {
+            return lhsIsCalendar && !rhsIsCalendar
+        }
+        if lhsIsCalendar, rhsIsCalendar {
+            let lhsDate = lhs.metadata["date"] ?? ""
+            let rhsDate = rhs.metadata["date"] ?? ""
+            if !lhsDate.isEmpty, !rhsDate.isEmpty, lhsDate != rhsDate {
+                return lhsDate < rhsDate
+            }
+        }
         let lhsDocument = lhs.metadata["document_id"] ?? ""
         let rhsDocument = rhs.metadata["document_id"] ?? ""
         if lhsDocument != rhsDocument {
