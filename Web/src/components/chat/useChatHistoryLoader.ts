@@ -17,7 +17,11 @@ import {
 } from "../../api";
 import { normalizeSessionID } from "../../approvalsSession";
 import type { FrozenRunLogEntry } from "../../hooks/useRunningRuns";
-import { settleParkedFlight } from "./chatHelpers";
+import {
+  canAdoptFromLive,
+  canAdoptFromPoll,
+  settleParkedFlight,
+} from "./chatHelpers";
 import {
   loadContextTokens,
   loadInputHistory,
@@ -386,23 +390,68 @@ export function useChatHistoryLoader({
       });
   }, [sessionIDRef, knownDraftIDRef, didRecoverSessionRef, pendingRef, turnSessionIDRef, messagesRef, inFlightTurnRef, setInFlightTurn, setMessages, setSessionID]);
 
+  // Guards concurrent polls from double-adopting before the first sets pending.
+  const adoptInFlightRef = useRef(false);
+  // Drops post-await state on unmount so a late live-turn never revives a dead view.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Reattaches a reloaded tab to a turn the server still owns.
-  const tryAdoptReloadedTurn = useCallback(() => {
-    if (pendingRef.current) return false;
-    if (cancelledRef.current) return false;
+  const tryAdoptReloadedTurn = useCallback(async () => {
+    if (adoptInFlightRef.current) return false;
     const activeID = sessionIDRef.current;
     if (!activeID) return false;
     const activeNorm = normalizeSessionID(activeID);
     if (!activeNorm) return false;
-    if (knownDraftIDRef.current === activeID) return false;
-    if (!sharedRunningIDsRef.current.includes(activeNorm)) return false;
-    const parked = parkedFlightsRef.current.get(activeNorm);
-    if (parked?.pending) return false;
+    if (
+      !canAdoptFromPoll({
+        pending: pendingRef.current,
+        cancelled: cancelledRef.current,
+        isDraft: knownDraftIDRef.current === activeID,
+        runningIncludesActive:
+          sharedRunningIDsRef.current.includes(activeNorm),
+        parkedPending:
+          parkedFlightsRef.current.get(activeNorm)?.pending === true,
+      })
+    ) {
+      return false;
+    }
+    adoptInFlightRef.current = true;
+    let live: Awaited<ReturnType<typeof getLiveTurn>> | null = null;
+    try {
+      live = await getLiveTurn(activeID);
+    } catch {
+      // Stale poll rows never promote a bubble when the live probe fails.
+      adoptInFlightRef.current = false;
+      markBackgroundRunning(activeNorm, false);
+      return false;
+    }
+    if (!mountedRef.current) {
+      adoptInFlightRef.current = false;
+      return false;
+    }
+    if (
+      normalizeSessionID(sessionIDRef.current) !== activeNorm ||
+      pendingRef.current ||
+      cancelledRef.current
+    ) {
+      adoptInFlightRef.current = false;
+      return false;
+    }
+    if (!canAdoptFromLive(live)) {
+      adoptInFlightRef.current = false;
+      markBackgroundRunning(activeNorm, false);
+      return false;
+    }
     let startedAt: number | null = null;
     for (const run of sharedRunsRef.current) {
       const raw = (run as { sessionID?: unknown }).sessionID;
-      if (typeof raw !== "string" || !raw.trim()) continue;
-      if (raw.trim().toLowerCase() !== activeNorm) continue;
+      const norm = normalizeSessionID(typeof raw === "string" ? raw : null);
+      if (norm !== activeNorm) continue;
       const status = (run as { status?: unknown }).status;
       if (
         !isActiveRunStatus(typeof status === "string" ? status : undefined)
@@ -417,42 +466,39 @@ export function useChatHistoryLoader({
         break;
       }
     }
+    // Build the merged turn before committing pending so pending never
+    // strands with an empty shell.
     const shell: InFlightTurn = { toolActions: [], text: "", held: "", segments: [] };
-    inFlightTurnRef.current = shell;
-    setInFlightTurn(shell);
-    setPending(true);
+    const merged: InFlightTurn = mergeLiveSnapshotIntoInFlightTurn(
+      shell,
+      live as NonNullable<typeof live>,
+    );
+    if (
+      !mountedRef.current ||
+      normalizeSessionID(sessionIDRef.current) !== activeNorm ||
+      pendingRef.current ||
+      cancelledRef.current
+    ) {
+      adoptInFlightRef.current = false;
+      return false;
+    }
     pendingRef.current = true;
     turnSessionIDRef.current = activeID;
     activeTurnStartMsRef.current = startedAt ?? Date.now();
+    inFlightTurnRef.current = merged;
+    setPending(true);
+    setInFlightTurn(merged);
     armTurnTimeout();
-
-    getLiveTurn(activeID)
-      .then((live) => {
-        if (
-          normalizeSessionID(sessionIDRef.current) !== activeNorm ||
-          !pendingRef.current
-        ) {
-          return;
-        }
-        const isLiveActive = live.active ?? false;
-        if (live && isLiveActive) {
-          const current = inFlightTurnRef.current;
-          const next = mergeLiveSnapshotIntoInFlightTurn(current, live);
-          if (next !== current) {
-            setInFlightTurn(next);
-            inFlightTurnRef.current = next;
-          }
-          const liveTotal = toNonNegativeInt(live.totalTokens);
-          if (typeof liveTotal === "number") {
-            setLastTurnTokens(liveTotal);
-            lastTurnTokensRef.current = liveTotal;
-          }
-        }
-      })
-      .catch(() => {});
-
+    const liveTotal = toNonNegativeInt(
+      (live as NonNullable<typeof live>).totalTokens,
+    );
+    if (typeof liveTotal === "number") {
+      setLastTurnTokens(liveTotal);
+      lastTurnTokensRef.current = liveTotal;
+    }
+    adoptInFlightRef.current = false;
     return true;
-  }, [pendingRef, cancelledRef, sessionIDRef, knownDraftIDRef, sharedRunningIDsRef, parkedFlightsRef, sharedRunsRef, inFlightTurnRef, setInFlightTurn, setPending, turnSessionIDRef, activeTurnStartMsRef, armTurnTimeout, setLastTurnTokens, lastTurnTokensRef]);
+  }, [pendingRef, cancelledRef, sessionIDRef, knownDraftIDRef, sharedRunningIDsRef, parkedFlightsRef, sharedRunsRef, inFlightTurnRef, setInFlightTurn, setPending, turnSessionIDRef, activeTurnStartMsRef, armTurnTimeout, setLastTurnTokens, lastTurnTokensRef, markBackgroundRunning]);
 
   // Load active session messages on initial mount / session change if existing
   useEffect(() => {
@@ -596,14 +642,13 @@ export function useChatHistoryLoader({
     }
     if (!pendingRef.current && !cancelledRef.current && activeNorm) {
       if (running.includes(activeNorm) && isOpenRef.current()) {
-        tryAdoptReloadedTurn();
+        void tryAdoptReloadedTurn();
       }
     }
     const settled = new Set<string>();
     for (const run of sharedRuns) {
       const raw = (run as { sessionID?: unknown }).sessionID;
-      if (typeof raw !== "string" || !raw.trim()) continue;
-      const norm = raw.trim().toLowerCase();
+      const norm = normalizeSessionID(typeof raw === "string" ? raw : null);
       if (!norm || running.includes(norm)) continue;
       settled.add(norm);
     }
@@ -639,8 +684,8 @@ export function useChatHistoryLoader({
           let stillRunning = false;
           for (const run of sharedRuns) {
             const raw = (run as { sessionID?: unknown }).sessionID;
-            if (typeof raw !== "string" || !raw.trim()) continue;
-            if (raw.trim().toLowerCase() !== activeNorm) continue;
+            const norm = normalizeSessionID(typeof raw === "string" ? raw : null);
+            if (norm !== activeNorm) continue;
             const status = (run as { status?: unknown }).status;
             if (
               isActiveRunStatus(

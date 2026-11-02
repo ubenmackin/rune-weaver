@@ -965,7 +965,9 @@ struct IndexStatusLiveLatestTests {
                 matched: 1,
                 current: "notes/report.md"
             ))
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            // Wide extracting window so the polling probe below still lands
+            // in extracting under parallel hermetic load.
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
             return IndexSourceRunReport(kind: .files, scanned: 3, indexed: 1, lastItem: "notes/report.md")
         }
         let (coordinator, store, directory) = try makeLiveComponents(stages: [slowStage])
@@ -984,11 +986,20 @@ struct IndexStatusLiveLatestTests {
             await waitForRunning(coordinator)
             #expect(await coordinator.isRunning)
 
-            // In flight the probe carries the live counters plus phase, stage,
-            // trigger, rate, elapsed, and the relative current file.
-            let during = try await indexRequest(app: app, method: .GET, path: "/index/status")
-            #expect(during.status == .ok)
-            let live = try during.content.decode(IndexStatusResponse.self).live
+            // In flight the probe carries live counters plus phase and stage.
+            // Poll until extracting lands so a slow poller never samples the
+            // terminal committing frame instead.
+            var live: IndexLiveStatus?
+            for _ in 0 ..< 200 {
+                let probed = try await indexRequest(app: app, method: .GET, path: "/index/status")
+                #expect(probed.status == .ok)
+                let candidate = try probed.content.decode(IndexStatusResponse.self).live
+                live = candidate
+                if candidate?.phase == IndexPhase.extracting.rawValue {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
             #expect(live != nil)
             #expect(live?.trigger == IndexRunTrigger.onDemand.rawValue)
             #expect(live?.phase == IndexPhase.extracting.rawValue)

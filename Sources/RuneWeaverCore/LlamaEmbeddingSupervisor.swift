@@ -500,16 +500,20 @@ extension LlamaEmbeddingSupervisor {
                     throw LlamaSupervisorError.launchFailed("llama-server exited immediately: \(errMsg)")
                 }
 
-                if let tcpPort {
-                    if await checkTCPHealth(port: tcpPort) {
-                        ready = true
-                        break
-                    }
+                // Dual-probe covers socket-only boots and TCP-forwarded ones: TCP wins
+                // when bound, socket is the fallback, both bounded by the 30s deadline.
+                let tcpHealthy: Bool = if let tcpPort {
+                    await checkTCPHealth(port: tcpPort)
                 } else {
-                    if await probeHealth(socketURL: socketURL) {
-                        ready = true
-                        break
-                    }
+                    false
+                }
+                if tcpHealthy {
+                    ready = true
+                    break
+                }
+                if await probeHealth(socketURL: socketURL) {
+                    ready = true
+                    break
                 }
                 try await Task.sleep(nanoseconds: 200_000_000)
             }

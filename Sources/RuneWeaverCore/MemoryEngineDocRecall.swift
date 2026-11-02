@@ -676,32 +676,32 @@ extension MemoryEngine {
         ISO8601DateFormatter().string(from: date)
     }
 
+    /// Records one hit unless its id or content was already kept.
+    private static func keepResult(
+        _ result: MemoryResult, isEpisodic: Bool, contentKey: String,
+        seenIDs: inout Set<String>, seenContent: inout Set<String>, kept: inout [MemoryResult]
+    ) {
+        if let id = result.metadata["id"], !id.isEmpty {
+            guard !seenIDs.contains(id) else { return }
+            seenIDs.insert(id)
+        }
+        guard isEpisodic || !seenContent.contains(contentKey) else { return }
+        if !isEpisodic {
+            seenContent.insert(contentKey)
+        }
+        kept.append(result)
+    }
+
     /// Dedupes merged recall hits by identifier, with content scope.
     private static func dedupe(_ results: [MemoryResult]) -> [MemoryResult] {
         var seenIDs = Set<String>()
-        var seenSemanticProfileContent = Set<String>()
+        var seenContent = Set<String>()
         var kept: [MemoryResult] = []
         kept.reserveCapacity(results.count)
         for result in results {
             let contentKey = result.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let isEpisodic = result.source == .episodic
-            if let id = result.metadata["id"], !id.isEmpty {
-                guard !seenIDs.contains(id) else { continue }
-                if !isEpisodic {
-                    guard !seenSemanticProfileContent.contains(contentKey) else { continue }
-                    seenSemanticProfileContent.insert(contentKey)
-                }
-                seenIDs.insert(id)
-                kept.append(result)
-            } else {
-                if isEpisodic {
-                    kept.append(result)
-                } else {
-                    guard !seenSemanticProfileContent.contains(contentKey) else { continue }
-                    seenSemanticProfileContent.insert(contentKey)
-                    kept.append(result)
-                }
-            }
+            keepResult(result, isEpisodic: isEpisodic, contentKey: contentKey, seenIDs: &seenIDs, seenContent: &seenContent, kept: &kept)
         }
         return kept
     }

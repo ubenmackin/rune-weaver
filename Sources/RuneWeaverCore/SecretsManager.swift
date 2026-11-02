@@ -105,7 +105,7 @@ public actor SecretsManager {
     public func storeKeychainIfAbsent(key: String, secret: String) throws -> Bool {
         let data = try Self.validatedStoreData(key: key, namespace: self.service, secret: secret)
         #if canImport(Security)
-            if !inMemory {
+            if !inMemory, !Self.isHermeticEnforced {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: self.service,
@@ -152,7 +152,7 @@ public actor SecretsManager {
     /// stand-in when `inMemory` is set or the Security framework is absent.
     private func upsertSecret(_ data: Data, key: String, service namespace: String) throws {
         #if canImport(Security)
-            if !inMemory {
+            if !inMemory, !Self.isHermeticEnforced {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: namespace,
@@ -180,7 +180,7 @@ public actor SecretsManager {
     /// the stored label so the env-consulting path can decide to backfill.
     private func readSecret(key: String, service namespace: String) throws -> (secret: String, label: String?)? {
         #if canImport(Security)
-            if !inMemory {
+            if !inMemory, !Self.isHermeticEnforced {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: namespace,
@@ -216,7 +216,7 @@ public actor SecretsManager {
     /// Applies only to real Keychain items; the in-memory store needs none.
     private func backfillLabelIfNeeded(_ currentLabel: String?, key: String, service namespace: String) {
         #if canImport(Security)
-            guard !inMemory, currentLabel == nil || currentLabel == namespace else { return }
+            guard !inMemory, !Self.isHermeticEnforced, currentLabel == nil || currentLabel == namespace else { return }
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: namespace,
@@ -237,7 +237,7 @@ public actor SecretsManager {
         }
         let namespace = service ?? self.service
         #if canImport(Security)
-            if !inMemory {
+            if !inMemory, !Self.isHermeticEnforced {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: namespace,
@@ -259,7 +259,7 @@ public actor SecretsManager {
     public func listKeys(service: String? = nil) throws -> [String] {
         let namespace = service ?? self.service
         #if canImport(Security)
-            if !inMemory {
+            if !inMemory, !Self.isHermeticEnforced {
                 // Attributes-only fetch: no value data requested, so matching
                 // never loads secret bytes into this process.
                 let query: [String: Any] = [
@@ -306,8 +306,16 @@ public actor SecretsManager {
 
 /// Test-process fallback stays beside the manager so resolvers share one hermetic default.
 extension SecretsManager {
+    /// Flagged runs stay off the login Keychain even when default-constructed.
+    public static var isHermeticEnforced: Bool {
+        ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] == "1"
+    }
+
     /// True inside XCTest or swift-testing; resolvers use it to stay hermetic.
     public static var isTestProcess: Bool {
+        if isHermeticEnforced {
+            return true
+        }
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
             return true
         }

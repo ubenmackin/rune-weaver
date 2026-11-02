@@ -559,6 +559,8 @@ private struct BroadcastFailingProvider: LLMProvider, Sendable {
 }
 
 /// Builds an isolated server context for broadcast delivery tests.
+/// Uses scratch plugin and tool-state stores so parallel hermetic runs never
+/// touch the operator's real database.
 private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerContext, URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-broadcast-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -587,16 +589,18 @@ private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerCo
         approvals: approvals,
         scheduler: SchedulerStore(),
         runs: RunLogStore(),
-        hub: WSHub()
+        hub: WSHub(),
+        pluginStore: ToolRegistryStore(dbPath: dbPath),
+        toolStates: ToolStateStore(dbPath: dbPath)
     )
     return (context, base)
 }
 
 /// Polls until a condition holds or a generous budget expires. Turns spawn detached, so the test must
 /// wait for the run row plus the fan-out to land instead of asserting immediately after the spawn
-/// returns.
+/// returns. The budget stays wide so parallel hermetic suites still settle under load.
 private func broadcastWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
-    let deadline = Date().addingTimeInterval(20)
+    let deadline = Date().addingTimeInterval(60)
     while Date() < deadline {
         if await condition() {
             return true

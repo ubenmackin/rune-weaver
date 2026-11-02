@@ -18,9 +18,7 @@ import {
   resetSharedSocket,
 } from "../test-utils/mockWebSocket";
 
-// Spread the real module so every export the component tree reaches keeps a value — notably the
-// `subscribeAuthState`/`getAuthToken`/`toNonNegativeInt` trio the shared WebSocket singleton reads
-// during construction and dialing.
+// Spread the real module so shared WebSocket auth helpers keep values.
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -100,8 +98,7 @@ const fanOutSessionsPayload = {
   count: 5,
 };
 
-// Deep-nesting fixture: a worker that itself spawned workers, which the engine permits when the
-// fan-out tool runs with the full tool registry.
+// Deep-nesting fixture: a worker that itself spawned workers.
 const nestedFanOutSessionsPayload = {
   sessions: [
     {
@@ -146,8 +143,7 @@ const nestedFanOutSessionsPayload = {
   count: 4,
 };
 
-// Malformed parent metadata: `cycle-a` and `cycle-b` name each other and `self-parent` names
-// itself.
+// Malformed parent metadata: cyclic and self-parented rows.
 const cyclicParentSessionsPayload = {
   sessions: [
     {
@@ -191,15 +187,13 @@ const cyclicParentSessionsPayload = {
 
 describe("SessionSidebar", () => {
   beforeEach(() => {
-    // Drop the shared poller's timer and cache so one suite's interval never
-    // leaks into the next and late subscribers never badge from stale rows.
+    // Drop shared poller state so suites never badge from stale rows.
     resetSharedRunsForTesting();
     vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(listSessions).mockResolvedValue(sessionsPayload);
     vi.mocked(updateSessionTitle).mockResolvedValue(undefined);
-    // Newer run-history helpers stay mocked so background-badge polling
-    // resolves empty instead of throwing on a missing export.
+    // Keep badge polling empty instead of throwing on a missing export.
     vi.mocked(listRuns).mockResolvedValue({ runs: [], count: 0 });
     vi.mocked(runningSessionIDsFromRuns).mockReturnValue([]);
   });
@@ -222,8 +216,7 @@ describe("SessionSidebar", () => {
     await user.type(input, "New title");
     const form = input.closest("form");
     expect(form).not.toBeNull();
-    // Real browsers blur the input on submit, so both the form submit
-    // and the input blur fire for one save; only one PATCH may go out.
+    // Submit plus blur fire once; only one PATCH may go out.
     if (form === null) {
       throw new Error("Expected rename form to be present");
     }
@@ -832,8 +825,7 @@ describe("fan-out session tree", () => {
     await user.click(disclosure);
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
 
-    // Enter activates the focused disclosure natively; the row's key handler
-    // must ignore the bubbling event so the opener never selects the session.
+    // Row handler must ignore bubbling Enter from the disclosure.
     disclosure.focus();
     await user.keyboard("{Enter}");
     expect(disclosure).toHaveAttribute("aria-expanded", "false");
@@ -860,21 +852,16 @@ describe("live session invalidation", () => {
   let capture: ReturnType<typeof createMockWebSocketCapture>;
 
   beforeEach(() => {
-    // The preceding describes drive the same shared socket singleton (their renders subscribe), so
-    // detach any handle or pending reconnect before stubbing this case's transport; a stale dial's
-    // open event would add a refetch these cases would misattribute to their own trigger.
+    // Detach shared socket state so stale dials never add a refetch here.
     vi.unstubAllGlobals();
     resetSharedSocket();
-    // The fan-out suite's Scheduled click persists `rw_session_filter` and leaves its own mock
-    // payloads installed, so this suite clears storage and reseeds the API mocks its mount path
-    // reads instead of inheriting either: the saved scheduler filter would hide the chat fixture.
+    // Clear persisted filter and mocks so the chat fixture stays visible.
     resetSharedRunsForTesting();
     vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(listSessions).mockResolvedValue(sessionsPayload);
     vi.mocked(updateSessionTitle).mockResolvedValue(undefined);
-    // Run-history helpers stay mocked so background-badge polling resolves
-    // empty instead of throwing on a missing export.
+    // Keep badge polling empty instead of throwing.
     vi.mocked(listRuns).mockResolvedValue({ runs: [], count: 0 });
     vi.mocked(runningSessionIDsFromRuns).mockReturnValue([]);
     capture = createMockWebSocketCapture();
@@ -913,9 +900,7 @@ describe("live session invalidation", () => {
     );
   }
 
-  // Mounts the sidebar and settles both the mount refetch and the socket-open
-  // refetch the mock fires on every dial, so each case can attribute the next
-  // refetch to its own trigger.
+  // Settles mount plus socket-open refetches for per-case attribution.
   async function renderSidebarWithSettledSocket() {
     const view = renderSidebar();
     await screen.findByText("Old title");
@@ -951,10 +936,31 @@ describe("live session invalidation", () => {
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1), {
       timeout: 2500,
     });
-    // Wait beyond a full coalesce window so a wrongly scheduled second timer
-    // would have fired; the burst must stay absorbed into the one refetch.
+    // Burst must stay absorbed past the coalesce window.
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the live badge on a thin run_completed without a nested payload", async () => {
+    // Thin terminal frames still clear the badge.
+    await renderSidebarWithSettledSocket();
+    await dispatchFrameOrThrow(
+      capture.onMessage,
+      runLifecycleFrame("run_started"),
+    );
+    await waitFor(
+      () => expect(screen.getByTestId("session-running-badge")).toBeInTheDocument(),
+    );
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      sessionID: "session-1",
+    });
+    await waitFor(
+      () =>
+        expect(
+          screen.queryByTestId("session-running-badge"),
+        ).not.toBeInTheDocument(),
+    );
   });
 
   it("refetches the session list when the tab returns to the foreground", async () => {
@@ -970,8 +976,7 @@ describe("live session invalidation", () => {
   });
 
   it("refetches the session list when the shared socket reopens", async () => {
-    // Unmounting releases the shared socket; the fresh subscriber redials and
-    // the reopened transport's open event must revalidate the history.
+    // Reopened transport must revalidate the history.
     const { unmount } = await renderSidebarWithSettledSocket();
     unmount();
     vi.mocked(listSessions).mockClear();

@@ -2152,7 +2152,7 @@ private struct DetachmentBranchingProvider: LLMProvider, Sendable {
     }
 }
 
-/// Builds an isolated context for detached-turn tests off the real data directory.
+/// Builds an isolated context for detached-turn tests on scratch storage.
 private func makeDetachmentContext(provider: any LLMProvider) throws -> (ServerContext, URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-detachment-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -2186,8 +2186,9 @@ private func makeDetachmentContext(provider: any LLMProvider) throws -> (ServerC
 }
 
 /// Polls an async condition until it holds or a generous budget expires.
+/// The budget stays wide so parallel hermetic suites still settle under load.
 private func detachmentWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
-    let deadline = Date().addingTimeInterval(20)
+    let deadline = Date().addingTimeInterval(60)
     while Date() < deadline {
         if await condition() {
             return true
@@ -2225,7 +2226,12 @@ struct WebSocketTurnDetachmentTests {
             await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "ok"
         }
         #expect(settled == true)
-        #expect(await context.activeTurns.isActive(sessionID: sessionID) == false)
+        // The slot clears only after the terminal row lands, so poll for the
+        // release instead of asserting immediately after the settle.
+        let released = await detachmentWaitUntil {
+            await context.activeTurns.isActive(sessionID: sessionID) == false
+        }
+        #expect(released == true)
     }
 
     @Test

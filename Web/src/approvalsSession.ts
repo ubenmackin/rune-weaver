@@ -38,17 +38,21 @@ export function approvalSessionID(
   return null;
 }
 
-// Reads the owning session from a run log entry. The engine tags interactive
-// turns with `sessionID`, so run views share this reader instead of
-// reimplementing the lookup per call site.
+// Reads the owning session across wire spellings. The engine tags turns with
+// `sessionID`, so run views share this reader instead of reimplementing the
+// lookup per call site.
 export function runSessionID(
   run: RunLogEntry | null | undefined,
 ): string | null {
   if (!run) return null;
-  const sid = run.sessionID;
-  if (typeof sid !== "string") return null;
-  const trimmed = sid.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  const record = run as unknown as Record<string, unknown>;
+  const candidates = [record.sessionID, record.sessionId, record.session_id];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return null;
 }
 
 // Validates an approval prompt before it joins the inbox badge, so a malformed socket frame cannot

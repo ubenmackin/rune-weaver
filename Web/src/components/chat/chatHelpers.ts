@@ -377,3 +377,43 @@ export function settleParkedFlight(flights: Map<string, ParkedFlight>, key: stri
   flights.delete(key);
   flights.set(key, flight);
 }
+
+// Reports whether the outgoing session owns a live turn worth parking: only a
+// pending turn bound to the outgoing session survives the switch, so idle
+// switches never mint a shell for a badge that was never live.
+export function isParkableTurn(
+  pending: boolean,
+  turnSessionID: string | null | undefined,
+  outgoingID: string | null | undefined,
+): boolean {
+  const normalizedOutgoing = normalizeSessionID(outgoingID);
+  return (
+    pending === true &&
+    normalizedOutgoing.length > 0 &&
+    normalizeSessionID(turnSessionID) === normalizedOutgoing
+  );
+}
+
+// Pre-live gate for reattaching a reloaded tab: the poll says running, no turn
+// is already pending, and no parked flight owns the session, so a live probe
+// is worth issuing instead of lighting a badge from a stale row.
+export function canAdoptFromPoll(args: {
+  pending: boolean;
+  cancelled: boolean;
+  isDraft: boolean;
+  runningIncludesActive: boolean;
+  parkedPending: boolean;
+}): boolean {
+  if (args.pending || args.cancelled || args.isDraft) return false;
+  if (!args.runningIncludesActive || args.parkedPending) return false;
+  return true;
+}
+
+// Post-live gate for the same adoption: only an active live-turn promotes the
+// poll row into a pending bubble, so settled or failed probes clear the badge
+// instead of reviving it.
+export function canAdoptFromLive(
+  live: { active?: unknown } | null | undefined,
+): boolean {
+  return !!live && live.active === true;
+}
