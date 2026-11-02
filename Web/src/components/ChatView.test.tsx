@@ -18,6 +18,7 @@ import {
   createMockWebSocketCapture,
   dispatchFrameOrThrow,
 } from "../test-utils/mockWebSocket";
+import { makeCountingSocket } from "../test-utils/countingSocket";
 
 describe("ChatView", () => {
   beforeEach(() => {
@@ -3019,24 +3020,7 @@ describe("ChatView mobile footer", () => {
 });
 
 describe("Chat reconnecting banner", () => {
-  function makeCountingSocket(): {
-    capture: ReturnType<typeof createMockWebSocketCapture>;
-    instances: WebSocket[];
-    CountingSocket: new (url?: string) => WebSocket;
-  } {
-    const capture = createMockWebSocketCapture();
-    const BaseSocket = createMockWebSocket(capture) as unknown as new (
-      url?: string,
-    ) => WebSocket;
-    const instances: WebSocket[] = [];
-    class CountingSocket extends BaseSocket {
-      constructor(url?: string) {
-        super(url);
-        instances.push(this);
-      }
-    }
-    return { capture, instances, CountingSocket };
-  }
+
 
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -3613,9 +3597,7 @@ describe("Reloaded-tab reattach without cancel", () => {
     localStorage.clear();
   });
 
-  // Shared stub for the reload shape: persisted history plus the run log plus
-  // an empty inbox. The run rows drive adoption while history stays the only
-  // source for visible messages, so the helper keeps both explicit.
+  // Reload stub: history plus run log plus empty inbox.
   function stubReloadFetch(
     sessionID: string,
     runs: Array<Record<string, unknown>>,
@@ -3645,6 +3627,9 @@ describe("Reloaded-tab reattach without cancel", () => {
         if (typeof input === "string" && input.endsWith("/tool-actions")) {
           return jsonResponse({ sessionID, actions: [], count: 0 });
         }
+        if (typeof input === "string" && input.includes("/live-turn")) {
+          return jsonResponse({ active: true, sessionID, text: "", reasoning: "", toolActions: [], warnings: [] });
+        }
         if (typeof input === "string" && input.startsWith("/sessions/")) {
           return jsonResponse({
             id: sessionID,
@@ -3670,9 +3655,7 @@ describe("Reloaded-tab reattach without cancel", () => {
   }
 
   it("adopts a running row on reload with zero cancel traffic", async () => {
-    // A tab that reloads mid-turn starts idle, yet the server still owns the
-    // turn. Adoption must light the pending affordance from run-log evidence
-    // alone, without fabricating a reply and without cancelling the owner.
+    // Reload adoption lights pending without cancelling the owner.
     const sessionA = "reload-adopt-aaaa-1111";
     localStorage.setItem("rw_active_session_id", sessionA);
     const now = new Date().toISOString();
@@ -3699,13 +3682,10 @@ describe("Reloaded-tab reattach without cancel", () => {
       expect(capture.onMessage).not.toBeNull();
     });
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Cancel turn" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     });
     expect(screen.getByText("stuck prompt")).toBeInTheDocument();
-    // Reattach never dials: no outbound socket frame and no REST cancel for a
-    // turn the server still owns.
+    // Reattach never dials the owner.
     expect(capture.sentFrames).toHaveLength(0);
     expect(
       seenFetch.filter((url) => url.includes("/chat/cancel")),
@@ -3713,8 +3693,7 @@ describe("Reloaded-tab reattach without cancel", () => {
   });
 
   it("rebuilds the timeline from broadcast deltas after adoption", async () => {
-    // Deltas that arrive after adoption belong to the same server turn, so
-    // they must extend the adopted shell instead of starting a second bubble.
+    // Post-adoption deltas extend the shell, not a second bubble.
     const sessionA = "reload-delta-aaaa-2222";
     localStorage.setItem("rw_active_session_id", sessionA);
     const now = new Date().toISOString();
@@ -3741,9 +3720,7 @@ describe("Reloaded-tab reattach without cancel", () => {
       expect(capture.onMessage).not.toBeNull();
     });
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Cancel turn" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     });
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "tool_start",
@@ -3763,16 +3740,13 @@ describe("Reloaded-tab reattach without cancel", () => {
     await waitFor(() => {
       expect(screen.getByText(/resumed progress/)).toBeInTheDocument();
     });
-    // Still live and still silent on cancel: rebuilding never aborts the owner.
-    expect(
-      screen.getByRole("button", { name: "Cancel turn" }),
-    ).toBeInTheDocument();
+    // Rebuilding never aborts the owner.
+    expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     expect(capture.sentFrames).toHaveLength(0);
   });
 
   it("completes an adopted turn normally on its terminal frame", async () => {
-    // The terminal broadcast settles the adopted shell exactly once, leaving
-    // one finished message and a free input like any locally started turn.
+    // Terminal broadcast settles the adopted shell once.
     const sessionA = "reload-done-aaaa-3333";
     localStorage.setItem("rw_active_session_id", sessionA);
     const now = new Date().toISOString();
@@ -3799,9 +3773,7 @@ describe("Reloaded-tab reattach without cancel", () => {
       expect(capture.onMessage).not.toBeNull();
     });
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Cancel turn" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     });
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "delta",
@@ -3827,8 +3799,7 @@ describe("Reloaded-tab reattach without cancel", () => {
   });
 
   it("loads persisted history without adopting when no running row remains", async () => {
-    // A turn that finished while away leaves only settled rows, so the reload
-    // must render history idly instead of resurrecting a live bubble.
+    // Settled rows render idly without a live bubble.
     const sessionA = "reload-settled-aaaa-4444";
     localStorage.setItem("rw_active_session_id", sessionA);
     const now = new Date().toISOString();
@@ -3862,9 +3833,7 @@ describe("Reloaded-tab reattach without cancel", () => {
       expect(screen.getByText("earlier reply")).toBeInTheDocument();
     });
     expect(screen.getByText("earlier prompt")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Cancel turn" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
     expect(capture.sentFrames).toHaveLength(0);
     expect(
@@ -3872,9 +3841,62 @@ describe("Reloaded-tab reattach without cancel", () => {
     ).toHaveLength(0);
   });
 
+  it("shows no pending bubble for a stale running poll row without an active live-turn", async () => {
+    // Stale rows without a live-turn never raise a bubble.
+    const sessionA = "reload-stale-aaaa-6666";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        seenFetch.push(typeof input === "string" ? input : String(input));
+        if (typeof input === "string" && input.includes("/live-turn")) {
+          return jsonResponse({ active: false, sessionID: sessionA, text: "", reasoning: "", toolActions: [], warnings: [] });
+        }
+        if (input === "/sessions") {
+          return jsonResponse({ sessions: [{ id: sessionA, title: "Reload Session", messageCount: 1, createdAt: now, updatedAt: now, source: "chat" }], count: 1 });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionA, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({ id: sessionA, title: "Reload Session", messages: [{ id: "u1", role: "user", content: "stale prompt", createdAt: now }], createdAt: now, updatedAt: now, source: "chat" });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [{ id: "run-stale-1", kind: "chat", status: "running", message: "stale prompt", sessionID: sessionA, timestamp: now }], count: 1 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("stale prompt")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(seenFetch.some((url) => url.startsWith("/runs"))).toBe(true);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Rune Weaver is thinking"),
+    ).not.toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
+  });
+
   it("keeps other sessions running turns out of the active view", async () => {
-    // Run rows and live frames carry their owner, so a foreign turn must badge
-    // elsewhere instead of lighting this session or leaking its deltas here.
+    // Foreign turns badge elsewhere, never here.
     const sessionA = "reload-active-aaaa-5555";
     const sessionB = "reload-other-bbbb-6666";
     localStorage.setItem("rw_active_session_id", sessionA);
@@ -3904,25 +3926,20 @@ describe("Reloaded-tab reattach without cancel", () => {
     await waitFor(() => {
       expect(screen.getByText("own prompt")).toBeInTheDocument();
     });
-    // Foreign running evidence never adopts the active view.
-    expect(
-      screen.queryByRole("button", { name: "Cancel turn" }),
-    ).not.toBeInTheDocument();
+    // Foreign evidence never adopts.
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "delta",
       delta: "foreign progress",
       sessionID: sessionB,
     });
     expect(screen.queryByText(/foreign progress/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Cancel turn" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
     expect(capture.sentFrames).toHaveLength(0);
   });
 
   it("lets explicit cancel abort an adopted turn", async () => {
-    // Adoption locks the input like a local send, so the visible Cancel must
-    // still reach the same session instead of stranding the adopted owner.
+    // Visible Cancel still reaches the adopted owner.
     const user = userEvent.setup();
     const sessionA = "reload-cancel-aaaa-7777";
     localStorage.setItem("rw_active_session_id", sessionA);
@@ -4813,24 +4830,7 @@ describe("ChatView persona header", () => {
 });
 
 describe("missed-terminal settle requires a closed socket", () => {
-  function makeCountingSocket(): {
-    capture: ReturnType<typeof createMockWebSocketCapture>;
-    instances: WebSocket[];
-    CountingSocket: new (url?: string) => WebSocket;
-  } {
-    const capture = createMockWebSocketCapture();
-    const BaseSocket = createMockWebSocket(capture) as unknown as new (
-      url?: string,
-    ) => WebSocket;
-    const instances: WebSocket[] = [];
-    class CountingSocket extends BaseSocket {
-      constructor(url?: string) {
-        super(url);
-        instances.push(this);
-      }
-    }
-    return { capture, instances, CountingSocket };
-  }
+
 
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -4919,9 +4919,7 @@ describe("missed-terminal settle requires a closed socket", () => {
       await waitFor(() => {
         expect(capture.onMessage).not.toBeNull();
       });
-      const detailCalls = (): number =>
-        seenFetch.filter(
-          (url) =>
+      const detailCalls = (): number => seenFetch.filter((url) =>
             url === `/sessions/${sessionA}` ||
             url.startsWith(`/sessions/${sessionA}?`),
         ).length;
@@ -5052,24 +5050,7 @@ describe("missed-terminal settle requires a closed socket", () => {
 });
 
 describe("done frame clears pending state without a render hop", () => {
-  function makeCountingSocket(): {
-    capture: ReturnType<typeof createMockWebSocketCapture>;
-    instances: WebSocket[];
-    CountingSocket: new (url?: string) => WebSocket;
-  } {
-    const capture = createMockWebSocketCapture();
-    const BaseSocket = createMockWebSocket(capture) as unknown as new (
-      url?: string,
-    ) => WebSocket;
-    const instances: WebSocket[] = [];
-    class CountingSocket extends BaseSocket {
-      constructor(url?: string) {
-        super(url);
-        instances.push(this);
-      }
-    }
-    return { capture, instances, CountingSocket };
-  }
+
 
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -5111,46 +5092,17 @@ describe("done frame clears pending state without a render hop", () => {
       "fetch",
       vi.fn(async (input: string) => {
         seenFetch.push(typeof input === "string" ? input : String(input));
-        if (
-          typeof input === "string" &&
-          (input === "/sessions" || input.startsWith("/sessions?"))
-        ) {
-          return jsonResponse({
-            sessions: [
-              {
-                id: sessionB,
-                title: "Done Session",
-                messageCount: historyMessages.length,
-                createdAt: stamp,
-                updatedAt: stamp,
-                source: "chat",
-              },
-            ],
-            count: 1,
-          });
+        if (typeof input === "string" && (input === "/sessions" || input.startsWith("/sessions?"))) {
+          return jsonResponse({ sessions: [{ id: sessionB, title: "Done Session", messageCount: historyMessages.length, createdAt: stamp, updatedAt: stamp, source: "chat" }], count: 1 });
         }
         if (typeof input === "string" && input.endsWith("/tool-actions")) {
           return jsonResponse({ sessionID: sessionB, actions: [], count: 0 });
         }
         if (typeof input === "string" && input.includes("/live-turn")) {
-          return jsonResponse({
-            active: false,
-            sessionID: sessionB,
-            text: "",
-            reasoning: "",
-            toolActions: [],
-            warnings: [],
-          });
+          return jsonResponse({ active: false, sessionID: sessionB, text: "", reasoning: "", toolActions: [], warnings: [] });
         }
         if (typeof input === "string" && input.startsWith("/sessions/")) {
-          return jsonResponse({
-            id: sessionB,
-            title: "Done Session",
-            messages: historyMessages,
-            createdAt: stamp,
-            updatedAt: stamp,
-            source: "chat",
-          });
+          return jsonResponse({ id: sessionB, title: "Done Session", messages: historyMessages, createdAt: stamp, updatedAt: stamp, source: "chat" });
         }
         if (typeof input === "string" && input.startsWith("/runs")) {
           return jsonResponse({ runs: mockRuns, count: mockRuns.length });
@@ -5166,9 +5118,7 @@ describe("done frame clears pending state without a render hop", () => {
       await waitFor(() => {
         expect(capture.onMessage).not.toBeNull();
       });
-      const detailCalls = (): number =>
-        seenFetch.filter(
-          (url) =>
+      const detailCalls = (): number => seenFetch.filter((url) =>
             url === `/sessions/${sessionB}` ||
             url.startsWith(`/sessions/${sessionB}?`),
         ).length;
@@ -5250,27 +5200,9 @@ describe("done frame clears pending state without a render hop", () => {
 });
 
 describe("history reload never clobbers the completed last turn", () => {
-  function makeCountingSocket(): {
-    capture: ReturnType<typeof createMockWebSocketCapture>;
-    instances: WebSocket[];
-    CountingSocket: new (url?: string) => WebSocket;
-  } {
-    const capture = createMockWebSocketCapture();
-    const BaseSocket = createMockWebSocket(capture) as unknown as new (
-      url?: string,
-    ) => WebSocket;
-    const instances: WebSocket[] = [];
-    class CountingSocket extends BaseSocket {
-      constructor(url?: string) {
-        super(url);
-        instances.push(this);
-      }
-    }
-    return { capture, instances, CountingSocket };
-  }
 
-  // Routes session reads through mutable boxes so each case seeds the mounted
-  // history first and swaps the reload answer before settling.
+
+  // Mutable boxes seed mounted history then swap the reload answer.
   function installFetch(
     sessionID: string,
     boxes: {
@@ -5306,24 +5238,10 @@ describe("history reload never clobbers the completed last turn", () => {
           return jsonResponse({ sessionID, actions: [], count: 0 });
         }
         if (typeof input === "string" && input.includes("/live-turn")) {
-          return jsonResponse({
-            active: false,
-            sessionID,
-            text: "",
-            reasoning: "",
-            toolActions: [],
-            warnings: [],
-          });
+          return jsonResponse({ active: true, sessionID, text: "", reasoning: "", toolActions: [], warnings: [] });
         }
         if (typeof input === "string" && input.startsWith("/sessions/")) {
-          return jsonResponse({
-            id: sessionID,
-            title: "Settle Session",
-            messages: boxes.history,
-            createdAt: now,
-            updatedAt: now,
-            source: "chat",
-          });
+          return jsonResponse({ id: sessionID, title: "Settle Session", messages: boxes.history, createdAt: now, updatedAt: now, source: "chat" });
         }
         if (typeof input === "string" && input.startsWith("/runs")) {
           return jsonResponse({ runs: boxes.runs, count: boxes.runs.length });
@@ -5390,9 +5308,7 @@ describe("history reload never clobbers the completed last turn", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("button", { name: "Cancel turn" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
     const { result } = renderHook(() => useRunningRuns());
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -5414,9 +5330,7 @@ describe("history reload never clobbers the completed last turn", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Cancel turn" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     });
     expect(screen.getByText("earlier prompt")).toBeInTheDocument();
     expect(screen.getByText("earlier reply")).toBeInTheDocument();
@@ -5504,9 +5418,7 @@ describe("history reload never clobbers the completed last turn", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("button", { name: "Cancel turn" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel turn" })).not.toBeInTheDocument();
     const { result } = renderHook(() => useRunningRuns());
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -5526,9 +5438,7 @@ describe("history reload never clobbers the completed last turn", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Cancel turn" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
     });
     expect(screen.getByText("earlier prompt")).toBeInTheDocument();
     expect(screen.getByText("earlier reply")).toBeInTheDocument();

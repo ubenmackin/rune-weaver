@@ -47,8 +47,7 @@ import {
 } from "./icons";
 import Modal from "./Modal";
 
-// Run-lifecycle frames arrive in bursts (a swarm emits parent plus child
-// start/settle updates), so they coalesce into one `listSessions()` refetch
+// Run-lifecycle frames arrive in bursts, so they coalesce into one refetch
 // instead of one request per frame.
 const SESSION_REFRESH_COALESCE_MS = 750;
 
@@ -64,19 +63,15 @@ interface SessionSidebarProps {
   // Shell activation flag for the Chat tab.
   isActive?: boolean;
   pendingApprovals?: PermissionRequest[];
-  // Live interactive turns parked in the chat view while the user browses
-  // other sessions. The sidebar merges these with polled run rows so a
-  // background turn stays badged even before its run record persists.
+  // Parked chat turns merged with polled runs so background work stays
+  // badged before its run record persists.
   runningSessionIDs?: Set<string> | string[] | null;
   // Live handheld flag from the owner.
   isMobile?: boolean;
-  // Close-only dismissal for the mobile drawer. Falls back to the toggle
-  // when omitted so existing callers keep working; unlike the toggle it can
-  // never reopen a closed drawer from backdrop or Escape paths.
+  // Close-only mobile dismissal; falls back to the toggle and never reopens
+  // from backdrop or Escape paths.
   onClose?: () => void;
-  // History trigger owned by the chat view. The drawer returns focus here
-  // after every mobile dismissal so keyboard users land back on the control
-  // that opened the drawer instead of losing focus to the document body.
+  // History trigger for mobile focus return after every drawer dismissal.
   historyButtonRef?: RefObject<HTMLButtonElement | null>;
 }
 
@@ -92,21 +87,9 @@ function groupSessionsByDate(sessions: SessionSummary[] = []): GroupedSessions {
   // where a day is 23 or 25 hours instead of a fixed millisecond offset. Constructing midnight per
   // calendar day keeps Today/Yesterday/Previous-7-Days boundaries on local midnights.
   const now = new Date();
-  const todayStart = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-  ).getTime();
-  const yesterdayStart = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() - 1,
-  ).getTime();
-  const lastWeekStart = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() - 7,
-  ).getTime();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
+  const lastWeekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).getTime();
 
   const grouped: GroupedSessions = {
     today: [],
@@ -205,9 +188,7 @@ function SessionSidebarView({
   // Fan-out parents whose worker children are revealed. Expansion is ephemeral
   // view state by design: it defaults to collapsed, is never persisted, and
   // deleting a row never cascades it, so a swarm opens only when asked.
-  const [expandedParentKeys, setExpandedParentKeys] = useState<Set<string>>(
-    () => new Set<string>(),
-  );
+  const [expandedParentKeys, setExpandedParentKeys] = useState<Set<string>>(() => new Set<string>());
   // Submit blurs the input, so `onSubmit` and `onBlur` fire for one save.
   // The in-flight marker drops the second invocation before it can issue
   // a duplicate PATCH.
@@ -221,9 +202,7 @@ function SessionSidebarView({
 
   // Pending focus-restore timer for mobile dismissal. Stored in a ref so an
   // unmount before the tick can clear it instead of focusing a detached node.
-  const focusTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(
-    null,
-  );
+  const focusTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
   // Returns focus to the History trigger after a mobile dismissal.
   const returnFocusToTrigger = useCallback(() => {
@@ -353,10 +332,8 @@ function SessionSidebarView({
     [onSelectSession, isMobile, requestDrawerClose, returnFocusToTrigger],
   );
 
-  // Sessions with a turn still running on the engine while the user browses elsewhere.
-  const [liveRunningIDs, setLiveRunningIDs] = useState<Set<string>>(
-    () => new Set<string>(),
-  );
+  // Sessions with a turn still running while the user browses elsewhere.
+  const [liveRunningIDs, setLiveRunningIDs] = useState<Set<string>>(() => new Set<string>());
   const { runningIDs: sharedRunningIDs, refresh: refreshSharedRuns } =
     useRunningRuns();
   // Shared poller already returns normalized lowercase owners through the
@@ -370,9 +347,7 @@ function SessionSidebarView({
   // Pending trailing-coalesce timer for session-list revalidation. Held in a
   // ref so a frame arriving inside the window is absorbed rather than queuing a
   // second refetch, and so unmount can drop a tick bound for a detached view.
-  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(
-    null,
-  );
+  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
   const refreshSessions = useCallback(async () => {
     setLoading(true);
@@ -421,34 +396,48 @@ function SessionSidebarView({
       // add, retitle, or reprioritize a row, so the coalesced refetch must not
       // depend on the nested run parsing.
       scheduleSessionsRefresh();
-      const nested = (frame as Record<string, unknown>).run;
-      if (!nested || typeof nested !== "object") return;
-      const owner = runSessionID(
-        nested as Parameters<typeof runSessionID>[0],
+      const record = frame as unknown as Record<string, unknown>;
+      const nested = record.run;
+      const nestedRecord =
+        nested && typeof nested === "object"
+          ? (nested as Record<string, unknown>)
+          : null;
+      // Thin terminal frames omit the nested run, so the shared reader owns
+      // all spellings and one drift never strands a stuck Running badge.
+      const frameOwner = runSessionID(
+        record as unknown as Parameters<typeof runSessionID>[0],
       );
-      const normalized = normalizeSessionID(owner);
+      const nestedOwner = nestedRecord
+        ? runSessionID(
+            nestedRecord as unknown as Parameters<typeof runSessionID>[0],
+          )
+        : null;
+      const ownerRaw = frameOwner ?? nestedOwner;
+      const normalized = normalizeSessionID(ownerRaw);
       if (!normalized) return;
-      // Single active contract with the polled run log: only a live running status keeps the badge
-      // lit.
-      const nestedStatus =
-        typeof (nested as Record<string, unknown>).status === "string"
-          ? ((nested as Record<string, unknown>).status as string)
-          : undefined;
-      if (frameType === "run_started" && isActiveRunStatus(nestedStatus)) {
+      if (frameType === "run_started") {
+        // Only a live running status lights the badge; parked or settled
+        // starts leave the live set untouched.
+        const nestedStatus =
+          nestedRecord && typeof nestedRecord.status === "string"
+            ? (nestedRecord.status as string)
+            : undefined;
+        if (!isActiveRunStatus(nestedStatus)) return;
         setLiveRunningIDs((previous) => {
           if (previous.has(normalized)) return previous;
           const next = new Set(previous);
           next.add(normalized);
           return next;
         });
-      } else {
-        setLiveRunningIDs((previous) => {
-          if (!previous.has(normalized)) return previous;
-          const next = new Set(previous);
-          next.delete(normalized);
-          return next;
-        });
+        return;
       }
+      // Terminal frames always clear, even when the nested payload is thin.
+      setLiveRunningIDs((previous) => {
+        if (!previous.has(normalized)) return previous;
+        const next = new Set(previous);
+        next.delete(normalized);
+        return next;
+      });
     },
     [scheduleSessionsRefresh],
   );

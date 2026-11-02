@@ -21,6 +21,7 @@ import {
   dispatchFrameOrThrow,
   resetSharedSocket,
 } from "../test-utils/mockWebSocket";
+import { makeCountingSocket } from "../test-utils/countingSocket";
 
 function historyEntry(
   overrides: Record<string, unknown> = {},
@@ -71,24 +72,6 @@ function stubSharedSocket() {
   const capture = createMockWebSocketCapture();
   vi.stubGlobal("WebSocket", createMockWebSocket(capture));
   return capture;
-}
-
-// Records every dialed socket instance so reopen tests can close the live
-// handle and count the backoff redial on the real singleton path.
-function stubCountingSocket(): { instances: WebSocket[] } {
-  const capture = createMockWebSocketCapture();
-  const BaseSocket = createMockWebSocket(capture) as unknown as new (
-    url?: string,
-  ) => WebSocket;
-  const instances: WebSocket[] = [];
-  class CountingSocket extends BaseSocket {
-    constructor(url?: string) {
-      super(url);
-      instances.push(this);
-    }
-  }
-  vi.stubGlobal("WebSocket", CountingSocket);
-  return { instances };
 }
 
 // Drains one mocked fetch round inside act so assertions read the settled
@@ -514,7 +497,8 @@ describe("ApprovalHistory socket reopen refresh", () => {
 
   it("resyncs after the shared socket drops and the backoff redials", async () => {
     vi.useFakeTimers();
-    const { instances } = stubCountingSocket();
+    const { instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
     const seen: string[] = [];
     stubHistory([historyEntry()], (url) => seen.push(url));
     render(<ApprovalHistory />);

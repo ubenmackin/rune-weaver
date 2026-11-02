@@ -63,6 +63,7 @@ import {
   createMockWebSocketCapture,
   dispatchFrameOrThrow,
 } from "../test-utils/mockWebSocket";
+import { makeCountingSocket } from "../test-utils/countingSocket";
 import rootStyles from "../styles.css?raw";
 import formsStyles from "../styles/forms.css?raw";
 import settingsStyles from "../styles/settings.css?raw";
@@ -4741,25 +4742,6 @@ describe("IndexingPanel two-phase storage", () => {
 });
 
 describe("IndexingPanel connection resilience", () => {
-  function makeCountingSocket(): {
-    capture: ReturnType<typeof createMockWebSocketCapture>;
-    instances: WebSocket[];
-    CountingSocket: new (url?: string) => WebSocket;
-  } {
-    const capture = createMockWebSocketCapture();
-    const BaseSocket = createMockWebSocket(capture) as unknown as new (
-      url?: string,
-    ) => WebSocket;
-    const instances: WebSocket[] = [];
-    class CountingSocket extends BaseSocket {
-      constructor(url?: string) {
-        super(url);
-        instances.push(this);
-      }
-    }
-    return { capture, instances, CountingSocket };
-  }
-
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();

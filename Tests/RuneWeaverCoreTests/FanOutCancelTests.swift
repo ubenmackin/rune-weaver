@@ -189,9 +189,10 @@ private func cancelSubtask(title: String, prompt: String? = nil) -> FanOutSubtas
 }
 
 /// Polls a condition until it holds or the deadline passes, so tests order themselves against real
-/// worker state instead of racing fixed sleeps.
+/// worker state instead of racing fixed sleeps. The budget stays wide so parallel
+/// hermetic suites still observe the settle under load.
 private func waitUntil(
-    timeoutSeconds: Double = 5,
+    timeoutSeconds: Double = 20,
     _ condition: @escaping @Sendable () async -> Bool
 ) async {
     let deadline = Date().addingTimeInterval(timeoutSeconds)

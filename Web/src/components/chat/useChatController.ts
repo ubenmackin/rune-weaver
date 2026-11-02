@@ -25,6 +25,7 @@ import {
 import {
   approvalsForSession,
   copyToClipboard,
+  isParkableTurn,
   messageListHasActiveSelection,
 } from "./chatHelpers";
 import {
@@ -264,17 +265,33 @@ export function useChatController({
   const { runs: sharedRuns, runningIDs: sharedRunningIDs } = useRunningRuns();
 
   const handleParkActiveFlight = useCallback(() => {
-    parkFlight(
-      sessionIDRef.current,
-      inFlightTurnRef.current,
-      messagesRef.current,
-      turnWarningsRef.current,
-      lastTurnTokensRef.current,
-      sessionBaseRef.current,
-      cancelledRef.current,
+    const outgoingID = sessionIDRef.current;
+    const normalizedOutgoing = normalizeSessionID(outgoingID);
+    // Park only a live turn bound to the outgoing session; idle switches keep
+    // a pending parked flight's badge and prune expired shells first.
+    const isLiveTurn = isParkableTurn(
+      pendingRef.current,
+      turnSessionIDRef.current,
+      outgoingID,
     );
+    if (isLiveTurn) {
+      parkFlight(
+        outgoingID,
+        inFlightTurnRef.current,
+        messagesRef.current,
+        turnWarningsRef.current,
+        lastTurnTokensRef.current,
+        sessionBaseRef.current,
+        cancelledRef.current,
+      );
+    } else if (normalizedOutgoing) {
+      reapExpiredFlightsAndSurface();
+      if (!parkedFlightsRef.current.get(normalizedOutgoing)?.pending) {
+        markBackgroundRunning(normalizedOutgoing, false);
+      }
+    }
     clearTurnTimeout();
-  }, [parkFlight, clearTurnTimeout, sessionIDRef]);
+  }, [parkFlight, markBackgroundRunning, clearTurnTimeout, reapExpiredFlightsAndSurface, parkedFlightsRef]);
 
   const handleRestoreParkedFlight = useCallback(
     (id: string) => {
@@ -283,15 +300,7 @@ export function useChatController({
       reapExpiredFlightsAndSurface();
       const parked = parkedFlightsRef.current.get(key);
       if (!parked) {
-        if (backgroundRunningRef.current.has(key)) {
-          markBackgroundRunning(key, false);
-          setInFlightTurn({ toolActions: [], text: "", held: "", segments: [] });
-          setPending(true);
-          pendingRef.current = true;
-          turnSessionIDRef.current = id;
-          activeTurnStartMsRef.current = Date.now();
-          armTurnTimeout();
-        }
+        markBackgroundRunning(key, false);
         return;
       }
       if (!parked.pending) {
@@ -339,7 +348,7 @@ export function useChatController({
       activeTurnStartMsRef.current = Date.now();
       armTurnTimeout();
     },
-    [reapExpiredFlightsAndSurface, parkedFlightsRef, backgroundRunningRef, markBackgroundRunning, armTurnTimeout],
+    [reapExpiredFlightsAndSurface, parkedFlightsRef, markBackgroundRunning, armTurnTimeout],
   );
 
   const handleResetSessionTurnState = useCallback((nextID: string) => {
@@ -565,7 +574,7 @@ export function useChatController({
     setReconnecting(false);
     reapExpiredFlightsAndSurface();
     if (!pendingRef.current || cancelledRef.current) {
-      tryAdoptReloadedTurn();
+      void tryAdoptReloadedTurn();
       return;
     }
     const activeNorm = normalizeSessionID(sessionIDRef.current);
@@ -590,8 +599,8 @@ export function useChatController({
     let stillRunning = false;
     for (const run of sharedRunsRef.current) {
       const raw = (run as { sessionID?: unknown }).sessionID;
-      if (typeof raw !== "string" || !raw.trim()) continue;
-      if (raw.trim().toLowerCase() !== activeNorm) continue;
+      const norm = normalizeSessionID(typeof raw === "string" ? raw : null);
+      if (norm !== activeNorm) continue;
       const status = (run as { status?: unknown }).status;
       if (isActiveRunStatus(typeof status === "string" ? status : undefined)) {
         stillRunning = true;
