@@ -20,6 +20,11 @@
   --status-amber: #f59e0b;
   --status-orange: #f0a35e;
   --status-red: #ef4444;
+  /* Translucent badge fills stay tokenized so surfaces never inline raw color. */
+  --status-red-bg: rgba(239, 68, 68, 0.2);
+  --status-red-border: rgba(239, 68, 68, 0.3);
+  --accent-blue-bg: rgba(59, 130, 246, 0.2);
+  --accent-blue-border: rgba(59, 130, 246, 0.3);
   --tool-progress-track: #2c2c36;
   --tool-progress-stripe-high: rgba(196, 181, 253, 0.95);
   --tool-progress-stripe-low: rgba(139, 92, 246, 0.45);

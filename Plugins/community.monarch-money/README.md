@@ -24,21 +24,25 @@ A Rune Weaver Python plugin for accessing and updating [Monarch Money](https://w
 
 ## Authentication & Credentials Setup
 
-Configure your Monarch Money credentials in Rune Weaver Secrets (`Settings` -> `Secrets` in the web dashboard, or via keychain):
+You can configure Monarch Money directly from the Rune Weaver Dashboard:
+1. Navigate to **Settings** -> **Tools & Runes**.
+2. Under **Installed Runes & Plugins**, locate **Monarch Money** and click **Configure**.
+3. Under **Credentials & API Keys**, click **Store Key** next to your preferred credential to save it directly into the macOS Keychain (`com.runeweaver.secrets`).
+4. Under **Network Access & Policy**, click **Allow in Policy** for `api.monarch.com` if outbound network access is not yet permitted in `policy.toml`.
 
 ### Option 1: Bearer Token (Recommended)
 Fastest and most reliable method. Bypasses interactive logins, CAPTCHAs, and 2FA prompts:
 1. Log into [app.monarchmoney.com](https://app.monarchmoney.com) in your web browser.
 2. Open Developer Tools (`Cmd+Option+I`), navigate to the **Network** tab, and filter by `graphql`.
 3. Click any request, look at the **Request Headers**, and copy the token after `Authorization: Token `.
-4. Save as secret key: `MONARCH_TOKEN`.
+4. Click **Store Key** on `MONARCH_TOKEN` in the Monarch Money Configure modal and paste your token.
 
 ### Option 2: Browser Cookie
 1. In Developer Tools Network tab, copy the value of the `Cookie` request header (must include `session_id` and `csrftoken`).
-2. Save as secret key: `MONARCH_COOKIE`.
+2. Click **Store Key** on `MONARCH_COOKIE` in the Configure modal and paste the cookie string.
 
 ### Option 3: Email + Password (+ MFA Secret)
-1. Save `MONARCH_EMAIL` and `MONARCH_PASSWORD`.
+1. Store `MONARCH_EMAIL` and `MONARCH_PASSWORD` via the Configure modal.
 2. If your account has Two-Factor Authentication (MFA) enabled, get the TOTP text secret from Monarch Money under **Settings** -> **Security** -> **Two-Factor Authentication** -> **Two-factor text code**, and save it as `MONARCH_MFA_SECRET`.
 
 ---

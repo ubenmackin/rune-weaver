@@ -142,6 +142,9 @@ export function SettingsFormPanels({
           handleToggleCategory={services.handleToggleCategory}
           onConfigureTool={(name) => save.setConfiguringToolName(name)}
           handlePermissionChange={services.handlePermissionChange}
+          secretStatus={services.secretStatus}
+          onConfigurePlugin={services.setConfiguringPlugin}
+          handleUpdatePlugin={services.handleUpdatePlugin}
           toolSearchQuery={services.toolSearchQuery}
           setToolSearchQuery={services.setToolSearchQuery}
           selectedToolCategory={services.selectedToolCategory}

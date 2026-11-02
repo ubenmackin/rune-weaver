@@ -33,6 +33,22 @@ export function updateToolState(name: string, enabled: boolean): Promise<ToolInf
   });
 }
 
+export interface PluginCredentialDeclaration {
+  key: string;
+  label?: string | null;
+  description?: string | null;
+  required?: boolean;
+}
+
+export interface PluginOptionDeclaration {
+  key: string;
+  label?: string | null;
+  description?: string | null;
+  type: string;
+  defaultValue?: string | null;
+  options?: string[] | null;
+}
+
 export interface PluginSummary {
   id: string;
   name: string;
@@ -48,6 +64,12 @@ export interface PluginSummary {
   permissionOverrides: Record<string, string>;
   discoveredAt: string;
   updatedAt: string;
+  latestVersion?: string | null;
+  hasUpdate?: boolean;
+  credentials?: PluginCredentialDeclaration[];
+  options?: PluginOptionDeclaration[];
+  declaredNetworkHosts?: string[];
+  userConfig?: Record<string, string>;
 }
 
 export interface PluginsResponse {
@@ -71,6 +93,8 @@ export interface MarketplacePluginItem {
   runtime: string;
   declaredTools: string[];
   isInstalled: boolean;
+  installedVersion?: string | null;
+  hasUpdate?: boolean;
 }
 
 export interface MarketplaceResponse {
@@ -124,6 +148,23 @@ export function installMarketplacePlugin(
   return fetchJson<PluginSummary>("/marketplace/install", {
     method: "POST",
     body: JSON.stringify(request),
+  });
+}
+
+export function updateMarketplacePlugin(id: string): Promise<PluginSummary> {
+  return fetchJson<PluginSummary>("/marketplace/update", {
+    method: "POST",
+    body: JSON.stringify({ id }),
+  });
+}
+
+export function updatePluginConfig(
+  id: string,
+  config: Record<string, string>,
+): Promise<PluginSummary> {
+  return fetchJson<PluginSummary>(`/plugins/${encodeURIComponent(id)}/config`, {
+    method: "POST",
+    body: JSON.stringify({ config }),
   });
 }
 

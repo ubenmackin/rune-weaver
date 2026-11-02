@@ -50,6 +50,33 @@ private func registerCorePluginRoutes(_ app: Application) {
         return try await handlePluginStateUpdate(id: id, body: body, context: context)
     }
 
+    // POST /plugins/:id/config
+    plugins.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.config)) { req async throws -> PluginSummary in
+        guard let id = req.parameters.get("id") else {
+            throw Abort(.badRequest, reason: "Missing plugin ID parameter.")
+        }
+        let body = try req.content.decode(UpdatePluginConfigRequest.self)
+        let context = req.application.runeWeaver
+        do {
+            let updated = try await context.pluginDiscovery.setUserConfig(id: id, config: body.config, toolBus: context.toolBus)
+            guard let manifestInfo = context.pluginDiscovery.findManifest(for: id) else {
+                throw Abort(.notFound, reason: "Plugin manifest not found.")
+            }
+            // Config saves keep live update truth so direct API reads match list views.
+            let marketplaceDoc = await loadMarketplaceIndex(context: context)
+            let catalogEntry = marketplaceDoc?.items.first(where: { $0.id == id })
+            return await makePluginSummary(record: updated, manifest: manifestInfo.manifest, context: context, catalogEntry: catalogEntry)
+        } catch let error as PluginDiscoveryError {
+            // Unknown IDs are 404; oversized or protected config stays 400.
+            if case .pluginNotFound = error {
+                throw Abort(.notFound, reason: error.localizedDescription)
+            }
+            throw Abort(.badRequest, reason: error.localizedDescription)
+        } catch {
+            throw Abort(.internalServerError, reason: "Failed to update plugin configuration: \(error.localizedDescription)")
+        }
+    }
+
     // DELETE /plugins/:id
     plugins.delete(PathComponent.parameter("id")) { req async throws -> Response in
         guard let id = req.parameters.get("id") else {
@@ -72,106 +99,241 @@ private func registerCorePluginRoutes(_ app: Application) {
 
 private func registerMarketplaceRoutes(_ app: Application) {
     let marketplace = app.grouped(PathComponent.constant(ServerPaths.marketplace))
+    marketplace.get(PathComponent.constant(ServerPaths.plugins), use: handleGetMarketplacePlugins)
+    marketplace.post(PathComponent.constant(ServerPaths.install), use: handleInstallMarketplacePlugin)
+    marketplace.post(PathComponent.constant(ServerPaths.update), use: handleUpdateMarketplacePlugin)
+}
 
-    // GET /marketplace/plugins
-    marketplace.get(PathComponent.constant(ServerPaths.plugins)) { req async throws -> MarketplaceResponse in
-        let context = req.application.runeWeaver
-        let installedRecords = await context.pluginStore.loadAll()
-        let installedIDs = Set(installedRecords.map(\.id))
-        var items = await fetchMarketplaceCatalog(context: context, installedIDs: installedIDs)
-        items.sort { $0.name < $1.name }
-        return MarketplaceResponse(items: items)
+/// GET /marketplace/plugins
+private func handleGetMarketplacePlugins(req: Request) async throws -> MarketplaceResponse {
+    let context = req.application.runeWeaver
+    let installedRecords = await context.pluginStore.loadAll()
+    let installedByID = Dictionary(uniqueKeysWithValues: installedRecords.map { ($0.id, $0) })
+    var items = await fetchMarketplaceCatalog(context: context, installedRecordsByID: installedByID)
+    items.sort { $0.name < $1.name }
+    return MarketplaceResponse(items: items)
+}
+
+/// POST /marketplace/install
+private func handleInstallMarketplacePlugin(req: Request) async throws -> PluginSummary {
+    let body = try req.content.decode(InstallMarketplacePluginRequest.self)
+    let context = req.application.runeWeaver
+    // Marketplace IDs become directory names and manifest fields, so reject traversal and
+    // injection payloads up front with the same allowlist the manifest parser enforces;
+    // containment below remains as a second layer.
+    let pluginID = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !pluginID.isEmpty,
+          pluginID != ".",
+          pluginID != "..",
+          pluginID.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
+          !pluginID.contains("/"),
+          !pluginID.contains("\\"),
+          !pluginID.contains("..")
+    else {
+        throw Abort(.badRequest, reason: "Invalid plugin ID. Only alphanumeric, '.', '-', and '_' are allowed.")
+    }
+    // Body downloadURL stays display provenance only and never triggers a fetch;
+    // catalog file fetches use https-only SSRF-guarded downloads with per-file
+    // size cap plus manifest-ID verification.
+    if let rawDownloadURL = body.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !rawDownloadURL.isEmpty
+    {
+        guard let downloadURL = URL(string: rawDownloadURL),
+              downloadURL.scheme?.lowercased() == "https",
+              downloadURL.host?.isEmpty == false
+        else {
+            throw Abort(.badRequest, reason: "downloadURL must be a valid https URL.")
+        }
+    }
+    let pluginsDir = context.pluginDiscovery.pluginsDirectory
+    let targetDir = pluginsDir.appendingPathComponent(pluginID)
+
+    // Keep a crafted ID or symlinked plugins root from escaping the holding
+    // pen; both sides resolve symlinks so a linked pen or parent traversal
+    // cannot bypass the prefix check. Verified before any directory is made.
+    let resolvedPluginsDir = pluginsDir.resolvingSymlinksInPath().standardizedFileURL
+    let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
+    let pluginsPrefix = resolvedPluginsDir.path.hasSuffix("/") ? resolvedPluginsDir.path : resolvedPluginsDir.path + "/"
+    guard resolvedTarget.path.hasPrefix(pluginsPrefix) else {
+        throw Abort(.badRequest, reason: "Plugin ID escapes the plugins directory.")
     }
 
-    // POST /marketplace/install
-    marketplace.post(PathComponent.constant(ServerPaths.install)) { req async throws -> PluginSummary in
-        let body = try req.content.decode(InstallMarketplacePluginRequest.self)
-        let context = req.application.runeWeaver
-        // Marketplace IDs become directory names and manifest fields, so reject traversal and
-        // injection payloads up front with the same allowlist the manifest parser enforces;
-        // containment below remains as a second layer.
-        let pluginID = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !pluginID.isEmpty,
-              pluginID != ".",
-              pluginID != "..",
-              pluginID.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
-              !pluginID.contains("/"),
-              !pluginID.contains("\\"),
-              !pluginID.contains("..")
-        else {
-            throw Abort(.badRequest, reason: "Invalid plugin ID. Only alphanumeric, '.', '-', and '_' are allowed.")
-        }
-        // Body downloadURL stays display provenance only and never triggers a fetch;
-        // catalog file fetches use https-only SSRF-guarded downloads with per-file
-        // size cap plus manifest-ID verification.
-        if let rawDownloadURL = body.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !rawDownloadURL.isEmpty
-        {
-            guard let downloadURL = URL(string: rawDownloadURL),
-                  downloadURL.scheme?.lowercased() == "https",
-                  downloadURL.host?.isEmpty == false
-            else {
-                throw Abort(.badRequest, reason: "downloadURL must be a valid https URL.")
-            }
-        }
-        let pluginsDir = context.pluginDiscovery.pluginsDirectory
-        let targetDir = pluginsDir.appendingPathComponent(pluginID)
+    let fileManager = FileManager.default
+    try fileManager.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
+    if fileManager.fileExists(atPath: targetDir.path) {
+        throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already installed.")
+    }
 
-        // Keep a crafted ID or symlinked plugins root from escaping the holding
-        // pen; both sides resolve symlinks so a linked pen or parent traversal
-        // cannot bypass the prefix check. Verified before any directory is made.
-        let resolvedPluginsDir = pluginsDir.resolvingSymlinksInPath().standardizedFileURL
-        let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
-        let pluginsPrefix = resolvedPluginsDir.path.hasSuffix("/") ? resolvedPluginsDir.path : resolvedPluginsDir.path + "/"
-        guard resolvedTarget.path.hasPrefix(pluginsPrefix) else {
-            throw Abort(.badRequest, reason: "Plugin ID escapes the plugins directory.")
-        }
+    do {
+        try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: false)
+    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+        throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already installed.")
+    }
 
-        let fileManager = FileManager.default
-        try fileManager.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
-        if fileManager.fileExists(atPath: targetDir.path) {
-            throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already installed.")
-        }
-
+    do {
+        let doc = await loadMarketplaceIndex(context: context)
+        let entry = doc?.items.first(where: { $0.id == pluginID })
+        try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context)
+    } catch {
         do {
-            try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: false)
-        } catch let error as CocoaError where error.code == .fileWriteFileExists {
-            throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already installed.")
-        }
-
-        do {
-            let doc = await loadMarketplaceIndex(context: context)
-            let entry = doc?.items.first(where: { $0.id == pluginID })
-            try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context)
+            try fileManager.removeItem(at: targetDir)
         } catch {
-            do {
-                try fileManager.removeItem(at: targetDir)
-            } catch {
-                RuneWeaverLog.server.warning("Failed cleaning up aborted plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
-            }
-            throw Abort(.internalServerError, reason: "Failed to install plugin '\(pluginID)': \(error.localizedDescription)")
+            RuneWeaverLog.server.warning("Failed cleaning up aborted plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
+        }
+        throw Abort(.internalServerError, reason: "Failed to install plugin '\(pluginID)': \(error.localizedDescription)")
+    }
+
+    // Trigger discovery sync: records plugin as 'discovered' (disabled by default!)
+    // Marketplace installs keep their origin instead of collapsing to local disk.
+    await context.pluginDiscovery.discoverAndSync(toolBus: context.toolBus, defaultSource: "marketplace")
+
+    guard let summary = await fetchPluginSummary(id: pluginID, context: context) else {
+        // Undiscoverable scaffold must not wedge retry behind a persistent 409.
+        do {
+            try fileManager.removeItem(at: targetDir)
+        } catch {
+            RuneWeaverLog.server.warning("Failed cleaning up undiscoverable plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
+        }
+        throw Abort(.internalServerError, reason: "Plugin installed but could not be discovered.")
+    }
+    return summary
+}
+
+/// POST /marketplace/update
+private func handleUpdateMarketplacePlugin(req: Request) async throws -> PluginSummary {
+    let body = try req.content.decode(UpdateMarketplacePluginRequest.self)
+    let context = req.application.runeWeaver
+    let pluginID = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !pluginID.isEmpty,
+          pluginID != ".",
+          pluginID != "..",
+          pluginID.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
+          !pluginID.contains("/"),
+          !pluginID.contains("\\"),
+          !pluginID.contains("..")
+    else {
+        throw Abort(.badRequest, reason: "Invalid plugin ID.")
+    }
+
+    guard let installedRecord = await context.pluginStore.get(id: pluginID) else {
+        throw Abort(.notFound, reason: "Plugin '\(pluginID)' is not installed.")
+    }
+
+    let pluginsDir = context.pluginDiscovery.pluginsDirectory
+    let targetDir = pluginsDir.appendingPathComponent(pluginID)
+    let resolvedPluginsDir = pluginsDir.resolvingSymlinksInPath().standardizedFileURL
+    let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
+    let pluginsPrefix = resolvedPluginsDir.path.hasSuffix("/") ? resolvedPluginsDir.path : resolvedPluginsDir.path + "/"
+    guard resolvedTarget.path.hasPrefix(pluginsPrefix) else {
+        throw Abort(.badRequest, reason: "Plugin ID escapes the plugins directory.")
+    }
+
+    let fileManager = FileManager.default
+    guard fileManager.fileExists(atPath: targetDir.path) else {
+        throw Abort(.notFound, reason: "Plugin directory does not exist.")
+    }
+
+    let doc = await loadMarketplaceIndex(context: context)
+    guard let entry = doc?.items.first(where: { $0.id == pluginID }) else {
+        throw Abort(.notFound, reason: "Plugin '\(pluginID)' not found in marketplace catalog.")
+    }
+
+    // Direct updates never downgrade; frontend gates on hasUpdate already.
+    guard isVersionNewer(entry.version, than: installedRecord.version) else {
+        throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already up to date.")
+    }
+
+    // Backup existing plugin directory to temporary rollback location
+    let backupDir = pluginsDir.appendingPathComponent(".\(pluginID).update-backup-\(UUID().uuidString)")
+    do {
+        try fileManager.copyItem(at: targetDir, to: backupDir)
+    } catch {
+        throw Abort(.internalServerError, reason: "Failed to create backup: \(error.localizedDescription)")
+    }
+
+    do {
+        // Clear target so files removed upstream do not linger executable.
+        let existingContents = try fileManager.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil, options: [])
+        for existingURL in existingContents {
+            try fileManager.removeItem(at: existingURL)
+        }
+        try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context, overwrite: true, allowScaffold: false)
+
+        // Re-provision venv if python and requirements.txt exists
+        let reqURL = targetDir.appendingPathComponent("requirements.txt")
+        if fileManager.fileExists(atPath: reqURL.path) {
+            try await context.pluginDiscovery.provisionVenvIfNeeded(at: targetDir, forceRecreate: true)
         }
 
-        // Trigger discovery sync: records plugin as 'discovered' (disabled by default!)
-        // Marketplace installs keep their origin instead of collapsing to local disk.
-        await context.pluginDiscovery.discoverAndSync(toolBus: context.toolBus, defaultSource: "marketplace")
-
-        guard let summary = await fetchPluginSummary(id: pluginID, context: context) else {
-            // Undiscoverable scaffold must not wedge retry behind a persistent 409.
-            do {
-                try fileManager.removeItem(at: targetDir)
-            } catch {
-                RuneWeaverLog.server.warning("Failed cleaning up undiscoverable plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
-            }
-            throw Abort(.internalServerError, reason: "Plugin installed but could not be discovered.")
+        guard let newHash = PluginSecurity.calculateDirectoryHash(at: targetDir) else {
+            throw Abort(.internalServerError, reason: "Failed to calculate plugin integrity hash.")
         }
+
+        let manifestFile = targetDir.appendingPathComponent("rune.json")
+        let manifestData = try Data(contentsOf: manifestFile)
+        let updatedManifest = try PluginManifest.from(jsonData: manifestData)
+
+        guard let updatedRecord = await context.pluginStore.setVersion(id: pluginID, version: updatedManifest.version, integrityHash: newHash) else {
+            throw Abort(.internalServerError, reason: "Failed to update plugin record.")
+        }
+
+        // Sync with tool bus
+        await context.pluginDiscovery.discoverAndSync(toolBus: context.toolBus)
+
+        let summary = await makePluginSummary(record: updatedRecord, manifest: updatedManifest, context: context, catalogEntry: entry)
+        // Backup is removed only after success; rollback keeps it on failure.
+        try? fileManager.removeItem(at: backupDir)
         return summary
+    } catch {
+        // Restore from backup; log rollback failures so a missing dir never goes silent.
+        do {
+            try fileManager.removeItem(at: targetDir)
+        } catch {
+            RuneWeaverLog.server.warning("Failed removing partial update at \(targetDir.path): \(error.localizedDescription)")
+        }
+        do {
+            try fileManager.moveItem(at: backupDir, to: targetDir)
+        } catch {
+            // Keep backup for manual recovery; it is the only rollback artifact.
+            let restoreDetail = "Failed restoring plugin backup for '\(pluginID)' at \(targetDir.path):"
+            RuneWeaverLog.server.warning("\(restoreDetail) \(error.localizedDescription). Backup kept at \(backupDir.path).")
+        }
+        throw Abort(.internalServerError, reason: "Failed to update plugin '\(pluginID)': \(error.localizedDescription)")
     }
 }
 
 // MARK: - Helper Functions
 
-private func makePluginSummary(record: PluginRecord, manifest: PluginManifest, context: ServerContext) async -> PluginSummary {
+private func isVersionNewer(_ candidate: String, than current: String) -> Bool {
+    let candidateClean = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    let currentClean = current.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard candidateClean != currentClean else { return false }
+
+    let candidateParts = candidateClean.split(whereSeparator: { $0 == "." || $0 == "-" }).compactMap { Int($0) }
+    let currentParts = currentClean.split(whereSeparator: { $0 == "." || $0 == "-" }).compactMap { Int($0) }
+
+    let maxCount = max(candidateParts.count, currentParts.count)
+    if maxCount > 0, !candidateParts.isEmpty || !currentParts.isEmpty {
+        for componentIndex in 0 ..< maxCount {
+            let candidateComponent = componentIndex < candidateParts.count ? candidateParts[componentIndex] : 0
+            let currentComponent = componentIndex < currentParts.count ? currentParts[componentIndex] : 0
+            if candidateComponent > currentComponent {
+                return true
+            }
+            if candidateComponent < currentComponent {
+                return false
+            }
+        }
+    }
+    return candidateClean.compare(currentClean, options: .numeric) == .orderedDescending
+}
+
+private func makePluginSummary(
+    record: PluginRecord,
+    manifest: PluginManifest,
+    context: ServerContext,
+    catalogEntry: MarketplaceIndexEntry? = nil
+) async -> PluginSummary {
     // Per-tool truth lives on the live bus (same source as GET /tools);
     // coarse plugin flag would flatten mixed per-tool states to all-or-nothing.
     var tools: [ToolInfo] = []
@@ -195,6 +357,14 @@ private func makePluginSummary(record: PluginRecord, manifest: PluginManifest, c
             )
         )
     }
+
+    let latestVer = catalogEntry?.version
+    let hasUpdate: Bool = if let latestVer {
+        isVersionNewer(latestVer, than: record.version)
+    } else {
+        false
+    }
+
     return PluginSummary(
         id: record.id,
         name: record.name,
@@ -209,18 +379,28 @@ private func makePluginSummary(record: PluginRecord, manifest: PluginManifest, c
         tools: tools,
         permissionOverrides: record.permissionOverrides,
         discoveredAt: record.discoveredAt,
-        updatedAt: record.updatedAt
+        updatedAt: record.updatedAt,
+        latestVersion: latestVer,
+        hasUpdate: hasUpdate,
+        credentials: manifest.effectiveCredentials,
+        options: manifest.options ?? [],
+        declaredNetworkHosts: manifest.effectiveNetworkHosts,
+        userConfig: record.userConfig
     )
 }
 
 private func fetchPluginsResponse(context: ServerContext) async -> PluginsResponse {
     // Live bus is the truth on reads; quarantine refreshes at boot and mutations.
     let records = await context.pluginStore.loadAll()
+    let marketplaceDoc = await loadMarketplaceIndex(context: context)
+    // Duplicates fail catalog validation; map is defensive last-wins.
+    let catalogByID = Dictionary((marketplaceDoc?.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     var summaries: [PluginSummary] = []
 
     for record in records {
         if let manifestInfo = context.pluginDiscovery.findManifest(for: record.id) {
-            await summaries.append(makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context))
+            let catalogEntry = catalogByID[record.id]
+            await summaries.append(makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context, catalogEntry: catalogEntry))
         }
     }
 
@@ -234,7 +414,10 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
         return nil
     }
 
-    return await makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context)
+    let marketplaceDoc = await loadMarketplaceIndex(context: context)
+    let catalogEntry = marketplaceDoc?.items.first(where: { $0.id == id })
+
+    return await makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context, catalogEntry: catalogEntry)
 }
 
 private func getCuratedMarketplaceItems(installedIDs _: Set<String>) -> [MarketplacePluginItem] {
@@ -486,8 +669,11 @@ private let marketplaceIndexMaxBytes = 1_048_576
 private func isValidMarketplaceIndex(_ doc: MarketplaceIndexDocument) -> Bool {
     // Version plus per-entry identity keep malformed catalogs from entering the merge.
     guard let version = doc.version, version >= 1 else { return false }
+    // Duplicate IDs would collide on merge, so fail closed before any read.
+    var seenIDs = Set<String>()
     for entry in doc.items {
-        guard !entry.id.isEmpty, !entry.name.isEmpty, !entry.version.isEmpty,
+        guard seenIDs.insert(entry.id).inserted,
+              !entry.id.isEmpty, !entry.name.isEmpty, !entry.version.isEmpty,
               entry.runtime == "python" || entry.runtime == "executable",
               !entry.declaredTools.isEmpty,
               isValidMarketplaceCatalogID(entry.id) else { return false }
@@ -630,15 +816,21 @@ private func loadMarketplaceIndex(context: ServerContext) async -> MarketplaceIn
     return nil
 }
 
-private func fetchMarketplaceCatalog(context: ServerContext, installedIDs: Set<String>) async -> [MarketplacePluginItem] {
+private func fetchMarketplaceCatalog(context: ServerContext, installedRecordsByID: [String: PluginRecord]) async -> [MarketplacePluginItem] {
+    // Duplicates fail catalog validation; map is defensive last-wins.
     var itemsByID: [String: MarketplacePluginItem] = [:]
 
-    for item in getCuratedMarketplaceItems(installedIDs: installedIDs) {
+    for item in getCuratedMarketplaceItems(installedIDs: Set(installedRecordsByID.keys)) {
         itemsByID[item.id] = item
     }
 
     if let doc = await loadMarketplaceIndex(context: context) {
         for entry in doc.items {
+            let installedRecord = installedRecordsByID[entry.id]
+            let isInstalled = installedRecord != nil
+            let installedVersion = installedRecord?.version
+            let hasUpdate = isInstalled && installedVersion != nil && isVersionNewer(entry.version, than: installedVersion!)
+
             let item = MarketplacePluginItem(
                 id: entry.id,
                 name: entry.name,
@@ -649,7 +841,9 @@ private func fetchMarketplaceCatalog(context: ServerContext, installedIDs: Set<S
                 tags: entry.tags,
                 runtime: entry.runtime,
                 declaredTools: entry.declaredTools,
-                isInstalled: installedIDs.contains(entry.id)
+                isInstalled: isInstalled,
+                installedVersion: installedVersion,
+                hasUpdate: hasUpdate
             )
             itemsByID[entry.id] = item
         }
@@ -731,7 +925,8 @@ private func verifyInstalledManifestID(pluginID: String, in targetDir: URL) thro
 private func copyMarketplaceFilesFromLocal(
     pluginID: String,
     targetDir: URL,
-    entry: MarketplaceIndexEntry?
+    entry: MarketplaceIndexEntry?,
+    overwrite: Bool = false
 ) throws -> Bool {
     // Prefer workspace copies so reviewed local bytes win before any network fetch.
     let fileManager = FileManager.default
@@ -776,6 +971,9 @@ private func copyMarketplaceFilesFromLocal(
                 throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
             }
             let src = localDir.appendingPathComponent(fileName)
+            if overwrite, fileManager.fileExists(atPath: dst.path) {
+                try fileManager.removeItem(at: dst)
+            }
             try fileManager.copyItem(at: src, to: dst)
         }
         try verifyInstalledManifestID(pluginID: pluginID, in: targetDir)
@@ -836,13 +1034,20 @@ private func installPluginFiles(
     pluginID: String,
     targetDir: URL,
     entry: MarketplaceIndexEntry?,
-    context _: ServerContext
+    context _: ServerContext,
+    overwrite: Bool = false,
+    allowScaffold: Bool = true
 ) async throws {
-    if try copyMarketplaceFilesFromLocal(pluginID: pluginID, targetDir: targetDir, entry: entry) {
+    if try copyMarketplaceFilesFromLocal(pluginID: pluginID, targetDir: targetDir, entry: entry, overwrite: overwrite) {
         return
     }
     if try await fetchMarketplaceFilesFromRemote(pluginID: pluginID, targetDir: targetDir, entry: entry) {
         return
+    }
+
+    // Scaffold is install-only; updates must fail closed instead of stubbing.
+    guard allowScaffold else {
+        throw PluginDiscoveryError.provisioningFailed("No update payload found for '\(pluginID)'.")
     }
 
     // Fallback: scaffold manifest and stub script

@@ -162,4 +162,27 @@ struct MarketplaceRouteTests {
             #expect(monarch?.isInstalled == true)
         }
     }
+
+    @Test
+    func `POST /plugins/:id/config updates user configuration`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("test-plugin-config-\(UUID().uuidString)")
+        let pluginsDir = base.appendingPathComponent("plugins")
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let indexURL = repoRoot.appendingPathComponent("Plugins/index.json")
+
+        try await withMarketplaceApp(pluginsDir: pluginsDir, dbPath: dbPath, marketplaceIndexURL: indexURL.path) { app, _ in
+            let installReq = InstallMarketplacePluginRequest(id: "community.monarch-money")
+            _ = try await Self.sendRequest(app: app, method: .POST, path: "/marketplace/install", body: installReq)
+
+            let configReq = UpdatePluginConfigRequest(config: ["default_view": "budgets"])
+            let configRes = try await Self.sendRequest(app: app, method: .POST, path: "/plugins/community.monarch-money/config", body: configReq)
+            #expect(configRes.status == .ok)
+            let summary = try configRes.content.decode(PluginSummary.self)
+            #expect(summary.userConfig["default_view"] == "budgets")
+        }
+    }
 }

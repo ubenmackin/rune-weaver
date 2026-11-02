@@ -81,6 +81,9 @@ export interface ToolsTabProps {
   setPluginsMarketplaceIndexURL: (val: string) => void;
   pluginsAutoRescan: boolean;
   setPluginsAutoRescan: (val: boolean) => void;
+  secretStatus?: Record<string, boolean>;
+  onConfigurePlugin?: (plugin: PluginSummary) => void;
+  handleUpdatePlugin?: (plugin: PluginSummary) => void;
   validationError?: string | null;
 }
 
@@ -129,6 +132,9 @@ export function ToolsTab({
   setPluginsMarketplaceIndexURL,
   pluginsAutoRescan,
   setPluginsAutoRescan,
+  secretStatus,
+  onConfigurePlugin,
+  handleUpdatePlugin,
   validationError = null,
 }: ToolsTabProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -251,6 +257,9 @@ export function ToolsTab({
         handlePermissionChange={handlePermissionChange}
         handleToggleTool={handleToggleTool}
         togglingToolNames={togglingToolNames}
+        secretStatus={secretStatus}
+        onConfigurePlugin={onConfigurePlugin}
+        handleUpdatePlugin={handleUpdatePlugin}
       />
 
       {/* Built-in Core Tools Section */}

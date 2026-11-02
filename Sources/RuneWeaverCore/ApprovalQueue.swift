@@ -143,7 +143,9 @@ public actor ApprovalQueue {
         bashConfig: BashConfig? = nil,
         workspaceRoot: URL? = nil
     ) async -> PermissionRequest {
-        let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: tool.name, argumentsJSON: call.argumentsJSON)
+        let effectiveEgressHost = egressHost
+            ?? Self.extractEgressHost(toolName: tool.name, argumentsJSON: call.argumentsJSON)
+            ?? tool.declaredEgressHosts.first
         let sandboxSummary = Self.stampedSandboxSummary(
             toolName: tool.name,
             argumentsJSON: call.argumentsJSON,

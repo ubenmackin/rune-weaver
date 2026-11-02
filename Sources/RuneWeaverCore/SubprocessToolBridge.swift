@@ -13,6 +13,10 @@ public struct SubprocessToolBridge: Tool, Sendable {
         .untrustedExternal
     }
 
+    public var declaredEgressHosts: [String] {
+        capabilities?.network ?? []
+    }
+
     /// Plugin identifier owning this tool.
     public let pluginID: String
     /// Directory containing the plugin files.
@@ -33,6 +37,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
     public let capabilities: PluginCapabilities?
     /// Optional secrets manager used to resolve declared env variables and sweep output.
     public let secrets: SecretsManager?
+    /// Optional user-specified key-value configuration injected into the child process.
+    public let userConfig: [String: String]
     /// Egress evaluator screening declared hosts before spawn.
     public let egressEvaluator: any EgressPolicyEvaluator?
     /// Scaffold plus interpreter-search keys that declared secrets must never overwrite.
@@ -53,6 +59,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
         permissionOverride: PermissionLevel? = nil,
         capabilities: PluginCapabilities? = nil,
         secrets: SecretsManager? = nil,
+        userConfig: [String: String] = [:],
         timeoutSeconds: TimeInterval = 30.0,
         maxOutputBytes: Int = 1_048_576,
         allowUnsandboxedExecution: Bool = false,
@@ -83,6 +90,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
         self.allowUnsandboxedExecution = allowUnsandboxedExecution
         self.capabilities = capabilities ?? declaration.capabilities
         self.secrets = secrets
+        self.userConfig = userConfig
         self.egressEvaluator = egressEvaluator
     }
 
@@ -156,9 +164,18 @@ public struct SubprocessToolBridge: Tool, Sendable {
 
         var resolvedSecrets: [String] = []
         var injectedEnv: [String: String] = [:]
+        for (cfgKey, cfgValue) in userConfig {
+            // Block protected keys case-insensitively so `path` cannot bypass a `PATH` guard.
+            if Self.protectedEnvKeys.contains(cfgKey.uppercased()) {
+                continue
+            }
+            injectedEnv[cfgKey] = cfgValue
+            injectedEnv[cfgKey.uppercased()] = cfgValue
+        }
         if let envKeys = capabilities?.env {
             for key in envKeys {
-                if Self.protectedEnvKeys.contains(key) {
+                // Declared secrets never overwrite interpreter search keys in any casing.
+                if Self.protectedEnvKeys.contains(key.uppercased()) {
                     continue
                 }
                 if let secrets {
@@ -426,7 +443,8 @@ extension SubprocessToolBridge {
         env = env.filter { allowedKeys.contains($0.key) }
         env["RUNEWEAVER_PLUGIN"] = "1"
         for (envKey, envValue) in invocation.injectedEnv {
-            if Self.protectedEnvKeys.contains(envKey) {
+            // Fail-closed on any casing so a slipped lowercase key never reaches the child.
+            if Self.protectedEnvKeys.contains(envKey.uppercased()) {
                 continue
             }
             env[envKey] = envValue

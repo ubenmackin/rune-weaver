@@ -14,6 +14,9 @@ export interface PluginsListSectionProps {
   ) => void;
   handleToggleTool: (tool: ToolInfo) => Promise<void>;
   togglingToolNames: Set<string>;
+  secretStatus?: Record<string, boolean>;
+  onConfigurePlugin?: (plugin: PluginSummary) => void;
+  handleUpdatePlugin?: (plugin: PluginSummary) => void;
 }
 
 export function PluginsListSection({
@@ -24,6 +27,9 @@ export function PluginsListSection({
   handlePermissionChange,
   handleToggleTool,
   togglingToolNames,
+  secretStatus,
+  onConfigurePlugin,
+  handleUpdatePlugin,
 }: PluginsListSectionProps) {
   return (
     <>
@@ -62,6 +68,19 @@ export function PluginsListSection({
                     <span className="tool-category-badge all-disabled">
                       {plugin.runtime}
                     </span>
+                    {plugin.hasUpdate && (
+                      <span className="tool-category-badge badge-update">
+                        UPDATE AVAILABLE (v{plugin.latestVersion})
+                      </span>
+                    )}
+                    {plugin.credentials &&
+                      plugin.credentials.some(
+                        (c) => c.required && secretStatus && !secretStatus[c.key]
+                      ) && (
+                        <span className="tool-category-badge partial">
+                          NEEDS CREDENTIALS
+                        </span>
+                    )}
                     {plugin.isEnabled ? (
                       <span className="tool-category-badge all-enabled">
                         ENABLED
@@ -92,6 +111,29 @@ export function PluginsListSection({
                     </span>
                   </div>
                   <div className="tool-category-actions">
+                    {plugin.hasUpdate && handleUpdatePlugin && (
+                      <button
+                        type="button"
+                        className="primary icon-text-btn"
+                        onClick={() => handleUpdatePlugin(plugin)}
+                        disabled={updatingPluginId === plugin.id}
+                      >
+                        {updatingPluginId === plugin.id
+                          ? "Updating..."
+                          : `Update to v${plugin.latestVersion}`}
+                      </button>
+                    )}
+                    {onConfigurePlugin && (
+                      <button
+                        type="button"
+                        className="ghost icon-text-btn"
+                        onClick={() => onConfigurePlugin(plugin)}
+                        title={`Configure ${plugin.name}`}
+                      >
+                        <WrenchIcon size={14} />
+                        <span>Configure</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       className={

@@ -203,7 +203,10 @@ public actor PermissionGate {
         sessionID: UUID?
     ) async -> PermissionDecision? {
         guard let evaluator = egressEvaluator else { return nil }
-        let egressHosts = ApprovalQueue.extractAllEgressHosts(toolName: tool.name, argumentsJSON: toolCall.argumentsJSON)
+        var egressHosts = ApprovalQueue.extractAllEgressHosts(toolName: tool.name, argumentsJSON: toolCall.argumentsJSON)
+        for declaredHost in tool.declaredEgressHosts where !egressHosts.contains(declaredHost) {
+            egressHosts.append(declaredHost)
+        }
         for host in egressHosts {
             let status = await evaluator.evaluateHostStatus(for: host, sessionID: sessionID)
             switch status {
