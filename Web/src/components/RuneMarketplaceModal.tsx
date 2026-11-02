@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   getMarketplacePlugins,
   installMarketplacePlugin,
+  updateMarketplacePlugin,
   type MarketplacePluginItem,
 } from "../api";
 import Modal from "./Modal";
@@ -67,6 +68,30 @@ export default function RuneMarketplaceModal({
       onPluginInstalled();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to install '${item.name}'.`);
+    } finally {
+      setInstallingId(null);
+    }
+  }
+
+  async function handleUpdate(item: MarketplacePluginItem) {
+    setInstallingId(item.id);
+    setError(null);
+    try {
+      // Server truth wins: concurrent catalog changes must not linger as stale versions.
+      const updated = await updateMarketplacePlugin(item.id);
+      setInstalledNotice(
+        `Successfully updated '${item.name}' to v${updated.version}!`
+      );
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === item.id
+            ? { ...it, isInstalled: true, installedVersion: updated.version, version: updated.latestVersion ?? updated.version, hasUpdate: false }
+            : it
+        )
+      );
+      onPluginInstalled();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to update '${item.name}'.`);
     } finally {
       setInstallingId(null);
     }
@@ -173,14 +198,32 @@ export default function RuneMarketplaceModal({
                   </div>
 
                   {item.isInstalled ? (
-                    <button
-                      type="button"
-                      className="btn rune-marketplace-installed-btn"
-                      disabled
-                    >
-                      <CheckIcon size={14} />
-                      <span>Installed</span>
-                    </button>
+                    item.hasUpdate ? (
+                      <div className="row items-center gap-2">
+                        {item.installedVersion && (
+                          <span className="text-xs muted">
+                            v{item.installedVersion} installed
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="primary rune-marketplace-install-btn"
+                          onClick={() => handleUpdate(item)}
+                          disabled={installingId === item.id}
+                        >
+                          {installingId === item.id ? "Updating..." : `Update to v${item.version}`}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn rune-marketplace-installed-btn"
+                        disabled
+                      >
+                        <CheckIcon size={14} />
+                        <span>Installed</span>
+                      </button>
+                    )
                   ) : (
                     <button
                       type="button"

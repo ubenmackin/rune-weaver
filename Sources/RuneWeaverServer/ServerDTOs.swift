@@ -138,6 +138,10 @@ public enum ServerPaths {
     public static let marketplace = "marketplace"
     /// Marketplace install subpath.
     public static let install = "install"
+    /// Marketplace update subpath.
+    public static let update = "update"
+    /// Plugin configuration subpath.
+    public static let config = "config"
     /// Staged files management group.
     public static let files = "files"
     /// Staged files subpath under `/files`.
@@ -538,6 +542,12 @@ public struct PluginSummary: Content, Equatable, Identifiable {
     public let permissionOverrides: [String: String]
     public let discoveredAt: Date
     public let updatedAt: Date
+    public let latestVersion: String?
+    public let hasUpdate: Bool
+    public let credentials: [PluginCredentialDeclaration]
+    public let options: [PluginOptionDeclaration]
+    public let declaredNetworkHosts: [String]
+    public let userConfig: [String: String]
 
     public init(
         id: String,
@@ -553,7 +563,13 @@ public struct PluginSummary: Content, Equatable, Identifiable {
         tools: [ToolInfo],
         permissionOverrides: [String: String] = [:],
         discoveredAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        latestVersion: String? = nil,
+        hasUpdate: Bool = false,
+        credentials: [PluginCredentialDeclaration] = [],
+        options: [PluginOptionDeclaration] = [],
+        declaredNetworkHosts: [String] = [],
+        userConfig: [String: String] = [:]
     ) {
         self.id = id
         self.name = name
@@ -570,6 +586,12 @@ public struct PluginSummary: Content, Equatable, Identifiable {
         self.permissionOverrides = permissionOverrides
         self.discoveredAt = discoveredAt
         self.updatedAt = updatedAt
+        self.latestVersion = latestVersion
+        self.hasUpdate = hasUpdate
+        self.credentials = credentials
+        self.options = options
+        self.declaredNetworkHosts = declaredNetworkHosts
+        self.userConfig = userConfig
     }
 }
 
@@ -606,6 +628,15 @@ public struct UpdatePluginStateRequest: Content, Equatable {
     }
 }
 
+/// Request to update a plugin's custom configuration.
+public struct UpdatePluginConfigRequest: Content, Equatable {
+    public let config: [String: String]
+
+    public init(config: [String: String]) {
+        self.config = config
+    }
+}
+
 /// One item in the community marketplace index.
 public struct MarketplacePluginItem: Content, Equatable, Identifiable {
     public let id: String
@@ -618,6 +649,8 @@ public struct MarketplacePluginItem: Content, Equatable, Identifiable {
     public let runtime: String
     public let declaredTools: [String]
     public let isInstalled: Bool
+    public let installedVersion: String?
+    public let hasUpdate: Bool
 
     public init(
         id: String,
@@ -629,7 +662,9 @@ public struct MarketplacePluginItem: Content, Equatable, Identifiable {
         tags: [String] = [],
         runtime: String = "python",
         declaredTools: [String] = [],
-        isInstalled: Bool = false
+        isInstalled: Bool = false,
+        installedVersion: String? = nil,
+        hasUpdate: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -641,6 +676,8 @@ public struct MarketplacePluginItem: Content, Equatable, Identifiable {
         self.runtime = runtime
         self.declaredTools = declaredTools
         self.isInstalled = isInstalled
+        self.installedVersion = installedVersion
+        self.hasUpdate = hasUpdate
     }
 }
 
@@ -663,6 +700,15 @@ public struct InstallMarketplacePluginRequest: Content, Equatable {
     public init(id: String, downloadURL: String? = nil) {
         self.id = id
         self.downloadURL = downloadURL
+    }
+}
+
+/// Request to update an installed rune from the marketplace.
+public struct UpdateMarketplacePluginRequest: Content, Equatable {
+    public let id: String
+
+    public init(id: String) {
+        self.id = id
     }
 }
 

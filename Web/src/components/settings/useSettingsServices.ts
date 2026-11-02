@@ -33,6 +33,7 @@ import {
   stopSearch,
   stopWorkspaceMachine,
   uninstallPlugin,
+  updateMarketplacePlugin,
   updatePluginState,
   updateToolState,
 } from "../../api";
@@ -700,6 +701,21 @@ export function useSettingsServices({
     setPendingUninstallPlugin(null);
   };
 
+  const [configuringPlugin, setConfiguringPlugin] = useState<PluginSummary | null>(null);
+
+  const handleUpdatePlugin = async (plugin: PluginSummary) => {
+    setUpdatingPluginId(plugin.id);
+    try {
+      await updateMarketplacePlugin(plugin.id);
+      await loadPluginsData();
+      pushSuccessToast(`Updated rune '${plugin.name}' to v${plugin.latestVersion ?? "latest"}.`);
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : `Failed to update rune '${plugin.name}'.`);
+    } finally {
+      setUpdatingPluginId(null);
+    }
+  };
+
   const handleToggleTool = async (tool: ToolInfo) => {
     const nextEnabled = !tool.isEnabled;
     setTogglingToolNames((prev) => new Set(prev).add(tool.name));
@@ -783,35 +799,25 @@ export function useSettingsServices({
     const keys = new Set<string>();
     for (const item of emailAccountsList) {
       const name = item.account.name?.trim();
-      if (name) {
-        keys.add(getEmailPasswordEnv(name));
-      }
+      if (name) keys.add(getEmailPasswordEnv(name));
     }
     for (const item of providersList) {
       const keyEnv = (item.config.apiKeyEnv || "").trim();
-      if (keyEnv) {
-        keys.add(keyEnv);
-      }
+      if (keyEnv) keys.add(keyEnv);
     }
     const sonarrEnv = sonarrApiKeyEnv.trim();
-    if (sonarrEnv) {
-      keys.add(sonarrEnv);
-    }
+    if (sonarrEnv) keys.add(sonarrEnv);
     const radarrEnv = radarrApiKeyEnv.trim();
-    if (radarrEnv) {
-      keys.add(radarrEnv);
-    }
-    const storedSonarrEnv = (
-      settings?.media?.sonarr?.apiKeyEnv || ""
-    ).trim();
-    if (storedSonarrEnv) {
-      keys.add(storedSonarrEnv);
-    }
-    const storedRadarrEnv = (
-      settings?.media?.radarr?.apiKeyEnv || ""
-    ).trim();
-    if (storedRadarrEnv) {
-      keys.add(storedRadarrEnv);
+    if (radarrEnv) keys.add(radarrEnv);
+    const storedSonarrEnv = (settings?.media?.sonarr?.apiKeyEnv || "").trim();
+    if (storedSonarrEnv) keys.add(storedSonarrEnv);
+    const storedRadarrEnv = (settings?.media?.radarr?.apiKeyEnv || "").trim();
+    if (storedRadarrEnv) keys.add(storedRadarrEnv);
+    for (const plugin of pluginsList) {
+      for (const cred of plugin.credentials ?? []) {
+        const k = cred.key?.trim();
+        if (k) keys.add(k);
+      }
     }
     return Array.from(keys);
   }, [
@@ -820,6 +826,7 @@ export function useSettingsServices({
     sonarrApiKeyEnv,
     radarrApiKeyEnv,
     settings,
+    pluginsList,
   ]);
 
   const refreshSecretStatus = useCallback(
@@ -951,6 +958,9 @@ export function useSettingsServices({
     handleToggleEnable,
     confirmUninstallPlugin,
     cancelUninstallPlugin,
+    configuringPlugin,
+    setConfiguringPlugin,
+    handleUpdatePlugin,
     toolSearchQuery,
     setToolSearchQuery,
     selectedToolCategory,

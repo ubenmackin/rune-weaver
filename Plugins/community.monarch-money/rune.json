@@ -6,6 +6,38 @@
   "description": "Query accounts, balances, transactions, budgets, cashflow, and holdings, or update transactions and budgets via Monarch Money.",
   "runtime": "python",
   "entrypoint": "main.py",
+  "credentials": [
+    {
+      "key": "MONARCH_TOKEN",
+      "label": "Monarch API Token",
+      "description": "API Bearer token from app.monarchmoney.com (Recommended).",
+      "required": false
+    },
+    {
+      "key": "MONARCH_EMAIL",
+      "label": "Monarch Email",
+      "description": "Monarch account email for interactive or password login.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_PASSWORD",
+      "label": "Monarch Password",
+      "description": "Monarch account password.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_MFA_SECRET",
+      "label": "Monarch MFA Secret",
+      "description": "TOTP secret key if two-factor authentication is enabled.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_COOKIE",
+      "label": "Monarch Session Cookie",
+      "description": "Session cookie string if bypassing token and password login.",
+      "required": false
+    }
+  ],
   "tools": [
     {
       "name": "monarch.accounts",

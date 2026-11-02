@@ -14,6 +14,8 @@ private struct StructuredParkTool: Tool, Sendable {
     let output: String
     /// Permission level under test.
     let permissionLevel: PermissionLevel
+    /// Declared egress hosts under test.
+    var declaredEgressHosts: [String] = []
     /// Human-readable description.
     var description: String {
         "Fixture stub for \(name)."
@@ -96,6 +98,11 @@ private func makeStructuredGatedTool(name: String, output: String) -> Structured
     StructuredParkTool(name: name, output: output, permissionLevel: .requiresApproval)
 }
 
+/// Builds a read-only fixture tool with declared egress hosts.
+private func makeStructuredEgressTool(name: String, declaredHosts: [String]) -> StructuredParkTool {
+    StructuredParkTool(name: name, output: "egress-ok", permissionLevel: .readOnly, declaredEgressHosts: declaredHosts)
+}
+
 /// Stub evaluator mapping specific hosts to test statuses.
 private struct StubEgressEvaluator: EgressPolicyEvaluator, Sendable {
     let statuses: [String: HostStatus]
@@ -135,6 +142,34 @@ struct StructuredParkTests {
         let history = await conversations.history(for: sessionID)
         #expect(!history.contains { $0.role == .tool })
         #expect(history.contains { $0.role == .assistant && $0.content.lowercased().contains("waiting") })
+    }
+
+    @Test
+    func `Read-only tool with unlisted declared egress host parks for interactive approval`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let evaluator = StubEgressEvaluator(statuses: ["api.monarch.com": .unlisted("Unlisted in policy")])
+        await gate.setEgressEvaluator(evaluator)
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeStructuredEgressTool(name: "monarch.accounts", declaredHosts: ["api.monarch.com"]))
+        let read = ToolInput(toolName: "monarch.accounts", argumentsJSON: "{}", callID: "call_monarch_accounts")
+        let llm = StructuredParkLLM(rounds: [StructuredParkRound("", [read])])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let response = try await orchestrator.process(input: UserInput(text: "Check my balances", sessionID: sessionID))
+        #expect(response.isParked == true)
+        #expect(await queue.count() == 1)
+        let pending = await queue.list()
+        #expect(pending.first?.egressHost == "api.monarch.com")
+        #expect(pending.first?.toolName == "monarch.accounts")
     }
 
     @Test

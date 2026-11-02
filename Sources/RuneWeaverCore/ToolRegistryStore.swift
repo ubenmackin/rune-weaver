@@ -33,6 +33,8 @@ public struct PluginRecord: Sendable, Codable, Equatable, Identifiable {
     public var integrityHash: String?
     /// User-specified permission overrides mapping tool name to level string.
     public var permissionOverrides: [String: String]
+    /// User-specified custom configuration mapping key to string value.
+    public var userConfig: [String: String]
     /// Timestamp when first discovered.
     public var discoveredAt: Date
     /// Timestamp of most recent state modification.
@@ -47,6 +49,7 @@ public struct PluginRecord: Sendable, Codable, Equatable, Identifiable {
         status: PluginStatus = .discovered,
         integrityHash: String? = nil,
         permissionOverrides: [String: String] = [:],
+        userConfig: [String: String] = [:],
         discoveredAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -57,6 +60,7 @@ public struct PluginRecord: Sendable, Codable, Equatable, Identifiable {
         self.status = status
         self.integrityHash = integrityHash
         self.permissionOverrides = permissionOverrides
+        self.userConfig = userConfig
         self.discoveredAt = discoveredAt
         self.updatedAt = updatedAt
     }
@@ -72,6 +76,44 @@ public actor ToolRegistryStore {
     private let dbPath: String
     private var cached: [String: PluginRecord] = [:]
     private var isLoaded = false
+    // Fixed bounds keep userConfig from bloating SQLite or process env.
+    public static let maxUserConfigEntries = 50
+    public static let maxUserConfigKeyChars = 128
+    public static let maxUserConfigValueChars = 4096
+    public static let maxUserConfigTotalBytes = 65536
+    // Mirrors bridge injection blocklist; credentials stay Keychain-only.
+    static let protectedUserConfigKeys: Set<String> = [
+        "PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "RUNEWEAVER_PLUGIN",
+        "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "NODE_OPTIONS"
+    ]
+
+    /// Rejects oversized or protected userConfig before SQLite persistence.
+    public static func validateUserConfig(_ config: [String: String]) throws {
+        guard config.count <= maxUserConfigEntries else {
+            throw PluginDiscoveryError.invalidUserConfig("Too many entries (\(config.count) > \(maxUserConfigEntries)).")
+        }
+        var totalBytes = 0
+        for (key, value) in config {
+            guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PluginDiscoveryError.invalidUserConfig("Config key must not be empty.")
+            }
+            guard key.count <= maxUserConfigKeyChars else {
+                throw PluginDiscoveryError.invalidUserConfig("Key '\(key)' exceeds \(maxUserConfigKeyChars) characters.")
+            }
+            guard value.count <= maxUserConfigValueChars else {
+                throw PluginDiscoveryError.invalidUserConfig("Value for '\(key)' exceeds \(maxUserConfigValueChars) characters.")
+            }
+            // Case-insensitive so `path` cannot slip past a `PATH` guard.
+            guard !protectedUserConfigKeys.contains(key.uppercased()) else {
+                throw PluginDiscoveryError.invalidUserConfig("Key '\(key)' is protected and must not be set.")
+            }
+            totalBytes += key.utf8.count + value.utf8.count
+        }
+        guard totalBytes <= maxUserConfigTotalBytes else {
+            throw PluginDiscoveryError.invalidUserConfig("Total size exceeds \(maxUserConfigTotalBytes) bytes.")
+        }
+    }
 
     /// Creates a plugin registry store pointing to a SQLite database.
     /// - Parameter dbPath: SQLite database file path (e.g. `episodes.db`).
@@ -188,6 +230,50 @@ public actor ToolRegistryStore {
         return existing
     }
 
+    /// Sets user configuration for a plugin.
+    /// - Note: Credentials live in Keychain; userConfig carries non-secret prefs only.
+    public func setUserConfig(
+        id: String,
+        config: [String: String]
+    ) async throws -> PluginRecord? {
+        try Self.validateUserConfig(config)
+        _ = await loadAll()
+        guard var existing = cached[id] else { return nil }
+
+        existing.userConfig = config
+        existing.updatedAt = Date()
+
+        cached[id] = existing
+        let toSave = existing
+        await SQLiteSerialIO.runUncancellable {
+            SQLitePluginRegistryStore.upsert(record: toSave, dbPath: self.dbPath)
+        }
+        return existing
+    }
+
+    /// Sets the version and integrity hash of a plugin (used during updates).
+    public func setVersion(
+        id: String,
+        version: String,
+        integrityHash: String? = nil
+    ) async -> PluginRecord? {
+        _ = await loadAll()
+        guard var existing = cached[id] else { return nil }
+
+        existing.version = version
+        existing.updatedAt = Date()
+        if let integrityHash {
+            existing.integrityHash = integrityHash
+        }
+
+        cached[id] = existing
+        let toSave = existing
+        await SQLiteSerialIO.runUncancellable {
+            SQLitePluginRegistryStore.upsert(record: toSave, dbPath: self.dbPath)
+        }
+        return existing
+    }
+
     /// Sets or clears a permission override for a tool within a plugin.
     public func setPermissionOverride(
         id: String,
@@ -251,11 +337,17 @@ private enum SQLitePluginRegistryStore {
                 integrity_hash TEXT,
                 permission_overrides TEXT,
                 discovered_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                user_config TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_plugin_registry_status ON plugin_registry(status);
             """,
             failure: { PluginRegistryStoreDBError(message: $0) }
+        )
+        _ = try? SQLiteHelpers.exec(
+            handle: handle,
+            sql: "ALTER TABLE plugin_registry ADD COLUMN user_config TEXT;",
+            failure: { _ in PluginRegistryStoreDBError(message: "") }
         )
         return handle
     }
@@ -272,7 +364,7 @@ private enum SQLitePluginRegistryStore {
         defer { sqlite3_close(handle) }
 
         let sql = """
-        SELECT id, name, version, source, status, integrity_hash, permission_overrides, discovered_at, updated_at
+        SELECT id, name, version, source, status, integrity_hash, permission_overrides, discovered_at, updated_at, user_config
         FROM plugin_registry
         ORDER BY id ASC;
         """
@@ -306,6 +398,17 @@ private enum SQLitePluginRegistryStore {
                 }
             }
 
+            var userConfig: [String: String] = [:]
+            if let configJSON = SQLiteHelpers.columnText(statement, index: 9),
+               let data = configJSON.data(using: .utf8)
+            {
+                do {
+                    userConfig = try JSONDecoder().decode([String: String].self, from: data)
+                } catch {
+                    RuneWeaverLog.stores.warning("ToolRegistryStore: failed decoding userConfig JSON for \(id): \(error.localizedDescription)")
+                }
+            }
+
             records.append(PluginRecord(
                 id: id,
                 name: name,
@@ -314,6 +417,7 @@ private enum SQLitePluginRegistryStore {
                 status: status,
                 integrityHash: integrityHash,
                 permissionOverrides: overrides,
+                userConfig: userConfig,
                 discoveredAt: discoveredAt,
                 updatedAt: updatedAt
             ))
@@ -333,8 +437,8 @@ private enum SQLitePluginRegistryStore {
         defer { sqlite3_close(handle) }
 
         let sql = """
-        INSERT INTO plugin_registry(id, name, version, source, status, integrity_hash, permission_overrides, discovered_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO plugin_registry(id, name, version, source, status, integrity_hash, permission_overrides, discovered_at, updated_at, user_config)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             version = excluded.version,
@@ -342,7 +446,8 @@ private enum SQLitePluginRegistryStore {
             status = excluded.status,
             integrity_hash = excluded.integrity_hash,
             permission_overrides = excluded.permission_overrides,
-            updated_at = excluded.updated_at;
+            updated_at = excluded.updated_at,
+            user_config = excluded.user_config;
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return }
@@ -357,6 +462,14 @@ private enum SQLitePluginRegistryStore {
         }
         let overridesStr = String(data: overridesData, encoding: .utf8) ?? "{}"
 
+        let userConfigData: Data
+        do {
+            userConfigData = try JSONEncoder().encode(record.userConfig)
+        } catch {
+            userConfigData = Data("{}".utf8)
+        }
+        let userConfigStr = String(data: userConfigData, encoding: .utf8) ?? "{}"
+
         SQLiteHelpers.bindText(statement, index: 1, value: record.id)
         SQLiteHelpers.bindText(statement, index: 2, value: record.name)
         SQLiteHelpers.bindText(statement, index: 3, value: record.version)
@@ -366,6 +479,7 @@ private enum SQLitePluginRegistryStore {
         SQLiteHelpers.bindText(statement, index: 7, value: overridesStr)
         sqlite3_bind_double(statement, 8, record.discoveredAt.timeIntervalSince1970)
         sqlite3_bind_double(statement, 9, record.updatedAt.timeIntervalSince1970)
+        SQLiteHelpers.bindText(statement, index: 10, value: userConfigStr)
 
         _ = sqlite3_step(statement)
     }

@@ -1,10 +1,12 @@
 // Rune Weaver Dashboard — Modals for Settings (token rotation, secret storage, prune, uninstall, active run guard).
 
 import React from "react";
+import type { PluginSummary } from "../../api";
 import { CheckIcon, CloseIcon } from "../icons";
 import Modal from "../Modal";
 import RuneMarketplaceModal from "../RuneMarketplaceModal";
 import { StoreSecretModal } from "../StoreSecretModal";
+import { PluginConfigModal } from "./PluginConfigModal";
 import { SwitchControl } from "./SwitchControl";
 
 export interface SettingsModalsProps {
@@ -54,6 +56,16 @@ export interface SettingsModalsProps {
   } | null;
   setSecretModal: (modal: null) => void;
   handleSecretSaved: (key: string) => void;
+
+  // Custom plugin config modal
+  configuringPlugin?: PluginSummary | null;
+  setConfiguringPlugin?: (plugin: PluginSummary | null) => void;
+  secretStatus?: Record<string, boolean>;
+  handleOpenStoreSecretModal?: (
+    secretKey: string,
+    label: string,
+    isUpdate: boolean
+  ) => void;
 }
 
 export function SettingsModals({
@@ -85,6 +97,10 @@ export function SettingsModals({
   secretModal,
   setSecretModal,
   handleSecretSaved,
+  configuringPlugin,
+  setConfiguringPlugin,
+  secretStatus,
+  handleOpenStoreSecretModal,
 }: SettingsModalsProps): React.JSX.Element {
   return (
     <>
@@ -423,6 +439,19 @@ export function SettingsModals({
           isUpdate={secretModal.isUpdate}
           onClose={() => setSecretModal(null)}
           onSuccess={handleSecretSaved}
+        />
+      )}
+
+      {configuringPlugin && setConfiguringPlugin && (
+        <PluginConfigModal
+          isOpen={!!configuringPlugin}
+          onClose={() => setConfiguringPlugin(null)}
+          plugin={configuringPlugin}
+          secretStatus={secretStatus ?? {}}
+          handleOpenStoreSecretModal={handleOpenStoreSecretModal ?? (() => {})}
+          onConfigSaved={() => {
+            void loadPluginsData();
+          }}
         />
       )}
     </>

@@ -344,6 +344,10 @@ export default function SettingsManager({
         secretModal={services.secretModal}
         setSecretModal={services.setSecretModal}
         handleSecretSaved={services.handleSecretSaved}
+        configuringPlugin={services.configuringPlugin}
+        setConfiguringPlugin={services.setConfiguringPlugin}
+        secretStatus={services.secretStatus}
+        handleOpenStoreSecretModal={services.handleOpenStoreSecretModal}
       />
 
       <ToolConfigModals

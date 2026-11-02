@@ -16,6 +16,9 @@ public protocol Tool: Sendable {
     /// states its own provenance so the loop never sniffs names.
     var contentTrustLevel: ContentTrustLevel { get }
 
+    /// Network egress hosts statically declared by this tool (e.g. from plugin capabilities).
+    var declaredEgressHosts: [String] { get }
+
     /// Runs the tool.
     func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput
 }
@@ -25,6 +28,11 @@ extension Tool {
     /// Trusted by default; network tools override to untrusted.
     public var contentTrustLevel: ContentTrustLevel {
         .trusted
+    }
+
+    /// Declared network egress hosts (defaults to empty).
+    public var declaredEgressHosts: [String] {
+        []
     }
 }
 

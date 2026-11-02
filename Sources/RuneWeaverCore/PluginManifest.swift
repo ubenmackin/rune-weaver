@@ -29,6 +29,111 @@ public struct PluginCapabilities: Sendable, Codable, Equatable {
         self.filesystem = filesystem
         self.env = env
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case network
+        case filesystem
+        case env
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        network = try container.decodeIfPresent([String].self, forKey: .network) ?? []
+        filesystem = try container.decodeIfPresent([String].self, forKey: .filesystem) ?? []
+        env = try container.decodeIfPresent([String].self, forKey: .env) ?? []
+    }
+}
+
+/// Declaration of a required or optional credential for a plugin.
+public struct PluginCredentialDeclaration: Sendable, Codable, Equatable {
+    /// Environment variable or secret key (e.g. `"MONARCH_TOKEN"`).
+    public let key: String
+    /// Human-friendly display label (e.g. `"API Token (Recommended)"`).
+    public let label: String
+    /// Human-friendly instructions or context explaining where to find the secret.
+    public let description: String?
+    /// Whether the plugin strictly requires this credential to function.
+    public let required: Bool
+
+    public init(
+        key: String,
+        label: String? = nil,
+        description: String? = nil,
+        required: Bool = false
+    ) {
+        self.key = key
+        self.label = label ?? key
+        self.description = description
+        self.required = required
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case label
+        case description
+        case required
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let key = try container.decode(String.self, forKey: .key)
+        self.key = key
+        self.label = try container.decodeIfPresent(String.self, forKey: .label) ?? key
+        self.description = try container.decodeIfPresent(String.self, forKey: .description)
+        self.required = try container.decodeIfPresent(Bool.self, forKey: .required) ?? false
+    }
+}
+
+/// Declaration of a configurable user option for a plugin.
+public struct PluginOptionDeclaration: Sendable, Codable, Equatable {
+    /// Configuration key identifier (e.g. `"session_file"`).
+    public let key: String
+    /// Human-friendly display label (e.g. `"Session Cache File"`).
+    public let label: String
+    /// Help text explaining what this setting controls.
+    public let description: String?
+    /// Option data type: `"string"`, `"boolean"`, `"number"`, or `"select"`.
+    public let type: String
+    /// Default value serialized as string.
+    public let defaultValue: String?
+    /// Available choices if type is `"select"`.
+    public let options: [String]?
+
+    public init(
+        key: String,
+        label: String? = nil,
+        description: String? = nil,
+        type: String = "string",
+        defaultValue: String? = nil,
+        options: [String]? = nil
+    ) {
+        self.key = key
+        self.label = label ?? key
+        self.description = description
+        self.type = type
+        self.defaultValue = defaultValue
+        self.options = options
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case label
+        case description
+        case type
+        case defaultValue
+        case options
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let key = try container.decode(String.self, forKey: .key)
+        self.key = key
+        self.label = try container.decodeIfPresent(String.self, forKey: .label) ?? key
+        self.description = try container.decodeIfPresent(String.self, forKey: .description)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "string"
+        self.defaultValue = try container.decodeIfPresent(String.self, forKey: .defaultValue)
+        self.options = try container.decodeIfPresent([String].self, forKey: .options)
+    }
 }
 
 /// Declaration of a single tool exposed by a plugin.
@@ -128,6 +233,47 @@ public struct PluginManifest: Sendable, Codable, Equatable {
     public let entrypoint: String
     /// Tools provided by this plugin.
     public let tools: [PluginToolDeclaration]
+    /// Optional credential declarations for the plugin.
+    public let credentials: [PluginCredentialDeclaration]?
+    /// Optional configuration options exposed by the plugin.
+    public let options: [PluginOptionDeclaration]?
+
+    /// Effective credential declarations: uses explicit `credentials` if defined; otherwise
+    /// synthesizes declarations from tools' `capabilities.env`.
+    public var effectiveCredentials: [PluginCredentialDeclaration] {
+        if let explicit = credentials, !explicit.isEmpty {
+            return explicit
+        }
+        var seen = Set<String>()
+        var synthesized: [PluginCredentialDeclaration] = []
+        for tool in tools {
+            for envKey in tool.capabilities?.env ?? [] where !seen.contains(envKey) {
+                seen.insert(envKey)
+                synthesized.append(
+                    PluginCredentialDeclaration(
+                        key: envKey,
+                        label: envKey,
+                        description: "Secret required by '\(tool.name)'",
+                        required: false
+                    )
+                )
+            }
+        }
+        return synthesized
+    }
+
+    /// All external network hosts declared across all tools in the plugin.
+    public var effectiveNetworkHosts: [String] {
+        var seen = Set<String>()
+        var hosts: [String] = []
+        for tool in tools {
+            for host in tool.capabilities?.network ?? [] where !seen.contains(host) {
+                seen.insert(host)
+                hosts.append(host)
+            }
+        }
+        return hosts
+    }
 
     /// Creates a validated plugin manifest.
     public init(
@@ -138,7 +284,9 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         description: String,
         runtime: PluginRuntime,
         entrypoint: String,
-        tools: [PluginToolDeclaration]
+        tools: [PluginToolDeclaration],
+        credentials: [PluginCredentialDeclaration]? = nil,
+        options: [PluginOptionDeclaration]? = nil
     ) throws {
         self.id = id
         self.name = name
@@ -148,6 +296,8 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         self.runtime = runtime
         self.entrypoint = entrypoint
         self.tools = tools
+        self.credentials = credentials
+        self.options = options
         try validate()
     }
 
@@ -160,6 +310,8 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         case runtime
         case entrypoint
         case tools
+        case credentials
+        case options
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,11 +331,35 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         }
         entrypoint = try container.decode(String.self, forKey: .entrypoint)
         tools = try container.decode([PluginToolDeclaration].self, forKey: .tools)
+        credentials = try container.decodeIfPresent([PluginCredentialDeclaration].self, forKey: .credentials)
+        options = try container.decodeIfPresent([PluginOptionDeclaration].self, forKey: .options)
         try validate()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(version, forKey: .version)
+        try container.encodeIfPresent(author, forKey: .author)
+        try container.encode(description, forKey: .description)
+        try container.encode(runtime.rawValue, forKey: .runtime)
+        try container.encode(entrypoint, forKey: .entrypoint)
+        try container.encode(tools, forKey: .tools)
+        try container.encodeIfPresent(credentials, forKey: .credentials)
+        try container.encodeIfPresent(options, forKey: .options)
     }
 
     /// Performs invariant validation on the manifest fields.
     public func validate() throws {
+        try validateIdentity()
+        try validateEntrypoint()
+        try validateToolDeclarations()
+        try validateCredentialDeclarations()
+        try validateOptionDeclarations()
+    }
+
+    private func validateIdentity() throws {
         guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PluginManifestError.invalidField(field: "id", reason: "Plugin ID must not be empty.")
         }
@@ -205,6 +381,13 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PluginManifestError.invalidField(field: "name", reason: "Plugin name must not be empty.")
         }
+        // Empty versions pass decoding yet yield untraceable records downstream.
+        guard !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PluginManifestError.invalidField(field: "version", reason: "Plugin version must not be empty.")
+        }
+    }
+
+    private func validateEntrypoint() throws {
         guard !entrypoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PluginManifestError.invalidField(field: "entrypoint", reason: "Entrypoint must not be empty.")
         }
@@ -215,31 +398,93 @@ public struct PluginManifest: Sendable, Codable, Equatable {
         guard !tools.isEmpty else {
             throw PluginManifestError.invalidField(field: "tools", reason: "Plugin must declare at least one tool.")
         }
+    }
 
+    private static let reservedToolPrefixes = [
+        "memory.", "memories.", "messages.", "email.", "config.", "scheduler.", "approvals.", "system."
+    ]
+
+    private func validateToolDeclarations() throws {
         var seenNames = Set<String>()
         for tool in tools {
-            let toolName = tool.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !toolName.isEmpty else {
-                throw PluginManifestError.invalidField(field: "tools.name", reason: "Tool name cannot be empty.")
-            }
-            if seenNames.contains(toolName) {
-                throw PluginManifestError.duplicateToolName(toolName)
-            }
-            seenNames.insert(toolName)
+            try validateSingleTool(tool, seenNames: &seenNames)
+        }
+    }
 
-            // Protected built-in tool namespaces
-            let reservedPrefixes = ["memory.", "memories.", "messages.", "email.", "config.", "scheduler.", "approvals.", "system."]
-            if toolName == "memories.store" || toolName == "memories.recall" || reservedPrefixes
-                .contains(where: { toolName.hasPrefix($0) })
-            {
-                throw PluginManifestError.reservedToolName(tool: toolName, reason: "Reserved for core system engine.")
-            }
+    private func validateSingleTool(_ tool: PluginToolDeclaration, seenNames: inout Set<String>) throws {
+        let toolName = tool.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !toolName.isEmpty else {
+            throw PluginManifestError.invalidField(field: "tools.name", reason: "Tool name cannot be empty.")
+        }
+        if seenNames.contains(toolName) {
+            throw PluginManifestError.duplicateToolName(toolName)
+        }
+        seenNames.insert(toolName)
+        try rejectReservedToolName(toolName)
+        try rejectMalformedToolSchema(tool, toolName: toolName)
+    }
 
-            // Verify JSON schema validity
-            guard let schemaData = tool.inputSchema.data(using: .utf8),
-                  (try? JSONSerialization.jsonObject(with: schemaData)) is [String: Any]
-            else {
-                throw PluginManifestError.invalidJSONSchema(tool: toolName, schema: tool.inputSchema)
+    /// Reserved names stay barred even when a manifest otherwise parses.
+    private func rejectReservedToolName(_ toolName: String) throws {
+        let isReserved = toolName == "memories.store" || toolName == "memories.recall"
+        let usesReservedPrefix = Self.reservedToolPrefixes.contains(where: { toolName.hasPrefix($0) })
+        if isReserved || usesReservedPrefix {
+            throw PluginManifestError.reservedToolName(tool: toolName, reason: "Reserved for core system engine.")
+        }
+    }
+
+    /// Malformed schemas fail closed so registration never serves an uncallable tool.
+    private func rejectMalformedToolSchema(_ tool: PluginToolDeclaration, toolName: String) throws {
+        guard let schemaData = tool.inputSchema.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: schemaData)) is [String: Any]
+        else {
+            throw PluginManifestError.invalidJSONSchema(tool: toolName, schema: tool.inputSchema)
+        }
+    }
+
+    private func validateCredentialDeclarations() throws {
+        // Blank or duplicate credential keys would surface as empty auth rows.
+        guard let creds = credentials else { return }
+        var seenCredKeys = Set<String>()
+        for cred in creds {
+            let credKey = cred.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !credKey.isEmpty else {
+                throw PluginManifestError.invalidField(field: "credentials.key", reason: "Credential key must not be empty.")
+            }
+            guard seenCredKeys.insert(credKey).inserted else {
+                throw PluginManifestError.invalidField(field: "credentials.key", reason: "Duplicate credential key '\(credKey)'.")
+            }
+        }
+    }
+
+    private func validateOptionDeclarations() throws {
+        // Unknown option types and empty select choices break dummy-proof config.
+        guard let opts = options else { return }
+        let allowedTypes = Set(["string", "boolean", "number", "select"])
+        var seenOptKeys = Set<String>()
+        for opt in opts {
+            try validateSingleOption(opt, seenKeys: &seenOptKeys, allowedTypes: allowedTypes)
+        }
+    }
+
+    private func validateSingleOption(
+        _ opt: PluginOptionDeclaration,
+        seenKeys: inout Set<String>,
+        allowedTypes: Set<String>
+    ) throws {
+        let optKey = opt.key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !optKey.isEmpty else {
+            throw PluginManifestError.invalidField(field: "options.key", reason: "Option key must not be empty.")
+        }
+        guard seenKeys.insert(optKey).inserted else {
+            throw PluginManifestError.invalidField(field: "options.key", reason: "Duplicate option key '\(optKey)'.")
+        }
+        guard allowedTypes.contains(opt.type) else {
+            throw PluginManifestError.invalidField(field: "options.type", reason: "Unknown option type '\(opt.type)' for key '\(optKey)'.")
+        }
+        if opt.type == "select" {
+            guard let choices = opt.options, !choices.isEmpty else {
+                throw PluginManifestError.invalidField(field: "options.options", reason: "Select option '\(optKey)' must declare non-empty options.")
             }
         }
     }
@@ -253,6 +498,8 @@ public struct PluginManifest: Sendable, Codable, Equatable {
             return manifest
         } catch let manifestError as PluginManifestError {
             throw manifestError
+        } catch let decodingError as DecodingError {
+            throw PluginManifestError.invalidField(field: "manifest", reason: "\(decodingError)")
         } catch {
             throw PluginManifestError.invalidField(field: "manifest", reason: error.localizedDescription)
         }

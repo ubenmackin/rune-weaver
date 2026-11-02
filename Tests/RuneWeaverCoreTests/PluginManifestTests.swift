@@ -206,6 +206,63 @@ struct PluginManifestTests {
         let mutateTool = manifest.tools.first { $0.name == "monarch.mutate" }
         #expect(mutateTool?.permissionLevel == .requiresApproval)
         #expect(mutateTool?.capabilities?.network == ["api.monarch.com"])
+
+        #expect(manifest.credentials?.count == 5)
+        #expect(manifest.effectiveCredentials.contains { $0.key == "MONARCH_TOKEN" })
+        #expect(manifest.effectiveNetworkHosts == ["api.monarch.com"])
+    }
+
+    @Test
+    func `Manifest decodes credentials and options and computes effective fallbacks`() throws {
+        let json = """
+        {
+            "id": "community.custom-tool",
+            "name": "Custom Tool",
+            "version": "1.0.0",
+            "description": "A custom test tool.",
+            "runtime": "python",
+            "entrypoint": "main.py",
+            "credentials": [
+                {
+                    "key": "API_KEY",
+                    "label": "Custom API Key",
+                    "description": "Required token",
+                    "required": true
+                }
+            ],
+            "options": [
+                {
+                    "key": "mode",
+                    "label": "Execution Mode",
+                    "type": "string",
+                    "defaultValue": "fast",
+                    "options": ["fast", "accurate"]
+                }
+            ],
+            "tools": [
+                {
+                    "name": "custom.run",
+                    "description": "Run custom action",
+                    "input_schema": "{}",
+                    "permission_level": "readOnly",
+                    "capabilities": {
+                        "network": ["api.custom.com"],
+                        "env": ["FALLBACK_KEY"]
+                    }
+                }
+            ]
+        }
+        """
+        let data = try #require(json.data(using: .utf8))
+        let manifest = try PluginManifest.from(jsonData: data)
+        #expect(manifest.credentials?.count == 1)
+        #expect(manifest.credentials?.first?.key == "API_KEY")
+        #expect(manifest.credentials?.first?.required == true)
+        #expect(manifest.options?.count == 1)
+        #expect(manifest.options?.first?.options == ["fast", "accurate"])
+        #expect(manifest.effectiveNetworkHosts == ["api.custom.com"])
+        // effectiveCredentials uses explicit credentials if defined
+        #expect(manifest.effectiveCredentials.map(\.key) == ["API_KEY"])
     }
 
     @Test

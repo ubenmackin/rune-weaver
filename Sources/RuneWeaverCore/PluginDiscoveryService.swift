@@ -209,17 +209,26 @@ public final class PluginDiscoveryService: Sendable {
         }
 
         if updated.status == .enabled, let manifestInfo = findManifest(for: id) {
-            // Snapshot live per-tool states so re-registration never revives a disabled tool.
-            var previousStates: [String: Bool] = [:]
-            for toolDecl in manifestInfo.manifest.tools where await toolBus.tool(named: toolDecl.name) != nil {
-                previousStates[toolDecl.name] = await toolBus.isToolEnabled(named: toolDecl.name)
-            }
-            await registerFailClosed(
-                manifest: manifestInfo.manifest,
-                dir: manifestInfo.dir,
-                record: updated,
-                toolBus: toolBus
-            ) { previousStates[$0] == true }
+            await reregisterPreservingStates(manifest: manifestInfo.manifest, dir: manifestInfo.dir, record: updated, toolBus: toolBus)
+        }
+
+        return updated
+    }
+
+    /// Sets user configuration for a plugin and refreshes live bridge instances.
+    /// Credentials stay Keychain-only; userConfig colliding with secrets is rejected.
+    public func setUserConfig(
+        id: String,
+        config: [String: String],
+        toolBus: ToolBus
+    ) async throws -> PluginRecord {
+        try Self.validateUserConfig(config, manifest: findManifest(for: id)?.manifest)
+        guard let updated = try await store.setUserConfig(id: id, config: config) else {
+            throw PluginDiscoveryError.pluginNotFound(id)
+        }
+
+        if updated.status == .enabled, let manifestInfo = findManifest(for: id) {
+            await reregisterPreservingStates(manifest: manifestInfo.manifest, dir: manifestInfo.dir, record: updated, toolBus: toolBus)
         }
 
         return updated
@@ -279,6 +288,33 @@ public final class PluginDiscoveryService: Sendable {
         return nil
     }
 
+    private func reregisterPreservingStates(
+        manifest: PluginManifest,
+        dir: URL,
+        record: PluginRecord,
+        toolBus: ToolBus
+    ) async {
+        // Snapshot live states so re-registration never revives a disabled tool.
+        var previousStates: [String: Bool] = [:]
+        for toolDecl in manifest.tools where await toolBus.tool(named: toolDecl.name) != nil {
+            previousStates[toolDecl.name] = await toolBus.isToolEnabled(named: toolDecl.name)
+        }
+        await registerFailClosed(manifest: manifest, dir: dir, record: record, toolBus: toolBus) {
+            previousStates[$0] == true
+        }
+    }
+
+    private static func validateUserConfig(_ config: [String: String], manifest: PluginManifest?) throws {
+        try ToolRegistryStore.validateUserConfig(config)
+        guard let manifest else { return }
+        let credentialKeys = Set(manifest.effectiveCredentials.map { $0.key.uppercased() })
+        for key in config.keys {
+            guard !credentialKeys.contains(key.uppercased()) else {
+                throw PluginDiscoveryError.invalidUserConfig("Key '\(key)' collides with a declared credential; use Keychain.")
+            }
+        }
+    }
+
     private func registerFailClosed(
         manifest: PluginManifest,
         dir: URL,
@@ -329,6 +365,7 @@ public final class PluginDiscoveryService: Sendable {
                     permissionOverride: overrideLevel,
                     capabilities: toolDecl.capabilities,
                     secrets: secrets,
+                    userConfig: record.userConfig,
                     egressEvaluator: evaluator
                 )
                 await toolBus.register(tool: bridge, isEnabled: isEnabled)
@@ -344,7 +381,7 @@ public final class PluginDiscoveryService: Sendable {
 /// Venv provisioning lives here so the main service body stays within budget.
 /// Enable-time provisioning runs ahead of hashing; behavior is unchanged.
 extension PluginDiscoveryService {
-    private func provisionVenvIfNeeded(at directory: URL) async throws {
+    public func provisionVenvIfNeeded(at directory: URL, forceRecreate: Bool = false) async throws {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
             return
         }
@@ -352,6 +389,15 @@ extension PluginDiscoveryService {
         let reqURL = directory.appendingPathComponent("requirements.txt")
         let venvDir = directory.appendingPathComponent(".venv")
         let venvPython = venvDir.appendingPathComponent("bin/python3")
+
+        if forceRecreate, fileManager.fileExists(atPath: venvDir.path) {
+            // A failed removal must not masquerade a stale venv as fresh.
+            do {
+                try fileManager.removeItem(at: venvDir)
+            } catch {
+                throw PluginDiscoveryError.provisioningFailed("Failed to remove stale virtual environment at \(venvDir.path): \(error.localizedDescription)")
+            }
+        }
 
         guard fileManager.fileExists(atPath: reqURL.path),
               !fileManager.fileExists(atPath: venvPython.path)
@@ -555,6 +601,7 @@ public enum PluginDiscoveryError: Error, Sendable, Equatable, LocalizedError {
     case unreadablePluginDirectory(String)
     case escapesPluginsDirectory(String)
     case provisioningFailed(String)
+    case invalidUserConfig(String)
 
     public var errorDescription: String? {
         switch self {
@@ -566,6 +613,8 @@ public enum PluginDiscoveryError: Error, Sendable, Equatable, LocalizedError {
             "Refusing to remove plugin directory outside the plugins pen at '\(path)'."
         case let .provisioningFailed(reason):
             "Plugin provisioning failed: \(reason)"
+        case let .invalidUserConfig(reason):
+            "Invalid plugin configuration: \(reason)"
         }
     }
 }

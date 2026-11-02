@@ -968,3 +968,18 @@ section[data-testid="policy-pane"] .settings-footer {
 /* Bash section spacing replacing inline margins. */
 .bash-intro-note { margin-bottom: 16px; }
 
+/* Custom Rune & Plugin Config Modal */
+.plugin-config-body { max-height: 70vh; overflow-y: auto; }
+.plugin-config-card { padding: 14px; border-radius: var(--radius-card); border: 1px solid var(--border-color); margin-bottom: 16px; background: var(--bg-subtle); }
+.plugin-config-card h4 { margin: 0 0 6px 0; font-size: 0.92rem; }
+.plugin-credential-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-color); }
+.plugin-credential-item:last-child { border-bottom: none; }
+.plugin-credential-info { flex: 1; }
+.plugin-credential-action { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.plugin-network-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-color); }
+.plugin-network-item:last-child { border-bottom: none; }
+.plugin-network-info { display: flex; align-items: center; gap: 8px; }
+.badge-required { background: var(--status-red-bg); color: var(--status-red); border: 1px solid var(--status-red-border); border-radius: var(--radius-sm); padding: 1px 5px; font-size: 10px; font-weight: 600; }
+.badge-update { background: var(--accent-blue-bg); color: var(--accent-blue); border: 1px solid var(--accent-blue-border); border-radius: var(--radius-sm); padding: 1px 5px; font-size: 10px; font-weight: 600; }
+
+
