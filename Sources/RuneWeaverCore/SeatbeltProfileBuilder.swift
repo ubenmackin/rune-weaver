@@ -19,22 +19,27 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     public var allowedEgressHosts: [String]
 
     /// Default system read paths essential for standard binaries and runtimes.
-    public static let defaultSystemReadPaths: [String] = [
-        "/System",
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/Library",
-        "/opt/homebrew",
-        "/Applications/Xcode.app",
-        "/Library/Developer/CommandLineTools",
-        "/private/var/folders",
-        "/var/folders",
-        "/private/etc",
-        "/etc",
-        "/dev",
-        "/private/var/db/dyld"
-    ]
+    /// Managed venv expands at access so SBPL never sees `~`; xcode-select
+    /// links stay host-tier only via `hostToolchainReadPaths`.
+    public static var defaultSystemReadPaths: [String] {
+        [
+            "/System",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/Library",
+            "/opt/homebrew",
+            "/Applications/Xcode.app",
+            "/Library/Developer/CommandLineTools",
+            BrowserConfig.managedPythonVenvDirURL().path,
+            "/private/var/folders",
+            "/var/folders",
+            "/private/etc",
+            "/etc",
+            "/dev",
+            "/private/var/db/dyld"
+        ]
+    }
 
     /// Default temporary write paths required by compilers, shells, and runtimes.
     public static let defaultSystemWritePaths: [String] = [
@@ -207,7 +212,8 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     private func appendWriteIsolation(to lines: inout [String], sanitizedTemp: Set<String>) {
         lines.append(";; Filesystem write isolation: block all writes by default")
         lines.append("(deny file-write* (subpath \"/\"))")
-        var allWrite = Set(Self.defaultSystemWritePaths)
+        // Expand defaults so a `~` entry never reaches SBPL unexpanded.
+        var allWrite = Set(Self.expandPaths(Self.defaultSystemWritePaths))
         allWrite.formUnion(Self.sanitizedAllowPaths(allowedWritePaths))
         allWrite.formUnion(sanitizedTemp)
         let sortedWrite = allWrite.sorted()
@@ -269,6 +275,8 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         lines.append(";; Process and system-service compat for macOS 14+ dyld")
         lines.append("(allow process-fork)")
         lines.append("(allow process-exec*)")
+        // No blanket metadata allow: `file-read*` below already grants
+        // metadata on allowed roots, so a global allow would widen stat.
         // Process introspection stays open for self only in spirit: libSystem
         // queries its own pid and process list during startup, and denying
         // these aborts before main runs even though no other process is touched.
@@ -294,8 +302,9 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         // Filesystem read policy: deny-default already blocks reads, so reopen only minimal system
         // roots plus caller workspace roots.
         lines.append(";; Filesystem read isolation: allow only system and workspace roots")
-        var allRead = Set(Self.defaultSystemReadPaths)
-        allRead.formUnion(Self.defaultSystemWritePaths)
+        // Expand defaults so a `~` entry never reaches SBPL unexpanded.
+        var allRead = Set(Self.expandPaths(Self.defaultSystemReadPaths))
+        allRead.formUnion(Self.expandPaths(Self.defaultSystemWritePaths))
         allRead.formUnion(Self.sanitizedAllowPaths(allowedReadPaths))
         allRead.formUnion(Self.sanitizedAllowPaths(allowedWritePaths))
         allRead.formUnion(sanitizedTemp)
@@ -315,8 +324,9 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         // Executable mapping stays confined to the same roots as reads minus temp: dyld maps system
         // libraries and the target binary via file-map-executable rather than file-read, so deny-
         // default would otherwise abort before main runs.
-        var allRead = Set(Self.defaultSystemReadPaths)
-        allRead.formUnion(Self.defaultSystemWritePaths)
+        // Expand defaults so a `~` entry never reaches SBPL unexpanded.
+        var allRead = Set(Self.expandPaths(Self.defaultSystemReadPaths))
+        allRead.formUnion(Self.expandPaths(Self.defaultSystemWritePaths))
         allRead.formUnion(Self.sanitizedAllowPaths(allowedReadPaths))
         allRead.formUnion(Self.sanitizedAllowPaths(allowedWritePaths))
         allRead.formUnion(sanitizedTemp)
