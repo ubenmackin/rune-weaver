@@ -199,6 +199,10 @@ export function PluginConfigModal({
               Credentials are encrypted in macOS Keychain (<code>com.runeweaver.secrets</code>) and
               injected into the plugin environment when tools run.
             </p>
+            <p className="muted text-xs mb-3">
+              Only one auth method needed. Priority: Token first, then Cookie, then Email plus
+              Password with MFA Secret when MFA is on.
+            </p>
             <div className="plugin-credentials-list">
               {credentials.map((cred) => {
                 const isStored = !!secretStatus[cred.key];
