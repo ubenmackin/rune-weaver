@@ -65,9 +65,12 @@ public final class PluginDiscoveryService: Sendable {
         }
 
         for subdir in subdirs {
-            guard (try? subdir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
-                continue
+            // Cooperative cancel keeps a torn-down test from awaiting a full rescan.
+            if Task.isCancelled {
+                return results
             }
+            // Hidden staging stays out so backups never hash as plugins.
+            guard !subdir.lastPathComponent.hasPrefix("."), (try? subdir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
 
             // Look for rune.json or plugin.json
             let runeJSON = subdir.appendingPathComponent("rune.json")
@@ -271,6 +274,8 @@ public final class PluginDiscoveryService: Sendable {
         }
 
         for subdir in subdirs {
+            // Hidden staging never holds a live manifest.
+            guard !subdir.lastPathComponent.hasPrefix(".") else { continue }
             for filename in ["rune.json", "plugin.json"] {
                 let manifestURL = subdir.appendingPathComponent(filename)
                 guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
@@ -387,6 +392,7 @@ extension PluginDiscoveryService {
     }
 
     static func provisionVenvIfNeeded(at directory: URL, forceRecreate: Bool = false) async throws {
+        try Task.checkCancellation()
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
             return
         }
@@ -406,7 +412,7 @@ extension PluginDiscoveryService {
         }
 
         guard fileManager.fileExists(atPath: reqURL.path),
-              !fileManager.fileExists(atPath: venvPython.path)
+              !fileManager.isExecutableFile(atPath: venvPython.path)
         else {
             return
         }
@@ -415,13 +421,20 @@ extension PluginDiscoveryService {
         // Enable is an explicit operator action with bounded timeouts, the documented egress exception.
         try validatePinnedRequirements(at: reqURL)
 
-        // Fresh enables converge on the pinned standalone runtime if available, falling back to managed/system Python.
+        // Standalone runtime precedes venv creation; failures warn then fall back.
+        // Only the final interpreter resolution throws with descriptive context.
         let provisioner = PythonProvisioner()
         do {
             _ = try await provisioner.ensureProvisioned()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            // Best-effort standalone fetch; fallback tiers still enforce the 3.12 pin below.
-            RuneWeaverLog.tools.warning("PluginDiscoveryService: standalone Python provisioning failed, falling back: \(error.localizedDescription)")
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            RuneWeaverLog.tools.warning(
+                "PluginDiscoveryService: standalone runtime unavailable, falling back to managed/system python3.12: \(error.localizedDescription)"
+            )
         }
 
         RuneWeaverLog.tools.info("PluginDiscoveryService: provisioning .venv for \(directory.lastPathComponent)...")
@@ -443,7 +456,12 @@ extension PluginDiscoveryService {
             }
         } catch let error as PluginDiscoveryError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw PluginDiscoveryError.provisioningFailed(
                 "Failed to create Python virtual environment at \(directory.path) using interpreter \(python.path) (\(version)): \(error.localizedDescription)"
             )
@@ -467,7 +485,12 @@ extension PluginDiscoveryService {
             }
         } catch let error as PluginDiscoveryError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             // Failed installs leave no partial venv behind.
             try? fileManager.removeItem(at: venvDir)
             throw PluginDiscoveryError.provisioningFailed(
@@ -489,7 +512,12 @@ extension PluginDiscoveryService {
             )
             let combined = "\(result.stdoutString) \(result.stderrString)".trimmingCharacters(in: .whitespacesAndNewlines)
             return combined.isEmpty ? "unknown" : combined
+        } catch is CancellationError {
+            return "unknown"
         } catch {
+            if Task.isCancelled {
+                return "unknown"
+            }
             return "unknown"
         }
     }

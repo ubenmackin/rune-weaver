@@ -2,6 +2,11 @@
 
 import CryptoKit
 import Foundation
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 /// Security and integrity services for Rune Weaver plugins.
 public enum PluginSecurity {
@@ -25,6 +30,79 @@ public enum PluginSecurity {
         let loweredIgnored = Set(ignoredFileNames.map { $0.lowercased() })
         let segments = entrypoint.split(whereSeparator: { $0 == "/" || $0 == "\\" })
         return segments.contains(where: { loweredIgnored.contains(String($0).lowercased()) })
+    }
+
+    /// Renders SHA-256 bytes as lowercase hex by delegating to the digest formatter.
+    public static func hexDigest(for data: Data) -> String {
+        hexDigest(for: SHA256.hash(data: data))
+    }
+
+    /// Renders a finalized SHA-256 digest as lowercase hex without duplicating format logic.
+    public static func hexDigest(for digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Shared no-follow read keeps links and FIFOs from stalling callers.
+    public static func secureCappedFileData(at fileURL: URL, maxBytes: Int) -> Data? {
+        guard let opened = openValidatedRegularFile(at: fileURL, maxBytes: maxBytes) else { return nil }
+        defer { close(opened.fd) }
+        var data = Data()
+        data.reserveCapacity(Int(opened.size))
+        let chunkSize = 32 * 1024
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        while true {
+            let readCount = buffer.withUnsafeMutableBytes { ptr in
+                readRetrying(opened.fd, ptr.baseAddress, chunkSize)
+            }
+            if readCount < 0 {
+                return nil
+            }
+            if readCount == 0 {
+                break
+            }
+            data.append(contentsOf: buffer.prefix(Int(readCount)))
+            if data.count > maxBytes {
+                return nil
+            }
+        }
+        return data
+    }
+
+    /// Opens a regular file without following links; caller closes the descriptor.
+    static func openValidatedRegularFile(at fileURL: URL, maxBytes: Int? = nil) -> (fd: Int32, size: Int64)? {
+        // O_NONBLOCK keeps FIFO open from stalling; fstat then rejects non-regular files.
+        let fd = fileURL.path.withCString { cString in open(cString, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) }
+        guard fd >= 0 else { return nil }
+        var status = stat()
+        guard fstat(fd, &status) == 0,
+              Int(status.st_mode) & Int(S_IFMT) == Int(S_IFREG),
+              status.st_size >= 0,
+              maxBytes.map({ Int64(status.st_size) <= Int64($0) }) ?? true
+        else {
+            close(fd)
+            return nil
+        }
+        // Regular file confirmed; restore blocking reads so normal files never see non-blocking behavior.
+        let openFlags = fcntl(fd, F_GETFL)
+        if openFlags != -1 {
+            _ = fcntl(fd, F_SETFL, openFlags & ~O_NONBLOCK)
+        }
+        return (fd, Int64(status.st_size))
+    }
+
+    /// Retries interrupted reads so signals never fail a healthy descriptor.
+    static func readRetrying(_ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int) -> Int {
+        while true {
+            let result = read(fd, buffer, count)
+            if result < 0 {
+                let err = errno
+                if err == EINTR || err == EAGAIN || err == EWOULDBLOCK {
+                    continue
+                }
+                return -1
+            }
+            return result
+        }
     }
 
     /// Calculates a deterministic SHA-256 tree hash of all files in a plugin directory.
@@ -66,14 +144,14 @@ public enum PluginSecurity {
                 withUnsafeBytes(of: &modeBE) { hasher.update(bufferPointer: $0) }
                 hasher.update(data: Data([0x00]))
             } else {
-                guard hashFileEntry(entry, at: directoryURL, fileManager: fileManager, into: &hasher) else {
+                guard hashFileEntry(entry, at: directoryURL, into: &hasher) else {
                     return nil
                 }
             }
         }
 
         let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return hexDigest(for: digest)
     }
 
     private struct HashedEntry {
@@ -111,6 +189,10 @@ public enum PluginSecurity {
             let isRegularFile = resourceValues?.isRegularFile == true
             guard isSymlink || isDirectory || isRegularFile else {
                 continue
+            }
+            // Linked directories never descend so venv links cannot pull outside trees in.
+            if isSymlink {
+                enumerator.skipDescendants()
             }
 
             let standardPath = fileURL.standardizedFileURL.path
@@ -211,44 +293,34 @@ public enum PluginSecurity {
     private static func hashFileEntry(
         _ entry: HashedEntry,
         at directoryURL: URL,
-        fileManager: FileManager,
         into hasher: inout SHA256
     ) -> Bool {
+        // Shared open keeps link and FIFO handling identical across readers.
         hasher.update(data: Data([0x46]))
         let fileURL = directoryURL.appendingPathComponent(entry.relativePath)
-        let handle: FileHandle
-        do {
-            handle = try FileHandle(forReadingFrom: fileURL)
-        } catch {
-            RuneWeaverLog.tools.debug("PluginSecurity: failed opening file handle at \(fileURL.path): \(error.localizedDescription)")
+        guard let opened = openValidatedRegularFile(at: fileURL) else {
             return false
         }
-        defer { try? handle.close() }
-
-        guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-              let fileSize = attributes[.size] as? UInt64
-        else {
-            return false
-        }
-
+        defer { close(opened.fd) }
+        let fileSize = UInt64(opened.size)
         var contentLength = fileSize.bigEndian
         withUnsafeBytes(of: &contentLength) { hasher.update(bufferPointer: $0) }
 
         let chunkSize = 64 * 1024
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
         var bytesRead: UInt64 = 0
         while true {
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: chunkSize)
-            } catch {
-                RuneWeaverLog.tools.debug("PluginSecurity: failed reading chunk from \(fileURL.path): \(error.localizedDescription)")
-                chunk = nil
+            let readCount = buffer.withUnsafeMutableBytes { ptr in
+                readRetrying(opened.fd, ptr.baseAddress, chunkSize)
             }
-            guard let chunk, !chunk.isEmpty else {
+            if readCount < 0 {
+                return false
+            }
+            if readCount == 0 {
                 break
             }
-            bytesRead += UInt64(chunk.count)
-            hasher.update(data: chunk)
+            bytesRead += UInt64(readCount)
+            hasher.update(data: Data(buffer.prefix(Int(readCount))))
         }
 
         guard bytesRead == fileSize else {
