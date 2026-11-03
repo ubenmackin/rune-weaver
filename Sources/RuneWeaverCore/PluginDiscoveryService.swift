@@ -381,7 +381,12 @@ public final class PluginDiscoveryService: Sendable {
 /// Venv provisioning lives here so the main service body stays within budget.
 /// Enable-time provisioning runs ahead of hashing; behavior is unchanged.
 extension PluginDiscoveryService {
+    /// Public for server enable routes; static below holds the single owner.
     public func provisionVenvIfNeeded(at directory: URL, forceRecreate: Bool = false) async throws {
+        try await Self.provisionVenvIfNeeded(at: directory, forceRecreate: forceRecreate)
+    }
+
+    static func provisionVenvIfNeeded(at directory: URL, forceRecreate: Bool = false) async throws {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
             return
         }
@@ -390,7 +395,8 @@ extension PluginDiscoveryService {
         let venvDir = directory.appendingPathComponent(".venv")
         let venvPython = venvDir.appendingPathComponent("bin/python3")
 
-        if forceRecreate, fileManager.fileExists(atPath: venvDir.path) {
+        let isVenvCorrupt = fileManager.fileExists(atPath: venvDir.path) && !fileManager.isExecutableFile(atPath: venvPython.path)
+        if forceRecreate || isVenvCorrupt, fileManager.fileExists(atPath: venvDir.path) {
             // A failed removal must not masquerade a stale venv as fresh.
             do {
                 try fileManager.removeItem(at: venvDir)
@@ -409,18 +415,17 @@ extension PluginDiscoveryService {
         // Enable is an explicit operator action with bounded timeouts, the documented egress exception.
         try validatePinnedRequirements(at: reqURL)
 
-        // Fresh enables converge on the pinned runtime before venv creation.
+        // Fresh enables converge on the pinned standalone runtime if available, falling back to managed/system Python.
         let provisioner = PythonProvisioner()
         do {
             _ = try await provisioner.ensureProvisioned()
         } catch {
-            throw PluginDiscoveryError.provisioningFailed(
-                "Failed to provision Python 3.12 runtime at \(provisioner.destinationInterpreterURL.path) (unknown): \(error.localizedDescription)"
-            )
+            // Best-effort standalone fetch; fallback tiers still enforce the 3.12 pin below.
+            RuneWeaverLog.tools.warning("PluginDiscoveryService: standalone Python provisioning failed, falling back: \(error.localizedDescription)")
         }
 
         RuneWeaverLog.tools.info("PluginDiscoveryService: provisioning .venv for \(directory.lastPathComponent)...")
-        let python = resolveProvisioningInterpreter()
+        let python = try await resolveProvisioningInterpreter()
         let version = await provisioningInterpreterVersion(for: python)
         do {
             let venvResult = try await BoundedProcessRunner.runAsync(
@@ -472,7 +477,7 @@ extension PluginDiscoveryService {
         }
     }
 
-    private func provisioningInterpreterVersion(for python: URL) async -> String {
+    static func provisioningInterpreterVersion(for python: URL) async -> String {
         // --version may report on either stream, so both are combined.
         do {
             let result = try await BoundedProcessRunner.runAsync(
@@ -489,23 +494,37 @@ extension PluginDiscoveryService {
         }
     }
 
-    private func resolveProvisioningInterpreter() -> URL {
+    static func resolveProvisioningInterpreter() async throws -> URL {
         // Env override first so operators pin the interpreter without editing code.
         if let override = ProcessInfo.processInfo.environment["RUNEWEAVER_PYTHON_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
             return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
         }
-        // Provisioned 3.12 next so fresh enables use the pinned runtime.
+        // Provisioned runtime next when present and on the pinned line.
         let provisioned = PythonProvisioner().destinationInterpreterURL
-        if FileManager.default.fileExists(atPath: provisioned.path) {
+        if await PythonProvisioner.isCompatibleInterpreterAsync(at: provisioned) {
             return provisioned
         }
-        for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] where FileManager.default.fileExists(atPath: candidate) {
-            return URL(fileURLWithPath: candidate)
+        // Managed plus Homebrew/system fallbacks gate on the same pin so a 3.9/3.11 never creates venvs.
+        let managed = BrowserConfig.managedPythonExecutableURL()
+        if await PythonProvisioner.isCompatibleInterpreterAsync(at: managed) {
+            return managed
         }
-        return URL(fileURLWithPath: "/usr/bin/python3")
+        let candidates = [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+            "/usr/bin/python3"
+        ]
+        for candidate in candidates {
+            let url = URL(fileURLWithPath: candidate)
+            if await PythonProvisioner.isCompatibleInterpreterAsync(at: url) {
+                return url
+            }
+        }
+        throw PluginDiscoveryError.provisioningFailed("No compatible Python 3.12 interpreter found.")
     }
 
-    private func validatePinnedRequirements(at reqURL: URL) throws {
+    static func validatePinnedRequirements(at reqURL: URL) throws {
         // Unpinned ranges plus missing hashes would let enable fetch arbitrary code.
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: reqURL.path),
               let size = attrs[.size] as? NSNumber, size.int64Value <= 64 * 1024,
@@ -574,7 +593,7 @@ extension PluginDiscoveryService {
         }
     }
 
-    private func validateRequirementHashToken(_ token: String) throws {
+    static func validateRequirementHashToken(_ token: String) throws {
         // Malformed hashes fail closed so pip never resolves an unverifiable stanza.
         var cleaned = token.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.hasSuffix("\\") {

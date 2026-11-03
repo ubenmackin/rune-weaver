@@ -124,12 +124,10 @@ public struct SubprocessToolBridge: Tool, Sendable {
 
         switch runtime {
         case .python:
-            // Prefer virtualenv python if present in plugin directory, otherwise system python3
-            let localVenvPython = pluginDirectory.appendingPathComponent(".venv/bin/python3")
-            if FileManager.default.isExecutableFile(atPath: localVenvPython.path) {
-                executableURL = localVenvPython
-            } else {
-                executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            do {
+                executableURL = try await resolvePythonExecutable()
+            } catch {
+                return .failure("Python interpreter unavailable: \(error.localizedDescription)", callID: input.callID)
             }
             arguments = [scriptURL.path]
         case .executable:
@@ -203,6 +201,16 @@ public struct SubprocessToolBridge: Tool, Sendable {
             injectedEnv: injectedEnv,
             resolvedSecrets: resolvedSecrets
         )
+    }
+
+    private func resolvePythonExecutable() async throws -> URL {
+        // Prefer the plugin-local venv when present; enable-time provisioning owns creation.
+        let localVenvPython = pluginDirectory.appendingPathComponent(".venv/bin/python3")
+        if FileManager.default.isExecutableFile(atPath: localVenvPython.path) {
+            return localVenvPython
+        }
+        // Single owner for tier ordering; missing interpreters fail closed upstream.
+        return try await PluginDiscoveryService.resolveProvisioningInterpreter()
     }
 
     private struct SubprocessInvocation: Sendable {

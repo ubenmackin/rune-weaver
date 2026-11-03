@@ -41,7 +41,7 @@ public struct PythonProvisioner: Sendable {
     }()
 
     /// Pinned SHA-256 digest for the declared archive.
-    public static let defaultArchiveSHA256 = "b5199d66966141fb6d5447512d2b2fe0398d417da37b1949f58db3792d314eac"
+    public static let defaultArchiveSHA256 = "d0447b65d9653b763e042a424f7f4dd4632e792cc2a18dcdcb76d9ddbbcc0078"
     /// Minimum archive byte count accepted as a complete download.
     public static let defaultMinArchiveSize: Int64 = 10_000_000
 
@@ -109,6 +109,24 @@ public struct PythonProvisioner: Sendable {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return false }
             return output.contains("3.12")
+        } catch {
+            return false
+        }
+    }
+
+    /// Async pin check off the cooperative pool for enable-time resolution.
+    public static func isCompatibleInterpreterAsync(at url: URL) async -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: url.path) else { return false }
+        do {
+            let result = try await BoundedProcessRunner.runAsync(
+                executableURL: url,
+                arguments: ["--version"],
+                timeoutSeconds: 10,
+                maxOutputBytes: 4 * 1024,
+                maxErrorBytes: 4 * 1024
+            )
+            guard result.exitCode == 0 else { return false }
+            return "\(result.stdoutString) \(result.stderrString)".contains("3.12")
         } catch {
             return false
         }
