@@ -10,31 +10,31 @@
     {
       "key": "MONARCH_TOKEN",
       "label": "Monarch API Token",
-      "description": "API Bearer token from app.monarchmoney.com (Recommended).",
-      "required": false
-    },
-    {
-      "key": "MONARCH_EMAIL",
-      "label": "Monarch Email",
-      "description": "Monarch account email for interactive or password login.",
-      "required": false
-    },
-    {
-      "key": "MONARCH_PASSWORD",
-      "label": "Monarch Password",
-      "description": "Monarch account password.",
-      "required": false
-    },
-    {
-      "key": "MONARCH_MFA_SECRET",
-      "label": "Monarch MFA Secret",
-      "description": "TOTP secret key if two-factor authentication is enabled.",
+      "description": "Bearer token from app.monarchmoney.com DevTools Network graphql Authorization Token value. Recommended. Bypasses CAPTCHA + 2FA. Only one auth method needed.",
       "required": false
     },
     {
       "key": "MONARCH_COOKIE",
       "label": "Monarch Session Cookie",
-      "description": "Session cookie string if bypassing token and password login.",
+      "description": "Full Cookie header including session_id + csrftoken from DevTools Network graphql request. Use when Token expired. Only one auth method needed.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_EMAIL",
+      "label": "Monarch Email",
+      "description": "Account email for Email + Password login. Set a password in Security settings first when using Google login. Only one auth method needed.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_PASSWORD",
+      "label": "Monarch Password",
+      "description": "Account password for Email + Password login. Use with Email. Only one auth method needed.",
+      "required": false
+    },
+    {
+      "key": "MONARCH_MFA_SECRET",
+      "label": "Monarch MFA Secret",
+      "description": "TOTP Two-factor text code from Settings Security Enable MFA, not the 6-digit code. Required for Email + Password when MFA is on. Only one auth method needed.",
       "required": false
     }
   ],

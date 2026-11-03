@@ -24,6 +24,8 @@ A Rune Weaver Python plugin for accessing and updating [Monarch Money](https://w
 
 ## Authentication & Credentials Setup
 
+Only one auth method needed. Priority: Token first, then Cookie, then Email plus Password with MFA Secret when MFA is on. Follow Option 1, Option 2, and Option 3 below for retrieval steps.
+
 You can configure Monarch Money directly from the Rune Weaver Dashboard:
 1. Navigate to **Settings** -> **Tools & Runes**.
 2. Under **Installed Runes & Plugins**, locate **Monarch Money** and click **Configure**.
