@@ -338,6 +338,7 @@ public struct DashboardBundle: Sendable, Equatable {
 
 extension DashboardBundle {
     /// Content Security Policy applied to dashboard responses.
+    /// Mirrors Web/index.html meta so header and meta stay aligned.
     public static let contentSecurityPolicy = [
         "default-src 'self';",
         "script-src 'self';",
@@ -345,6 +346,7 @@ extension DashboardBundle {
         "img-src 'self' data: blob:;",
         "font-src 'self';",
         "connect-src 'self' ws: wss:;",
+        "form-action 'self';",
         "frame-ancestors 'none';",
         "base-uri 'self';",
         "object-src 'none';"

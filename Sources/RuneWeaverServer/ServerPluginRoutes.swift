@@ -2,7 +2,6 @@
 
 import Foundation
 import RuneWeaverCore
-import RuneWeaverTools
 import Vapor
 
 /// Registers plugin and marketplace routes.
@@ -63,7 +62,7 @@ private func registerCorePluginRoutes(_ app: Application) {
                 throw Abort(.notFound, reason: "Plugin manifest not found.")
             }
             // Config saves keep live update truth so direct API reads match list views.
-            let marketplaceDoc = await loadMarketplaceIndex(context: context)
+            let marketplaceDoc = await MarketplaceCatalog.loadMarketplaceIndex(context: context)
             let catalogEntry = marketplaceDoc?.items.first(where: { $0.id == id })
             return await makePluginSummary(record: updated, manifest: manifestInfo.manifest, context: context, catalogEntry: catalogEntry)
         } catch let error as PluginDiscoveryError {
@@ -101,7 +100,7 @@ private func registerMarketplaceRoutes(_ app: Application) {
     let marketplace = app.grouped(PathComponent.constant(ServerPaths.marketplace))
     marketplace.get(PathComponent.constant(ServerPaths.plugins), use: handleGetMarketplacePlugins)
     marketplace.post(PathComponent.constant(ServerPaths.install), use: handleInstallMarketplacePlugin)
-    marketplace.post(PathComponent.constant(ServerPaths.update), use: handleUpdateMarketplacePlugin)
+    marketplace.post(PathComponent.constant(ServerPaths.update), use: MarketplaceUpdate.handleUpdateMarketplacePlugin)
 }
 
 /// GET /marketplace/plugins
@@ -109,7 +108,7 @@ private func handleGetMarketplacePlugins(req: Request) async throws -> Marketpla
     let context = req.application.runeWeaver
     let installedRecords = await context.pluginStore.loadAll()
     let installedByID = Dictionary(uniqueKeysWithValues: installedRecords.map { ($0.id, $0) })
-    var items = await fetchMarketplaceCatalog(context: context, installedRecordsByID: installedByID)
+    var items = await MarketplaceCatalog.fetchMarketplaceCatalog(context: context, installedRecordsByID: installedByID)
     items.sort { $0.name < $1.name }
     return MarketplaceResponse(items: items)
 }
@@ -171,14 +170,22 @@ private func handleInstallMarketplacePlugin(req: Request) async throws -> Plugin
     }
 
     do {
-        let doc = await loadMarketplaceIndex(context: context)
+        try Task.checkCancellation()
+        let doc = await MarketplaceCatalog.loadMarketplaceIndex(context: context)
         let entry = doc?.items.first(where: { $0.id == pluginID })
-        try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context)
+        try await MarketplaceCatalog.installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context)
+    } catch is CancellationError {
+        try? fileManager.removeItem(at: targetDir)
+        throw CancellationError()
     } catch {
         do {
             try fileManager.removeItem(at: targetDir)
         } catch {
             RuneWeaverLog.server.warning("Failed cleaning up aborted plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
+        }
+        // Cancellation outranks mapping so cooperative cancels never surface as 500s.
+        if Task.isCancelled {
+            throw CancellationError()
         }
         throw Abort(.internalServerError, reason: "Failed to install plugin '\(pluginID)': \(error.localizedDescription)")
     }
@@ -199,136 +206,13 @@ private func handleInstallMarketplacePlugin(req: Request) async throws -> Plugin
     return summary
 }
 
-/// POST /marketplace/update
-private func handleUpdateMarketplacePlugin(req: Request) async throws -> PluginSummary {
-    let body = try req.content.decode(UpdateMarketplacePluginRequest.self)
-    let context = req.application.runeWeaver
-    let pluginID = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !pluginID.isEmpty,
-          pluginID != ".",
-          pluginID != "..",
-          pluginID.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
-          !pluginID.contains("/"),
-          !pluginID.contains("\\"),
-          !pluginID.contains("..")
-    else {
-        throw Abort(.badRequest, reason: "Invalid plugin ID.")
-    }
-
-    guard let installedRecord = await context.pluginStore.get(id: pluginID) else {
-        throw Abort(.notFound, reason: "Plugin '\(pluginID)' is not installed.")
-    }
-
-    let pluginsDir = context.pluginDiscovery.pluginsDirectory
-    let targetDir = pluginsDir.appendingPathComponent(pluginID)
-    let resolvedPluginsDir = pluginsDir.resolvingSymlinksInPath().standardizedFileURL
-    let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
-    let pluginsPrefix = resolvedPluginsDir.path.hasSuffix("/") ? resolvedPluginsDir.path : resolvedPluginsDir.path + "/"
-    guard resolvedTarget.path.hasPrefix(pluginsPrefix) else {
-        throw Abort(.badRequest, reason: "Plugin ID escapes the plugins directory.")
-    }
-
-    let fileManager = FileManager.default
-    guard fileManager.fileExists(atPath: targetDir.path) else {
-        throw Abort(.notFound, reason: "Plugin directory does not exist.")
-    }
-
-    let doc = await loadMarketplaceIndex(context: context)
-    guard let entry = doc?.items.first(where: { $0.id == pluginID }) else {
-        throw Abort(.notFound, reason: "Plugin '\(pluginID)' not found in marketplace catalog.")
-    }
-
-    // Direct updates never downgrade; frontend gates on hasUpdate already.
-    guard isVersionNewer(entry.version, than: installedRecord.version) else {
-        throw Abort(.conflict, reason: "Plugin '\(pluginID)' is already up to date.")
-    }
-
-    // Backup existing plugin directory to temporary rollback location
-    let backupDir = pluginsDir.appendingPathComponent(".\(pluginID).update-backup-\(UUID().uuidString)")
-    do {
-        try fileManager.copyItem(at: targetDir, to: backupDir)
-    } catch {
-        throw Abort(.internalServerError, reason: "Failed to create backup: \(error.localizedDescription)")
-    }
-
-    do {
-        // Clear target so files removed upstream do not linger executable.
-        let existingContents = try fileManager.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil, options: [])
-        for existingURL in existingContents {
-            try fileManager.removeItem(at: existingURL)
-        }
-        try await installPluginFiles(pluginID: pluginID, targetDir: targetDir, entry: entry, context: context, overwrite: true, allowScaffold: false)
-
-        // Re-provision venv if python and requirements.txt exists
-        let reqURL = targetDir.appendingPathComponent("requirements.txt")
-        if fileManager.fileExists(atPath: reqURL.path) {
-            try await context.pluginDiscovery.provisionVenvIfNeeded(at: targetDir, forceRecreate: true)
-        }
-
-        guard let newHash = PluginSecurity.calculateDirectoryHash(at: targetDir) else {
-            throw Abort(.internalServerError, reason: "Failed to calculate plugin integrity hash.")
-        }
-
-        let manifestFile = targetDir.appendingPathComponent("rune.json")
-        let manifestData = try Data(contentsOf: manifestFile)
-        let updatedManifest = try PluginManifest.from(jsonData: manifestData)
-
-        guard let updatedRecord = await context.pluginStore.setVersion(id: pluginID, version: updatedManifest.version, integrityHash: newHash) else {
-            throw Abort(.internalServerError, reason: "Failed to update plugin record.")
-        }
-
-        // Sync with tool bus
-        await context.pluginDiscovery.discoverAndSync(toolBus: context.toolBus)
-
-        let summary = await makePluginSummary(record: updatedRecord, manifest: updatedManifest, context: context, catalogEntry: entry)
-        // Backup is removed only after success; rollback keeps it on failure.
-        try? fileManager.removeItem(at: backupDir)
-        return summary
-    } catch {
-        // Restore from backup; log rollback failures so a missing dir never goes silent.
-        do {
-            try fileManager.removeItem(at: targetDir)
-        } catch {
-            RuneWeaverLog.server.warning("Failed removing partial update at \(targetDir.path): \(error.localizedDescription)")
-        }
-        do {
-            try fileManager.moveItem(at: backupDir, to: targetDir)
-        } catch {
-            // Keep backup for manual recovery; it is the only rollback artifact.
-            let restoreDetail = "Failed restoring plugin backup for '\(pluginID)' at \(targetDir.path):"
-            RuneWeaverLog.server.warning("\(restoreDetail) \(error.localizedDescription). Backup kept at \(backupDir.path).")
-        }
-        throw Abort(.internalServerError, reason: "Failed to update plugin '\(pluginID)': \(error.localizedDescription)")
-    }
-}
+// Update flow lives in ServerMarketplaceUpdate to keep this file within budget.
 
 // MARK: - Helper Functions
 
-private func isVersionNewer(_ candidate: String, than current: String) -> Bool {
-    let candidateClean = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-    let currentClean = current.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard candidateClean != currentClean else { return false }
+// Version plus hash helpers live in ServerMarketplaceCatalog.
 
-    let candidateParts = candidateClean.split(whereSeparator: { $0 == "." || $0 == "-" }).compactMap { Int($0) }
-    let currentParts = currentClean.split(whereSeparator: { $0 == "." || $0 == "-" }).compactMap { Int($0) }
-
-    let maxCount = max(candidateParts.count, currentParts.count)
-    if maxCount > 0, !candidateParts.isEmpty || !currentParts.isEmpty {
-        for componentIndex in 0 ..< maxCount {
-            let candidateComponent = componentIndex < candidateParts.count ? candidateParts[componentIndex] : 0
-            let currentComponent = componentIndex < currentParts.count ? currentParts[componentIndex] : 0
-            if candidateComponent > currentComponent {
-                return true
-            }
-            if candidateComponent < currentComponent {
-                return false
-            }
-        }
-    }
-    return candidateClean.compare(currentClean, options: .numeric) == .orderedDescending
-}
-
-private func makePluginSummary(
+func makePluginSummary(
     record: PluginRecord,
     manifest: PluginManifest,
     context: ServerContext,
@@ -360,7 +244,7 @@ private func makePluginSummary(
 
     let latestVer = catalogEntry?.version
     let hasUpdate: Bool = if let latestVer {
-        isVersionNewer(latestVer, than: record.version)
+        MarketplaceCatalog.isVersionNewer(latestVer, than: record.version)
     } else {
         false
     }
@@ -392,7 +276,7 @@ private func makePluginSummary(
 private func fetchPluginsResponse(context: ServerContext) async -> PluginsResponse {
     // Live bus is the truth on reads; quarantine refreshes at boot and mutations.
     let records = await context.pluginStore.loadAll()
-    let marketplaceDoc = await loadMarketplaceIndex(context: context)
+    let marketplaceDoc = await MarketplaceCatalog.loadMarketplaceIndex(context: context)
     // Duplicates fail catalog validation; map is defensive last-wins.
     let catalogByID = Dictionary((marketplaceDoc?.items ?? []).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     var summaries: [PluginSummary] = []
@@ -414,15 +298,10 @@ private func fetchPluginSummary(id: String, context: ServerContext) async -> Plu
         return nil
     }
 
-    let marketplaceDoc = await loadMarketplaceIndex(context: context)
+    let marketplaceDoc = await MarketplaceCatalog.loadMarketplaceIndex(context: context)
     let catalogEntry = marketplaceDoc?.items.first(where: { $0.id == id })
 
     return await makePluginSummary(record: record, manifest: manifestInfo.manifest, context: context, catalogEntry: catalogEntry)
-}
-
-private func getCuratedMarketplaceItems(installedIDs _: Set<String>) -> [MarketplacePluginItem] {
-    // Catalog mirrors the remote index, so the curated set stays empty.
-    []
 }
 
 private func handlePluginStateUpdate(
@@ -498,588 +377,4 @@ private func handlePluginStateUpdate(
     return summary
 }
 
-private func toolMeta(name: String, description: String, schema: String, permission: String) -> [String: Any] {
-    [
-        "name": name,
-        "description": description,
-        "input_schema": schema,
-        "permission_level": permission
-    ]
-}
-
-private func getCuratedToolsMetadata(for pluginID: String, fallbackTools: [String]) -> [[String: Any]] {
-    switch pluginID {
-    case "community.playwright-browser":
-        [
-            toolMeta(
-                name: "browser.navigate",
-                description: "Navigate the browser to a specific URL.",
-                schema: "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}",
-                permission: "requiresApproval"
-            ),
-            toolMeta(
-                name: "browser.read_page",
-                description: "Read text content and metadata of the current page.",
-                schema: "{\"type\":\"object\",\"properties\":{\"selector\":{\"type\":\"string\"}},\"required\":[]}",
-                permission: "readOnly"
-            ),
-            toolMeta(
-                name: "browser.screenshot",
-                description: "Capture screenshot of current browser window.",
-                schema: "{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"}},\"required\":[]}",
-                permission: "requiresApproval"
-            )
-        ]
-    case "community.homeassistant-control":
-        [
-            toolMeta(
-                name: "home.get_state",
-                description: "Get state of an entity in Home Assistant.",
-                schema: "{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"]}",
-                permission: "readOnly"
-            ),
-            toolMeta(
-                name: "home.call_service",
-                description: "Call a service on an entity in Home Assistant.",
-                schema: "{\"type\":\"object\",\"properties\":{\"domain\":{\"type\":\"string\"},"
-                    + "\"service\":{\"type\":\"string\"},\"entity_id\":{\"type\":\"string\"}},\"required\":[\"domain\",\"service\",\"entity_id\"]}",
-                permission: "requiresApproval"
-            )
-        ]
-    case "community.github-explorer":
-        [
-            toolMeta(
-                name: "github.search_repos",
-                description: "Search GitHub repositories with a query string.",
-                schema: "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}",
-                permission: "readOnly"
-            ),
-            toolMeta(
-                name: "github.list_issues",
-                description: "List open issues for a repository.",
-                schema: "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"}},\"required\":[\"repo\"]}",
-                permission: "readOnly"
-            )
-        ]
-    case "community.clock-timer":
-        [
-            toolMeta(
-                name: "clock.current_time",
-                description: "Get current system and UTC time.",
-                schema: "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-                permission: "readOnly"
-            ),
-            toolMeta(
-                name: "clock.convert_timezone",
-                description: "Convert current time to target timezone.",
-                schema: "{\"type\":\"object\",\"properties\":{\"timezone\":{\"type\":\"string\"}},\"required\":[\"timezone\"]}",
-                permission: "readOnly"
-            )
-        ]
-    default:
-        fallbackTools.map { toolName in
-            toolMeta(
-                name: toolName,
-                description: "Runs execution for \(toolName).",
-                schema: "{\"type\":\"object\",\"properties\":{}}",
-                permission: "requiresApproval"
-            )
-        }
-    }
-}
-
-private func generateScaffoldScript(for _: String, tools _: [[String: Any]]) -> String {
-    """
-    #!/usr/bin/env python3
-    import sys, json
-
-    def handle_request(req):
-        call_id = req.get("id")
-        method = req.get("method", "")
-        params = req.get("params", {})
-
-        if method == "browser.navigate":
-            url = params.get("url", "about:blank")
-            return {"jsonrpc": "2.0", "result": f"Navigated to {url}", "id": call_id}
-        elif method == "browser.read_page":
-            return {"jsonrpc": "2.0", "result": "Title: Rune Weaver Community Page\\nContent: Sample extracted text content.", "id": call_id}
-        elif method == "browser.screenshot":
-            fn = params.get("filename", "screenshot.png")
-            return {"jsonrpc": "2.0", "result": f"Screenshot captured to {fn}", "id": call_id}
-        elif method == "home.get_state":
-            eid = params.get("entity_id", "light.living_room")
-            return {"jsonrpc": "2.0", "result": f"Entity {eid} state: on, brightness: 80%", "id": call_id}
-        elif method == "home.call_service":
-            return {"jsonrpc": "2.0", "result": f"Called service {params.get('domain')}.{params.get('service')} on {params.get('entity_id')}", "id": call_id}
-        elif method == "github.search_repos":
-            q = params.get("query", "")
-            return {"jsonrpc": "2.0", "result": f"Top repos matching '{q}': ubenmackin/rune-weaver (★120)", "id": call_id}
-        elif method == "github.list_issues":
-            r = params.get("repo", "")
-            return {"jsonrpc": "2.0", "result": f"Open issues for {r}: #1 Add plugin marketplace support", "id": call_id}
-        elif method == "clock.current_time":
-            import datetime
-            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            return {"jsonrpc": "2.0", "result": f"Current UTC time: {now_iso}", "id": call_id}
-        elif method == "clock.convert_timezone":
-            tz = params.get("timezone", "UTC")
-            return {"jsonrpc": "2.0", "result": f"Time in {tz}: 12:00:00 PM", "id": call_id}
-        else:
-            return {"jsonrpc": "2.0", "result": f"Executed {method} successfully with parameters: {params}", "id": call_id}
-
-    def main():
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line)
-                resp = handle_request(req)
-                print(json.dumps(resp), flush=True)
-            except Exception as exc:
-                err_resp = {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(exc)}, "id": None}
-                print(json.dumps(err_resp), flush=True)
-
-    if __name__ == "__main__":
-        main()
-    """
-}
-
-struct MarketplaceIndexDocument: Codable, Sendable {
-    let version: Int?
-    let items: [MarketplaceIndexEntry]
-}
-
-struct MarketplaceIndexEntry: Codable, Sendable {
-    let id: String
-    let name: String
-    let version: String
-    let author: String?
-    let description: String
-    let downloadURL: String?
-    let tags: [String]
-    let runtime: String
-    let declaredTools: [String]
-    let path: String?
-    let files: [String]?
-}
-
-private let marketplaceIndexMaxBytes = 1_048_576
-
-private func isValidMarketplaceIndex(_ doc: MarketplaceIndexDocument) -> Bool {
-    // Version plus per-entry identity keep malformed catalogs from entering the merge.
-    guard let version = doc.version, version >= 1 else { return false }
-    // Duplicate IDs would collide on merge, so fail closed before any read.
-    var seenIDs = Set<String>()
-    for entry in doc.items {
-        guard seenIDs.insert(entry.id).inserted,
-              !entry.id.isEmpty, !entry.name.isEmpty, !entry.version.isEmpty,
-              entry.runtime == "python" || entry.runtime == "executable",
-              !entry.declaredTools.isEmpty,
-              isValidMarketplaceCatalogID(entry.id) else { return false }
-        if let files = entry.files {
-            guard !files.isEmpty, files.allSatisfy(isSafeMarketplaceFileName) else { return false }
-        }
-        if let rawPath = entry.path, !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           validatedMarketplaceSourceDir(rawPath) == nil
-        {
-            return false
-        }
-        if let rawURL = entry.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !rawURL.isEmpty
-        {
-            guard let url = URL(string: rawURL), url.scheme?.lowercased() == "https", url.host?.isEmpty == false else { return false }
-        }
-    }
-    return true
-}
-
-private func isValidMarketplaceCatalogID(_ id: String) -> Bool {
-    // Catalog IDs become directory names, so enforce the install allowlist early.
-    guard !id.isEmpty, id != ".", id != "..",
-          id.range(of: "^[a-zA-Z0-9_.-]+$", options: .regularExpression) != nil,
-          !id.contains("/"), !id.contains("\\"), !id.contains("..") else { return false }
-    return true
-}
-
-private func loadValidatedMarketplaceIndexFile(at url: URL) -> MarketplaceIndexDocument? {
-    // Size cap plus validation keep oversized or malformed catalogs out.
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-          let size = attrs[.size] as? NSNumber, size.int64Value <= marketplaceIndexMaxBytes,
-          let data = try? Data(contentsOf: url), data.count <= marketplaceIndexMaxBytes,
-          let doc = try? JSONDecoder().decode(MarketplaceIndexDocument.self, from: data),
-          isValidMarketplaceIndex(doc)
-    else {
-        return nil
-    }
-    return doc
-}
-
-private func loadValidatedMarketplaceIndexFile(atExpandedPath rawPath: String) -> MarketplaceIndexDocument? {
-    // Expand tilde plus reject traversal so configured paths cannot escape via "..".
-    let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return nil }
-    for scalar in trimmed.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
-        return nil
-    }
-    let expanded = (trimmed as NSString).expandingTildeInPath
-    let parts = expanded.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-    guard !parts.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
-    let fileURL: URL
-    if expanded.hasPrefix("/") {
-        // Absolute catalog paths stay inside the workspace or the owner data dir.
-        let candidate = URL(fileURLWithPath: expanded).standardizedFileURL
-        let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
-        let ownerDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".runeweaver").standardizedFileURL
-        let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
-        let resolvedWorkspace = workspaceRoot.resolvingSymlinksInPath().standardizedFileURL
-        let resolvedOwner = ownerDir.resolvingSymlinksInPath().standardizedFileURL
-        let workspacePrefix = resolvedWorkspace.path.hasSuffix("/") ? resolvedWorkspace.path : resolvedWorkspace.path + "/"
-        let ownerPrefix = resolvedOwner.path.hasSuffix("/") ? resolvedOwner.path : resolvedOwner.path + "/"
-        guard resolvedCandidate.path.hasPrefix(workspacePrefix) || resolvedCandidate.path.hasPrefix(ownerPrefix) else { return nil }
-        fileURL = candidate
-    } else {
-        let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
-        fileURL = workspaceRoot.appendingPathComponent(expanded).standardizedFileURL
-    }
-    return loadValidatedMarketplaceIndexFile(at: fileURL)
-}
-
-private func fetchValidatedMarketplaceBytes(from initialURL: URL, maxBytes: Int, timeout: TimeInterval) async -> Data? {
-    // Manual redirect chain re-validates https plus SSRF plus size cap per hop.
-    var current = initialURL
-    for _ in 0 ..< HTTPRedirectFollower.maxRedirects {
-        guard current.scheme?.lowercased() == "https", current.host?.isEmpty == false,
-              await ApiSSRFGuard.denyReasonAsync(for: current.absoluteString, allowlistedOrigins: []) == nil
-        else { return nil }
-        var request = URLRequest(url: current)
-        request.timeoutInterval = timeout
-        // Streaming cap enforces per-byte during download so oversized bodies never buffer.
-        guard let (data, response) = try? await CappedNoRedirectDelegate.downloadCapped(
-            request: request,
-            maxBytes: maxBytes,
-            timeoutSeconds: timeout
-        ), let http = response as? HTTPURLResponse else { return nil }
-        if http.statusCode == 200 {
-            guard data.count <= maxBytes else { return nil }
-            return data
-        }
-        guard (300 ..< 400).contains(http.statusCode),
-              let next = HTTPRedirectFollower.redirectTarget(http: http, currentURL: current),
-              next.scheme?.lowercased() == "https", next.host?.isEmpty == false
-        else { return nil }
-        current = next
-    }
-    return nil
-}
-
-private func loadMarketplaceIndex(context: ServerContext) async -> MarketplaceIndexDocument? {
-    let urlString = context.pluginConfig.marketplaceIndexURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    let lower = urlString.lowercased()
-
-    // Remote catalog requires https only so plain http cannot tamper the merge.
-    if lower.hasPrefix("https://") {
-        if let url = URL(string: urlString),
-           url.scheme?.lowercased() == "https",
-           url.host?.isEmpty == false,
-           let data = await fetchValidatedMarketplaceBytes(from: url, maxBytes: marketplaceIndexMaxBytes, timeout: 5.0),
-           let doc = try? JSONDecoder().decode(MarketplaceIndexDocument.self, from: data),
-           isValidMarketplaceIndex(doc)
-        {
-            return doc
-        }
-    } else if !lower.hasPrefix("http://"), !urlString.isEmpty, let doc = loadValidatedMarketplaceIndexFile(atExpandedPath: urlString) {
-        // Configured file path honors tilde, containment, size cap, plus validation.
-        return doc
-    }
-
-    // File path from environment with the same size and validation bounds.
-    if let envPath = ProcessInfo.processInfo.environment["RUNEWEAVER_MARKETPLACE_INDEX_PATH"],
-       !envPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-       let doc = loadValidatedMarketplaceIndexFile(atExpandedPath: envPath)
-    {
-        return doc
-    }
-
-    // Fallback to local Plugins/index.json relative to current directory, plugins pen, or home.
-    let candidates = [
-        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Plugins/index.json"),
-        context.pluginDiscovery.pluginsDirectory.deletingLastPathComponent().appendingPathComponent("Plugins/index.json"),
-        URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path).appendingPathComponent(".runeweaver/Plugins/index.json")
-    ]
-    for candidate in candidates {
-        if let doc = loadValidatedMarketplaceIndexFile(at: candidate) {
-            return doc
-        }
-    }
-
-    return nil
-}
-
-private func fetchMarketplaceCatalog(context: ServerContext, installedRecordsByID: [String: PluginRecord]) async -> [MarketplacePluginItem] {
-    // Duplicates fail catalog validation; map is defensive last-wins.
-    var itemsByID: [String: MarketplacePluginItem] = [:]
-
-    for item in getCuratedMarketplaceItems(installedIDs: Set(installedRecordsByID.keys)) {
-        itemsByID[item.id] = item
-    }
-
-    if let doc = await loadMarketplaceIndex(context: context) {
-        for entry in doc.items {
-            let installedRecord = installedRecordsByID[entry.id]
-            let isInstalled = installedRecord != nil
-            let installedVersion = installedRecord?.version
-            let hasUpdate = isInstalled && installedVersion != nil && isVersionNewer(entry.version, than: installedVersion!)
-
-            let item = MarketplacePluginItem(
-                id: entry.id,
-                name: entry.name,
-                version: entry.version,
-                author: entry.author ?? "Community",
-                description: entry.description,
-                downloadURL: entry.downloadURL ?? "",
-                tags: entry.tags,
-                runtime: entry.runtime,
-                declaredTools: entry.declaredTools,
-                isInstalled: isInstalled,
-                installedVersion: installedVersion,
-                hasUpdate: hasUpdate
-            )
-            itemsByID[entry.id] = item
-        }
-    }
-
-    return Array(itemsByID.values)
-}
-
-private func isSafeMarketplaceFileName(_ fileName: String) -> Bool {
-    // Single-component allowlist so catalog entries cannot escape the pen.
-    guard !fileName.isEmpty, fileName != ".", fileName != "..",
-          !fileName.contains("/"), !fileName.contains("\\"), !fileName.contains(".."),
-          !fileName.hasPrefix("/"), !fileName.hasPrefix("\\") else { return false }
-    for scalar in fileName.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
-        return false
-    }
-    return true
-}
-
-private func containedMarketplaceDestination(for fileName: String, in targetDir: URL) -> URL? {
-    // Fail closed on traversal payloads, then re-resolve symlinks for pen containment.
-    guard isSafeMarketplaceFileName(fileName) else { return nil }
-    let dst = targetDir.appendingPathComponent(fileName).standardizedFileURL
-    let resolvedTarget = targetDir.resolvingSymlinksInPath().standardizedFileURL
-    let resolvedDst = dst.resolvingSymlinksInPath().standardizedFileURL
-    let prefix = resolvedTarget.path.hasSuffix("/") ? resolvedTarget.path : resolvedTarget.path + "/"
-    guard resolvedDst.path.hasPrefix(prefix) else { return nil }
-    return dst
-}
-
-private func validatedMarketplaceSourceDir(_ rawPath: String) -> URL? {
-    // Catalog sources stay under Plugins/ so workspace files never enter the pen.
-    let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.hasPrefix("\\"), !trimmed.hasPrefix("~"),
-          !trimmed.contains("\\"), !trimmed.contains(".."),
-          trimmed == "Plugins" || trimmed.hasPrefix("Plugins/") else { return nil }
-    for scalar in trimmed.unicodeScalars where scalar.value < 32 || scalar.value == 127 {
-        return nil
-    }
-    let parts = trimmed.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-    guard !parts.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
-    let workspaceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
-    let candidate = workspaceRoot.appendingPathComponent(trimmed).standardizedFileURL
-    let resolvedRoot = workspaceRoot.resolvingSymlinksInPath().standardizedFileURL
-    let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
-    let prefix = resolvedRoot.path.hasSuffix("/") ? resolvedRoot.path : resolvedRoot.path + "/"
-    guard resolvedCandidate.path.hasPrefix(prefix) else { return nil }
-    return candidate
-}
-
-private let marketplacePluginFileMaxBytes = 5_242_880
-
-private func isSafeLocalSourceFile(at src: URL, within localDir: URL) -> Bool {
-    // lstat-style check rejects symlinks plus directories before any copy.
-    guard let values = try? src.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey]),
-          values.isSymbolicLink != true,
-          values.isRegularFile == true,
-          values.isDirectory != true
-    else {
-        return false
-    }
-    let resolvedDir = localDir.resolvingSymlinksInPath().standardizedFileURL
-    let resolvedSrc = src.resolvingSymlinksInPath().standardizedFileURL
-    let prefix = resolvedDir.path.hasSuffix("/") ? resolvedDir.path : resolvedDir.path + "/"
-    return resolvedSrc.path.hasPrefix(prefix)
-}
-
-private func verifyInstalledManifestID(pluginID: String, in targetDir: URL) throws {
-    // Copied catalog bytes must describe the requested ID, not a swapped manifest.
-    let runeURL = targetDir.appendingPathComponent("rune.json")
-    guard let data = try? Data(contentsOf: runeURL),
-          let manifest = try? PluginManifest.from(jsonData: data),
-          manifest.id == pluginID
-    else {
-        throw PluginDiscoveryError.provisioningFailed("Installed manifest ID mismatch for '\(pluginID)'.")
-    }
-}
-
-private func copyMarketplaceFilesFromLocal(
-    pluginID: String,
-    targetDir: URL,
-    entry: MarketplaceIndexEntry?,
-    overwrite: Bool = false
-) throws -> Bool {
-    // Prefer workspace copies so reviewed local bytes win before any network fetch.
-    let fileManager = FileManager.default
-    var candidates = [
-        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Plugins/\(pluginID)")
-    ]
-    if let rawPath = entry?.path, let validated = validatedMarketplaceSourceDir(rawPath) {
-        candidates.append(validated)
-    }
-
-    for localDir in candidates where fileManager.fileExists(atPath: localDir.path) {
-        let filesToCopy = entry?.files ?? ["rune.json", "main.py", "requirements.txt", "README.md"]
-        // Fail closed: any unsafe name aborts the install, never silently skipped.
-        for fileName in filesToCopy {
-            guard containedMarketplaceDestination(for: fileName, in: targetDir) != nil else {
-                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
-            }
-        }
-        var hasMissing = false
-        for fileName in filesToCopy {
-            let src = localDir.appendingPathComponent(fileName)
-            if !fileManager.fileExists(atPath: src.path) {
-                hasMissing = true
-                break
-            }
-            guard isSafeLocalSourceFile(at: src, within: localDir) else {
-                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe local source '\(fileName)' for plugin '\(pluginID)'.")
-            }
-            // Cap local bytes like remote fetch so hashing never reads oversized files.
-            guard let attrs = try? fileManager.attributesOfItem(atPath: src.path),
-                  let size = attrs[.size] as? NSNumber,
-                  size.int64Value <= marketplacePluginFileMaxBytes
-            else {
-                throw PluginDiscoveryError.provisioningFailed("Local file '\(fileName)' exceeds size limit for plugin '\(pluginID)'.")
-            }
-        }
-        if hasMissing {
-            continue
-        }
-        for fileName in filesToCopy {
-            guard let dst = containedMarketplaceDestination(for: fileName, in: targetDir) else {
-                throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
-            }
-            let src = localDir.appendingPathComponent(fileName)
-            if overwrite, fileManager.fileExists(atPath: dst.path) {
-                try fileManager.removeItem(at: dst)
-            }
-            try fileManager.copyItem(at: src, to: dst)
-        }
-        try verifyInstalledManifestID(pluginID: pluginID, in: targetDir)
-        return true
-    }
-    return false
-}
-
-private func fetchMarketplaceFilesFromRemote(
-    pluginID: String,
-    targetDir: URL,
-    entry: MarketplaceIndexEntry?
-) async throws -> Bool {
-    // Fetch catalog bytes over https with SSRF guard when local copies are absent.
-    guard let entry, let rawURL = entry.downloadURL, let baseDownloadURL = URL(string: rawURL),
-          baseDownloadURL.scheme?.lowercased() == "https",
-          let files = entry.files, !files.isEmpty
-    else {
-        return false
-    }
-    for fileName in files {
-        guard containedMarketplaceDestination(for: fileName, in: targetDir) != nil else {
-            throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
-        }
-    }
-    let baseURL = baseDownloadURL.deletingLastPathComponent()
-    var remoteComplete = true
-    var writtenFiles: [URL] = []
-    for fileName in files {
-        guard let dst = containedMarketplaceDestination(for: fileName, in: targetDir) else {
-            throw PluginDiscoveryError.escapesPluginsDirectory("Unsafe marketplace file name '\(fileName)' for plugin '\(pluginID)'.")
-        }
-        let fileURL = baseURL.appendingPathComponent(fileName)
-        // Manual redirect chain re-validates each hop before accepting 200 bytes.
-        if let data = await fetchValidatedMarketplaceBytes(from: fileURL, maxBytes: marketplacePluginFileMaxBytes, timeout: 10.0) {
-            guard data.count <= marketplacePluginFileMaxBytes else {
-                throw PluginDiscoveryError.provisioningFailed("Remote file '\(fileName)' exceeds size limit for plugin '\(pluginID)'.")
-            }
-            try data.write(to: dst, options: .atomic)
-            writtenFiles.append(dst)
-        } else {
-            remoteComplete = false
-            break
-        }
-    }
-    if remoteComplete {
-        try verifyInstalledManifestID(pluginID: pluginID, in: targetDir)
-        return true
-    }
-    // Partial fetch must not leave fetched bytes beside a scaffolded fallback.
-    for written in writtenFiles {
-        try? FileManager.default.removeItem(at: written)
-    }
-    return false
-}
-
-private func installPluginFiles(
-    pluginID: String,
-    targetDir: URL,
-    entry: MarketplaceIndexEntry?,
-    context _: ServerContext,
-    overwrite: Bool = false,
-    allowScaffold: Bool = true
-) async throws {
-    if try copyMarketplaceFilesFromLocal(pluginID: pluginID, targetDir: targetDir, entry: entry, overwrite: overwrite) {
-        return
-    }
-    if try await fetchMarketplaceFilesFromRemote(pluginID: pluginID, targetDir: targetDir, entry: entry) {
-        return
-    }
-
-    // Scaffold is install-only; updates must fail closed instead of stubbing.
-    guard allowScaffold else {
-        throw PluginDiscoveryError.provisioningFailed("No update payload found for '\(pluginID)'.")
-    }
-
-    // Fallback: scaffold manifest and stub script
-    let curated = getCuratedMarketplaceItems(installedIDs: []).first(where: { $0.id == pluginID })
-    let displayName = entry?.name ?? curated?.name ?? (pluginID.components(separatedBy: ".").last?.capitalized ?? pluginID)
-    let itemDescription = entry?.description ?? curated?.description ?? "Installed community rune package."
-    let itemVersion = entry?.version ?? curated?.version ?? "1.0.0"
-
-    let toolsMetadata: [[String: Any]] = getCuratedToolsMetadata(
-        for: pluginID,
-        fallbackTools: entry?.declaredTools ?? curated?.declaredTools ?? ["\(pluginID).run"]
-    )
-
-    let manifestObject: [String: Any] = [
-        "id": pluginID,
-        "name": displayName,
-        "version": itemVersion,
-        "description": itemDescription,
-        // Scaffold emits a Python stub, so the manifest stays python-only.
-        "runtime": "python",
-        "entrypoint": "main.py",
-        "tools": toolsMetadata
-    ]
-    let manifestData = try JSONSerialization.data(
-        withJSONObject: manifestObject,
-        options: [.prettyPrinted, .sortedKeys]
-    )
-    let scriptContent = generateScaffoldScript(for: pluginID, tools: toolsMetadata)
-
-    let manifestFile = targetDir.appendingPathComponent("rune.json")
-    let scriptFile = targetDir.appendingPathComponent("main.py")
-
-    try manifestData.write(to: manifestFile, options: .atomic)
-    try scriptContent.write(to: scriptFile, atomically: true, encoding: .utf8)
-}
+// Catalog plus install helpers live in ServerMarketplaceCatalog.

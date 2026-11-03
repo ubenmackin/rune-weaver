@@ -8,7 +8,7 @@ import Foundation
 #endif
 
 /// Errors raised during CPython runtime provisioning.
-public enum PythonProvisionError: Error, Sendable, Equatable {
+public enum PythonProvisionError: Error, Sendable, Equatable, LocalizedError {
     /// Download of the archive failed.
     case downloadFailed(String)
     /// Size, hash, or layout verification failed.
@@ -19,6 +19,17 @@ public enum PythonProvisionError: Error, Sendable, Equatable {
     case directoryCreationFailed(String)
     /// Interpreter could not be made executable.
     case permissionFailed(String)
+
+    /// Surfaces the associated reason so callers report the failing stage.
+    public var errorDescription: String? {
+        switch self {
+        case let .downloadFailed(reason): reason
+        case let .verificationFailed(reason): reason
+        case let .extractionFailed(reason): reason
+        case let .directoryCreationFailed(reason): reason
+        case let .permissionFailed(reason): reason
+        }
+    }
 }
 
 /// Provisions the pinned CPython 3.12 runtime under the user data dir.
@@ -185,6 +196,8 @@ public struct PythonProvisioner: Sendable {
 
         let digest = try sha256HexOfFile(at: tempArchiveURL)
         guard digest.caseInsensitiveCompare(expectedSHA256) == .orderedSame else {
+            // Verification context carries no secrets, so digest plus size plus URL aid diagnosis.
+            RuneWeaverLog.stores.error("PythonProvisioner: archive verification failed digest=\(digest) size=\(archiveSize) url=\(archiveURL.absoluteString)")
             throw PythonProvisionError.verificationFailed("Archive SHA-256 mismatch; refusing to install.")
         }
 
@@ -294,7 +307,7 @@ public struct PythonProvisioner: Sendable {
             guard let chunk, !chunk.isEmpty else { break }
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return PluginSecurity.hexDigest(for: hasher.finalize())
     }
 
     /// Lists archive members and rejects absolute or parent-escaping entries.
