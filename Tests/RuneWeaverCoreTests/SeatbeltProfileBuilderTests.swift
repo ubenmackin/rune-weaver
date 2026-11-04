@@ -84,6 +84,23 @@ struct SeatbeltProfileBuilderTests {
         #expect(!profile.contains("(allow default)"))
         #expect(profile.contains("(allow file-read*"))
         #expect(profile.contains("(allow file-write*"))
+        // Public root CA bundles and trust anchors must be allowed for TLS
+        #expect(profile.contains("/private/etc/ssl/cert.pem"))
+        #expect(profile.contains("/System/Library/Keychains/SystemRootCertificates.keychain"))
+        #expect(profile.contains("cacert\\.pem"))
+    }
+
+    @Test
+    func `Does not emit network trust rules when network is denied`() {
+        let builder = SeatbeltProfileBuilder(
+            allowedReadPaths: ["/tmp/app"],
+            allowedWritePaths: ["/tmp/app"],
+            allowNetwork: false
+        )
+        let profile = builder.buildProfile()
+
+        #expect(profile.contains("(deny network*)"))
+        #expect(!profile.contains(";; System and runtime CA certificate bundles for TLS verification"))
     }
 
     @Test

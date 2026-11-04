@@ -132,6 +132,30 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         #"/Library/LaunchDaemons/"#
     ]
 
+    /// Standard public root CA certificate files required for TLS verification on macOS.
+    public static let defaultTrustBundleLiterals: [String] = [
+        "/private/etc/ssl/cert.pem",
+        "/etc/ssl/cert.pem",
+        "/System/Library/Keychains/SystemRootCertificates.keychain"
+    ]
+
+    /// Standard public root CA certificate directories for OpenSSL and Homebrew.
+    public static let defaultTrustBundleSubpaths: [String] = [
+        "/private/etc/ssl/certs",
+        "/etc/ssl/certs",
+        "/opt/homebrew/etc/ca-certificates",
+        "/opt/homebrew/etc/openssl@3",
+        "/opt/homebrew/etc/openssl"
+    ]
+
+    /// Standard public CA bundle filenames used by runtime packages (e.g. Python certifi).
+    public static let defaultTrustBundleRegexes: [String] = [
+        #"/cacert\.pem$"#,
+        #"/ca-bundle\.crt$"#,
+        #"/ca-bundle\.trust\.crt$"#,
+        #"/ca-certificates\.crt$"#
+    ]
+
     /// Maximum declared egress hosts honored per profile.
     public static let maxEgressHosts = 10
 
@@ -186,6 +210,34 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         }
     }
 
+    /// Synthesizes the complete SBPL Scheme string for `/usr/bin/sandbox-exec -p`.
+    public func buildProfile() -> String {
+        var lines: [String] = []
+        lines.append("(version 1)")
+        lines.append("(deny default)")
+        lines.append("")
+        appendNetworkPolicy(to: &lines)
+        lines.append("")
+        appendProcessCompat(to: &lines)
+        lines.append(contentsOf: bootstrapLiterals())
+        // Binary launch stays covered by the process exec/fork allows above combined with the file-
+        // read and executable-mapping allows below: the kernel reads binaries through file-read
+        // rights and maps them through file-map-executable rights, so both stay scoped to the same...
+        let sanitizedTemp = Set(Self.sanitizedAllowPaths(allowedTempPaths))
+        appendWriteIsolation(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendReadPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendExecPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendDenyPolicy(to: &lines)
+        if allowNetwork {
+            appendNetworkTrustPolicy(to: &lines)
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - SBPL Policy Construction
+
+extension SeatbeltProfileBuilder {
     /// Bootstrap traversal rules keeping dyld launchable under deny-default.
     private func bootstrapLiterals() -> [String] {
         [
@@ -231,27 +283,6 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         lines.append("    (literal \"/dev/dtracehelper\")")
         lines.append(")")
         lines.append("")
-    }
-
-    /// Synthesizes the complete SBPL Scheme string for `/usr/bin/sandbox-exec -p`.
-    public func buildProfile() -> String {
-        var lines: [String] = []
-        lines.append("(version 1)")
-        lines.append("(deny default)")
-        lines.append("")
-        appendNetworkPolicy(to: &lines)
-        lines.append("")
-        appendProcessCompat(to: &lines)
-        lines.append(contentsOf: bootstrapLiterals())
-        // Binary launch stays covered by the process exec/fork allows above combined with the file-
-        // read and executable-mapping allows below: the kernel reads binaries through file-read
-        // rights and maps them through file-map-executable rights, so both stay scoped to the same...
-        let sanitizedTemp = Set(Self.sanitizedAllowPaths(allowedTempPaths))
-        appendWriteIsolation(to: &lines, sanitizedTemp: sanitizedTemp)
-        appendReadPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
-        appendExecPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
-        appendDenyPolicy(to: &lines)
-        return lines.joined(separator: "\n")
     }
 
     /// Appends blanket network posture; supervisor remains the per-host gate.
@@ -380,6 +411,29 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             lines.append(")")
             lines.append("")
         }
+    }
+
+    /// Appends read access for system and runtime root CA bundles so TLS verification can succeed.
+    ///
+    /// The filename regex deny above catches all `.pem` and `*keychain*` paths to protect user
+    /// secrets and private keys, but that blanket deny inadvertently blocks public certificate
+    /// authority bundles (`/etc/ssl/cert.pem`, `SystemRootCertificates.keychain`, `cacert.pem`).
+    /// Reopening trust stores after the deny section restores TLS client verification while keeping
+    /// private keys and user keychains sealed.
+    private func appendNetworkTrustPolicy(to lines: inout [String]) {
+        lines.append(";; System and runtime CA certificate bundles for TLS verification")
+        lines.append("(allow file-read* file-test-existence")
+        for literal in Self.defaultTrustBundleLiterals {
+            lines.append("    (literal \"\(escapeScheme(literal))\")")
+        }
+        for subpath in Self.defaultTrustBundleSubpaths {
+            lines.append("    (subpath \"\(escapeScheme(subpath))\")")
+        }
+        for pattern in Self.defaultTrustBundleRegexes {
+            lines.append("    (regex #\"\(pattern)\")")
+        }
+        lines.append(")")
+        lines.append("")
     }
 
     /// Escapes a path for interpolation inside an SBPL quoted string.
