@@ -2784,4 +2784,104 @@ struct EmailToolsTests {
         #expect(decoded.failedAccounts == ["work"])
         #expect(decoded.messages.map(\.account) == ["work", "personal"])
     }
+
+    @Test
+    func `Search tool for INBOX fast-paths without listing mailboxes`() async throws {
+        let hit = EmailSearchHit(
+            id: "101",
+            subject: "Daily News",
+            from: "news@example.com",
+            date: "Mon, 01 Sep 2025 10:00:00 +0000",
+            snippet: "Today in news...",
+            mailbox: "INBOX"
+        )
+        let listCounter = OSAllocatedUnfairLock(initialState: 0)
+        let stub = ToolsTestSupport.StubEmailGateway(
+            hits: [hit],
+            listedMailboxes: ["INBOX", "Archive", "Sent"],
+            listCounter: listCounter
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailSearchTool(emailConfig: config, gateway: stub)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","mailbox":"INBOX","query":"news"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!output.isError)
+            #expect(listCounter.withLock { $0 } == 0)
+
+            // Contrast: searching a non-INBOX folder requires listing mailboxes to resolve canonical name.
+            let outputArchive = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","mailbox":"Archive","query":"news"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!outputArchive.isError)
+            #expect(listCounter.withLock { $0 } == 1)
+        }
+    }
+
+    @Test
+    func `Read tool for INBOX fast-paths without listing mailboxes`() async throws {
+        let msg = EmailFullMessage(
+            id: "101",
+            subject: "Daily News",
+            from: "news@example.com",
+            to: "worker@example.com",
+            date: "Mon, 01 Sep 2025 10:00:00 +0000",
+            body: "Today in news..."
+        )
+        let listCounter = OSAllocatedUnfairLock(initialState: 0)
+        let stub = ToolsTestSupport.StubEmailGateway(
+            message: msg,
+            listedMailboxes: ["INBOX", "Archive", "Sent"],
+            listCounter: listCounter
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: stub)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","mailbox":"INBOX","id":"101"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!output.isError)
+            #expect(listCounter.withLock { $0 } == 0)
+
+            // Contrast: reading from non-INBOX folder requires mailbox listing
+            let outputArchive = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","mailbox":"Archive","id":"101"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!outputArchive.isError)
+            #expect(listCounter.withLock { $0 } == 1)
+        }
+    }
+
+    @Test
+    func `Subprocess IO enforces timeout guard when helper stalls`() async throws {
+        let stallScript = "import time; time.sleep(5)"
+        let start = Date()
+        do {
+            _ = try await EmailSubprocessIO.runBridgeIO(
+                scriptSource: stallScript,
+                payload: Data(),
+                pythonExecutable: nil,
+                serviceName: "TEST",
+                timeoutSeconds: 0.3
+            )
+            Issue.record("Expected timeout error")
+        } catch let EmailIMAPError.bridgeFailed(msg) {
+            let elapsed = Date().timeIntervalSince(start)
+            #expect(elapsed < 3.0)
+            #expect(msg.contains("timed out after"))
+        }
+    }
+
+    @Test
+    func `Search bridge script batches UID fetch operations`() throws {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("range(0, len(fetch_uids), 25)"))
+        #expect(source.contains("conn.uid(\"fetch\", \",\".join(sub), \"(BODY.PEEK[])\")"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
 }

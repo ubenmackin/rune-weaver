@@ -170,6 +170,8 @@ enum ToolsTestSupport {
         let delimiter: String?
         /// Box receiving the destination mailbox passed to `move`, when set.
         let moveCapture: QueryCapture?
+        /// Counter tracking listMailboxes / mailboxListing calls.
+        let listCounter: OSAllocatedUnfairLock<Int>?
 
         /// Creates a stub gateway.
         init(
@@ -182,7 +184,8 @@ enum ToolsTestSupport {
             hitsByMailbox: [String: [EmailSearchHit]]? = nil,
             mailboxCapture: QueryCapture? = nil,
             delimiter: String? = nil,
-            moveCapture: QueryCapture? = nil
+            moveCapture: QueryCapture? = nil,
+            listCounter: OSAllocatedUnfairLock<Int>? = nil
         ) {
             self.hits = hits
             self.message = message
@@ -194,6 +197,7 @@ enum ToolsTestSupport {
             self.mailboxCapture = mailboxCapture
             self.delimiter = delimiter
             self.moveCapture = moveCapture
+            self.listCounter = listCounter
         }
 
         /// Stub append (no-op unless failure set).
@@ -210,6 +214,7 @@ enum ToolsTestSupport {
             if let failure {
                 throw EmailIMAPError.bridgeFailed(failure)
             }
+            listCounter?.withLock { $0 += 1 }
             let boxes = listedMailboxes ?? ["INBOX"]
             let separator = delimiter ?? "/"
             return EmailMailboxListing(mailboxes: boxes, delimiter: separator)

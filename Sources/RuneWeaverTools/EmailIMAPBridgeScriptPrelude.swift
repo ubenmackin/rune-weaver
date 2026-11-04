@@ -23,11 +23,11 @@ enum EmailIMAPSharedPrelude {
         for text, charset in decode_header(raw):
             if isinstance(text, bytes):
                 try:
-                    chunks = chunks + [text.decode(charset or "utf-8", errors="replace")]
+                    chunks.append(text.decode(charset or "utf-8", errors="replace"))
                 except Exception:
-                    chunks = chunks + [text.decode("utf-8", errors="replace")]
+                    chunks.append(text.decode("utf-8", errors="replace"))
             else:
-                chunks = chunks + [text]
+                chunks.append(text)
         return "".join(chunks)
 
     def body_text(msg):
@@ -91,13 +91,13 @@ enum EmailIMAPSharedPrelude {
                         payload = part.get_payload(decode=True) or b""
                     except Exception:
                         payload = b""
-                    found = found + [(name, ctype, payload)]
+                    found.append((name, ctype, payload))
         return found
 
     def attachments_of(msg):
         out = []
         for (name, ctype, payload) in attachment_parts(msg):
-            out = out + [{"filename": name, "contentType": ctype, "sizeBytes": len(payload)}]
+            out.append({"filename": name, "contentType": ctype, "sizeBytes": len(payload)})
         return out
 
     def snippet_of(text, limit=200):

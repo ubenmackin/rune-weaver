@@ -669,60 +669,81 @@ private enum EmailIMAPBridgeScriptSearch {
                     if has_att_filter is None:
                         wanted = [u.decode("utf-8", errors="replace") for u in uids[-limit:]]
                         wanted.reverse()
-                        scan_uids = wanted
+                        fetch_uids = wanted
                     else:
                         reversed_uids = [u.decode("utf-8", errors="replace") for u in reversed(uids)]
                         # Intent: bound filtered-search fetch cost. Candidate scan stays capped at
                         # max(limit*5, 50), i.e. worst-case 250 UIDs per mailbox (limit <= 50), with a
-                        # cheap BODYSTRUCTURE probe per candidate and a full BODY.PEEK[] fetch only
-                        # for probe matches (at most `limit` full fetches). All reads stay read-only
-                        # (BODYSTRUCTURE + BODY.PEEK) so no \Seen flag is set.
+                        # cheap BODYSTRUCTURE probe per candidate and a batched BODY.PEEK[] fetch only
+                        # for probe matches. All reads stay read-only (BODYSTRUCTURE + BODY.PEEK)
+                        # so no \Seen flag is set.
                         scan_uids = reversed_uids[:min(len(reversed_uids), max(limit * 5, 50))]
+                        fetch_uids = []
+                        for uid in scan_uids:
+                            try:
+                                styp, sdata = conn.uid("fetch", uid, "(BODYSTRUCTURE)")
+                            except Exception:
+                                styp, sdata = "NO", None
+                            if styp == "OK" and sdata:
+                                try:
+                                    if isinstance(sdata, bytes):
+                                        s_blob = sdata.decode("utf-8", errors="replace").lower()
+                                    else:
+                                        s_chunks = []
+                                        for s_item in sdata:
+                                            if s_item is None:
+                                                continue
+                                            if isinstance(s_item, tuple):
+                                                for s_sub in s_item:
+                                                    if isinstance(s_sub, bytes):
+                                                        s_chunks.append(s_sub.decode("utf-8", errors="replace"))
+                                                    elif s_sub is not None:
+                                                        s_chunks.append(str(s_sub))
+                                            elif isinstance(s_item, bytes):
+                                                s_chunks.append(s_item.decode("utf-8", errors="replace"))
+                                            else:
+                                                s_chunks.append(str(s_item))
+                                        s_blob = " ".join(s_chunks).lower()
+                                    # Empty probe response is inconclusive: fall through to the
+                                    # authoritative full fetch below instead of skipping.
+                                    if s_blob.strip():
+                                        probe_has = ("attachment" in s_blob or "filename" in s_blob or '"name"' in s_blob)
+                                        if probe_has != bool(has_att_filter):
+                                            continue
+                                except Exception:
+                                    pass
+                            fetch_uids.append(uid)
+                            if len(fetch_uids) >= max(limit * 2, 25):
+                                break
+
+                    raw_by_uid = {}
+                    for i in range(0, len(fetch_uids), 25):
+                        sub = [u for u in fetch_uids[i:i + 25] if re.fullmatch(r"\d+", u)]
+                        if not sub: continue
+                        try:
+                            ftyp, fdata = conn.uid("fetch", ",".join(sub), "(BODY.PEEK[])")
+                            if ftyp == "OK" and fdata:
+                                for chunk in fdata:
+                                    if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[0], bytes) and isinstance(chunk[1], bytes):
+                                        m = re.search(rb"\bUID\s+(\d+)\b", chunk[0], re.I)
+                                        if m: raw_by_uid[m.group(1).decode("ascii")] = chunk[1]
+                                        elif len(sub) == 1: raw_by_uid[sub[0]] = chunk[1]
+                        except Exception: pass
+                        for uid in sub:
+                            if uid in raw_by_uid: continue
+                            try:
+                                ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                                if ftyp == "OK" and fdata:
+                                    for chunk in fdata:
+                                        if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
+                                            raw_by_uid[uid] = chunk[1]
+                                            break
+                            except Exception: continue
 
                     messages = []
-                    for uid in scan_uids:
+                    for uid in fetch_uids:
                         try:
-                            if has_att_filter is not None:
-                                try:
-                                    styp, sdata = conn.uid("fetch", uid, "(BODYSTRUCTURE)")
-                                except Exception:
-                                    styp, sdata = "NO", None
-                                if styp == "OK" and sdata:
-                                    try:
-                                        if isinstance(sdata, bytes):
-                                            s_blob = sdata.decode("utf-8", errors="replace").lower()
-                                        else:
-                                            s_chunks = []
-                                            for s_item in sdata:
-                                                if s_item is None:
-                                                    continue
-                                                if isinstance(s_item, tuple):
-                                                    for s_sub in s_item:
-                                                        if isinstance(s_sub, bytes):
-                                                            s_chunks.append(s_sub.decode("utf-8", errors="replace"))
-                                                        elif s_sub is not None:
-                                                            s_chunks.append(str(s_sub))
-                                                elif isinstance(s_item, bytes):
-                                                    s_chunks.append(s_item.decode("utf-8", errors="replace"))
-                                                else:
-                                                    s_chunks.append(str(s_item))
-                                            s_blob = " ".join(s_chunks).lower()
-                                        # Empty probe response is inconclusive: fall through to the
-                                        # authoritative full fetch below instead of skipping.
-                                        if s_blob.strip():
-                                            probe_has = ("attachment" in s_blob or "filename" in s_blob or '"name"' in s_blob)
-                                            if probe_has != bool(has_att_filter):
-                                                continue
-                                    except Exception:
-                                        pass
-                            ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
-                            if ftyp != "OK" or not fdata:
-                                continue
-                            raw = None
-                            for chunk in fdata:
-                                if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
-                                    raw = chunk[1]
-                                    break
+                            raw = raw_by_uid.get(uid)
                             if not raw:
                                 continue
                             # Skip malformed message so single bad MIME does not fail entire search
