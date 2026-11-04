@@ -97,6 +97,8 @@ def _session_file_is_trusted(path: str) -> bool:
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
+    if st.st_size == 0:
+        return False
     try:
         if st.st_uid != os.geteuid():
             return False
@@ -164,7 +166,7 @@ def _resolve_session_file() -> str:
 
 
 def _prepare_session_file(path: str) -> None:
-    # Reserve the cache exclusively so creation never follows a planted link.
+    # Ensure secure directory exists, and clean up untrusted or empty session files.
     try:
         same_dir = os.path.realpath(os.path.dirname(path)) == os.path.realpath(_SESSION_DIR)
     except OSError:
@@ -176,25 +178,11 @@ def _prepare_session_file(path: str) -> None:
         st = os.lstat(path)
     except OSError:
         st = None
-    if st is not None and not _session_file_is_trusted(path):
+    if st is not None and (not _session_file_is_trusted(path) or st.st_size == 0):
         try:
             os.unlink(path)
         except OSError:
             return
-        st = None
-    if st is None:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        except OSError:
-            return
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
 
 
 def _harden_saved_session(path: str) -> None:
@@ -242,7 +230,10 @@ async def get_monarch_client() -> Any:
             mm.load_session(session_file)
             return mm
         except Exception:
-            pass  # Fall through to credentials if session expired/invalid
+            try:
+                os.unlink(session_file)
+            except OSError:
+                pass  # Fall through to credentials if session expired/invalid
 
     # 4. Email + Password Credentials Auth
     if email and password:
@@ -252,7 +243,7 @@ async def get_monarch_client() -> Any:
                 email=email,
                 password=password,
                 save_session=True,
-                use_saved_session=True,
+                use_saved_session=False,
                 mfa_secret_key=mfa_secret,
             )
             _harden_saved_session(session_file)
@@ -264,6 +255,12 @@ async def get_monarch_client() -> Any:
             )
         except LoginFailedException as e:
             raise RuntimeError(f"Monarch Money login failed: {e}")
+        except Exception as exc:
+            try:
+                os.unlink(session_file)
+            except OSError:
+                pass
+            raise RuntimeError(f"Monarch Money login failed: {exc}")
 
     raise RuntimeError(
         "Missing Monarch Money credentials. Please set MONARCH_TOKEN (recommended), "

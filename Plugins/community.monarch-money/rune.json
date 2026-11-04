@@ -1,7 +1,7 @@
 {
   "id": "community.monarch-money",
   "name": "Monarch Money",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Rune Weaver Community",
   "description": "Query accounts, balances, transactions, budgets, cashflow, and holdings, or update transactions and budgets via Monarch Money.",
   "runtime": "python",
