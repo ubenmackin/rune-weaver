@@ -115,10 +115,11 @@ public struct PythonProvisioner: Sendable {
         process.standardError = pipe
         do {
             try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return false }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return false }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8)
+            else { return false }
             return output.contains("3.12")
         } catch {
             return false
@@ -332,48 +333,32 @@ public struct PythonProvisioner: Sendable {
         }
     }
 
-    /// Runs `tar -tzf` off the cooperative pool to list archive members.
+    /// Runs `tar -tzf` with bounded async I/O to list archive members without pipe deadlocks.
     private func archiveMembers(at archiveURL: URL) async throws -> [String] {
-        try await Task.detached {
-            let listProcess = Process()
-            listProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            listProcess.arguments = ["-tzf", archiveURL.path]
-            let pipe = Pipe()
-            let errorPipe = Pipe()
-            listProcess.standardOutput = pipe
-            listProcess.standardError = errorPipe
-            do {
-                try listProcess.run()
-                listProcess.waitUntilExit()
-            } catch {
-                throw PythonProvisionError.verificationFailed("Failed to inspect archive: \(error.localizedDescription)")
-            }
-            guard listProcess.terminationStatus == 0 else {
-                throw PythonProvisionError.verificationFailed("Archive is corrupt (tar listing failed).")
-            }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.components(separatedBy: .newlines)
-        }.value
+        let result = try await BoundedProcessRunner.runAsync(
+            executableURL: URL(fileURLWithPath: "/usr/bin/tar"),
+            arguments: ["-tzf", archiveURL.path],
+            timeoutSeconds: 30,
+            maxOutputBytes: 16 * 1024 * 1024,
+            maxErrorBytes: 64 * 1024
+        )
+        guard result.exitCode == 0 else {
+            throw PythonProvisionError.verificationFailed("Archive is corrupt (tar listing failed).")
+        }
+        return result.stdoutString.components(separatedBy: .newlines)
     }
 
-    /// Extracts the verified archive into the staging directory.
+    /// Extracts the verified archive into the staging directory with bounded async I/O.
     private func extractArchive(at archiveURL: URL, to stagingDir: URL) async throws {
-        try await Task.detached {
-            let tarProcess = Process()
-            tarProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            tarProcess.arguments = ["-xzf", archiveURL.path, "-C", stagingDir.path]
-            do {
-                try tarProcess.run()
-                tarProcess.waitUntilExit()
-                guard tarProcess.terminationStatus == 0 else {
-                    throw PythonProvisionError.extractionFailed("tar extraction exited with code \(tarProcess.terminationStatus)")
-                }
-            } catch let error as PythonProvisionError {
-                throw error
-            } catch {
-                throw PythonProvisionError.extractionFailed("Failed to run /usr/bin/tar: \(error.localizedDescription)")
-            }
-        }.value
+        let result = try await BoundedProcessRunner.runAsync(
+            executableURL: URL(fileURLWithPath: "/usr/bin/tar"),
+            arguments: ["-xzf", archiveURL.path, "-C", stagingDir.path],
+            timeoutSeconds: 120,
+            maxOutputBytes: 64 * 1024,
+            maxErrorBytes: 64 * 1024
+        )
+        guard result.exitCode == 0 else {
+            throw PythonProvisionError.extractionFailed("tar extraction exited with code \(result.exitCode)")
+        }
     }
 }

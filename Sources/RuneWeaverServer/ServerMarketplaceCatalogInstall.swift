@@ -191,6 +191,15 @@ extension MarketplaceCatalog {
         var candidates = [
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Plugins/\(pluginID)")
         ]
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appendingPathComponent("plugins/\(pluginID)"))
+        }
+        let sourceFile = URL(fileURLWithPath: #filePath)
+        let packageRoot = sourceFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        candidates.append(packageRoot.appendingPathComponent("Plugins/\(pluginID)"))
         if let rawPath = entry?.path, let validated = MarketplaceCatalog.validatedMarketplaceSourceDir(rawPath) {
             candidates.append(validated)
         }
