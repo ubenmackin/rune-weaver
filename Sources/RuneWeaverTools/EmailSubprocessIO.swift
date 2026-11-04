@@ -1,5 +1,6 @@
 // Rune Weaver Tools — Shared blocking-IO helper single-sourcing subprocess execution.
 
+import Darwin
 import Foundation
 import os
 import RuneWeaverCore
@@ -18,12 +19,16 @@ enum EmailSubprocessIO {
         }
     }
 
+    /// Default timeout for bridge subprocess execution.
+    static let defaultTimeoutSeconds: TimeInterval = 60.0
+
     /// Runs blocking bridge subprocess I/O off the async executor.
     static func runBridgeIO(
         scriptSource: String,
         payload: Data,
         pythonExecutable: String?,
-        serviceName: String
+        serviceName: String,
+        timeoutSeconds: TimeInterval = defaultTimeoutSeconds
     ) async throws -> Data {
         try Task.checkCancellation()
         return try await withTaskCancellationHandler {
@@ -34,7 +39,8 @@ enum EmailSubprocessIO {
                             scriptSource: scriptSource,
                             payload: payload,
                             pythonExecutable: pythonExecutable,
-                            serviceName: serviceName
+                            serviceName: serviceName,
+                            timeoutSeconds: timeoutSeconds
                         ))
                     } catch {
                         continuation.resume(throwing: error)
@@ -128,12 +134,101 @@ enum EmailSubprocessIO {
         return output
     }
 
-    /// Spawns the Python helper and reads its output synchronously.
+    /// Standard drains and group for child process pipe reading.
+    private struct DrainedPipes {
+        let stdoutDrain: PipeDrain
+        let stderrDrain: PipeDrain
+        let drainGroup: DispatchGroup
+    }
+
+    /// Sets up background pipe drains for stdout and stderr.
+    private static func setupPipeDrains(
+        outputPipe: Pipe,
+        errorPipe: Pipe
+    ) -> DrainedPipes {
+        let stdoutDrain = PipeDrain()
+        let stderrDrain = PipeDrain()
+        let drainGroup = DispatchGroup()
+        let outFD = outputPipe.fileHandleForReading.fileDescriptor
+        let errFD = errorPipe.fileHandleForReading.fileDescriptor
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            let handle = FileHandle(fileDescriptor: outFD, closeOnDealloc: false)
+            stdoutDrain.set(handle.readDataToEndOfFile())
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            let handle = FileHandle(fileDescriptor: errFD, closeOnDealloc: false)
+            stderrDrain.set(handle.readDataToEndOfFile())
+            drainGroup.leave()
+        }
+        return DrainedPipes(stdoutDrain: stdoutDrain, stderrDrain: stderrDrain, drainGroup: drainGroup)
+    }
+
+    /// Writes the payload to the child process standard input, terminating on write failure.
+    private static func writePayload(
+        inputPipe: Pipe,
+        payload: Data,
+        process: Process,
+        exitGroup: DispatchGroup,
+        drainGroup: DispatchGroup,
+        serviceName: String
+    ) throws {
+        let pid = process.processIdentifier
+        do {
+            try inputPipe.fileHandleForWriting.write(contentsOf: payload)
+        } catch {
+            process.terminate()
+            _ = exitGroup.wait(timeout: .now() + 1.0)
+            _ = drainGroup.wait(timeout: .now() + 1.0)
+            MailSessionEventLog.live.emit(
+                event: "bridge.write.error",
+                account: serviceName.lowercased(),
+                pid: pid,
+                fields: ["error": error.localizedDescription]
+            )
+            throw EmailIMAPError.bridgeFailed("Could not write \(serviceName) request: \(error.localizedDescription)")
+        }
+        try? inputPipe.fileHandleForWriting.close()
+    }
+
+    /// Waits for the subprocess to exit within the given timeout, escalating to SIGKILL if stuck.
+    private static func waitForProcessExit(
+        process: Process,
+        exitGroup: DispatchGroup,
+        drainGroup: DispatchGroup,
+        serviceName: String,
+        timeoutSeconds: TimeInterval
+    ) throws {
+        let pid = process.processIdentifier
+        let waitResult = exitGroup.wait(timeout: .now() + timeoutSeconds)
+        if waitResult == .timedOut {
+            process.terminate()
+            if exitGroup.wait(timeout: .now() + 1.0) == .timedOut {
+                Darwin.kill(pid, SIGKILL)
+                _ = exitGroup.wait(timeout: .now() + 1.0)
+            }
+            _ = drainGroup.wait(timeout: .now() + 1.0)
+            MailSessionEventLog.live.emit(
+                event: "bridge.timeout",
+                account: serviceName.lowercased(),
+                pid: pid,
+                fields: ["timeoutSeconds": timeoutSeconds]
+            )
+            throw EmailIMAPError.bridgeFailed("\(serviceName) helper timed out after \(Int(timeoutSeconds))s")
+        }
+        process.waitUntilExit()
+        _ = drainGroup.wait(timeout: .now() + 5.0)
+    }
+
+    /// Spawns the Python helper and reads its output synchronously with a timeout guard.
     private static func runBridgeBlocking(
         scriptSource: String,
         payload: Data,
         pythonExecutable: String?,
-        serviceName: String
+        serviceName: String,
+        timeoutSeconds: TimeInterval
     ) throws -> Data {
         let startTime = Date()
         let configured = makeProcess(scriptSource: scriptSource, pythonExecutable: pythonExecutable)
@@ -144,9 +239,28 @@ enum EmailSubprocessIO {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+
+        let exitGroup = DispatchGroup()
+        exitGroup.enter()
+        let hasExited = OSAllocatedUnfairLock(initialState: false)
+        process.terminationHandler = { _ in
+            hasExited.withLock { exited in
+                if !exited {
+                    exited = true
+                    exitGroup.leave()
+                }
+            }
+        }
+
         do {
             try process.run()
         } catch {
+            hasExited.withLock { exited in
+                if !exited {
+                    exited = true
+                    exitGroup.leave()
+                }
+            }
             MailSessionEventLog.live.emit(
                 event: "session.spawn.error",
                 account: serviceName.lowercased(),
@@ -166,43 +280,27 @@ enum EmailSubprocessIO {
             argvPreview: configured.argvPreview,
             scriptBytes: scriptSource.utf8.count
         )
-        let stdoutDrain = PipeDrain()
-        let stderrDrain = PipeDrain()
-        let drainGroup = DispatchGroup()
-        let outFD = outputPipe.fileHandleForReading.fileDescriptor
-        let errFD = errorPipe.fileHandleForReading.fileDescriptor
-        drainGroup.enter()
-        DispatchQueue.global(qos: .utility).async {
-            let handle = FileHandle(fileDescriptor: outFD, closeOnDealloc: false)
-            stdoutDrain.set(handle.readDataToEndOfFile())
-            drainGroup.leave()
-        }
-        drainGroup.enter()
-        DispatchQueue.global(qos: .utility).async {
-            let handle = FileHandle(fileDescriptor: errFD, closeOnDealloc: false)
-            stderrDrain.set(handle.readDataToEndOfFile())
-            drainGroup.leave()
-        }
-        do {
-            try inputPipe.fileHandleForWriting.write(contentsOf: payload)
-        } catch {
-            process.terminate()
-            drainGroup.wait()
-            MailSessionEventLog.live.emit(
-                event: "bridge.write.error",
-                account: serviceName.lowercased(),
-                pid: pid,
-                fields: ["error": error.localizedDescription]
-            )
-            throw EmailIMAPError.bridgeFailed("Could not write \(serviceName) request: \(error.localizedDescription)")
-        }
-        try? inputPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
-        drainGroup.wait()
+
+        let drains = setupPipeDrains(outputPipe: outputPipe, errorPipe: errorPipe)
+        try writePayload(
+            inputPipe: inputPipe,
+            payload: payload,
+            process: process,
+            exitGroup: exitGroup,
+            drainGroup: drains.drainGroup,
+            serviceName: serviceName
+        )
+        try waitForProcessExit(
+            process: process,
+            exitGroup: exitGroup,
+            drainGroup: drains.drainGroup,
+            serviceName: serviceName,
+            timeoutSeconds: timeoutSeconds
+        )
         return try evaluateOutput(
             process: process,
-            stdoutDrain: stdoutDrain,
-            stderrDrain: stderrDrain,
+            stdoutDrain: drains.stdoutDrain,
+            stderrDrain: drains.stderrDrain,
             startTime: startTime,
             serviceName: serviceName,
             pid: pid

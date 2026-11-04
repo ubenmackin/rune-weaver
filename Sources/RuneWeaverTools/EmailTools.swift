@@ -371,13 +371,17 @@ extension EmailSearchTool {
         failedAccounts: [String]? = nil,
         callID: String
     ) async throws -> ToolOutput {
-        let listed = try await gateway.listMailboxes(credentials: credentials)
-        let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
         let canonical: String
-        do {
-            canonical = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requested, available: available)
-        } catch {
-            return .failure(error.localizedDescription, callID: callID)
+        if requested.caseInsensitiveCompare("INBOX") == .orderedSame {
+            canonical = "INBOX"
+        } else {
+            let listed = try await gateway.listMailboxes(credentials: credentials)
+            let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+            do {
+                canonical = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requested, available: available)
+            } catch {
+                return .failure(error.localizedDescription, callID: callID)
+            }
         }
         let hits = try await gateway.search(
             credentials: credentials,
@@ -586,15 +590,20 @@ extension EmailSearchTool {
             }
             return failed(error.localizedDescription)
         }
+        let isInbox = requestedMailbox?.caseInsensitiveCompare("INBOX") == .orderedSame
         let available: [String]
-        do {
-            let listed = try await gateway.listMailboxes(credentials: credentials)
-            available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
-        } catch {
-            if error is CancellationError {
-                throw error
+        if isInbox {
+            available = ["INBOX"]
+        } else {
+            do {
+                let listed = try await gateway.listMailboxes(credentials: credentials)
+                available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                return failed(error.localizedDescription)
             }
-            return failed(error.localizedDescription)
         }
         func searched(groups: [[EmailSearchHit]], folders: [String]) -> AccountSearchOutcome {
             AccountSearchOutcome(groups: groups, searchedFolders: folders, availableFolders: available, failureText: nil)
@@ -606,7 +615,7 @@ extension EmailSearchTool {
             AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: available, failureText: text)
         }
         if let requested = requestedMailbox {
-            guard let canonical = EmailBridgeParsing.resolveMailbox(requested, among: available) else {
+            guard let canonical = isInbox ? "INBOX" : EmailBridgeParsing.resolveMailbox(requested, among: available) else {
                 // Skipped silently: the account enters neither `accounts` nor
                 // `failedAccounts`, but `availableFolders` rides along so the
                 // parent can name real folders when no account covers the request.
@@ -973,14 +982,18 @@ public struct EmailReadTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
-            // Reuse the found mailbox so fan-out hits stay openable.
-            let listed = try await gateway.listMailboxes(credentials: credentials)
-            let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+            // Fast-path standard INBOX without an extra list round-trip; other mailboxes resolve against server listing.
             let effectiveMailbox: String
-            do {
-                effectiveMailbox = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requestedMailbox, available: available)
-            } catch {
-                return .failure(error.localizedDescription, callID: input.callID)
+            if requestedMailbox.caseInsensitiveCompare("INBOX") == .orderedSame {
+                effectiveMailbox = "INBOX"
+            } else {
+                let listed = try await gateway.listMailboxes(credentials: credentials)
+                let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+                do {
+                    effectiveMailbox = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requestedMailbox, available: available)
+                } catch {
+                    return .failure(error.localizedDescription, callID: input.callID)
+                }
             }
             let message = try await gateway.fetch(credentials: credentials, mailbox: effectiveMailbox, messageID: messageID)
             // Credential filter runs at the envelope boundary where
