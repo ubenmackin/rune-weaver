@@ -35,7 +35,7 @@ public enum PythonProvisionError: Error, Sendable, Equatable, LocalizedError {
 /// Provisions the pinned CPython 3.12 runtime under the user data dir.
 public struct PythonProvisioner: Sendable {
     /// Pinned CPython line supported for plugin virtual environments.
-    public static let defaultPythonVersion = "3.12.9"
+    public static let defaultPythonVersion = "3.12.16"
     /// Default install root under the user home.
     public static let defaultInstallRoot = "~/.runeweaver/python"
     /// Relative path of the interpreter inside the install root.
@@ -43,16 +43,16 @@ public struct PythonProvisioner: Sendable {
 
     /// Pinned Darwin ARM64 archive for the supported CPython line.
     public static let defaultArchiveURL: URL = {
-        guard let url = URL(
-            string: "https://github.com/astral-sh/python-build-standalone/releases/download/20250205/cpython-3.12.9+20250205-aarch64-apple-darwin-install_only.tar.gz"
-        ) else {
+        let base = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+        let file = "cpython-3.12.16+20261026-aarch64-apple-darwin-install_only.tar.gz"
+        guard let url = URL(string: base + file) else {
             preconditionFailure("Invalid hardcoded CPython archive URL")
         }
         return url
     }()
 
     /// Pinned SHA-256 digest for the declared archive.
-    public static let defaultArchiveSHA256 = "d0447b65d9653b763e042a424f7f4dd4632e792cc2a18dcdcb76d9ddbbcc0078"
+    public static let defaultArchiveSHA256 = "fbf4afef53c2a6b72bb741bc06d5671a9dfaf87bd84e5aa73ac9b3d0d589f14e"
     /// Minimum archive byte count accepted as a complete download.
     public static let defaultMinArchiveSize: Int64 = 10_000_000
 
@@ -104,7 +104,7 @@ public struct PythonProvisioner: Sendable {
         return URL(fileURLWithPath: expanded, isDirectory: true)
     }
 
-    /// Validates that an interpreter binary exists, runs, and reports Python 3.
+    /// Validates that an interpreter binary exists, runs, and reports the 3.12 line.
     public static func isCompatibleInterpreter(at url: URL) -> Bool {
         guard FileManager.default.isExecutableFile(atPath: url.path) else { return false }
         let process = Process()
@@ -119,7 +119,7 @@ public struct PythonProvisioner: Sendable {
             guard process.terminationStatus == 0 else { return false }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return false }
-            return output.contains("Python 3.")
+            return output.contains("3.12")
         } catch {
             return false
         }
@@ -138,7 +138,7 @@ public struct PythonProvisioner: Sendable {
             )
             guard result.exitCode == 0 else { return false }
             let combined = "\(result.stdoutString) \(result.stderrString)"
-            return combined.contains("Python 3.")
+            return combined.contains("3.12")
         } catch {
             return false
         }
@@ -163,6 +163,10 @@ public struct PythonProvisioner: Sendable {
         }
 
         let rootURL = installRootURL
+        // Remove an obsolete or non-compatible runtime before staging fresh CPython
+        if FileManager.default.fileExists(atPath: rootURL.path) {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
         do {
             try FileManager.default.createDirectory(at: rootURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         } catch {
@@ -268,8 +272,8 @@ public struct PythonProvisioner: Sendable {
             try await customDownload(archiveURL, tempArchiveURL)
         } else {
             let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 15
-            config.timeoutIntervalForResource = 30
+            config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 120
             let session = URLSession(configuration: config)
             do {
                 let (downloadedURL, response) = try await session.download(from: archiveURL)
