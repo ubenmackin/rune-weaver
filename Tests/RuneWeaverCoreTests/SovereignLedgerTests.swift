@@ -117,8 +117,8 @@ private struct LockedKeychainSigner: SovereignSigner {
         throw SovereignLedgerError.signingKeyUnavailable(reason: Self.lockedRemedy)
     }
 
-    func verify(challenge _: String, signature _: String) async -> Bool {
-        false
+    func verify(challenge _: String, signature _: String) async throws -> Bool {
+        throw SovereignLedgerError.signingKeyUnavailable(reason: Self.lockedRemedy)
     }
 }
 
@@ -218,7 +218,13 @@ struct SovereignKeychainIdentityTests {
         do {
             _ = try await ledger.verifyChain()
             Issue.record("Expected the locked Keychain to fail the ceremony closed")
-        } catch is SovereignLedgerError {}
+        } catch let error as SovereignLedgerError {
+            guard case let .signingKeyUnavailable(reason) = error else {
+                Issue.record("Expected signingKeyUnavailable, got \(error)")
+                return
+            }
+            #expect(reason.contains("unlock"))
+        }
         #expect(!FileManager.default.fileExists(atPath: scratch.copyPath))
         #expect(!FileManager.default.fileExists(atPath: scratch.checkpointPath))
         // The refused ceremony parks the pulse red until a fresh passing one.
@@ -227,6 +233,54 @@ struct SovereignKeychainIdentityTests {
         let value = await pulse.snapshot()
         #expect(value.status == .red)
         #expect(value.remediation == .rebaseline)
+    }
+
+    @Test
+    func `A locked Keychain during copy verification fails with signingKeyUnavailable rather than hmacMismatch`() async throws {
+        let scratch = try SovereignScratch.make()
+        defer { scratch.remove() }
+        let secrets = freshTestSecrets()
+        let store = EpisodeStore(dbPath: scratch.dbPath)
+        try await store.store(sessionID: UUID(), role: .user, content: "test entry")
+
+        // First establish a valid sovereign baseline with a working signer
+        let healthyLedger = makeLedger(
+            scratch: scratch,
+            secrets: secrets,
+            now: { Date(timeIntervalSince1970: 1_700_000_000) }
+        )
+        let firstVerdict = try await healthyLedger.verifyChain()
+        #expect(firstVerdict.outcome == .verified)
+
+        // Now run verifyChain with a locked Keychain signer
+        let lockedLedger = makeLedger(
+            scratch: scratch,
+            secrets: secrets,
+            signer: LockedKeychainSigner(),
+            now: { Date(timeIntervalSince1970: 1_700_000_000) }
+        )
+        do {
+            _ = try await lockedLedger.verifyChain()
+            Issue.record("Expected locked Keychain to fail verification")
+        } catch let error as SovereignLedgerError {
+            guard case let .signingKeyUnavailable(reason) = error else {
+                Issue.record("Expected signingKeyUnavailable instead of hmacMismatch, got \(error)")
+                return
+            }
+            #expect(reason.contains("unlock"))
+        }
+
+        // And rebaseline with a locked Keychain must also fail closed
+        do {
+            _ = try await lockedLedger.rebaselineToCurrentChain()
+            Issue.record("Expected locked Keychain to fail rebaseline")
+        } catch let error as SovereignLedgerError {
+            guard case let .signingKeyUnavailable(reason) = error else {
+                Issue.record("Expected signingKeyUnavailable instead of silent success, got \(error)")
+                return
+            }
+            #expect(reason.contains("unlock"))
+        }
     }
 }
 

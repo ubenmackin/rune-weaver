@@ -111,6 +111,7 @@ public actor SecretsManager {
                     kSecAttrService as String: self.service,
                     kSecAttrAccount as String: key,
                     kSecValueData as String: data,
+                    kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
                     kSecAttrLabel as String: "Rune Weaver: \(key)",
                     kSecAttrDescription as String: "Rune Weaver credential for \(key)"
                 ]
@@ -160,6 +161,7 @@ public actor SecretsManager {
                 ]
                 let attributes: [String: Any] = [
                     kSecValueData as String: data,
+                    kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
                     kSecAttrLabel as String: "Rune Weaver: \(key)",
                     kSecAttrDescription as String: "Rune Weaver credential for \(key)"
                 ]

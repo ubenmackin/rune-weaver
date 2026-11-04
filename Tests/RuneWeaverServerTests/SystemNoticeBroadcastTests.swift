@@ -61,8 +61,8 @@ private struct UnavailableSigner: SovereignSigner {
         throw SovereignLedgerError.signingKeyUnavailable(reason: "test signing key unavailable")
     }
 
-    func verify(challenge _: String, signature _: String) async -> Bool {
-        false
+    func verify(challenge _: String, signature _: String) async throws -> Bool {
+        throw SovereignLedgerError.signingKeyUnavailable(reason: "test signing key unavailable")
     }
 }
 

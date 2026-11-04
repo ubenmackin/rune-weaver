@@ -153,7 +153,7 @@ public protocol SovereignSigner: Sendable {
     /// - Returns: Hex-encoded signature.
     func sign(challenge: String) async throws -> String
     /// Whether a signature matches the challenge under this signer's key.
-    func verify(challenge: String, signature: String) async -> Bool
+    func verify(challenge: String, signature: String) async throws -> Bool
     /// Loads or mints the key without signing, so boot fails fast on lock.
     func preloadIfNeeded() async throws
 }
@@ -195,8 +195,8 @@ public struct EnclaveHMACSigner: SovereignSigner {
         return Self.hex(Data(code))
     }
 
-    public func verify(challenge: String, signature: String) async -> Bool {
-        guard let key = try? await loadKey() else { return false }
+    public func verify(challenge: String, signature: String) async throws -> Bool {
+        let key = try await loadKey()
         let candidate = signature.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let code = HMAC<SHA256>.authenticationCode(for: Data(challenge.utf8), using: key)
         return Self.constantTimeEquals(Self.hex(Data(code)), candidate)
@@ -578,6 +578,7 @@ public actor SovereignLedger {
         try await writeSovereignCopy(chain)
         try await writeCheckpoint(tip: primaryTip, episodeCount: episodes.count)
         try await writeAnchor(tip: primaryTip, episodeCount: episodes.count)
+        _ = try await readSovereignCopy()
         return SovereignVerdict(
             outcome: episodes.isEmpty ? .empty : .verified,
             primaryTip: primaryTip,
@@ -612,6 +613,7 @@ public actor SovereignLedger {
         try await writeSovereignCopy(chain)
         try await writeCheckpoint(tip: primaryTip, episodeCount: episodes.count)
         try await writeAnchor(tip: primaryTip, episodeCount: episodes.count)
+        _ = try await readSovereignCopy()
         return SovereignVerdict(
             outcome: episodes.isEmpty ? .empty : .verified,
             primaryTip: primaryTip,
@@ -739,7 +741,7 @@ extension SovereignLedger {
             else {
                 throw SovereignLedgerError.chainBreak(path: path, seq: offset)
             }
-            guard await signer.verify(challenge: line.hash, signature: line.hmac) else {
+            guard try await signer.verify(challenge: line.hash, signature: line.hmac) else {
                 throw SovereignLedgerError.hmacMismatch(path: path, seq: offset)
             }
         }
@@ -946,7 +948,7 @@ extension SovereignLedger {
             signature: signature,
             signer: signerIdentity
         )
-        guard await signer.verify(challenge: checkpoint.signaturePayload(), signature: signature) else {
+        guard try await signer.verify(challenge: checkpoint.signaturePayload(), signature: signature) else {
             throw SovereignLedgerError.checkpointSignatureInvalid(path: path)
         }
         return checkpoint
