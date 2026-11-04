@@ -421,22 +421,6 @@ extension PluginDiscoveryService {
         // Enable is an explicit operator action with bounded timeouts, the documented egress exception.
         try validatePinnedRequirements(at: reqURL)
 
-        // Standalone runtime precedes venv creation; failures warn then fall back.
-        // Only the final interpreter resolution throws with descriptive context.
-        let provisioner = PythonProvisioner()
-        do {
-            _ = try await provisioner.ensureProvisioned()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            if Task.isCancelled {
-                throw CancellationError()
-            }
-            RuneWeaverLog.tools.warning(
-                "PluginDiscoveryService: standalone runtime unavailable, falling back to managed/system python3.12: \(error.localizedDescription)"
-            )
-        }
-
         RuneWeaverLog.tools.info("PluginDiscoveryService: provisioning .venv for \(directory.lastPathComponent)...")
         let python = try await resolveProvisioningInterpreter()
         let version = await provisioningInterpreterVersion(for: python)
@@ -524,19 +508,29 @@ extension PluginDiscoveryService {
 
     static func resolveProvisioningInterpreter() async throws -> URL {
         // Env override first so operators pin the interpreter without editing code.
-        if let override = ProcessInfo.processInfo.environment["RUNEWEAVER_PYTHON_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
-            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        if let rawOverride = ProcessInfo.processInfo.environment["RUNEWEAVER_PYTHON_BIN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !rawOverride.isEmpty
+        {
+            // Unvalidated override would hand venv plus pip to an arbitrary binary.
+            let expanded = (rawOverride as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir)
+            guard exists, !isDir.boolValue, FileManager.default.isExecutableFile(atPath: expanded) else {
+                throw PluginDiscoveryError.provisioningFailed("RUNEWEAVER_PYTHON_BIN does not name an executable file: \(rawOverride)")
+            }
+            let url = URL(fileURLWithPath: expanded)
+            guard await PythonProvisioner.isCompatibleInterpreterAsync(at: url) else {
+                throw PluginDiscoveryError.provisioningFailed("RUNEWEAVER_PYTHON_BIN is not a compatible Python 3 interpreter: \(rawOverride)")
+            }
+            RuneWeaverLog.tools.info("PluginDiscoveryService: using RUNEWEAVER_PYTHON_BIN interpreter at \(url.path).")
+            return url
         }
-        // Provisioned runtime next when present and on the pinned line.
-        let provisioned = PythonProvisioner().destinationInterpreterURL
-        if await PythonProvisioner.isCompatibleInterpreterAsync(at: provisioned) {
-            return provisioned
-        }
-        // Managed plus Homebrew/system fallbacks gate on the same pin so a 3.9/3.11 never creates venvs.
+        // Managed runtime next.
         let managed = BrowserConfig.managedPythonExecutableURL()
         if await PythonProvisioner.isCompatibleInterpreterAsync(at: managed) {
             return managed
         }
+        // System and Homebrew fallbacks
         let candidates = [
             "/opt/homebrew/bin/python3",
             "/usr/local/bin/python3",
@@ -549,7 +543,25 @@ extension PluginDiscoveryService {
                 return url
             }
         }
-        throw PluginDiscoveryError.provisioningFailed("No compatible Python 3.12 interpreter found.")
+        // Provisioned runtime next if already present
+        let provisioner = PythonProvisioner()
+        let provisioned = provisioner.destinationInterpreterURL
+        if await PythonProvisioner.isCompatibleInterpreterAsync(at: provisioned) {
+            return provisioned
+        }
+        // Fallback to downloading standalone runtime only if no local interpreter is available
+        do {
+            return try await provisioner.ensureProvisioned()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw PluginDiscoveryError.provisioningFailed(
+                "No compatible Python interpreter found on system or managed path: \(error.localizedDescription)"
+            )
+        }
     }
 
     static func validatePinnedRequirements(at reqURL: URL) throws {

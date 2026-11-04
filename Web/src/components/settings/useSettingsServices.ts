@@ -623,9 +623,7 @@ export function useSettingsServices({
       setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
       pushSuccessToast(`Discovered ${res.plugins?.length ?? 0} external runes.`);
     } catch (err) {
-      pushErrorToast(
-        err instanceof Error ? err.message : "Failed to rescan plugins."
-      );
+      pushErrorToast(err instanceof Error ? err.message : "Failed to rescan plugins.");
     } finally {
       setRescanLoading(false);
     }
@@ -635,47 +633,27 @@ export function useSettingsServices({
     const nextEnabled = !plugin.isEnabled;
     setUpdatingPluginId(plugin.id);
     try {
-      await updatePluginState(plugin.id, {
-        action: nextEnabled ? "enable" : "disable",
-      });
+      await updatePluginState(plugin.id, { action: nextEnabled ? "enable" : "disable" });
       await loadPluginsData();
-      pushSuccessToast(
-        nextEnabled
-          ? `Enabled rune '${plugin.name}'.`
-          : `Disabled rune '${plugin.name}'.`
-      );
+      pushSuccessToast(nextEnabled ? `Enabled rune '${plugin.name}'.` : `Disabled rune '${plugin.name}'.`);
     } catch (err) {
-      pushErrorToast(
-        err instanceof Error ? err.message : "Failed to update rune state."
-      );
+      pushErrorToast(err instanceof Error ? err.message : "Failed to update rune state.");
     } finally {
       setUpdatingPluginId(null);
     }
   };
 
-  const handlePermissionChange = async (
-    pluginId: string,
-    toolName: string,
-    level: string
-  ) => {
+  const handlePermissionChange = async (pluginId: string, toolName: string, level: string) => {
     try {
       await updatePluginState(pluginId, {
-        action:
-          level === "default" ? "clear_override" : "override_permission",
+        action: level === "default" ? "clear_override" : "override_permission",
         toolName,
-        permissionLevel:
-          level === "default"
-            ? undefined
-            : (level as "readOnly" | "requiresApproval"),
+        permissionLevel: level === "default" ? undefined : (level as "readOnly" | "requiresApproval"),
       });
       await loadPluginsData();
       pushSuccessToast(`Updated permission for '${toolName}'.`);
     } catch (err) {
-      pushErrorToast(
-        err instanceof Error
-          ? err.message
-          : "Failed to update permission override."
-      );
+      pushErrorToast(err instanceof Error ? err.message : "Failed to update permission override.");
     }
   };
 
@@ -689,9 +667,7 @@ export function useSettingsServices({
       pushSuccessToast(`Uninstalled rune '${name}'.`);
       setPendingUninstallPlugin(null);
     } catch (err) {
-      pushErrorToast(
-        err instanceof Error ? err.message : "Failed to uninstall rune."
-      );
+      pushErrorToast(err instanceof Error ? err.message : "Failed to uninstall rune.");
     } finally {
       setUpdatingPluginId(null);
     }
