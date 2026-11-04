@@ -60,6 +60,13 @@ if [ ! -f "${ROOT_DIR}/Web/dist/index.html" ]; then
 fi
 cp -R "${ROOT_DIR}/Web/dist/." "${RESOURCES_DIR}/web/"
 
+# Copy curated plugins into app bundle resources
+if [ -d "${ROOT_DIR}/Plugins" ]; then
+    echo "==> Copying curated Plugins into ${RESOURCES_DIR}/plugins..."
+    mkdir -p "${RESOURCES_DIR}/plugins"
+    cp -R "${ROOT_DIR}/Plugins/." "${RESOURCES_DIR}/plugins/"
+fi
+
 # Copy app icon (generates if missing)
 if [ ! -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
     echo "==> Generating AppIcon.icns..."
