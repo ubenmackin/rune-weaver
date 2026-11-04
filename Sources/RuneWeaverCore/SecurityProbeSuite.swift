@@ -540,7 +540,7 @@ private struct ProbeSigner: SovereignSigner {
         EnclaveHMACSigner.hex(Data(HMAC<SHA256>.authenticationCode(for: Data(challenge.utf8), using: key)))
     }
 
-    func verify(challenge: String, signature: String) async -> Bool {
+    func verify(challenge: String, signature: String) async throws -> Bool {
         let candidate = signature.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let expected = EnclaveHMACSigner.hex(Data(HMAC<SHA256>.authenticationCode(for: Data(challenge.utf8), using: key)))
         return EnclaveHMACSigner.constantTimeEquals(expected, candidate)
