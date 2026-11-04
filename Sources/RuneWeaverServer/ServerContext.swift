@@ -363,7 +363,7 @@ public final class ServerContext: Sendable {
         self.activeTurns = activeTurns
         self.steeringQueue = steeringQueue
         self.persona = persona
-        let defaultDBPath = (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+        let defaultDBPath = memoryEngine.episodesDBPath
         // Goals resolve before the worker so the default worker below can
         // carry them; an explicit worker still wins untouched for tests that
         // hand-build one without goals.
@@ -491,8 +491,17 @@ extension ServerContext {
     /// Resolves the sovereign ledger over the primary episode ledger file, so the copy corroborates
     /// live truth; an injected instance wins untouched for tests.
     static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String, secrets: SecretsManager? = nil) -> SovereignLedger {
-        // Tests default to an isolated fallback so contexts never touch the login Keychain.
-        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath), secrets: SecretsManager.resolving(secrets))
+        if let ledger {
+            return ledger
+        }
+        let copyPath = SovereignLedger.companionCopyPath(forDBPath: dbPath)
+        let checkpointPath = SovereignLedger.companionCheckpointPath(forDBPath: dbPath)
+        return SovereignLedger(
+            episodeStore: EpisodeStore(dbPath: dbPath),
+            sovereignCopyPath: copyPath,
+            checkpointPath: checkpointPath,
+            secrets: SecretsManager.resolving(secrets)
+        )
     }
 
     /// Resolves the fan-out engine sharing the orchestrator and run log.
