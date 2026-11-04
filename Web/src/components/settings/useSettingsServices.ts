@@ -632,6 +632,11 @@ export function useSettingsServices({
   const handleToggleEnable = async (plugin: PluginSummary) => {
     const nextEnabled = !plugin.isEnabled;
     setUpdatingPluginId(plugin.id);
+    pushSuccessToast(
+      nextEnabled
+        ? `Preparing and enabling '${plugin.name}'… Setting up virtual environment and dependencies…`
+        : `Disabling '${plugin.name}'…`
+    );
     try {
       await updatePluginState(plugin.id, { action: nextEnabled ? "enable" : "disable" });
       await loadPluginsData();

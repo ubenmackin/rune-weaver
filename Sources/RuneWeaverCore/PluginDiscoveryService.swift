@@ -559,7 +559,7 @@ extension PluginDiscoveryService {
                 throw CancellationError()
             }
             throw PluginDiscoveryError.provisioningFailed(
-                "No compatible Python interpreter found on system or managed path: \(error.localizedDescription)"
+                "No compatible Python 3.12 interpreter found on system or managed path: \(error.localizedDescription)"
             )
         }
     }
