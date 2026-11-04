@@ -104,7 +104,7 @@ public struct PythonProvisioner: Sendable {
         return URL(fileURLWithPath: expanded, isDirectory: true)
     }
 
-    /// Validates that an interpreter binary exists, runs, and reports the 3.12 line.
+    /// Validates that an interpreter binary exists, runs, and reports Python 3.
     public static func isCompatibleInterpreter(at url: URL) -> Bool {
         guard FileManager.default.isExecutableFile(atPath: url.path) else { return false }
         let process = Process()
@@ -119,7 +119,7 @@ public struct PythonProvisioner: Sendable {
             guard process.terminationStatus == 0 else { return false }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return false }
-            return output.contains("3.12")
+            return output.contains("Python 3.")
         } catch {
             return false
         }
@@ -137,7 +137,8 @@ public struct PythonProvisioner: Sendable {
                 maxErrorBytes: 4 * 1024
             )
             guard result.exitCode == 0 else { return false }
-            return "\(result.stdoutString) \(result.stderrString)".contains("3.12")
+            let combined = "\(result.stdoutString) \(result.stderrString)"
+            return combined.contains("Python 3.")
         } catch {
             return false
         }
@@ -267,8 +268,8 @@ public struct PythonProvisioner: Sendable {
             try await customDownload(archiveURL, tempArchiveURL)
         } else {
             let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 300
-            config.timeoutIntervalForResource = 1800
+            config.timeoutIntervalForRequest = 15
+            config.timeoutIntervalForResource = 30
             let session = URLSession(configuration: config)
             do {
                 let (downloadedURL, response) = try await session.download(from: archiveURL)

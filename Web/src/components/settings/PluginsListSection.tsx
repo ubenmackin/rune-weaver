@@ -118,9 +118,14 @@ export function PluginsListSection({
                         onClick={() => handleUpdatePlugin(plugin)}
                         disabled={updatingPluginId === plugin.id}
                       >
-                        {updatingPluginId === plugin.id
-                          ? "Updating..."
-                          : `Update to v${plugin.latestVersion}`}
+                        {updatingPluginId === plugin.id ? (
+                          <>
+                            <span className="spinner-sm" aria-hidden="true" />
+                            <span>Updating…</span>
+                          </>
+                        ) : (
+                          `Update to v${plugin.latestVersion}`
+                        )}
                       </button>
                     )}
                     {onConfigurePlugin && (
@@ -144,15 +149,20 @@ export function PluginsListSection({
                       onClick={() => handleToggleEnable(plugin)}
                       disabled={updatingPluginId === plugin.id}
                     >
-                      {updatingPluginId === plugin.id
-                        ? "Updating..."
-                        : plugin.isEnabled
-                          ? "Disable"
-                          : isPending
-                            ? "Approve & Enable"
-                            : isTampered
-                              ? "Re-verify & Enable"
-                              : "Enable"}
+                      {updatingPluginId === plugin.id ? (
+                        <>
+                          <span className="spinner-sm" aria-hidden="true" />
+                          <span>{plugin.isEnabled ? "Disabling…" : "Enabling…"}</span>
+                        </>
+                      ) : plugin.isEnabled ? (
+                        "Disable"
+                      ) : isPending ? (
+                        "Approve & Enable"
+                      ) : isTampered ? (
+                        "Re-verify & Enable"
+                      ) : (
+                        "Enable"
+                      )}
                     </button>
                     <button
                       type="button"

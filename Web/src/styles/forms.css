@@ -212,6 +212,16 @@ button:disabled {
   gap: 6px;
 }
 
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent-purple-glow);
+  border-top-color: var(--accent-purple);
+  border-radius: 50%;
+  animation: spinAnimation 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
 .spin {
   animation: spinAnimation 1s linear infinite;
 }
