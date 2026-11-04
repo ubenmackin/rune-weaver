@@ -421,10 +421,52 @@ private struct CopyLine {
 
 /// Actor-backed sovereign ledger verifier.
 public actor SovereignLedger {
+    /// Shared test scratch directory isolated per test process.
+    public static let testScratchDirectory: URL = {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-test-sovereign-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    /// Production sovereign copy path.
+    public static let productionSovereignCopyPath = "~/.runeweaver/memory/ledger.sovereign.jsonl"
+    /// Production checkpoint path.
+    public static let productionCheckpointPath = "~/.runeweaver/sovereign-checkpoint.json"
+
     /// Default sovereign copy path beside the other durable memory state.
-    public static let defaultSovereignCopyPath = "~/.runeweaver/memory/ledger.sovereign.jsonl"
+    /// In test processes, defaults to an isolated scratch location to keep tests hermetic.
+    public static var defaultSovereignCopyPath: String {
+        if SecretsManager.isTestProcess {
+            return testScratchDirectory.appendingPathComponent("ledger.sovereign.jsonl").path
+        }
+        return productionSovereignCopyPath
+    }
+
     /// Default checkpoint path beside the other durable engine state.
-    public static let defaultCheckpointPath = "~/.runeweaver/sovereign-checkpoint.json"
+    /// In test processes, defaults to an isolated scratch location to keep tests hermetic.
+    public static var defaultCheckpointPath: String {
+        if SecretsManager.isTestProcess {
+            return testScratchDirectory.appendingPathComponent("sovereign-checkpoint.json").path
+        }
+        return productionCheckpointPath
+    }
+
+    /// Companion sovereign copy path beside a given episodes SQLite database path.
+    public static func companionCopyPath(forDBPath dbPath: String) -> String {
+        let dir = (dbPath as NSString).deletingLastPathComponent
+        return (dir as NSString).appendingPathComponent("ledger.sovereign.jsonl")
+    }
+
+    /// Companion sovereign checkpoint path beside a given episodes SQLite database path.
+    public static func companionCheckpointPath(forDBPath dbPath: String) -> String {
+        let dir = (dbPath as NSString).deletingLastPathComponent
+        let parent = (dir as NSString).lastPathComponent == "memory"
+            ? (dir as NSString).deletingLastPathComponent
+            : dir
+        return (parent as NSString).appendingPathComponent("sovereign-checkpoint.json")
+    }
+
     /// A checkpoint older than this cannot arbitrate; the ceremony fails closed.
     public static let maxCheckpointAge: TimeInterval = 36 * 60 * 60
     /// Sovereign copy ceiling. A larger copy is refused, never truncated.
@@ -451,15 +493,35 @@ public actor SovereignLedger {
     /// is recomputed from.
     public init(
         episodeStore: EpisodeStore,
-        sovereignCopyPath: String = SovereignLedger.defaultSovereignCopyPath,
-        checkpointPath: String = SovereignLedger.defaultCheckpointPath,
+        sovereignCopyPath: String? = nil,
+        checkpointPath: String? = nil,
         signer: SovereignSigner? = nil,
         secrets: SecretsManager? = nil,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.episodeStore = episodeStore
-        self.sovereignCopyPath = sovereignCopyPath
-        self.checkpointPath = checkpointPath
+        let rawCopy = sovereignCopyPath ?? Self.defaultSovereignCopyPath
+        let rawCheckpoint = checkpointPath ?? Self.defaultCheckpointPath
+        if SecretsManager.isTestProcess {
+            // Defense in depth: a test must never touch the user's ~/.runeweaver directory.
+            let expandedCopy = (rawCopy as NSString).expandingTildeInPath
+            let prodCopy = (Self.productionSovereignCopyPath as NSString).expandingTildeInPath
+            if expandedCopy == prodCopy || expandedCopy.contains("/.runeweaver/") {
+                self.sovereignCopyPath = Self.testScratchDirectory.appendingPathComponent("ledger.sovereign.jsonl").path
+            } else {
+                self.sovereignCopyPath = rawCopy
+            }
+            let expandedCheckpoint = (rawCheckpoint as NSString).expandingTildeInPath
+            let prodCheckpoint = (Self.productionCheckpointPath as NSString).expandingTildeInPath
+            if expandedCheckpoint == prodCheckpoint || expandedCheckpoint.contains("/.runeweaver/") {
+                self.checkpointPath = Self.testScratchDirectory.appendingPathComponent("sovereign-checkpoint.json").path
+            } else {
+                self.checkpointPath = rawCheckpoint
+            }
+        } else {
+            self.sovereignCopyPath = rawCopy
+            self.checkpointPath = rawCheckpoint
+        }
         // Tests default to an isolated fallback so ceremonies stay hermetic.
         let resolvedSecrets = SecretsManager.resolving(secrets)
         self.secrets = resolvedSecrets

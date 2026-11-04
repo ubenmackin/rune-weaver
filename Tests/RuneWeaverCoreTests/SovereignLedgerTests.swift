@@ -282,6 +282,37 @@ struct SovereignKeychainIdentityTests {
             #expect(reason.contains("unlock"))
         }
     }
+
+    @Test
+    func `process isolates default sovereign ledger paths from production`() async throws {
+        #expect(SecretsManager.isTestProcess)
+        let copyPath = SovereignLedger.defaultSovereignCopyPath
+        let checkpointPath = SovereignLedger.defaultCheckpointPath
+        #expect(!copyPath.contains(".runeweaver"))
+        #expect(!checkpointPath.contains(".runeweaver"))
+        #expect(copyPath.contains("runeweaver-test-sovereign"))
+        #expect(checkpointPath.contains("runeweaver-test-sovereign"))
+
+        // Companion paths test
+        let customDB = "/tmp/custom-fixture-tree/episodes.db"
+        let companionCopy = SovereignLedger.companionCopyPath(forDBPath: customDB)
+        let companionCheckpoint = SovereignLedger.companionCheckpointPath(forDBPath: customDB)
+        #expect(companionCopy == "/tmp/custom-fixture-tree/ledger.sovereign.jsonl")
+        #expect(companionCheckpoint == "/tmp/custom-fixture-tree/sovereign-checkpoint.json")
+
+        let scratch = try SovereignScratch.make()
+        defer { scratch.remove() }
+
+        // In test mode, even passing production paths explicitly redirects to scratch
+        let ledger = SovereignLedger(
+            episodeStore: EpisodeStore(dbPath: scratch.dbPath),
+            sovereignCopyPath: SovereignLedger.productionSovereignCopyPath,
+            checkpointPath: SovereignLedger.productionCheckpointPath
+        )
+        let verdict = try await ledger.verifyChain()
+        #expect(verdict.outcome == .empty)
+        #expect(FileManager.default.fileExists(atPath: SovereignLedger.defaultSovereignCopyPath))
+    }
 }
 
 @Suite("Sovereign Anchor And Orphan")

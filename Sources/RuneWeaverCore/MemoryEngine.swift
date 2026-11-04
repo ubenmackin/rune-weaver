@@ -192,6 +192,11 @@ public actor MemoryEngine {
     /// Episodic conversation-history store.
     private let episodeStore: EpisodeStore
 
+    /// Filesystem path to the primary episodes SQLite database.
+    public nonisolated var episodesDBPath: String {
+        episodeStore.dbPath
+    }
+
     /// Semantic fact/vector store.
     private let vectorStore: VectorStore
     /// Durable document index for hybrid keyword/vector recall, when configured.
@@ -413,55 +418,6 @@ public actor MemoryEngine {
         }
     }
 
-    // MARK: - Semantic
-
-    /// Stores a fact in semantic memory and in the user profile.
-    @discardableResult
-    public func storeSemantic(
-        fact: String,
-        embedding: [Float],
-        metadata: [String: String]? = nil,
-        confidence: Double = 1.0,
-        source: String = "user"
-    ) async throws -> UserFact {
-        let trimmed = try Self.validatedFactText(fact)
-        guard (0.0 ... 1.0).contains(confidence) else {
-            throw MemoryEngineError.semanticFailed("Confidence must be in [0, 1].")
-        }
-        return try await persistValidatedFact(
-            content: trimmed,
-            embedding: embedding,
-            metadata: metadata ?? [:],
-            confidence: confidence,
-            source: source
-        )
-    }
-
-    /// Queries semantic memory by embedding, filtered by metadata.
-    public func querySemantic(
-        query: String,
-        embedding: [Float],
-        limit: Int = 5,
-        metadataFilter: [String: String]? = nil
-    ) async -> [MemoryResult] {
-        guard limit > 0 else { return [] }
-        let clamped = min(limit, Self.maxPerTierResults)
-        let scored: [ScoredFact] = if embedding.isEmpty {
-            await vectorStore.search(query: query, limit: clamped, metadataFilter: metadataFilter)
-        } else {
-            await vectorStore.query(embedding: embedding, limit: clamped, metadataFilter: metadataFilter)
-        }
-        return scored.map { hit in
-            MemoryResult(
-                content: hit.fact.content,
-                score: hit.score,
-                source: .semantic,
-                metadata: ["id": hit.fact.id.uuidString, "query": query]
-                    .merging(hit.fact.metadata) { current, _ in current }
-            )
-        }
-    }
-
     // MARK: - Profile
 
     /// Returns the current user profile.
@@ -628,6 +584,59 @@ public actor MemoryEngine {
         profile.facts.removeAll { $0.id == id }
         touchProfile()
         await answerCache.invalidateOnMemoryWrite()
+    }
+}
+
+// MARK: - MemoryEngine Semantic Queries
+
+extension MemoryEngine {
+    // MARK: - Semantic
+
+    /// Stores a fact in semantic memory and in the user profile.
+    @discardableResult
+    public func storeSemantic(
+        fact: String,
+        embedding: [Float],
+        metadata: [String: String]? = nil,
+        confidence: Double = 1.0,
+        source: String = "user"
+    ) async throws -> UserFact {
+        let trimmed = try Self.validatedFactText(fact)
+        guard (0.0 ... 1.0).contains(confidence) else {
+            throw MemoryEngineError.semanticFailed("Confidence must be in [0, 1].")
+        }
+        return try await persistValidatedFact(
+            content: trimmed,
+            embedding: embedding,
+            metadata: metadata ?? [:],
+            confidence: confidence,
+            source: source
+        )
+    }
+
+    /// Queries semantic memory by embedding, filtered by metadata.
+    public func querySemantic(
+        query: String,
+        embedding: [Float],
+        limit: Int = 5,
+        metadataFilter: [String: String]? = nil
+    ) async -> [MemoryResult] {
+        guard limit > 0 else { return [] }
+        let clamped = min(limit, Self.maxPerTierResults)
+        let scored: [ScoredFact] = if embedding.isEmpty {
+            await vectorStore.search(query: query, limit: clamped, metadataFilter: metadataFilter)
+        } else {
+            await vectorStore.query(embedding: embedding, limit: clamped, metadataFilter: metadataFilter)
+        }
+        return scored.map { hit in
+            MemoryResult(
+                content: hit.fact.content,
+                score: hit.score,
+                source: .semantic,
+                metadata: ["id": hit.fact.id.uuidString, "query": query]
+                    .merging(hit.fact.metadata) { current, _ in current }
+            )
+        }
     }
 }
 
