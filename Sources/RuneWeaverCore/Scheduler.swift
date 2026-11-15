@@ -327,6 +327,8 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     public var calendarLeadTimeMinutes: Int?
     /// Calendar names to watch for calendar upcoming event trigger.
     public var calendarNames: [String]?
+    /// Missed-schedule policy when a cron slot was missed while asleep or offline (`nil` defaults to `.strict`).
+    public var misfirePolicy: SchedulerMisfirePolicy?
 
     private enum CodingKeys: String, CodingKey {
         case name
@@ -340,6 +342,7 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         case rules
         case calendarLeadTimeMinutes = "calendar_lead_time_minutes"
         case calendarNames = "calendar_names"
+        case misfirePolicy = "misfire_policy"
     }
 
     /// Creates a job config.
@@ -354,7 +357,8 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         watcherSource: EventWatcherSource? = nil,
         rules: [EventRule]? = nil,
         calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil
+        calendarNames: [String]? = nil,
+        misfirePolicy: SchedulerMisfirePolicy? = nil
     ) {
         self.name = name
         self.prompt = prompt
@@ -367,6 +371,7 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         self.rules = rules
         self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
         self.calendarNames = calendarNames
+        self.misfirePolicy = misfirePolicy
     }
 
     /// Clamps a calendar lead time to the shared `minCalendarLeadTimeMinutes...maxCalendarLeadTimeMinutes` bounds.
@@ -594,8 +599,10 @@ public struct SchedulerConfig: Sendable, Codable, Equatable {
 
 /// Why a scheduler job fired.
 public enum SchedulerFireReason: Sendable, Equatable {
-    /// A cron fire time fell in the check window.
+    /// A cron fire time fell in the active grace window.
     case cron
+    /// A missed cron fire time was caught up after wake or restart.
+    case cronCatchUp
     /// Previously unseen mail arrived.
     case emailArrived(account: String, count: Int)
     /// Previously unseen message arrived.
@@ -608,6 +615,8 @@ public enum SchedulerFireReason: Sendable, Equatable {
         switch self {
         case .cron:
             "cron"
+        case .cronCatchUp:
+            "cron_catch_up"
         case let .emailArrived(account, count):
             "email(\(account),+\(count))"
         case let .messagesArrived(count):
@@ -1184,9 +1193,16 @@ extension SchedulerJobConfig {
                     failure: { _ in LoadError() }
                 )
             }
-            // Watcher columns share one statement owner so server
+            // Watcher and cron-tracking columns share statement owners so server
             // persistence and direct-core reads add identical columns.
             SchedulerJobConfig.applyWatcherColumnMigrations { statement in
+                _ = try? SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: statement,
+                    failure: { _ in LoadError() }
+                )
+            }
+            SchedulerJobConfig.applyCronTrackingColumnMigrations { statement in
                 _ = try? SQLiteHelpers.exec(
                     handle: handle,
                     sql: statement,
@@ -1201,7 +1217,7 @@ extension SchedulerJobConfig {
             SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
                    poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
                    watcher_source, rules, calendar_lead_time_minutes, calendar_names,
-                   poll_from, poll_subject, poll_unread_only, poll_since_days
+                   poll_from, poll_subject, poll_unread_only, poll_since_days, misfire_policy
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -1220,7 +1236,7 @@ extension SchedulerJobConfig {
             return loaded
         }
 
-        /// Builds one config from a decoded row plus watcher columns.
+        /// Builds one config from a decoded row plus watcher and misfire columns.
         private static func makeSchedulerStoreConfig(row: SchedulerJobRow, statement: OpaquePointer?) -> SchedulerJobConfig {
             let watcherRaw = SQLiteHelpers.columnText(statement, index: 11)
             let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
@@ -1231,6 +1247,7 @@ extension SchedulerJobConfig {
             let pollSubject = SQLiteHelpers.columnText(statement, index: 16)
             let pollUnreadOnly = (SQLiteHelpers.columnInt64(statement, index: 17) ?? 0) != 0
             let pollSinceDays = SQLiteHelpers.columnInt64(statement, index: 18).map { Int($0) }
+            let misfirePolicy = SQLiteHelpers.columnText(statement, index: 19).flatMap { SchedulerMisfirePolicy.parseStrict($0) }
             return SchedulerJobConfig(
                 name: row.name,
                 prompt: row.prompt,
@@ -1247,7 +1264,8 @@ extension SchedulerJobConfig {
                 watcherSource: watcherSource,
                 rules: rules,
                 calendarLeadTimeMinutes: leadTime,
-                calendarNames: calendarNames
+                calendarNames: calendarNames,
+                misfirePolicy: misfirePolicy
             )
         }
 

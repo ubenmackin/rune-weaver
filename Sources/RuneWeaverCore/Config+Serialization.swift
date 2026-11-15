@@ -318,6 +318,9 @@ extension RuneWeaverConfig {
             if let schedule = job.schedule, !schedule.isEmpty {
                 lines.append("schedule = \(Self.tomlQuoted(schedule))")
             }
+            if let misfirePolicy = job.misfirePolicy {
+                lines.append("misfire_policy = \(Self.tomlQuoted(misfirePolicy.rawValue))")
+            }
             if let maxIter = job.maxToolIterations {
                 lines.append("max_tool_iterations = \(maxIter)")
             }

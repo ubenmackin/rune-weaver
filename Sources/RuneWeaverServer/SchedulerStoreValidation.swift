@@ -29,6 +29,7 @@ extension SchedulerStore {
         let rules: [EventRule]?
         let calendarLeadTimeMinutes: Int?
         let calendarNames: [String]?
+        let misfirePolicy: String?
     }
 
     /// Validates required job fields plus trigger shape.
@@ -51,7 +52,8 @@ extension SchedulerStore {
         watcherSource: EventWatcherSource? = nil,
         rules: [EventRule]? = nil,
         calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil
+        calendarNames: [String]? = nil,
+        misfirePolicy: String? = nil
     ) throws {
         let request = ValidationRequest(
             name: name, schedule: schedule, prompt: prompt,
@@ -61,9 +63,11 @@ extension SchedulerStore {
             pollUnreadOnly: pollUnreadOnly, pollSinceDays: pollSinceDays,
             maxToolIterations: maxToolIterations, onToolLimit: onToolLimit,
             watcherSource: watcherSource, rules: rules,
-            calendarLeadTimeMinutes: calendarLeadTimeMinutes, calendarNames: calendarNames
+            calendarLeadTimeMinutes: calendarLeadTimeMinutes, calendarNames: calendarNames,
+            misfirePolicy: misfirePolicy
         )
         try validateToolBudget(maxToolIterations: maxToolIterations, onToolLimit: onToolLimit)
+        try validateMisfirePolicy(misfirePolicy)
         try validateNameAndPrompt(request)
         try validatePollAccountRequirements(request)
         try validatePollFieldValues(request)
@@ -225,6 +229,14 @@ extension SchedulerStore {
         }
         if let onToolLimit, !["fail", "park"].contains(onToolLimit) {
             throw SchedulerStoreError.invalidField("on_tool_limit must be 'fail' or 'park' (got '\(onToolLimit)')")
+        }
+    }
+
+    /// Validates an optional missed-schedule policy token (`strict` or `catch_up`).
+    static func validateMisfirePolicy(_ misfirePolicy: String?) throws {
+        guard let misfirePolicy else { return }
+        guard SchedulerMisfirePolicy.parseStrict(misfirePolicy) != nil else {
+            throw SchedulerStoreError.invalidField("misfire_policy must be 'strict' or 'catch_up' (got '\(misfirePolicy)')")
         }
     }
 

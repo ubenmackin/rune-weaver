@@ -861,6 +861,19 @@ extension RuneWeaverConfig {
         let pollAccount = try node.strictString("poll_account", field: "scheduler.jobs[\(name)].poll_account")
         let maxToolIterations = try node.strictInt("max_tool_iterations", field: "scheduler.jobs[\(name)].max_tool_iterations")
         let onToolLimit = try node.strictString("on_tool_limit", field: "scheduler.jobs[\(name)].on_tool_limit")
+        let misfireRaw = try node.strictString("misfire_policy", field: "scheduler.jobs[\(name)].misfire_policy")
+        let misfirePolicy: SchedulerMisfirePolicy?
+        if let misfireRaw {
+            guard let parsed = SchedulerMisfirePolicy.parseStrict(misfireRaw) else {
+                throw ConfigError.validationError(
+                    field: "scheduler.jobs[\(name)].misfire_policy",
+                    message: "must be 'strict' or 'catch_up' (got '\(misfireRaw)')"
+                )
+            }
+            misfirePolicy = parsed
+        } else {
+            misfirePolicy = nil
+        }
         let poll: EmailPollRule?
         if let account = pollAccount {
             let query = try node.strictString("poll_query", field: "scheduler.jobs[\(name)].poll_query") ?? ""
@@ -905,7 +918,8 @@ extension RuneWeaverConfig {
             schedule: schedule,
             poll: poll,
             maxToolIterations: maxToolIterations,
-            onToolLimit: onToolLimit
+            onToolLimit: onToolLimit,
+            misfirePolicy: misfirePolicy
         )
     }
 

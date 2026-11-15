@@ -745,4 +745,83 @@ describe("ScheduleWizardModal budgets and tips", () => {
       undefined,
     );
   });
+
+  it("defaults cron schedules to strict and allows opting into catch-up", async () => {
+    stubFetch({ accounts: ["icloud"] });
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => {});
+    render(
+      <ScheduleWizardModal
+        sectionDefault={25}
+        onSave={onSave}
+        onClose={() => {}}
+      />,
+    );
+    await user.type(screen.getByLabelText("Job Name"), "Daily check");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const catchUpToggle = screen.getByLabelText(
+      "Run as soon as possible if missed (Catch up)",
+    ) as HTMLInputElement;
+    expect(catchUpToggle.checked).toBe(false);
+    await user.click(catchUpToggle);
+    expect(catchUpToggle.checked).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(
+      screen.getByLabelText("Agent Task Instructions"),
+      "Check status",
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Run as soon as possible (Catch up once)");
+    await user.click(screen.getByRole("button", { name: "Save Schedule" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ misfirePolicy: "catch_up" }),
+      undefined,
+    );
+  });
+
+  it("prefills catch-up policy when editing and submits strict when unchecked", async () => {
+    stubFetch({ accounts: ["icloud"] });
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => {});
+    const jobToEdit = {
+      id: "catchup-edit-id",
+      name: "Catchup digest",
+      schedule: "0 8 * * *",
+      prompt: "Summarize mail",
+      enabled: true,
+      misfirePolicy: "catch_up" as const,
+      pollAccount: null,
+      pollQuery: null,
+      pollMailbox: null,
+      pollIntervalSeconds: null,
+      pollLimit: null,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    render(
+      <ScheduleWizardModal
+        jobToEdit={jobToEdit}
+        sectionDefault={25}
+        onSave={onSave}
+        onClose={() => {}}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const catchUpToggle = screen.getByLabelText(
+      "Run as soon as possible if missed (Catch up)",
+    ) as HTMLInputElement;
+    expect(catchUpToggle.checked).toBe(true);
+    await user.click(catchUpToggle);
+    expect(catchUpToggle.checked).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Skip if missed (Strict schedule)");
+    await user.click(screen.getByRole("button", { name: "Update Schedule" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ misfirePolicy: "strict" }),
+      "catchup-edit-id",
+    );
+  });
 });

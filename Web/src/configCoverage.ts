@@ -120,6 +120,7 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "scheduler.jobs.*.poll_limit": "scheduler-pane",
   "scheduler.jobs.*.max_tool_iterations": "scheduler-pane",
   "scheduler.jobs.*.on_tool_limit": "scheduler-pane",
+  "scheduler.jobs.*.misfire_policy": "scheduler-pane",
   "plugins.plugins_dir": "plugins-pane",
   "plugins.marketplace_index_url": "plugins-pane",
   "plugins.auto_rescan": "plugins-pane",

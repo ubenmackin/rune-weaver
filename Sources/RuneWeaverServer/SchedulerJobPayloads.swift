@@ -48,6 +48,8 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
     public var calendarLeadTimeMinutes: Int?
     /// Calendar names to watch for calendar upcoming event trigger.
     public var calendarNames: [String]?
+    /// Missed-schedule policy: `"strict"` (default) or `"catch_up"`.
+    public var misfirePolicy: String?
 
     private enum CodingKeys: String, CodingKey {
         case name
@@ -73,6 +75,8 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         case rules
         case calendarLeadTimeMinutes
         case calendarNames
+        case misfirePolicy
+        case misfirePolicySnake = "misfire_policy"
     }
 
     /// Creates a new-job payload.
@@ -97,7 +101,8 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         watcherSource: EventWatcherSource? = nil,
         rules: [EventRule]? = nil,
         calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil
+        calendarNames: [String]? = nil,
+        misfirePolicy: String? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -120,6 +125,7 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         self.rules = rules
         self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
         self.calendarNames = calendarNames
+        self.misfirePolicy = misfirePolicy
     }
 
     /// Decodes the payload accepting `pollContains`/`poll_contains` as aliases for `pollQuery`.
@@ -150,6 +156,8 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         rules = try container.decodeIfPresent([EventRule].self, forKey: .rules)
         calendarLeadTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .calendarLeadTimeMinutes)
         calendarNames = try container.decodeIfPresent([String].self, forKey: .calendarNames)
+        misfirePolicy = try container.decodeIfPresent(String.self, forKey: .misfirePolicy)
+            ?? container.decodeIfPresent(String.self, forKey: .misfirePolicySnake)
     }
 
     /// Encodes the payload mirroring `pollQuery` into `pollContains` for older readers.
@@ -176,6 +184,7 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         try container.encodeIfPresent(rules, forKey: .rules)
         try container.encodeIfPresent(calendarLeadTimeMinutes, forKey: .calendarLeadTimeMinutes)
         try container.encodeIfPresent(calendarNames, forKey: .calendarNames)
+        try container.encodeIfPresent(misfirePolicy, forKey: .misfirePolicy)
     }
 }
 
@@ -238,6 +247,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     public var clearWatcher: Bool?
     /// When true, clears event rules.
     public var clearRules: Bool?
+    /// Updated missed-schedule policy: `"strict"`, `"catch_up"`, or empty string to reset to `"strict"`.
+    public var misfirePolicy: String?
 
     private enum CodingKeys: String, CodingKey {
         case name
@@ -267,6 +278,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         case calendarNames
         case clearWatcher
         case clearRules
+        case misfirePolicy
+        case misfirePolicySnake = "misfire_policy"
     }
 
     /// Creates an update payload.
@@ -295,7 +308,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         calendarLeadTimeMinutes: Int? = nil,
         calendarNames: [String]? = nil,
         clearWatcher: Bool? = nil,
-        clearRules: Bool? = nil
+        clearRules: Bool? = nil,
+        misfirePolicy: String? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -322,6 +336,7 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         self.calendarNames = calendarNames
         self.clearWatcher = clearWatcher
         self.clearRules = clearRules
+        self.misfirePolicy = misfirePolicy
     }
 
     /// Decodes the payload accepting `pollContains`/`poll_contains` as aliases for `pollQuery`.
@@ -361,6 +376,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         calendarNames = try container.decodeIfPresent([String].self, forKey: .calendarNames)
         clearWatcher = try container.decodeIfPresent(Bool.self, forKey: .clearWatcher)
         clearRules = try container.decodeIfPresent(Bool.self, forKey: .clearRules)
+        misfirePolicy = try container.decodeIfPresent(String.self, forKey: .misfirePolicy)
+            ?? container.decodeIfPresent(String.self, forKey: .misfirePolicySnake)
     }
 
     /// Encodes the payload mirroring `pollQuery` into `pollContains` for older readers.
@@ -392,5 +409,6 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         try container.encodeIfPresent(calendarNames, forKey: .calendarNames)
         try container.encodeIfPresent(clearWatcher, forKey: .clearWatcher)
         try container.encodeIfPresent(clearRules, forKey: .clearRules)
+        try container.encodeIfPresent(misfirePolicy, forKey: .misfirePolicy)
     }
 }

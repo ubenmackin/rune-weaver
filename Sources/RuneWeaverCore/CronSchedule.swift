@@ -83,10 +83,14 @@ public struct CronSchedule: Sendable, Codable, Equatable {
               let hour = components.hour,
               let day = components.day,
               let month = components.month,
-              let weekday = components.weekday
-        else { return false }
+              let weekday = components.weekday,
+              minutes.contains(minute), hours.contains(hour) else { return false }
+        return matchesDay(month: month, day: day, weekday: weekday)
+    }
+
+    private func matchesDay(month: Int, day: Int, weekday: Int) -> Bool {
+        guard months.contains(month) else { return false }
         let cronWeekday = (weekday - 1) % 7
-        guard minutes.contains(minute), hours.contains(hour), months.contains(month) else { return false }
         let domUnrestricted = days == Set(1 ... 31)
         let dowUnrestricted = weekdays == Set(0 ... 6)
         if domUnrestricted, dowUnrestricted {
@@ -120,6 +124,49 @@ public struct CronSchedule: Sendable, Codable, Equatable {
             }
             guard let next = working.date(byAdding: .minute, value: 1, to: cursor) else { return nil }
             cursor = next
+        }
+        return nil
+    }
+
+    /// Computes the most recent fire time on or before `date` (within a 366-day lookback).
+    public func previousFire(beforeOrAt date: Date, calendar: Calendar = .current) -> Date? {
+        let working = calendar
+        let second = working.component(.second, from: date)
+        let nanosecond = working.component(.nanosecond, from: date)
+        let subMinute = TimeInterval(second) + (TimeInterval(nanosecond) / 1_000_000_000)
+        var cursor = Date(timeIntervalSince1970: (date.timeIntervalSince1970 - subMinute).rounded())
+        while cursor > date {
+            guard let earlier = working.date(byAdding: .minute, value: -1, to: cursor) else { return nil }
+            cursor = earlier
+        }
+        guard let cutoff = working.date(byAdding: .day, value: -366, to: cursor) else { return nil }
+
+        // Skip whole non-matching days and hours so rare schedules stay O(days + hours + minutes).
+        while cursor >= cutoff {
+            let parts = working.dateComponents([.month, .day, .weekday, .hour, .minute], from: cursor)
+            guard let month = parts.month,
+                  let day = parts.day,
+                  let weekday = parts.weekday,
+                  let hour = parts.hour,
+                  let minute = parts.minute
+            else { return nil }
+
+            if !matchesDay(month: month, day: day, weekday: weekday) {
+                let startOfDay = working.startOfDay(for: cursor)
+                guard let prevDayEnd = working.date(byAdding: .minute, value: -1, to: startOfDay) else { return nil }
+                cursor = prevDayEnd
+                continue
+            }
+            if !hours.contains(hour) {
+                guard let prevHourEnd = working.date(byAdding: .minute, value: -(minute + 1), to: cursor) else { return nil }
+                cursor = prevHourEnd
+                continue
+            }
+            if minutes.contains(minute) {
+                return cursor
+            }
+            guard let prevMinute = working.date(byAdding: .minute, value: -1, to: cursor) else { return nil }
+            cursor = prevMinute
         }
         return nil
     }

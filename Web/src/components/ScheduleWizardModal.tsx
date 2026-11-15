@@ -26,6 +26,7 @@ import {
   type NewSchedulerJobInput,
   type PollPredicate,
   type SchedulerJob,
+  type SchedulerMisfirePolicy,
   type UpdateSchedulerJobInput,
 } from "../api";
 import {
@@ -98,6 +99,9 @@ export default function ScheduleWizardModal({
     jobToEdit?.schedule && !CRON_PRESETS.some((p) => p.cron === jobToEdit.schedule)
       ? jobToEdit.schedule
       : "0 8 * * *",
+  );
+  const [misfirePolicy, setMisfirePolicy] = useState<SchedulerMisfirePolicy>(
+    jobToEdit?.misfirePolicy === "catch_up" ? "catch_up" : "strict",
   );
 
   // Poll / Watcher State
@@ -593,6 +597,7 @@ export default function ScheduleWizardModal({
           schedule: effectiveCron(selectedPreset, customCron),
           prompt: prompt.trim(),
           enabled,
+          misfirePolicy,
           clearPoll: true,
           clearWatcher: true,
           clearRules: true,
@@ -904,6 +909,24 @@ export default function ScheduleWizardModal({
                   </span>
                 </div>
               )}
+
+              <div className="checkbox-row mt-4">
+                <input
+                  type="checkbox"
+                  id="wizard-misfire-catch-up"
+                  checked={misfirePolicy === "catch_up"}
+                  onChange={(e) =>
+                    setMisfirePolicy(e.target.checked ? "catch_up" : "strict")
+                  }
+                />
+                <label htmlFor="wizard-misfire-catch-up">
+                  <span>Run as soon as possible if missed (Catch up)</span>
+                </label>
+                <InfoTip
+                  text="Strict mode (default) skips schedules missed while asleep or offline. Catch-up runs once on wake or launch when the job never started, and never retries failed runs."
+                  label="Missed schedule policy guidance"
+                />
+              </div>
             </div>
           )}
 
@@ -1434,6 +1457,16 @@ export default function ScheduleWizardModal({
                       : `Watches Calendar (lead time ${calendarLeadTimeMinutes}m)`}
                   </span>
                 </div>
+                {triggerType === "cron" && (
+                  <div className="review-row">
+                    <span className="review-label">If Missed:</span>
+                    <span>
+                      {misfirePolicy === "catch_up"
+                        ? "Run as soon as possible (Catch up once)"
+                        : "Skip if missed (Strict schedule)"}
+                    </span>
+                  </div>
+                )}
                 {triggerType === "email" ? (
                   <div className="review-row">
                     <span className="review-label">Filters:</span>
