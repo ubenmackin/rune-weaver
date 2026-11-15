@@ -391,6 +391,7 @@ name = "morning digest"
 schedule = "0 8 * * *"
 prompt = "Summarize overnight mail and today's calendar"
 enabled = true
+# misfire_policy = "strict"  # "strict" skips missed runs; "catch_up" runs once on wake if never started.
 
 # [[scheduler.jobs]]
 # name = "invoice watcher"

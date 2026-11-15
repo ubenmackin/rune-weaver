@@ -450,10 +450,14 @@ export function normalizeEventRule(rule: EventRule): EventRule {
 // form instead of arriving as blank filters.
 export function normalizeSchedulerJob(job: SchedulerJob): SchedulerJob {
   if (!isRecord(job)) return job;
+  const legacyJob = job as SchedulerJob & { misfire_policy?: unknown };
+  const rawPolicy = legacyJob.misfirePolicy ?? legacyJob.misfire_policy;
+  const misfirePolicy: SchedulerMisfirePolicy =
+    rawPolicy === "catch_up" ? "catch_up" : "strict";
   const rules = Array.isArray(job.rules)
     ? job.rules.map((rule) => normalizeEventRule(rule as EventRule))
     : job.rules;
-  return { ...job, rules: rules as SchedulerJob["rules"] };
+  return { ...job, rules: rules as SchedulerJob["rules"], misfirePolicy };
 }
 
 function normalizeSchedulerJobsResponse(
@@ -537,12 +541,17 @@ export function validateEventRules(
   return null;
 }
 
+export type SchedulerMisfirePolicy = "strict" | "catch_up";
+
 export interface SchedulerJob {
   id: string;
   name: string;
   schedule: string;
   prompt: string;
   enabled: boolean;
+  misfirePolicy?: SchedulerMisfirePolicy | null;
+  lastScheduledSlotAt?: string | null;
+  scheduleAnchorAt?: string | null;
   pollAccount?: string | null;
   pollQuery?: string | null;
   pollContains?: string | null;
@@ -609,6 +618,7 @@ export interface NewSchedulerJobInput {
   schedule: string;
   prompt: string;
   enabled?: boolean;
+  misfirePolicy?: SchedulerMisfirePolicy | null;
   pollAccount?: string | null;
   pollQuery?: string | null;
   pollContains?: string | null;
@@ -632,6 +642,7 @@ export interface UpdateSchedulerJobInput {
   schedule?: string;
   prompt?: string;
   enabled?: boolean;
+  misfirePolicy?: SchedulerMisfirePolicy | null;
   // Poll clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine): omitted (undefined)
   // or null leaves the field alone, "" clears that poll string to null (blank → null normalization),
   // and clearPoll clears the whole poll trigger before re-applying non-nil fields in the same payload.

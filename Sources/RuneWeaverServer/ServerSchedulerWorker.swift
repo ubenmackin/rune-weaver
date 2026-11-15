@@ -39,6 +39,8 @@ public actor ServerSchedulerWorker {
 
     /// Cadence window between nightly idea refresh passes.
     public static let ideasRefreshInterval: TimeInterval = 24 * 60 * 60
+    /// Grace window beyond a scheduled cron fire time eligible for strict on-time execution.
+    public static let strictCronGraceSeconds: TimeInterval = 300
     /// Episodic store the trigger bridge polls for mirrored events, nil when
     /// goals are unwired or no database path was available.
     private let triggerEpisodeStore: EpisodeStore?
@@ -58,14 +60,18 @@ public actor ServerSchedulerWorker {
     let goalsConfig: GoalsConfig
     /// Live per-type preferences shared with the combined notifier.
     let notificationsBox: NotificationsConfigBox
+    let acquireSleepAssertion: SystemSleepAssertion.Acquire
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
     private var runningTask: Task<Void, Never>?
+    var sleepTask: Task<Void, Never>?
+    var wakeObserver: WakeNotificationToken?
+    var pendingWakeSweep = false
     var seenPollIDs: [UUID: Set<String>] = [:]
     var lastPollCheck: [UUID: Date] = [:]
     var lastSkippedGoalDueAt: [UUID: Date] = [:]
-    private var isStarted = false
+    var isStarted = false
 
     /// Creates a server scheduler worker.
     public init(scheduler: SchedulerStore, runs: RunLogStore, hub: WSHub, runLock: SchedulerRunLock, orchestrator: Orchestrator,
@@ -77,7 +83,8 @@ public actor ServerSchedulerWorker {
                 goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(), outcomeGate: OutcomeGate? = nil,
                 proactiveConfig: ProactiveConfig = ProactiveConfig(), judgeLLM: any LLMProvider? = nil,
                 schedulerConfig: SchedulerConfig = .empty, goalsConfig: GoalsConfig = GoalsConfig(),
-                notificationsBox: NotificationsConfigBox? = nil)
+                notificationsBox: NotificationsConfigBox? = nil,
+                acquireSleepAssertion: @escaping SystemSleepAssertion.Acquire = { SystemSleepAssertion.acquire(reason: $0) })
     {
         self.scheduler = scheduler
         self.runs = runs
@@ -100,6 +107,7 @@ public actor ServerSchedulerWorker {
         self.ideasEngine = ideasEngine
         self.goalRunLock = goalRunLock ?? SchedulerRunLock()
         self.activeTurns = activeTurns
+        self.acquireSleepAssertion = acquireSleepAssertion
         if let notificationsBox {
             self.notificationsBox = notificationsBox
         } else if let composite = notifier as? CompositeSchedulerNotifier {
@@ -162,18 +170,18 @@ public actor ServerSchedulerWorker {
     public func start() {
         guard !isStarted else { return }
         isStarted = true
+        wakeObserver = WakeNotificationToken { [weak self] in
+            Task { await self?.wakeNow() }
+        }
         // Capture the fixed cadence while still isolated so the detached loop
         // never hops back to the actor just to read an immutable interval.
         let interval = intervalSeconds
         runningTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { break }
+                guard let self, await self.running else { break }
                 await self.tick()
-                do {
-                    try await Task.sleep(for: .seconds(interval))
-                } catch {
-                    break
-                }
+                guard !Task.isCancelled, await self.running else { break }
+                await self.sleepForNextTick(seconds: interval)
             }
         }
     }
@@ -182,6 +190,11 @@ public actor ServerSchedulerWorker {
     public func stop() {
         guard isStarted else { return }
         isStarted = false
+        pendingWakeSweep = false
+        sleepTask?.cancel()
+        sleepTask = nil
+        wakeObserver?.release()
+        wakeObserver = nil
         runningTask?.cancel()
         runningTask = nil
     }
@@ -231,8 +244,12 @@ public actor ServerSchedulerWorker {
             }
 
             // 2. Evaluate Cron trigger
-            if job.hasCronTrigger, let cron = try? CronSchedule.parse(job.schedule), cron.isDue(at: now, lastCheck: windowStart) {
-                let outcome = await executeJob(job, reason: .cron)
+            if job.hasCronTrigger, let cronDecision = evaluateCronTrigger(for: job, now: now, windowStart: windowStart) {
+                let outcome = await executeJob(
+                    job,
+                    reason: cronDecision.reason,
+                    scheduledSlotAt: cronDecision.slotAt
+                )
                 results.append(outcome)
             }
         }
@@ -392,12 +409,18 @@ extension ServerSchedulerWorker {
         _ job: SchedulerJob,
         reason: SchedulerFireReason,
         promptOverride: String? = nil,
-        ruleName: String? = nil
+        ruleName: String? = nil,
+        scheduledSlotAt: Date? = nil
     ) async -> SchedulerRunResult {
         let startTime = Date()
 
         guard await runLock.tryAcquire(id: job.id, name: job.name) else {
             return await recordJobSkipped(job: job, startTime: startTime)
+        }
+        let sleepAssertion = acquireSleepAssertion("Rune Weaver scheduled job: \(job.name)")
+        defer { sleepAssertion?.release() }
+        if let scheduledSlotAt {
+            await scheduler.recordScheduledSlotAttempt(id: job.id, slotAt: scheduledSlotAt)
         }
 
         let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: conversations)

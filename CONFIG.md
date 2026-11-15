@@ -390,6 +390,7 @@ Persistent cron and email-arrival scheduled jobs. Config `[[scheduler.jobs]]` en
 | `max_tool_iterations` | integer | `25` | Default consecutive tool rounds per scheduled run before the limit policy triggers (1-100). Per-job `max_tool_iterations` overrides this default. Default policy synthesizes plus budget_exceeded; a job with `on_tool_limit = "park"` parks instead. |
 | `jobs.max_tool_iterations` | integer \| unset | unset (section default) | Per-job consecutive tool rounds override for this job (1-100). Omit to inherit `[scheduler] max_tool_iterations` (default 25). |
 | `jobs.on_tool_limit` | string \| unset | unset (inherit, synthesizes) | Per-job limit policy when the budget is reached: `"fail"` synthesizes plus `budget_exceeded`, `"park"` parks for approval instead. Omit (or `""`/nil) to inherit: unset behaves like `"fail"` (synthesize). |
+| `jobs.misfire_policy` | string | `"strict"` | Per-job behavior when a scheduled slot was missed while the host slept or was offline: `"strict"` skips stale slots (only the 300s grace window runs late), `"catch_up"` fires once on wake/launch if the latest slot never started. Persisted in SQLite; unknown values are rejected at save. |
 
 ### `[plugins]`
 

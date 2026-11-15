@@ -2,9 +2,6 @@
 
 import Foundation
 import RuneWeaverCore
-#if canImport(SQLite3)
-    import SQLite3
-#endif
 
 /// One scheduled job: a cron-like trigger and/or an email-arrival poll rule plus the prompt to run.
 public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
@@ -58,6 +55,12 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var calendarLeadTimeMinutes: Int?
     /// Calendar names to watch for calendar upcoming event trigger.
     public var calendarNames: [String]?
+    /// Missed-schedule policy when a cron slot was missed while asleep or offline.
+    public var misfirePolicy: SchedulerMisfirePolicy
+    /// Most recent cron slot instant started for this job (prevents catch-up retries).
+    public var lastScheduledSlotAt: Date?
+    /// Earliest baseline instant considered for catch-up on creation or re-enable/schedule edit.
+    public var scheduleAnchorAt: Date?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -87,6 +90,10 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         case rules
         case calendarLeadTimeMinutes
         case calendarNames
+        case misfirePolicy
+        case misfirePolicySnake = "misfire_policy"
+        case lastScheduledSlotAt
+        case scheduleAnchorAt
     }
 
     /// Creates a scheduler job.
@@ -115,7 +122,10 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         watcherSource: EventWatcherSource? = nil,
         rules: [EventRule]? = nil,
         calendarLeadTimeMinutes: Int? = nil,
-        calendarNames: [String]? = nil
+        calendarNames: [String]? = nil,
+        misfirePolicy: SchedulerMisfirePolicy = .strict,
+        lastScheduledSlotAt: Date? = nil,
+        scheduleAnchorAt: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -143,6 +153,9 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.rules = rules
         self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
         self.calendarNames = calendarNames
+        self.misfirePolicy = misfirePolicy
+        self.lastScheduledSlotAt = lastScheduledSlotAt
+        self.scheduleAnchorAt = scheduleAnchorAt
     }
 
     /// Decodes a job accepting `pollContains`/`poll_contains` as aliases for `pollQuery`.
@@ -177,6 +190,11 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         rules = try container.decodeIfPresent([EventRule].self, forKey: .rules)
         calendarLeadTimeMinutes = try container.decodeIfPresent(Int.self, forKey: .calendarLeadTimeMinutes)
         calendarNames = try container.decodeIfPresent([String].self, forKey: .calendarNames)
+        let rawMisfire = try container.decodeIfPresent(String.self, forKey: .misfirePolicy)
+            ?? container.decodeIfPresent(String.self, forKey: .misfirePolicySnake)
+        misfirePolicy = rawMisfire.flatMap { SchedulerMisfirePolicy.parseStrict($0) } ?? .strict
+        lastScheduledSlotAt = try container.decodeIfPresent(Date.self, forKey: .lastScheduledSlotAt)
+        scheduleAnchorAt = try container.decodeIfPresent(Date.self, forKey: .scheduleAnchorAt)
     }
 
     /// Encodes a job mirroring `pollQuery` into `pollContains` for older readers.
@@ -207,6 +225,9 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         try container.encodeIfPresent(rules, forKey: .rules)
         try container.encodeIfPresent(calendarLeadTimeMinutes, forKey: .calendarLeadTimeMinutes)
         try container.encodeIfPresent(calendarNames, forKey: .calendarNames)
+        try container.encode(misfirePolicy, forKey: .misfirePolicy)
+        try container.encodeIfPresent(lastScheduledSlotAt, forKey: .lastScheduledSlotAt)
+        try container.encodeIfPresent(scheduleAnchorAt, forKey: .scheduleAnchorAt)
     }
 
     /// Whether the job has a cron trigger.
@@ -304,8 +325,10 @@ public actor SchedulerStore {
             watcherSource: input.watcherSource,
             rules: input.rules,
             calendarLeadTimeMinutes: input.calendarLeadTimeMinutes,
-            calendarNames: input.calendarNames
+            calendarNames: input.calendarNames,
+            misfirePolicy: input.misfirePolicy
         )
+        let resolvedMisfirePolicy = input.misfirePolicy.flatMap { SchedulerMisfirePolicy.parseStrict($0) } ?? .strict
         let trimmedName = normalizedSchedulerJobName(input.name)
         if jobs.values.contains(where: { $0.name == trimmedName }) {
             throw SchedulerStoreError.invalidField("job name '\(trimmedName)' already exists")
@@ -333,7 +356,9 @@ public actor SchedulerStore {
             watcherSource: input.watcherSource,
             rules: input.rules,
             calendarLeadTimeMinutes: input.calendarLeadTimeMinutes,
-            calendarNames: input.calendarNames
+            calendarNames: input.calendarNames,
+            misfirePolicy: resolvedMisfirePolicy,
+            scheduleAnchorAt: now
         )
         jobs[job.id] = job
         if let dbPath {
@@ -374,6 +399,13 @@ public actor SchedulerStore {
             }
             existing.name = trimmedName
         }
+        let wasEnabled = existing.enabled
+        let previousSchedule = existing.schedule
+        let previousPolicy = existing.misfirePolicy
+        let resolvedUpdateMisfireRaw: String? = input.misfirePolicy.map { raw in
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? SchedulerMisfirePolicy.strict.rawValue : trimmed
+        }
         Self.applyUpdates(to: &existing, from: input)
         try Self.validated(
             name: existing.name,
@@ -394,9 +426,22 @@ public actor SchedulerStore {
             watcherSource: existing.watcherSource,
             rules: existing.rules,
             calendarLeadTimeMinutes: existing.calendarLeadTimeMinutes,
-            calendarNames: existing.calendarNames
+            calendarNames: existing.calendarNames,
+            misfirePolicy: resolvedUpdateMisfireRaw ?? existing.misfirePolicy.rawValue
         )
-        existing.updatedAt = Date()
+        if let resolvedUpdateMisfireRaw,
+           let parsedPolicy = SchedulerMisfirePolicy.parseStrict(resolvedUpdateMisfireRaw)
+        {
+            existing.misfirePolicy = parsedPolicy
+        }
+        let now = Date()
+        if (!wasEnabled && existing.enabled)
+            || existing.schedule != previousSchedule
+            || (previousPolicy != .catchUp && existing.misfirePolicy == .catchUp)
+        {
+            existing.scheduleAnchorAt = now
+        }
+        existing.updatedAt = now
         let updatedJob = existing
         jobs[id] = updatedJob
         if let dbPath {
@@ -656,345 +701,11 @@ extension SchedulerJob {
             watcherSource: config.watcherSource,
             rules: config.rules,
             calendarLeadTimeMinutes: config.calendarLeadTimeMinutes,
-            calendarNames: config.calendarNames
+            calendarNames: config.calendarNames,
+            misfirePolicy: config.misfirePolicy ?? .strict,
+            scheduleAnchorAt: createdAt
         )
     }
 }
 
-#if canImport(SQLite3)
-    /// Internal SQLite helper for durable scheduler job persistence.
-    enum SQLiteSchedulerJobStore {
-        private struct SchedulerDBError: Error {
-            let message: String
-        }
-
-        private static func open(dbPath: String) throws -> OpaquePointer? {
-            // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
-            let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { SchedulerDBError(message: $0) })
-            try SQLiteHelpers.exec(
-                handle: handle,
-                sql: """
-                CREATE TABLE IF NOT EXISTS scheduler_jobs(
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    schedule TEXT NOT NULL,
-                    prompt TEXT NOT NULL,
-                    enabled INTEGER NOT NULL,
-                    poll_account TEXT,
-                    poll_query TEXT,
-                    poll_mailbox TEXT,
-                    poll_interval_seconds INTEGER,
-                    poll_limit INTEGER,
-                    poll_from TEXT,
-                    poll_subject TEXT,
-                    poll_unread_only INTEGER,
-                    poll_since_days INTEGER,
-                    max_tool_iterations INTEGER,
-                    on_tool_limit TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    last_successful_run_ended_at REAL,
-                    email_report_job INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_name ON scheduler_jobs(name);
-                """,
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN max_tool_iterations INTEGER;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN last_successful_run_ended_at REAL;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN email_report_job INTEGER NOT NULL DEFAULT 0;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_from TEXT;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_subject TEXT;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_unread_only INTEGER;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            _ = try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE scheduler_jobs ADD COLUMN poll_since_days INTEGER;",
-                failure: { SchedulerDBError(message: $0) }
-            )
-            // Watcher columns delegate to the Core-owned statement list so the
-            // additive migrations stay identical across persistence sites.
-            SchedulerJobConfig.applyWatcherColumnMigrations { statement in
-                _ = try? SQLiteHelpers.exec(
-                    handle: handle,
-                    sql: statement,
-                    failure: { SchedulerDBError(message: $0) }
-                )
-            }
-            return handle
-        }
-
-        static func read(dbPath: String) -> [SchedulerJob] {
-            guard let handle = SQLiteOpenHelper.openLogged(
-                dbPath: dbPath,
-                storeName: "SQLiteSchedulerJobStore",
-                fallbackNote: "read returning in-memory state only",
-                open: { try open(dbPath: dbPath) }
-            ) else {
-                return []
-            }
-            defer { sqlite3_close(handle) }
-
-            let sql = """
-            SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
-                   poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
-                   created_at, updated_at, last_successful_run_ended_at, email_report_job,
-                   watcher_source, rules, calendar_lead_time_minutes, calendar_names,
-                   poll_from, poll_subject, poll_unread_only, poll_since_days
-            FROM scheduler_jobs
-            ORDER BY created_at ASC;
-            """
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                return []
-            }
-            defer { sqlite3_finalize(statement) }
-
-            var loaded: [SchedulerJob] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
-                guard let idStr = SQLiteHelpers.columnText(statement, index: 0),
-                      let id = UUID(uuidString: idStr),
-                      let row = SchedulerJobRow.decode(statement, base: 1)
-                else { continue }
-
-                let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 12))
-                let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 13))
-                let cursor: Date?
-                if sqlite3_column_type(statement, 14) == SQLITE_NULL {
-                    cursor = nil
-                } else {
-                    let value = SQLiteHelpers.columnDouble(statement, index: 14)
-                    cursor = value == 0 ? nil : Date(timeIntervalSince1970: value)
-                }
-                // Rows written before the email-report flag existed decode as
-                // false, matching the column default.
-                let emailReportJob = (SQLiteHelpers.columnInt64(statement, index: 15) ?? 0) != 0
-                let watcherRaw = SQLiteHelpers.columnText(statement, index: 16)
-                let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
-                let rulesRaw = SQLiteHelpers.columnText(statement, index: 17)
-                let rules: [EventRule]? = rulesRaw.flatMap { json in
-                    guard let data = json.data(using: .utf8) else { return nil }
-                    return try? JSONDecoder().decode([EventRule].self, from: data)
-                }
-                let leadTime = SQLiteHelpers.columnInt64(statement, index: 18).map { Int($0) }
-                let calNamesRaw = SQLiteHelpers.columnText(statement, index: 19)
-                let calendarNames: [String]? = calNamesRaw.flatMap { json in
-                    guard let data = json.data(using: .utf8) else { return nil }
-                    return try? JSONDecoder().decode([String].self, from: data)
-                }
-                // Blank strings predate normalization; folding them keeps
-                // legacy rows equivalent to omitted structured filters.
-                let rawFrom = SQLiteHelpers.columnText(statement, index: 20)
-                let rawSubject = SQLiteHelpers.columnText(statement, index: 21)
-                let normalizedFrom: String? = {
-                    guard let raw = rawFrom else { return nil }
-                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : trimmed
-                }()
-                let normalizedSubject: String? = {
-                    guard let raw = rawSubject else { return nil }
-                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : trimmed
-                }()
-                let unreadOnly = (SQLiteHelpers.columnInt64(statement, index: 22) ?? 0) != 0
-                let sinceDays = SQLiteHelpers.columnInt64(statement, index: 23).map { Int($0) }
-
-                loaded.append(SchedulerJob(
-                    id: id,
-                    name: row.name,
-                    schedule: row.schedule,
-                    prompt: row.prompt,
-                    enabled: row.enabled,
-                    pollAccount: row.pollAccount,
-                    pollQuery: row.pollQuery,
-                    pollMailbox: row.pollMailbox,
-                    pollIntervalSeconds: row.pollIntervalSeconds,
-                    pollLimit: row.pollLimit,
-                    pollFrom: normalizedFrom,
-                    pollSubject: normalizedSubject,
-                    pollUnreadOnly: unreadOnly,
-                    pollSinceDays: sinceDays,
-                    emailReportJob: emailReportJob,
-                    maxToolIterations: row.maxToolIterations,
-                    onToolLimit: row.onToolLimit,
-                    createdAt: createdAt,
-                    updatedAt: updatedAt,
-                    lastSuccessfulRunEndedAt: cursor,
-                    watcherSource: watcherSource,
-                    rules: rules,
-                    calendarLeadTimeMinutes: leadTime,
-                    calendarNames: calendarNames
-                ))
-            }
-            return loaded
-        }
-
-        static func write(job: SchedulerJob, dbPath: String) {
-            guard let handle = SQLiteOpenHelper.openLogged(
-                dbPath: dbPath,
-                storeName: "SQLiteSchedulerJobStore",
-                fallbackNote: "job \(job.id) kept in memory only and will not survive restart",
-                open: { try open(dbPath: dbPath) }
-            ) else {
-                return
-            }
-            defer { sqlite3_close(handle) }
-
-            let sql = """
-            INSERT INTO scheduler_jobs(
-                id, name, schedule, prompt, enabled, poll_account, poll_query,
-                poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at,
-                last_successful_run_ended_at, email_report_job, watcher_source, rules, calendar_lead_time_minutes, calendar_names,
-                poll_from, poll_subject, poll_unread_only, poll_since_days
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                schedule = excluded.schedule,
-                prompt = excluded.prompt,
-                enabled = excluded.enabled,
-                poll_account = excluded.poll_account,
-                poll_query = excluded.poll_query,
-                poll_mailbox = excluded.poll_mailbox,
-                poll_interval_seconds = excluded.poll_interval_seconds,
-                poll_limit = excluded.poll_limit,
-                max_tool_iterations = excluded.max_tool_iterations,
-                on_tool_limit = excluded.on_tool_limit,
-                updated_at = excluded.updated_at,
-                last_successful_run_ended_at = excluded.last_successful_run_ended_at,
-                email_report_job = excluded.email_report_job,
-                watcher_source = excluded.watcher_source,
-                rules = excluded.rules,
-                calendar_lead_time_minutes = excluded.calendar_lead_time_minutes,
-                calendar_names = excluded.calendar_names,
-                poll_from = excluded.poll_from,
-                poll_subject = excluded.poll_subject,
-                poll_unread_only = excluded.poll_unread_only,
-                poll_since_days = excluded.poll_since_days;
-            """
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                let code = sqlite3_errcode(handle)
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed preparing job write (code \(code)); job \(job.id) kept in memory only.")
-                return
-            }
-            defer { sqlite3_finalize(statement) }
-
-            SQLiteHelpers.bindText(statement, index: 1, value: job.id.uuidString)
-            SQLiteHelpers.bindText(statement, index: 2, value: job.name)
-            SQLiteHelpers.bindText(statement, index: 3, value: job.schedule)
-            SQLiteHelpers.bindText(statement, index: 4, value: job.prompt)
-            SQLiteHelpers.bindInt64(statement, index: 5, value: job.enabled ? 1 : 0)
-            SQLiteHelpers.bindText(statement, index: 6, value: job.pollAccount)
-            SQLiteHelpers.bindText(statement, index: 7, value: job.pollQuery)
-            SQLiteHelpers.bindText(statement, index: 8, value: job.pollMailbox)
-            SQLiteHelpers.bindInt64(statement, index: 9, value: job.pollIntervalSeconds.map { Int64($0) })
-            SQLiteHelpers.bindInt64(statement, index: 10, value: job.pollLimit.map { Int64($0) })
-            SQLiteHelpers.bindInt64(statement, index: 11, value: job.maxToolIterations.map { Int64($0) })
-            SQLiteHelpers.bindText(statement, index: 12, value: job.onToolLimit)
-            SQLiteHelpers.bindDouble(statement, index: 13, value: job.createdAt.timeIntervalSince1970)
-            SQLiteHelpers.bindDouble(statement, index: 14, value: job.updatedAt.timeIntervalSince1970)
-            if let cursor = job.lastSuccessfulRunEndedAt {
-                SQLiteHelpers.bindDouble(statement, index: 15, value: cursor.timeIntervalSince1970)
-            } else {
-                sqlite3_bind_null(statement, 15)
-            }
-            SQLiteHelpers.bindInt64(statement, index: 16, value: job.emailReportJob ? 1 : 0)
-            SQLiteHelpers.bindText(statement, index: 17, value: job.watcherSource?.rawValue)
-            let rulesJSON = job.rules.flatMap { rules -> String? in
-                guard let data = try? JSONEncoder().encode(rules) else { return nil }
-                return String(data: data, encoding: .utf8)
-            }
-            SQLiteHelpers.bindText(statement, index: 18, value: rulesJSON)
-            SQLiteHelpers.bindInt64(statement, index: 19, value: job.calendarLeadTimeMinutes.map { Int64($0) })
-            let calNamesJSON = job.calendarNames.flatMap { names -> String? in
-                guard let data = try? JSONEncoder().encode(names) else { return nil }
-                return String(data: data, encoding: .utf8)
-            }
-            SQLiteHelpers.bindText(statement, index: 20, value: calNamesJSON)
-            SQLiteHelpers.bindText(statement, index: 21, value: job.pollFrom)
-            SQLiteHelpers.bindText(statement, index: 22, value: job.pollSubject)
-            SQLiteHelpers.bindInt64(statement, index: 23, value: job.pollUnreadOnly ? 1 : 0)
-            SQLiteHelpers.bindInt64(statement, index: 24, value: job.pollSinceDays.map { Int64($0) })
-
-            guard sqlite3_step(statement) == SQLITE_DONE else {
-                let code = sqlite3_errcode(handle)
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed writing job \(job.id) (code \(code)); in-memory state is ahead of disk.")
-                return
-            }
-        }
-
-        static func delete(id: UUID, dbPath: String) {
-            guard let handle = SQLiteOpenHelper.openLogged(
-                dbPath: dbPath,
-                storeName: "SQLiteSchedulerJobStore",
-                fallbackNote: "delete of \(id) kept in memory only",
-                open: { try open(dbPath: dbPath) }
-            ) else {
-                return
-            }
-            defer { sqlite3_close(handle) }
-
-            let sql = "DELETE FROM scheduler_jobs WHERE id = ?;"
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                let code = sqlite3_errcode(handle)
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed preparing job delete (code \(code)) for \(id).")
-                return
-            }
-            defer { sqlite3_finalize(statement) }
-
-            SQLiteHelpers.bindText(statement, index: 1, value: id.uuidString)
-            guard sqlite3_step(statement) == SQLITE_DONE else {
-                let code = sqlite3_errcode(handle)
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed deleting job \(id) (code \(code)); in-memory state is ahead of disk.")
-                return
-            }
-        }
-
-        static func clear(dbPath: String) {
-            guard let handle = SQLiteOpenHelper.openLogged(
-                dbPath: dbPath,
-                storeName: "SQLiteSchedulerJobStore",
-                fallbackNote: "clear kept in memory only",
-                open: { try open(dbPath: dbPath) }
-            ) else {
-                return
-            }
-            defer { sqlite3_close(handle) }
-            do {
-                try SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM scheduler_jobs;", failure: { SchedulerDBError(message: $0) })
-            } catch {
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed clearing jobs: \(error)")
-            }
-        }
-    }
-#endif
+// SQLite persistence and cron-slot tracking live in `SchedulerStoreCronTracking.swift`.

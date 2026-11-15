@@ -654,3 +654,91 @@ struct EventRuleTests {
         }
     }
 }
+
+@Suite("Cron Previous Fire and Misfire Policy")
+struct CronPreviousFireAndMisfireTests {
+    @Test
+    func `previousFire resolves exact, same-day, previous-day, and yearly slots`() throws {
+        let calendar = utcCalendar()
+
+        let daily = try CronSchedule.parse("0 8 * * *")
+        // Exact match returns the timestamp itself floored to zero seconds.
+        let exact = utcDate(year: 2026, month: 3, day: 4, hour: 8, minute: 0).addingTimeInterval(42)
+        #expect(daily.previousFire(beforeOrAt: exact, calendar: calendar) == utcDate(year: 2026, month: 3, day: 4, hour: 8, minute: 0))
+
+        // After today's fire returns today's slot.
+        let laterSameDay = utcDate(year: 2026, month: 3, day: 4, hour: 15, minute: 20)
+        #expect(daily.previousFire(beforeOrAt: laterSameDay, calendar: calendar) == utcDate(year: 2026, month: 3, day: 4, hour: 8, minute: 0))
+
+        // Before today's fire steps back to yesterday's slot.
+        let beforeToday = utcDate(year: 2026, month: 3, day: 4, hour: 7, minute: 59)
+        #expect(daily.previousFire(beforeOrAt: beforeToday, calendar: calendar) == utcDate(year: 2026, month: 3, day: 3, hour: 8, minute: 0))
+
+        // Yearly cron skips backward quickly without iterating every minute.
+        let yearly = try CronSchedule.parse("0 0 1 1 *")
+        let midYear = utcDate(year: 2026, month: 6, day: 15, hour: 12, minute: 0)
+        #expect(yearly.previousFire(beforeOrAt: midYear, calendar: calendar) == utcDate(year: 2026, month: 1, day: 1, hour: 0, minute: 0))
+
+        // Impossible calendar dates return nil cleanly.
+        let impossible = try CronSchedule.parse("0 0 31 2 *")
+        #expect(impossible.previousFire(beforeOrAt: midYear, calendar: calendar) == nil)
+    }
+
+    @Test
+    func `previousFire preserves DOM and DOW union semantics`() throws {
+        let calendar = utcCalendar()
+        // 15th of month OR Monday at 09:00 UTC
+        let union = try CronSchedule.parse("0 9 15 * 1")
+        // 2026-03-16 is a Monday -> 09:00 same day when checked at 10:00
+        #expect(
+            union.previousFire(
+                beforeOrAt: utcDate(year: 2026, month: 3, day: 16, hour: 10, minute: 0),
+                calendar: calendar
+            ) == utcDate(year: 2026, month: 3, day: 16, hour: 9, minute: 0)
+        )
+        // 2026-03-15 is a Sunday (DOM match = 15th) -> before 09:00 falls back to prior Monday 2026-03-09 09:00
+        #expect(
+            union.previousFire(
+                beforeOrAt: utcDate(year: 2026, month: 3, day: 15, hour: 8, minute: 30),
+                calendar: calendar
+            ) == utcDate(year: 2026, month: 3, day: 9, hour: 9, minute: 0)
+        )
+    }
+
+    @Test
+    func `TOML decodes, serializes, and validates misfire_policy`() throws {
+        let tomlText = """
+        [[scheduler.jobs]]
+        name = "catch-up digest"
+        schedule = "0 7 * * *"
+        prompt = "Summarize mail"
+        misfire_policy = "catch_up"
+
+        [[scheduler.jobs]]
+        name = "strict digest"
+        schedule = "0 8 * * *"
+        prompt = "Check status"
+        """
+        let root = try TOMLParser.parse(tomlText)
+        let config = try RuneWeaverConfig(decoding: root)
+        try config.validate()
+        #expect(config.scheduler.jobs.count == 2)
+        #expect(config.scheduler.jobs[0].misfirePolicy == .catchUp)
+        #expect(config.scheduler.jobs[1].misfirePolicy == nil)
+
+        let serialized = config.renderTOML()
+        #expect(serialized.contains(#"misfire_policy = "catch_up""#))
+
+        let invalidText = """
+        [[scheduler.jobs]]
+        name = "bad policy"
+        schedule = "0 7 * * *"
+        prompt = "Run"
+        misfire_policy = "retry_forever"
+        """
+        let invalidRoot = try TOMLParser.parse(invalidText)
+        #expect(throws: ConfigError.self) {
+            _ = try RuneWeaverConfig(decoding: invalidRoot)
+        }
+    }
+}

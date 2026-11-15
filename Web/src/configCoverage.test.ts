@@ -103,6 +103,7 @@ const EXPECTED_LEAF_KEYS: readonly string[] = [
   "scheduler.jobs.*.poll_limit",
   "scheduler.jobs.*.max_tool_iterations",
   "scheduler.jobs.*.on_tool_limit",
+  "scheduler.jobs.*.misfire_policy",
   "plugins.plugins_dir",
   "plugins.marketplace_index_url",
   "plugins.auto_rescan",

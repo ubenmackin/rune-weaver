@@ -308,6 +308,8 @@ extension ServerSchedulerWorker {
         guard await !isGoalBusy(id: goal.id), await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
             return await recordGoalSkipped(goal: goal, startTime: startTime)
         }
+        let sleepAssertion = acquireSleepAssertion("Rune Weaver goal step: \(goal.title)")
+        defer { sleepAssertion?.release() }
         lastSkippedGoalDueAt.removeValue(forKey: goal.id)
         let claimedNextDue = startTime.addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
         try? await store.markAdvanced(goalID: goal.id, nextDueAt: claimedNextDue)
@@ -413,6 +415,8 @@ extension ServerSchedulerWorker {
             _ = await recordGoalSkipped(goal: goal, startTime: startTime)
             throw GoalBusyError()
         }
+        let sleepAssertion = acquireSleepAssertion("Rune Weaver goal advance: \(goal.title)")
+        defer { sleepAssertion?.release() }
         lastSkippedGoalDueAt.removeValue(forKey: goal.id)
         let claimedNextDue = startTime.addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
         try? await store.markAdvanced(goalID: goal.id, nextDueAt: claimedNextDue)

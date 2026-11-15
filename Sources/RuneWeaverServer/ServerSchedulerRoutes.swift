@@ -485,6 +485,8 @@ private func executeManualJobRun(
     startTime: Date,
     context: ServerContext
 ) async throws -> OrchestratorResponse {
+    let sleepAssertion = context.schedulerWorker.acquireSleepAssertion("Rune Weaver manual job: \(job.name)")
+    defer { sleepAssertion?.release() }
     do {
         let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
         // Manual runs carry the same framework cursor as automatic ticks; because the initial job

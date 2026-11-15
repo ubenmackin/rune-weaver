@@ -509,7 +509,10 @@ export default function SchedulerManager() {
                         {ruleCount > 0 ? ` · ${ruleCount} rule${ruleCount === 1 ? "" : "s"} configured` : ""}
                       </span>
                     ) : (
-                      <span>Recurring time-based cron schedule</span>
+                      <span>
+                        Recurring time-based cron schedule
+                        {job.misfirePolicy === "catch_up" ? " · Catch up if missed" : ""}
+                      </span>
                     )}
                   </div>
                 </div>
